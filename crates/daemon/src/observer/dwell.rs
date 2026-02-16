@@ -1,5 +1,7 @@
 use std::time::{Duration, Instant};
 
+/// NOTE: This type is designed for single-threaded use within the observer event loop.
+/// It is NOT thread-safe — do not share across threads without synchronization.
 pub struct DwellTracker {
     t_dwell: Duration,
     t_scroll_read: Duration,

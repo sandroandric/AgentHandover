@@ -95,6 +95,8 @@ impl<'a> MaintenanceRunner<'a> {
         let free_bytes = get_free_disk_space(db_path)?;
         let free_gb = free_bytes / (1024 * 1024 * 1024);
 
+        // safety_multiplier should be at least 2.5 to account for concurrent writes
+        // during VACUUM, which temporarily doubles the database file.
         let required = (db_size as f64 * safety_multiplier) as u64;
         let safe = free_gb >= min_free_gb && free_bytes > required;
 

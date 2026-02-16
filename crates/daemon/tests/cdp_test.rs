@@ -283,7 +283,7 @@ fn cdp_config_serde_roundtrip() {
 
 #[test]
 fn cdp_eval_script_contains_selector() {
-    let script = build_cdp_eval_script("#my-button");
+    let script = build_cdp_eval_script("#my-button").unwrap();
     let expected = r##""#my-button""##;
     assert!(
         script.contains(expected),
@@ -294,20 +294,20 @@ fn cdp_eval_script_contains_selector() {
 
 #[test]
 fn cdp_eval_script_is_iife() {
-    let script = build_cdp_eval_script("div.test");
+    let script = build_cdp_eval_script("div.test").unwrap();
     assert!(script.starts_with("(function()"));
     assert!(script.ends_with("})()"));
 }
 
 #[test]
 fn cdp_eval_script_queries_dom() {
-    let script = build_cdp_eval_script(".some-class");
+    let script = build_cdp_eval_script(".some-class").unwrap();
     assert!(script.contains("document.querySelector("));
 }
 
 #[test]
 fn cdp_eval_script_returns_semantic_properties() {
-    let script = build_cdp_eval_script("button");
+    let script = build_cdp_eval_script("button").unwrap();
     assert!(script.contains("tagName"));
     assert!(script.contains("role"));
     assert!(script.contains("ariaLabel"));
@@ -318,7 +318,7 @@ fn cdp_eval_script_returns_semantic_properties() {
 #[test]
 fn cdp_eval_script_escapes_special_chars() {
     // A selector with special characters that need JSON escaping
-    let script = build_cdp_eval_script(r#"[data-test="hello \"world\""]"#);
+    let script = build_cdp_eval_script(r#"[data-test="hello \"world\""]"#).unwrap();
     // The selector should be JSON-encoded, escaping the inner quotes
     assert!(
         script.contains("document.querySelector("),
@@ -335,7 +335,7 @@ fn cdp_eval_script_escapes_special_chars() {
 
 #[test]
 fn cdp_eval_script_truncates_text_content() {
-    let script = build_cdp_eval_script("p");
+    let script = build_cdp_eval_script("p").unwrap();
     assert!(
         script.contains(".substring(0, 500)"),
         "Script should truncate textContent to 500 chars"
@@ -344,7 +344,7 @@ fn cdp_eval_script_truncates_text_content() {
 
 #[test]
 fn cdp_eval_script_null_check() {
-    let script = build_cdp_eval_script("div");
+    let script = build_cdp_eval_script("div").unwrap();
     assert!(
         script.contains("if (!el) return null"),
         "Script should return null when element not found"

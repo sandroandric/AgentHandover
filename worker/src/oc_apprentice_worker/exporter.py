@@ -8,11 +8,14 @@ Implements sections 10.4 and 10.5 of the OpenMimic spec.  Provides:
 
 from __future__ import annotations
 
+import logging
 import os
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from oc_apprentice_worker.sop_format import SOPFormatter
@@ -46,18 +49,26 @@ class AtomicWriter:
             prefix=".tmp_",
             suffix=".md",
         )
+        renamed = False
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write(content)
                 f.flush()
                 os.fsync(f.fileno())
             os.rename(temp_path, str(filepath))
+            renamed = True
         except Exception:
-            try:
-                os.unlink(temp_path)
-            except OSError:
-                pass
             raise
+        finally:
+            if not renamed:
+                try:
+                    os.unlink(temp_path)
+                except OSError as cleanup_err:
+                    logger.warning(
+                        "Failed to clean up temp file %s: %s",
+                        temp_path,
+                        cleanup_err,
+                    )
 
 
 class IndexGenerator:

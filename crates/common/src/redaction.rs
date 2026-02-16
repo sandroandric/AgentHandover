@@ -2,7 +2,37 @@ use regex::Regex;
 
 pub struct Redactor {
     patterns: Vec<(Regex, &'static str)>,
+    cc_pattern: Regex,
     high_entropy_pattern: Regex,
+}
+
+/// Validate a number string using the Luhn algorithm.
+/// Returns true if the number passes the Luhn check (i.e., is a plausible card number).
+fn luhn_check(number: &str) -> bool {
+    let digits: Vec<u32> = number
+        .chars()
+        .filter(|c| c.is_ascii_digit())
+        .map(|c| c.to_digit(10).unwrap())
+        .collect();
+
+    if digits.len() < 13 {
+        return false;
+    }
+
+    let mut sum = 0u32;
+    let mut double = false;
+    for &d in digits.iter().rev() {
+        let mut val = d;
+        if double {
+            val *= 2;
+            if val > 9 {
+                val -= 9;
+            }
+        }
+        sum += val;
+        double = !double;
+    }
+    sum % 10 == 0
 }
 
 impl Redactor {
@@ -14,8 +44,6 @@ impl Redactor {
             (Regex::new(r"(?i)(?:aws_secret_access_key|secret_key)\s*[=:]\s*([A-Za-z0-9/+=]{30,})").unwrap(), "[REDACTED_SECRET]"),
             // Generic API keys/tokens (long alphanumeric after common key words)
             (Regex::new(r"(?i)(?:api[_-]?key|api[_-]?token|auth[_-]?token|bearer)\s*[=:]\s*['\x22]?([A-Za-z0-9_\-]{20,})['\x22]?").unwrap(), "[REDACTED_API_KEY]"),
-            // Credit card numbers (Visa, MC, Amex, Discover with optional dashes/spaces)
-            (Regex::new(r"\b([3-6]\d{3}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{3,4})\b").unwrap(), "[REDACTED_CC]"),
             // SSN
             (Regex::new(r"\b(\d{3}-\d{2}-\d{4})\b").unwrap(), "[REDACTED_SSN]"),
             // Private keys (PEM format)
@@ -27,9 +55,15 @@ impl Redactor {
             (Regex::new(r"(xox[bpors]-[A-Za-z0-9\-]{10,})").unwrap(), "[REDACTED_SLACK_TOKEN]"),
         ];
 
-        let high_entropy_pattern = Regex::new(r"\b([a-f0-9]{48,})\b").unwrap();
+        // Credit card pattern — matches are validated with Luhn before redacting.
+        let cc_pattern = Regex::new(r"\b([3-6]\d{3}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{3,4})\b").unwrap();
 
-        Self { patterns, high_entropy_pattern }
+        // High-entropy hex strings: 80+ chars to avoid matching common hashes
+        // (SHA-256 = 64 hex chars, SHA-512 = 128 hex chars). 80 is above
+        // standard hash lengths but catches genuinely suspicious long hex secrets.
+        let high_entropy_pattern = Regex::new(r"\b([a-f0-9]{80,})\b").unwrap();
+
+        Self { patterns, cc_pattern, high_entropy_pattern }
     }
 
     pub fn redact(&self, input: &str) -> String {
@@ -38,6 +72,16 @@ impl Redactor {
         for (pattern, replacement) in &self.patterns {
             output = pattern.replace_all(&output, *replacement).to_string();
         }
+
+        // Credit card numbers — only redact if they pass the Luhn check
+        output = self.cc_pattern.replace_all(&output, |caps: &regex::Captures| {
+            let matched = &caps[0];
+            if luhn_check(matched) {
+                "[REDACTED_CC]".to_string()
+            } else {
+                matched.to_string()
+            }
+        }).to_string();
 
         // High-entropy hex strings (potential secrets/hashes)
         output = self.high_entropy_pattern.replace_all(&output, "[REDACTED_HIGH_ENTROPY]").to_string();
@@ -48,6 +92,12 @@ impl Redactor {
     pub fn contains_sensitive(&self, input: &str) -> bool {
         for (pattern, _) in &self.patterns {
             if pattern.is_match(input) {
+                return true;
+            }
+        }
+        // Check CC with Luhn validation
+        if let Some(caps) = self.cc_pattern.captures(input) {
+            if luhn_check(&caps[0]) {
                 return true;
             }
         }

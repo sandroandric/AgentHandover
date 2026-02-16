@@ -128,7 +128,8 @@ fn test_github_token_never_reaches_storage() {
 #[test]
 fn test_high_entropy_hex_never_reaches_storage() {
     let redactor = Redactor::new();
-    let hex_token = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8";
+    // 80+ hex chars to trigger redaction (shorter hashes like SHA-256 are not redacted)
+    let hex_token = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0";
     let event = make_event_with_title(&format!("token: {}", hex_token));
     let redacted = redact_event(&event, &redactor);
 

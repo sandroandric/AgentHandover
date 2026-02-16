@@ -300,10 +300,11 @@ class IdleJobGate:
         to an approximate temperature using the same linear model as
         the Rust daemon: ``temp = 50 + (100 - limit) * 0.5``.
 
-        Returns 50.0 (cool) on failure so temperature alone does not
-        block when the probe is unavailable.
+        Returns 85.0 on failure (safety-first: blocks heavy jobs when
+        temperature is unknown, since we cannot confirm it is safe).
         """
         if platform.system() != "Darwin":
+            # Non-macOS: assume safe since we cannot probe
             return 50.0
 
         try:
@@ -327,12 +328,14 @@ class IdleJobGate:
                         except ValueError:
                             pass
 
-            # No CPU_Speed_Limit found — assume cool
-            return 50.0
+            # No CPU_Speed_Limit found — return high value to block heavy
+            # jobs when temperature is unknown (safety-first approach)
+            return 85.0
 
         except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
             logger.warning("Failed to probe CPU temperature: %s", exc)
-            return 50.0
+            # Safety-first: block heavy jobs when probe fails
+            return 85.0
 
 
 # ---------------------------------------------------------------------------

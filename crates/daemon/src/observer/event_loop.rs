@@ -162,9 +162,7 @@ pub async fn run_observer_loop(
                     {
                         if let Some(ref store) = artifact_store {
                             event.artifact_ids = capture_and_store_screenshot(store);
-                            if !event.artifact_ids.is_empty() {
-                                screenshot_count_this_minute += 1;
-                            }
+                            screenshot_count_this_minute += event.artifact_ids.len() as u32;
                         }
                     }
 
@@ -186,9 +184,7 @@ pub async fn run_observer_loop(
                     {
                         if let Some(ref store) = artifact_store {
                             event.artifact_ids = capture_and_store_screenshot(store);
-                            if !event.artifact_ids.is_empty() {
-                                screenshot_count_this_minute += 1;
-                            }
+                            screenshot_count_this_minute += event.artifact_ids.len() as u32;
                         }
                     }
 
@@ -246,25 +242,34 @@ pub async fn run_storage_writer(
 /// based ID is logged for filesystem correlation.
 #[cfg(target_os = "macos")]
 fn capture_and_store_screenshot(store: &ArtifactStore) -> Vec<Uuid> {
-    match crate::capture::screenshot::capture_main_display() {
-        Some((_width, _height, raw_pixels)) => {
-            match store.store(&raw_pixels, "screenshot") {
-                Ok(artifact_id) => {
-                    let uuid = Uuid::new_v4();
-                    debug!(uuid = %uuid, store_id = %artifact_id, "Screenshot captured and stored");
-                    vec![uuid]
+    const MAX_RETRIES: u32 = 2;
+
+    for attempt in 0..=MAX_RETRIES {
+        match crate::capture::screenshot::capture_main_display() {
+            Some((_width, _height, raw_pixels)) => {
+                match store.store(&raw_pixels, "screenshot") {
+                    Ok(artifact_id) => {
+                        let uuid = Uuid::new_v4();
+                        debug!(uuid = %uuid, store_id = %artifact_id, "Screenshot captured and stored");
+                        return vec![uuid];
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "Failed to store screenshot artifact");
+                        return vec![];
+                    }
                 }
-                Err(e) => {
-                    warn!(error = %e, "Failed to store screenshot artifact");
-                    vec![]
+            }
+            None => {
+                if attempt < MAX_RETRIES {
+                    warn!(attempt = attempt + 1, "Screenshot capture returned None, retrying");
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                } else {
+                    error!("Screenshot capture failed after {} retries (no permission?)", MAX_RETRIES + 1);
                 }
             }
         }
-        None => {
-            debug!("Screenshot capture returned None (no permission?)");
-            vec![]
-        }
     }
+    vec![]
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -329,6 +334,12 @@ fn detect_spanning_displays(
     }
 
     let [wx, wy, ww, wh] = win.bounds_global_px;
+
+    // Guard against zero-size windows which cause underflow in corner calculation
+    if ww == 0 || wh == 0 {
+        return None;
+    }
+
     // Window corners: top-left, top-right, bottom-left, bottom-right
     let corners = [
         (wx, wy),

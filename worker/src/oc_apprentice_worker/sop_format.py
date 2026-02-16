@@ -8,6 +8,7 @@ and a SHA-256 hash of the body for manual edit detection.
 from __future__ import annotations
 
 import hashlib
+import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -111,10 +112,10 @@ class SOPFormatter:
     def _compute_body_hash(self, body: str) -> str:
         """Compute SHA-256 hash of the body content.
 
-        Normalizes line endings and strips trailing newlines for
-        consistent hashing across platforms.
+        Normalizes Unicode to NFC and line endings for consistent
+        hashing across platforms regardless of NFC/NFD encoding.
         """
-        normalized = body.strip("\n").replace("\r\n", "\n")
+        normalized = unicodedata.normalize("NFC", body.strip("\n").replace("\r\n", "\n"))
         digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
         return f"sha256:{digest}"
 

@@ -71,6 +71,12 @@ INJECTION_PATTERNS: list[tuple[str, ThreatLevel, str]] = [
 ]
 
 
+# Module-level compiled patterns — computed once to avoid recompilation on every init
+_COMPILED_PATTERNS = [
+    (re.compile(pat), level, name) for pat, level, name in INJECTION_PATTERNS
+]
+
+
 class InjectionDefense:
     """Scans and sanitizes text for prompt injection patterns.
 
@@ -79,13 +85,12 @@ class InjectionDefense:
     """
 
     def __init__(self, custom_patterns: list[tuple[str, ThreatLevel, str]] | None = None):
-        self._patterns = INJECTION_PATTERNS.copy()
         if custom_patterns:
-            self._patterns.extend(custom_patterns)
-        # Pre-compile patterns
-        self._compiled = [
-            (re.compile(pat), level, name) for pat, level, name in self._patterns
-        ]
+            self._compiled = list(_COMPILED_PATTERNS) + [
+                (re.compile(pat), level, name) for pat, level, name in custom_patterns
+            ]
+        else:
+            self._compiled = _COMPILED_PATTERNS
 
     def scan(self, text: str) -> ScanResult:
         """Scan text for injection patterns.

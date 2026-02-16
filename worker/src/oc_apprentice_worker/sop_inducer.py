@@ -10,12 +10,17 @@ grouped by episode and produces SOP template dicts ready for formatting.
 
 from __future__ import annotations
 
+import hashlib
+import logging
+import random
 import re
 import unicodedata
 from collections import Counter, defaultdict
 from datetime import datetime
 
 from prefixspan import PrefixSpan
+
+logger = logging.getLogger(__name__)
 
 
 class SOPInducer:
@@ -177,15 +182,29 @@ class SOPInducer:
         """
         abs_support = max(2, int(self.min_support * episode_count))
 
-        ps = PrefixSpan(encoded)
+        # Safety cap: subsample if input is too large to avoid memory explosion
+        avg_steps = sum(len(ep) for ep in encoded) / max(len(encoded), 1)
+        data_size = episode_count * avg_steps
+        mining_input = encoded
+        if data_size > 50000:
+            logger.warning(
+                "PrefixSpan input too large (%.0f), subsampling to stay under 50000",
+                data_size,
+            )
+            target_episodes = int(50000 / max(avg_steps, 1))
+            mining_input = random.sample(encoded, min(target_episodes, len(encoded)))
+
+        ps = PrefixSpan(mining_input)
         # Mine frequent patterns with minimum length constraint
         raw = ps.frequent(abs_support)
 
-        # Filter by minimum pattern length
-        patterns = [
-            (count, pat) for count, pat in raw
-            if len(pat) >= self.min_pattern_length
-        ]
+        # Filter by minimum pattern length and collect up to 1000 patterns
+        patterns = []
+        for count, pat in raw:
+            if len(pat) >= self.min_pattern_length:
+                patterns.append((count, pat))
+                if len(patterns) >= 1000:
+                    break
 
         # Sort by support count descending, then pattern length descending
         patterns.sort(key=lambda x: (x[0], len(x[1])), reverse=True)
@@ -549,8 +568,10 @@ class SOPInducer:
 
         Takes the first 3 steps' intents and targets, combines them into
         a readable slug like "click_submit_type_email_click_send".
+        Appends a short hash suffix for collision resistance.
         """
         parts: list[str] = []
+        all_step_parts: list[str] = []
         for step in steps[:3]:
             intent = step.get("step", "action")
             target = step.get("target", "")
@@ -563,14 +584,22 @@ class SOPInducer:
             else:
                 parts.append(intent)
 
+        # Build hash from the full step sequence for uniqueness
+        for step in steps:
+            all_step_parts.append(f"{step.get('step', '')}:{step.get('target', '')}")
+        hash_suffix = hashlib.sha256(
+            "|".join(all_step_parts).encode("utf-8")
+        ).hexdigest()[:6]
+
         raw = "_".join(parts)
 
         # Normalize: remove non-ASCII, replace spaces/special chars with underscore
         slug = unicodedata.normalize("NFKD", raw)
         slug = re.sub(r"[^\w\s-]", "", slug).strip().lower()
         slug = re.sub(r"[\s_]+", "_", slug)
-        slug = slug[:80]  # Cap length
+        slug = slug[:73]  # Cap length leaving room for hash suffix
 
+        slug = f"{slug}_{hash_suffix}"
         return slug
 
     def _generate_title(self, steps: list[dict], apps: list[str]) -> str:

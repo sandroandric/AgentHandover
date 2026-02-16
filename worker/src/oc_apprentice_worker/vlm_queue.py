@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import logging
 import math
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import Enum
@@ -161,6 +162,7 @@ class VLMFallbackQueue:
         self._compute_minutes_today: float = 0.0
         self._dropped_count: int = 0
         self._today: datetime = datetime.now(timezone.utc).date()
+        self._daily_lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # Priority calculation
@@ -193,9 +195,10 @@ class VLMFallbackQueue:
             Priority score.  Higher values are more urgent.
         """
         risk_weight = RISK_WEIGHTS.get(intent, DEFAULT_RISK_WEIGHT)
-        hours_elapsed = max(
-            0.0,
-            (datetime.now(timezone.utc) - created_at).total_seconds() / 3600.0,
+        # Clamp hours_elapsed to [0, 720] (30 days) to limit impact of clock skew
+        hours_elapsed = min(
+            max(0.0, (datetime.now(timezone.utc) - created_at).total_seconds() / 3600.0),
+            720.0,
         )
         recency_weight = math.exp(-hours_elapsed / 24.0)
         return (1.0 - confidence) * risk_weight * recency_weight
@@ -446,17 +449,20 @@ class VLMFallbackQueue:
         """Reset counters at midnight UTC.
 
         Called at the start of every public method to ensure counters
-        reflect the current day.
+        reflect the current day.  Thread-safe via _daily_lock.
         """
         today = datetime.now(timezone.utc).date()
         if today != self._today:
-            logger.info(
-                "VLM queue daily reset: %s -> %s (dispatched=%d, compute=%.1f min)",
-                self._today,
-                today,
-                self._jobs_dispatched_today,
-                self._compute_minutes_today,
-            )
-            self._jobs_dispatched_today = 0
-            self._compute_minutes_today = 0.0
-            self._today = today
+            with self._daily_lock:
+                # Double-check after acquiring lock
+                if today != self._today:
+                    logger.info(
+                        "VLM queue daily reset: %s -> %s (dispatched=%d, compute=%.1f min)",
+                        self._today,
+                        today,
+                        self._jobs_dispatched_today,
+                        self._compute_minutes_today,
+                    )
+                    self._jobs_dispatched_today = 0
+                    self._compute_minutes_today = 0.0
+                    self._today = today

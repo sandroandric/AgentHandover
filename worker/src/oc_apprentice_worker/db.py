@@ -126,6 +126,10 @@ class WorkerDB:
         if not event_ids:
             return 0
 
+        # Validate event IDs before building the query
+        if not all(isinstance(eid, str) and len(eid) <= 36 for eid in event_ids):
+            raise ValueError("Invalid event IDs")
+
         resolved = self._conn.execute(
             "PRAGMA database_list"
         ).fetchone()
@@ -135,22 +139,24 @@ class WorkerDB:
             logger.error("Cannot determine database path for writable connection")
             return 0
 
+        write_conn = sqlite3.connect(db_path)
         try:
-            write_conn = sqlite3.connect(db_path)
             write_conn.execute("PRAGMA busy_timeout = 5000;")
             placeholders = ",".join("?" for _ in event_ids)
+            write_conn.execute("BEGIN IMMEDIATE")
             cursor = write_conn.execute(
                 f"UPDATE events SET processed = 1 WHERE id IN ({placeholders})",
                 event_ids,
             )
             write_conn.commit()
             updated = cursor.rowcount
-            write_conn.close()
             logger.info("Marked %d events as processed", updated)
             return updated
         except sqlite3.Error as exc:
             logger.error("Failed to mark events as processed: %s", exc)
             return 0
+        finally:
+            write_conn.close()
 
     # ------------------------------------------------------------------
     # Lifecycle

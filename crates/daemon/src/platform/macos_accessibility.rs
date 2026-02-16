@@ -1,6 +1,10 @@
 use core_foundation::base::{CFType, TCFType};
 use core_foundation::string::CFString;
-use tracing::{debug, warn};
+use std::sync::atomic::{AtomicU32, Ordering};
+use tracing::{debug, error, warn};
+
+/// Tracks consecutive AX API timeouts for degradation visibility.
+static AX_CONSECUTIVE_TIMEOUTS: AtomicU32 = AtomicU32::new(0);
 
 /// Check if the app has macOS Accessibility permission.
 /// Required for reading the AX tree of other applications.
@@ -103,13 +107,28 @@ pub async fn is_secure_field_focused_async() -> bool {
     )
     .await
     {
-        Ok(Ok(result)) => result,
+        Ok(Ok(result)) => {
+            AX_CONSECUTIVE_TIMEOUTS.store(0, Ordering::Relaxed);
+            result
+        }
         Ok(Err(e)) => {
+            AX_CONSECUTIVE_TIMEOUTS.store(0, Ordering::Relaxed);
             warn!(error = %e, "AX secure field check task panicked");
             false
         }
         Err(_) => {
-            debug!("AX secure field check timed out (100ms)");
+            let count = AX_CONSECUTIVE_TIMEOUTS.fetch_add(1, Ordering::Relaxed) + 1;
+            if count >= 10 {
+                error!(
+                    consecutive_timeouts = count,
+                    "AX API consistently timing out — capture is likely fully degraded"
+                );
+            } else if count >= 3 {
+                warn!(
+                    consecutive_timeouts = count,
+                    "AX API consistently timing out — capture may be degraded"
+                );
+            }
             // On timeout, assume it's a secure field as a safety measure.
             // Better to skip capture than to leak password data.
             true

@@ -23,7 +23,8 @@ impl EventStore {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
-        conn.pragma_update(None, "busy_timeout", 5000)?;
+        // 30s to accommodate maintenance VACUUM operations on large databases
+        conn.pragma_update(None, "busy_timeout", 30000)?;
 
         let store = Self {
             conn,
@@ -61,9 +62,20 @@ impl EventStore {
             .pragma_query_value(None, "user_version", |row| row.get(0))?;
 
         if current_version < schema::CURRENT_SCHEMA_VERSION {
-            // Create a backup before applying migrations, but only if the DB
-            // file already exists with content (not a brand-new database).
-            if self.db_path.exists() && std::fs::metadata(&self.db_path).map(|m| m.len()).unwrap_or(0) > 0 && current_version > 0 {
+            // Create a backup before applying migrations on any non-empty database
+            // that already has a schema (i.e., not a brand-new database).
+            // We check for the events table to distinguish a freshly-created DB
+            // (which has no user tables yet) from one with existing data.
+            let has_existing_schema: bool = self
+                .conn
+                .query_row(
+                    "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='events'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap_or(0)
+                > 0;
+            if has_existing_schema && self.db_path.exists() && std::fs::metadata(&self.db_path).map(|m| m.len()).unwrap_or(0) > 0 {
                 self.backup_before_migrate()?;
             }
 

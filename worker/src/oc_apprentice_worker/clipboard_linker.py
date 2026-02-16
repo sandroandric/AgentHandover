@@ -58,9 +58,9 @@ class ClipboardLinker:
         if not events:
             return []
 
-        # Map content_hash -> list of (event_id, timestamp) ordered by time
+        # Map content_hash -> list of (event_id, timestamp, content_length) ordered by time
         # We store all copies so we can pick the most recent one for a paste
-        copy_index: dict[str, list[tuple[str, datetime]]] = {}
+        copy_index: dict[str, list[tuple[str, datetime, int]]] = {}
         links: list[ClipboardLink] = []
 
         for event in events:
@@ -71,7 +71,8 @@ class ClipboardLinker:
             if kind == "ClipboardChange":
                 content_hash = self._extract_hash(event)
                 if content_hash and ts:
-                    copy_index.setdefault(content_hash, []).append((eid, ts))
+                    content_length = self._extract_content_length(event)
+                    copy_index.setdefault(content_hash, []).append((eid, ts, content_length))
 
             elif kind == "PasteDetected":
                 content_hash = self._extract_hash(event)
@@ -82,19 +83,31 @@ class ClipboardLinker:
                 if not copies:
                     continue
 
+                paste_length = self._extract_content_length(event)
+
                 # Find the most recent copy that is within the time window
                 best_copy: tuple[str, datetime] | None = None
-                for copy_eid, copy_ts in reversed(copies):
+                for copy_eid, copy_ts, copy_len in reversed(copies):
                     delta = (ts - copy_ts).total_seconds()
                     if delta < 0:
                         # Paste before copy — skip
                         continue
                     if delta <= self.window_minutes * 60:
-                        best_copy = (copy_eid, copy_ts)
+                        # Secondary verification: if both have content_length,
+                        # they should match (skip with warning if they differ)
+                        if paste_length > 0 and copy_len > 0:
+                            if abs(paste_length - copy_len) > max(paste_length, copy_len) * 0.1:
+                                logger.warning(
+                                    "Hash match but content_length mismatch: "
+                                    "copy=%d paste=%d (copy_eid=%s, paste_eid=%s)",
+                                    copy_len, paste_length, copy_eid, eid,
+                                )
+                                continue
+                        best_copy = (copy_eid, copy_ts, copy_len)
                         break
 
                 if best_copy is not None:
-                    copy_eid, copy_ts = best_copy
+                    copy_eid, copy_ts, _ = best_copy
                     delta_seconds = (ts - copy_ts).total_seconds()
                     links.append(
                         ClipboardLink(
@@ -130,6 +143,24 @@ class ClipboardLinker:
         if isinstance(parsed, dict) and parsed:
             return next(iter(parsed))
         return ""
+
+    @staticmethod
+    def _extract_content_length(event: dict) -> int:
+        """Extract ``byte_size`` from ``metadata_json``, returning 0 if absent."""
+        metadata_json = event.get("metadata_json", "")
+        if not metadata_json:
+            return 0
+
+        try:
+            metadata = json.loads(metadata_json) if isinstance(metadata_json, str) else metadata_json
+        except (json.JSONDecodeError, TypeError):
+            return 0
+
+        byte_size = metadata.get("byte_size", 0)
+        try:
+            return int(byte_size)
+        except (TypeError, ValueError):
+            return 0
 
     @staticmethod
     def _extract_hash(event: dict) -> str:

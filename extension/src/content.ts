@@ -70,14 +70,24 @@ export function registerModule(mod: ContentModule): void {
 export function sendToBackground(
   type: string,
   payload: Record<string, unknown> = {},
+  retries: number = 2,
 ): void {
   chrome.runtime.sendMessage({ type, payload }, (response) => {
     if (chrome.runtime.lastError) {
       // This can happen legitimately if the service worker is restarting.
-      console.warn(
-        '[OpenMimic:content] sendMessage error:',
-        chrome.runtime.lastError.message,
-      );
+      // Retry with a 1-second delay to give the service worker time to wake up.
+      if (retries > 0) {
+        console.warn(
+          '[OpenMimic:content] sendMessage error, retrying in 1s:',
+          chrome.runtime.lastError.message,
+        );
+        setTimeout(() => sendToBackground(type, payload, retries - 1), 1000);
+      } else {
+        console.warn(
+          '[OpenMimic:content] sendMessage error (retries exhausted):',
+          chrome.runtime.lastError.message,
+        );
+      }
       return;
     }
     if (response && !response.ok) {
@@ -193,6 +203,10 @@ sendToBackground('content_ready', {
 // Register built-in modules
 // ---------------------------------------------------------------------------
 
+// IMPORTANT: Module registration order matters. Secure-field MUST be first
+// to ensure the guard is active before capture modules start. Do not change
+// this order or make init() async without adding explicit synchronization.
+
 // --- Secure Field Detection (must be registered first so the guard is active
 //     before other modules start capturing) ---
 {
@@ -280,4 +294,12 @@ sendToBackground('content_ready', {
       cleanupDwell = null;
     },
   });
+}
+
+// Runtime assertion: verify secure-field is the first registered module
+if (registeredModules.length > 0 && registeredModules[0].name !== 'secure-field') {
+  console.error(
+    '[OpenMimic:content] CRITICAL: secure-field must be the first registered module, but found:',
+    registeredModules[0].name,
+  );
 }

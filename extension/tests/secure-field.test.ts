@@ -156,6 +156,27 @@ describe('isSecureField', () => {
     expect(isSecureField(input)).toBe(true);
   });
 
+  it('should detect autocomplete="cc-given-name"', () => {
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.setAttribute('autocomplete', 'cc-given-name');
+    expect(isSecureField(input)).toBe(true);
+  });
+
+  it('should detect autocomplete="cc-family-name"', () => {
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.setAttribute('autocomplete', 'cc-family-name');
+    expect(isSecureField(input)).toBe(true);
+  });
+
+  it('should detect autocomplete="cc-additional-name"', () => {
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.setAttribute('autocomplete', 'cc-additional-name');
+    expect(isSecureField(input)).toBe(true);
+  });
+
   // ----- Credit card name/id patterns -----
 
   it('should detect name="card-number"', () => {

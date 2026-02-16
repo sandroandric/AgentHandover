@@ -209,8 +209,8 @@ describe('Scroll-read timer', () => {
     // Start scrolling
     document.dispatchEvent(new Event('scroll'));
 
-    // Advance past scroll-read threshold
-    vi.advanceTimersByTime(3250); // 3000ms + 250ms interval
+    // Advance past scroll-read threshold (3000ms + 100ms timer interval)
+    vi.advanceTimersByTime(3100);
 
     expect(onScroll).toHaveBeenCalledOnce();
 
@@ -301,13 +301,39 @@ describe('Scroll-read timer', () => {
     // Start scrolling immediately
     document.dispatchEvent(new Event('scroll'));
 
-    // After 1250ms: dwell should fire (no manipulation)
-    vi.advanceTimersByTime(1250);
+    // After 1100ms: dwell should fire (no manipulation)
+    vi.advanceTimersByTime(1100);
     expect(onDwell).toHaveBeenCalledOnce();
     expect(onScroll).not.toHaveBeenCalled();
 
-    // After another 1000ms (total 2250ms): scroll should fire
+    // After another 1000ms (total 2100ms): scroll should fire
     vi.advanceTimersByTime(1000);
+    expect(onScroll).toHaveBeenCalledOnce();
+
+    cleanup();
+  });
+
+  it('fires both dwell and scroll-read when both thresholds reached simultaneously', () => {
+    const onDwell = vi.fn();
+    const onScroll = vi.fn();
+    // Set both thresholds to the same value so they trigger near-simultaneously
+    const config = testConfig({ dwellThresholdMs: 500, scrollReadThresholdMs: 500 });
+    const cleanup = initDwellTracker(config, onDwell, onScroll);
+
+    // Start scrolling immediately (navigation input)
+    document.dispatchEvent(new Event('scroll'));
+
+    // Keep triggering navigation inputs to keep scroll-read tracking active
+    vi.advanceTimersByTime(200);
+    document.dispatchEvent(new Event('scroll'));
+    vi.advanceTimersByTime(200);
+    document.dispatchEvent(new Event('scroll'));
+
+    // Advance past both thresholds (total 600ms, both at 500ms threshold)
+    vi.advanceTimersByTime(200);
+
+    // Both callbacks should have fired
+    expect(onDwell).toHaveBeenCalledOnce();
     expect(onScroll).toHaveBeenCalledOnce();
 
     cleanup();

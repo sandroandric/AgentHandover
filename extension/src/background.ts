@@ -17,6 +17,7 @@ import {
   onNativeMessage,
   onNativeDisconnect,
   isConnected,
+  resendBufferedMessages,
   type NativeInboundMessage,
 } from './native-messaging';
 
@@ -37,9 +38,13 @@ self.addEventListener('activate', () => {
 // Native messaging bootstrap
 // ---------------------------------------------------------------------------
 
+let reconnectAttempts = 0;
+const MAX_RECONNECT_DELAY = 300_000; // 5 minutes
+const MAX_RECONNECT_ATTEMPTS = 100;
+
 /**
  * Establish a connection to the daemon.  If the connection drops (e.g. daemon
- * restarts) we schedule a reconnect after a short delay.
+ * restarts) we schedule a reconnect with exponential backoff and jitter.
  */
 function initNativeConnection(): void {
   if (isConnected()) {
@@ -50,19 +55,44 @@ function initNativeConnection(): void {
   try {
     connectNativeHost();
 
+    // Reset reconnect counter on successful connection
+    reconnectAttempts = 0;
+
     onNativeMessage((message: NativeInboundMessage) => {
       console.log('[OpenMimic:bg] Daemon message:', message.type);
       handleDaemonMessage(message);
     });
 
     onNativeDisconnect(() => {
-      console.warn('[OpenMimic:bg] Lost daemon connection — will reconnect in 5 s');
-      setTimeout(initNativeConnection, 5_000);
+      reconnectAttempts++;
+      if (reconnectAttempts > MAX_RECONNECT_ATTEMPTS) {
+        console.error('[OpenMimic:bg] Max reconnect attempts reached. Giving up.');
+        return;
+      }
+      const delay = Math.min(5_000 * Math.pow(1.5, reconnectAttempts - 1), MAX_RECONNECT_DELAY);
+      const jitter = delay * 0.1 * Math.random();
+      console.warn(
+        `[OpenMimic:bg] Lost daemon connection — reconnect attempt ${reconnectAttempts} in ${Math.round(delay + jitter)}ms`,
+      );
+      setTimeout(() => {
+        initNativeConnection();
+        // Resend buffered messages after reconnecting
+        if (isConnected()) {
+          resendBufferedMessages();
+        }
+      }, delay + jitter);
     });
   } catch (err) {
     console.error('[OpenMimic:bg] Failed to connect to daemon:', err);
-    console.log('[OpenMimic:bg] Retrying in 5 s');
-    setTimeout(initNativeConnection, 5_000);
+    reconnectAttempts++;
+    if (reconnectAttempts > MAX_RECONNECT_ATTEMPTS) {
+      console.error('[OpenMimic:bg] Max reconnect attempts reached. Giving up.');
+      return;
+    }
+    const delay = Math.min(5_000 * Math.pow(1.5, reconnectAttempts - 1), MAX_RECONNECT_DELAY);
+    const jitter = delay * 0.1 * Math.random();
+    console.log(`[OpenMimic:bg] Retrying in ${Math.round(delay + jitter)}ms`);
+    setTimeout(initNativeConnection, delay + jitter);
   }
 }
 

@@ -159,38 +159,46 @@ class EpisodeBuilder:
                 if eid:
                     event_to_episode[eid] = ep
 
-        # Assign links to episodes containing the paste event
+        # Assign links to episodes containing the paste event.
+        # Verify episode_id match to avoid wrong assignment on event_id collision.
         for link in links:
             paste_ep = event_to_episode.get(link.paste_event_id)
+            copy_ep = event_to_episode.get(link.copy_event_id)
             if paste_ep is not None:
-                paste_ep.clipboard_links.append(link)
+                # Only assign if the copy event is in the same episode or
+                # no copy episode is found (cross-episode link is valid)
+                if copy_ep is None or copy_ep.episode_id == paste_ep.episode_id:
+                    paste_ep.clipboard_links.append(link)
 
     # ------------------------------------------------------------------
     # Thread identification
     # ------------------------------------------------------------------
 
     def _get_thread_id(self, event: dict) -> str:
-        """Determine thread ID from event's app_id, URL domain, and entities.
+        """Determine thread ID from event's app_id, window_id, URL domain, and entities.
 
         Entity-based clustering signals (extracted from window titles and URLs):
         - Ticket IDs: JIRA-123, PROJ-456, #789 patterns
         - Filenames: "document.pdf - Preview" patterns
 
-        Thread ID format:
-        - ``{app_id}:{url_domain}:{entity}`` when entity found
-        - ``{app_id}:{url_domain}`` when URL present but no entity
-        - ``{app_id}:{entity}`` when entity found but no URL
+        Thread ID format includes window_id to differentiate same-domain tabs:
+        - ``{app_id}:{window_id}:{url_domain}:{entity}`` when all present
+        - ``{app_id}:{window_id}:{url_domain}`` when URL present but no entity
+        - ``{app_id}:{window_id}`` when window_id but no URL/entity
         - ``{app_id}`` when no URL or entity found
         - ``unknown`` when no app_id can be extracted
         """
         app_id = self._extract_app_id(event)
         url_domain = self._extract_url_domain(event)
         entity = self._extract_entity(event)
+        window_id = self._extract_window_id(event)
 
         if not app_id:
             return "unknown"
 
         parts = [app_id]
+        if window_id:
+            parts.append(window_id)
         if url_domain:
             parts.append(url_domain)
         if entity:
@@ -210,6 +218,20 @@ class EpisodeBuilder:
             return ""
 
         return window.get("app_id", "")
+
+    def _extract_window_id(self, event: dict) -> str:
+        """Extract window_id from the event's window_json field."""
+        window_json = event.get("window_json")
+        if not window_json:
+            return ""
+
+        try:
+            window = json.loads(window_json) if isinstance(window_json, str) else window_json
+        except (json.JSONDecodeError, TypeError):
+            return ""
+
+        wid = window.get("window_id", "")
+        return str(wid) if wid else ""
 
     def _extract_url_domain(self, event: dict) -> str:
         """Extract URL domain from the event's metadata_json field."""
@@ -317,7 +339,8 @@ class EpisodeBuilder:
 
         Sets ``metadata["continuation_of"]`` to the previous episode's
         unique segment identifier so downstream consumers can reconstruct
-        the full episode chain.
+        the full episode chain.  Carries forward clipboard_links and
+        relevant metadata for continuity.
         """
         prev_id = f"{current.episode_id}:seg{current.segment_id}"
         new_segment = Episode(
@@ -326,6 +349,7 @@ class EpisodeBuilder:
             prev_segment_id=current.segment_id,
             thread_id=current.thread_id,
             metadata={"continuation_of": prev_id},
+            clipboard_links=list(current.clipboard_links),
         )
         return new_segment
 

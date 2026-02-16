@@ -12,6 +12,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Protocol
 
+from oc_apprentice_worker.injection_defense import InjectionDefense
+
 logger = logging.getLogger(__name__)
 
 
@@ -157,6 +159,7 @@ class VLMWorker:
     ):
         self.config = config or VLMConfig()
         self._backend = backend or self._create_backend()
+        self._injection_defense = InjectionDefense()
         self._jobs_processed_today = 0
         self._compute_minutes_today = 0.0
         self._last_reset_date: str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -223,8 +226,16 @@ class VLMWorker:
             )
 
         if request.dom_context:
-            # Truncate DOM context to prevent prompt injection via huge payloads
+            # Truncate BEFORE injection scan to avoid TOCTOU gap
             dom = request.dom_context[:2000]
+            scan_result = self._injection_defense.scan(dom)
+            if not scan_result.is_safe:
+                dom = scan_result.sanitized_text
+                logger.warning(
+                    "Injection patterns found in DOM context for job %s: %s",
+                    request.job_id,
+                    scan_result.patterns_found,
+                )
             parts.append(f"DOM context (truncated): {dom}")
 
         return "\n".join(parts)
@@ -253,6 +264,15 @@ class VLMWorker:
                         job_id=request.job_id,
                         success=False,
                         error=f"Image too large: {len(img_bytes)} bytes",
+                    )
+                # Verify image format via magic bytes
+                is_png = img_bytes[:4] == b"\x89PNG"
+                is_jpeg = img_bytes[:3] == b"\xff\xd8\xff"
+                if not (is_png or is_jpeg):
+                    return VLMResponse(
+                        job_id=request.job_id,
+                        success=False,
+                        error="Unsupported image format: expected PNG or JPEG",
                     )
             except Exception as e:
                 return VLMResponse(

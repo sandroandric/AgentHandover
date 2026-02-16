@@ -37,6 +37,9 @@ const CC_AUTOCOMPLETE_VALUES: ReadonlySet<string> = new Set([
   'cc-csc',
   'cc-name',
   'cc-type',
+  'cc-given-name',
+  'cc-family-name',
+  'cc-additional-name',
 ]);
 
 /** Name/ID substrings indicating credit card fields. */
@@ -118,6 +121,8 @@ export function initSecureFieldDetection(
   onStateChange: (isSecure: boolean) => void,
 ): () => void {
   let currentlySecure = false;
+  /** Monotonically increasing counter to track focus transitions and avoid stale callbacks. */
+  let focusSeq = 0;
 
   function setSecure(value: boolean): void {
     if (value === currentlySecure) return;
@@ -127,6 +132,7 @@ export function initSecureFieldDetection(
   }
 
   function handleFocusIn(event: FocusEvent): void {
+    focusSeq++;
     const target = event.target as Element | null;
     if (isSecureField(target)) {
       setSecure(true);
@@ -145,15 +151,20 @@ export function initSecureFieldDetection(
     // If the new target is also a secure field, stay secure
     if (isSecureField(relatedTarget)) return;
 
-    // Use a microtask to check the actual new activeElement,
+    // Use requestAnimationFrame to check the actual new activeElement,
     // since focusout fires before focusin on the new element.
-    // setTimeout(0) ensures we read the settled activeElement.
-    setTimeout(() => {
+    // requestAnimationFrame fires after the browser has processed the
+    // focus change, avoiding the timing race that setTimeout(0) creates.
+    // We track the focus sequence so that if focus has changed again by
+    // the time the callback fires, we skip the stale check.
+    const seq = ++focusSeq;
+    requestAnimationFrame(() => {
+      if (seq !== focusSeq) return; // Focus changed again, skip
       const active = document.activeElement;
       if (!isSecureField(active)) {
         setSecure(false);
       }
-    }, 0);
+    });
   }
 
   // Listen on capture phase to detect focus before bubbling

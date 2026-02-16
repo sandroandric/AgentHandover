@@ -10,7 +10,7 @@ use std::collections::VecDeque;
 use std::ffi::{c_long, c_void};
 use std::time::Duration;
 use tokio::sync::mpsc;
-use tracing::{debug, error, warn};
+use tracing::{debug, error, info, warn};
 
 // Objective-C runtime FFI bindings (libobjc.dylib ships with macOS).
 #[link(name = "objc", kind = "dylib")]
@@ -269,15 +269,20 @@ pub async fn run_clipboard_monitor(
                     break;
                 }
 
-                // Check change count in a blocking thread (ObjC calls).
-                let current_count = match tokio::task::spawn_blocking(get_pasteboard_change_count).await {
-                    Ok(Some(c)) => c,
-                    Ok(None) => {
+                // Check change count in a blocking thread with timeout.
+                let count_task = tokio::task::spawn_blocking(get_pasteboard_change_count);
+                let current_count = match tokio::time::timeout(Duration::from_millis(500), count_task).await {
+                    Ok(Ok(Some(c))) => c,
+                    Ok(Ok(None)) => {
                         warn!("Failed to read pasteboard changeCount");
                         continue;
                     }
-                    Err(e) => {
+                    Ok(Err(e)) => {
                         error!(error = %e, "Pasteboard changeCount task panicked");
+                        continue;
+                    }
+                    Err(_) => {
+                        warn!("Pasteboard changeCount check timed out");
                         continue;
                     }
                 };
@@ -285,12 +290,17 @@ pub async fn run_clipboard_monitor(
                 if current_count != last_change_count {
                     last_change_count = current_count;
 
-                    // Capture clipboard metadata in a blocking thread.
-                    let meta = match tokio::task::spawn_blocking(capture_clipboard_meta).await {
-                        Ok(Some(m)) => m,
-                        Ok(None) => continue,
-                        Err(e) => {
+                    // Capture clipboard metadata in a blocking thread with timeout.
+                    let meta_task = tokio::task::spawn_blocking(capture_clipboard_meta);
+                    let meta = match tokio::time::timeout(Duration::from_millis(500), meta_task).await {
+                        Ok(Ok(Some(m))) => m,
+                        Ok(Ok(None)) => continue,
+                        Ok(Err(e)) => {
                             error!(error = %e, "Clipboard meta capture panicked");
+                            continue;
+                        }
+                        Err(_) => {
+                            warn!("Clipboard meta capture timed out");
                             continue;
                         }
                     };
@@ -316,7 +326,9 @@ pub async fn run_clipboard_monitor(
         }
     }
 
-    debug!("Clipboard monitor stopped");
+    // Grace period for any in-flight blocking tasks
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    info!("Clipboard monitor stopped");
 }
 
 #[cfg(test)]

@@ -154,8 +154,12 @@ impl CdpBridge {
 /// injection, enforcing data/instruction separation per spec section 7.2.
 ///
 /// This function does NOT allow arbitrary JS execution -- only safe DOM queries.
-pub fn build_cdp_eval_script(selector: &str) -> String {
-    format!(
+///
+/// Returns `Err` if the selector cannot be serialized to JSON.
+pub fn build_cdp_eval_script(selector: &str) -> Result<String, String> {
+    let encoded_selector = serde_json::to_string(selector)
+        .map_err(|e| format!("Failed to JSON-encode selector {:?}: {}", selector, e))?;
+    Ok(format!(
         r#"(function() {{
             const el = document.querySelector({selector});
             if (!el) return null;
@@ -167,6 +171,6 @@ pub fn build_cdp_eval_script(selector: &str) -> String {
                 rect: el.getBoundingClientRect().toJSON()
             }};
         }})()"#,
-        selector = serde_json::to_string(selector).unwrap_or_default()
-    )
+        selector = encoded_selector
+    ))
 }

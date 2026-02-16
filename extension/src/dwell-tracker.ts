@@ -150,9 +150,9 @@ export function initDwellTracker(
   // Page focus
   window.addEventListener('focus', handleFocus);
 
-  // Periodic timer check — 250ms gives good responsiveness without
-  // excessive CPU usage
-  state.timerInterval = setInterval(checkTimers, 250);
+  // Periodic timer check — 100ms reduces the window for false positives
+  // from 250ms to 100ms while maintaining acceptable CPU usage.
+  state.timerInterval = setInterval(checkTimers, 100);
 
   // -----------------------------------------------------------------------
   // Cleanup

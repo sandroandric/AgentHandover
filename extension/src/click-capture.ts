@@ -158,10 +158,27 @@ export function initClickCapture(
 
   // Use capture phase (third argument = true) to intercept clicks before
   // any handler can call stopPropagation.
-  document.addEventListener('click', handleClick, true);
+  //
+  // LIMITATION: Other capture-phase listeners registered earlier on the same
+  // target can call stopImmediatePropagation() and prevent this handler from
+  // firing. To mitigate this, we also register on `window` as a fallback —
+  // this gives two chances to catch the click event. The dedup flag prevents
+  // the sendFn from being called twice for the same click.
+  let lastProcessedTimestamp = -1;
+
+  function deduplicatedHandleClick(event: MouseEvent): void {
+    // Skip if we already processed this exact event
+    if (event.timeStamp === lastProcessedTimestamp) return;
+    lastProcessedTimestamp = event.timeStamp;
+    handleClick(event);
+  }
+
+  document.addEventListener('click', deduplicatedHandleClick, true);
+  window.addEventListener('click', deduplicatedHandleClick, true);
 
   // Return cleanup function
   return () => {
-    document.removeEventListener('click', handleClick, true);
+    document.removeEventListener('click', deduplicatedHandleClick, true);
+    window.removeEventListener('click', deduplicatedHandleClick, true);
   };
 }

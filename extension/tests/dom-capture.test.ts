@@ -10,6 +10,10 @@
  *   6. Full DOM capture integration (walkDOM, captureViewportDOM)
  *
  * Environment: jsdom via vitest (configured in vitest.config.ts).
+ *
+ * NOTE: Full cross-component integration testing (Extension -> Daemon -> Storage -> Worker)
+ * requires browser automation (e.g., Puppeteer) and is not possible in jsdom.
+ * See tests/integration/ for Python-based pipeline integration tests.
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
@@ -753,6 +757,59 @@ describe('captureViewportDOM', () => {
     expect(result.length).toBe(3);
     expect(result.map((n) => n.testId)).toEqual(['section-0', 'section-1', 'section-2']);
   });
+});
+
+// ---------------------------------------------------------------------------
+// Viewport Size Variety
+// ---------------------------------------------------------------------------
+
+describe('viewport size variety', () => {
+  const viewportSizes = [
+    { w: 1920, h: 1080, name: 'Full HD' },
+    { w: 3440, h: 1440, name: 'Ultra-wide' },
+    { w: 768, h: 1024, name: 'Portrait tablet' },
+    { w: 375, h: 667, name: 'Mobile' },
+  ];
+
+  beforeEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  for (const { w, h, name } of viewportSizes) {
+    it(`captures elements correctly at ${name} (${w}x${h})`, () => {
+      setViewportSize(w, h);
+
+      const visible = document.createElement('div');
+      visible.setAttribute('data-testid', 'visible');
+      document.body.appendChild(visible);
+      mockBBox(visible, { x: 10, y: 10, width: 200, height: 100 });
+
+      const offscreen = document.createElement('div');
+      offscreen.setAttribute('data-testid', 'offscreen');
+      document.body.appendChild(offscreen);
+      mockBBox(offscreen, { x: w + 500, y: h + 500, width: 200, height: 100 });
+
+      const result = captureViewportDOM();
+      expect(result.length).toBe(1);
+      expect(result[0].testId).toBe('visible');
+    });
+
+    it(`correctly reports viewport intersection at ${name} (${w}x${h})`, () => {
+      setViewportSize(w, h);
+
+      const insideEl = document.createElement('div');
+      mockBBox(insideEl, { x: 0, y: 0, width: w / 2, height: h / 2 });
+      expect(isInViewport(insideEl)).toBe(true);
+
+      const outsideEl = document.createElement('div');
+      mockBBox(outsideEl, { x: w + 100, y: h + 100, width: 100, height: 100 });
+      expect(isInViewport(outsideEl)).toBe(false);
+
+      const partialEl = document.createElement('div');
+      mockBBox(partialEl, { x: w - 50, y: h - 50, width: 100, height: 100 });
+      expect(isInViewport(partialEl)).toBe(true);
+    });
+  }
 });
 
 // ---------------------------------------------------------------------------

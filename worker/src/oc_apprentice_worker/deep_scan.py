@@ -148,6 +148,14 @@ class DeepScanner:
                     area = int(digits_only[:3])
                     if area == 0 or area == 666 or area >= 900:
                         continue
+                    # Group (digits 4-5) cannot be 00
+                    group = int(digits_only[3:5])
+                    if group == 0:
+                        continue
+                    # Serial (digits 6-9) cannot be 0000
+                    serial = int(digits_only[5:9])
+                    if serial == 0:
+                        continue
 
                 matches.append(PIIMatch(
                     pattern_name=pattern_name,

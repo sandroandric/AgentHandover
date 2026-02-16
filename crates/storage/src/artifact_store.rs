@@ -5,9 +5,11 @@ use chacha20poly1305::{
 };
 use chrono::Utc;
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::RwLock;
 
 const HEADER_MAGIC: &[u8; 4] = b"OCAA"; // OpenClaw Apprentice Artifact
 const ARTIFACT_VERSION: u8 = 2;
@@ -20,11 +22,17 @@ const ENCRYPTION_XCHACHA20POLY1305: u8 = 1;
 pub struct ArtifactStore {
     base_path: PathBuf,
     key: [u8; 32],
+    /// Cache of artifact_id -> file path to avoid repeated recursive directory scans.
+    path_cache: RwLock<HashMap<String, PathBuf>>,
 }
 
 impl ArtifactStore {
     pub fn new(base_path: PathBuf, key: [u8; 32]) -> Self {
-        Self { base_path, key }
+        Self {
+            base_path,
+            key,
+            path_cache: RwLock::new(HashMap::new()),
+        }
     }
 
     /// Store: capture -> compress -> encrypt -> write (spec order from §6.2)
@@ -76,6 +84,11 @@ impl ArtifactStore {
         file.sync_all()?;
 
         fs::rename(&tmp_path, &final_path)?;
+
+        // Cache the path for fast retrieval
+        if let Ok(mut cache) = self.path_cache.write() {
+            cache.insert(artifact_id.clone(), final_path);
+        }
 
         Ok(artifact_id)
     }
@@ -133,16 +146,33 @@ impl ArtifactStore {
     }
 
     /// Get the filesystem path for a given artifact ID.
-    /// Searches the date hierarchy; falls back to today's date directory if not found.
+    /// Checks the in-memory cache first, then searches the date hierarchy,
+    /// and falls back to today's date directory if not found.
     pub fn artifact_path(&self, artifact_id: &str) -> PathBuf {
-        self.find_artifact(artifact_id).unwrap_or_else(|| {
-            let now = Utc::now();
-            self.base_path
-                .join(now.format("%Y").to_string())
-                .join(now.format("%m").to_string())
-                .join(now.format("%d").to_string())
-                .join(format!("{}.bin", artifact_id))
-        })
+        // Check cache first
+        if let Ok(cache) = self.path_cache.read() {
+            if let Some(path) = cache.get(artifact_id) {
+                return path.clone();
+            }
+        }
+
+        // Fall back to recursive search and cache the result
+        match self.find_artifact(artifact_id) {
+            Some(path) => {
+                if let Ok(mut cache) = self.path_cache.write() {
+                    cache.insert(artifact_id.to_string(), path.clone());
+                }
+                path
+            }
+            None => {
+                let now = Utc::now();
+                self.base_path
+                    .join(now.format("%Y").to_string())
+                    .join(now.format("%m").to_string())
+                    .join(now.format("%d").to_string())
+                    .join(format!("{}.bin", artifact_id))
+            }
+        }
     }
 
     fn find_artifact(&self, artifact_id: &str) -> Option<PathBuf> {

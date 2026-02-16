@@ -274,7 +274,8 @@ class TestProcessJobSuccess:
 
     def test_with_screenshot_base64(self) -> None:
         """Processing a job with a valid screenshot succeeds."""
-        img_data = base64.b64encode(b"fake png data for testing").decode()
+        # Use valid PNG magic bytes header so format validation passes
+        img_data = base64.b64encode(b"\x89PNG\r\n\x1a\nfake png data for testing").decode()
         worker = VLMWorker()
         response = worker.process_job(
             _make_request(job_id="with-img", screenshot_base64=img_data)

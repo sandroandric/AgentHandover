@@ -86,13 +86,16 @@ class NegativeDemoPruner:
                 negative_ids.add(eid)
                 prune_reasons[eid] = reason
 
-                # Mark preceding events within the lookback window
+                # Mark preceding events within the lookback window,
+                # scoped to the same episode if episode_id is available
+                episode_id = event.get("episode_id", "")
                 self._mark_lookback(
                     events[:idx],
                     event,
                     negative_ids,
                     prune_reasons,
                     reason,
+                    episode_id=episode_id,
                 )
 
         # Split into positive / negative
@@ -185,12 +188,14 @@ class NegativeDemoPruner:
         negative_ids: set[str],
         prune_reasons: dict[str, str],
         reason: str,
+        episode_id: str = "",
     ) -> None:
         """Mark preceding events in the same thread as negative.
 
         Looks back at most ``LOOKBACK_MAX_EVENTS`` events or
         ``LOOKBACK_MAX_SECONDS`` seconds, whichever is more restrictive.
         Only marks events that share the same thread (app_id).
+        When episode_id is provided, only marks events in the same episode.
         """
         trigger_ts = self._parse_timestamp(trigger)
         trigger_app = self._extract_app_id(trigger)
@@ -209,6 +214,12 @@ class NegativeDemoPruner:
             prev_app = self._extract_app_id(prev_event)
             if prev_app != trigger_app:
                 continue
+
+            # Episode boundary check — do not span episodes
+            if episode_id:
+                prev_episode_id = prev_event.get("episode_id", "")
+                if prev_episode_id and prev_episode_id != episode_id:
+                    continue
 
             # Time window check
             if trigger_ts is not None:

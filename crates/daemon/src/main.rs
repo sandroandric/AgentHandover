@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use tokio::sync::{mpsc, watch};
 use tracing::{info, warn, error};
 use tracing_subscriber::EnvFilter;
+use sha2::{Digest, Sha256};
 
 use oc_apprentice_daemon::ipc::native_messaging;
 use oc_apprentice_daemon::observer::event_loop::{
@@ -46,7 +47,7 @@ async fn main() -> Result<()> {
                         cfg
                     }
                     Err(e) => {
-                        warn!(path = %path.display(), error = %e, "Failed to parse config, using defaults");
+                        error!(path = %path.display(), error = %e, "Failed to parse config, using defaults");
                         AppConfig::default()
                     }
                 }
@@ -97,9 +98,15 @@ async fn main() -> Result<()> {
         let forwarder_tx = native_tx;
         let forwarder_handle = tokio::spawn(async move {
             while let Some(event) = nm_event_rx.recv().await {
-                if forwarder_tx.send(ObserverMessage::Event(event)).await.is_err() {
-                    info!("Native messaging forwarder: main channel closed");
-                    break;
+                match forwarder_tx.try_send(ObserverMessage::Event(event)) {
+                    Ok(()) => {}
+                    Err(mpsc::error::TrySendError::Full(_)) => {
+                        warn!("Native messaging forwarder: main channel full (backpressure), dropping event");
+                    }
+                    Err(mpsc::error::TrySendError::Closed(_)) => {
+                        info!("Native messaging forwarder: main channel closed");
+                        break;
+                    }
                 }
             }
         });
@@ -115,8 +122,13 @@ async fn main() -> Result<()> {
 
     // Spawn health watcher (periodic background health checks)
     let health_shutdown_rx = shutdown_tx.subscribe();
+    let health_db_path = db_path.clone();
     let health_handle = tokio::spawn(async move {
-        let watcher = HealthWatcher::new(5, 512);
+        let artifact_dir = health_db_path.parent()
+            .map(|p| p.join("artifacts"))
+            .unwrap_or_else(|| std::env::temp_dir().join("openmimic-artifacts"));
+        let watcher = HealthWatcher::new(5, 512)
+            .with_artifact_path(artifact_dir);
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
         let mut shutdown_rx = health_shutdown_rx;
 
@@ -188,7 +200,7 @@ async fn main() -> Result<()> {
         let clip_tx = tx.clone();
         let clip_shutdown_rx = shutdown_tx.subscribe();
         tokio::spawn(async move {
-            let (clip_event_tx, mut clip_event_rx) = mpsc::channel(64);
+            let (clip_event_tx, mut clip_event_rx) = mpsc::channel(256);
 
             // Spawn the forwarder that converts ClipboardMessage -> ObserverMessage
             let fwd_tx = clip_tx;
@@ -216,9 +228,15 @@ async fn main() -> Result<()> {
                                 metadata: serde_json::json!({}),
                                 display_ids_spanned: None,
                             };
-                            if fwd_tx.send(ObserverMessage::Event(event)).await.is_err() {
-                                info!("Clipboard forwarder: main channel closed");
-                                break;
+                            match fwd_tx.try_send(ObserverMessage::Event(event)) {
+                                Ok(()) => {}
+                                Err(mpsc::error::TrySendError::Full(_)) => {
+                                    warn!("Clipboard forwarder: main channel full (backpressure), dropping event");
+                                }
+                                Err(mpsc::error::TrySendError::Closed(_)) => {
+                                    info!("Clipboard forwarder: main channel closed");
+                                    break;
+                                }
                             }
                         }
                         clipboard_monitor::ClipboardMessage::Shutdown => break,
@@ -232,17 +250,20 @@ async fn main() -> Result<()> {
     };
 
     // Create artifact store for screenshot capture.
-    // Key is derived from a fixed seed — in production this should come from
-    // the config or a key management service.  For now we use a deterministic
-    // key so that artifacts can be read back by the same daemon instance.
+    // Key is derived from machine-specific data so each installation gets
+    // a unique encryption key, while remaining deterministic on the same machine.
     let artifact_store = {
         use oc_apprentice_storage::artifact_store::ArtifactStore;
-        use sha2::{Digest, Sha256};
 
-        let artifact_dir = db_path.parent().unwrap_or(std::path::Path::new(".")).join("artifacts");
-        let mut hasher = Sha256::new();
-        hasher.update(b"openmimic-local-artifact-key-v1");
-        let key: [u8; 32] = hasher.finalize().into();
+        let artifact_dir = match db_path.parent() {
+            Some(parent) => parent.join("artifacts"),
+            None => {
+                let fallback = std::env::temp_dir().join("openmimic-artifacts");
+                error!("db_path has no parent directory, using temp dir: {}", fallback.display());
+                fallback
+            }
+        };
+        let key = derive_machine_key();
 
         Some(std::sync::Arc::new(ArtifactStore::new(artifact_dir, key)))
     };
@@ -264,6 +285,42 @@ async fn main() -> Result<()> {
     observer_result
 }
 
+/// Derive an encryption key unique to this machine.
+///
+/// On macOS, uses `sysctl -n kern.uuid` (IOPlatformUUID) as seed material.
+/// Falls back to hostname + username if that fails.
+/// Hashes "openmimic-" + machine_id + "-artifact-key-v1" with SHA-256.
+fn derive_machine_key() -> [u8; 32] {
+    let machine_id = get_machine_id();
+    let mut hasher = Sha256::new();
+    hasher.update(format!("openmimic-{}-artifact-key-v1", machine_id).as_bytes());
+    hasher.finalize().into()
+}
+
+fn get_machine_id() -> String {
+    // Try sysctl kern.uuid (macOS IOPlatformUUID)
+    if let Ok(output) = std::process::Command::new("sysctl")
+        .args(["-n", "kern.uuid"])
+        .output()
+    {
+        let uuid = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !uuid.is_empty() {
+            return uuid;
+        }
+    }
+
+    // Fallback: hostname + username
+    let hostname = std::process::Command::new("hostname")
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_else(|| "unknown-host".to_string());
+    let username = std::env::var("USER")
+        .or_else(|_| std::env::var("USERNAME"))
+        .unwrap_or_else(|_| "unknown-user".to_string());
+    format!("{}-{}", hostname, username)
+}
+
 /// Run full database maintenance cycle.
 fn run_maintenance(
     db_path: &std::path::Path,
@@ -277,6 +334,6 @@ fn run_maintenance(
         14,  // retention_days_raw
         90,  // retention_days_episodes
         5,   // min_free_gb
-        2.1, // vacuum_safety_multiplier
+        2.5, // vacuum_safety_multiplier — extra buffer for concurrent writes during VACUUM
     )
 }

@@ -140,6 +140,7 @@ pub fn decode_frame(data: &[u8]) -> Result<serde_json::Value> {
 pub struct NativeMessageServer<R, W> {
     reader: R,
     writer: W,
+    // u64 overflow is theoretical only (~centuries at realistic rates). No action needed.
     outbound_seq: u64,
 }
 
@@ -292,8 +293,10 @@ where
                     }
                 }
                 None => {
-                    debug!(
+                    let payload_summary: String = ext_msg.payload.to_string().chars().take(200).collect();
+                    warn!(
                         msg_type = ?ext_msg.msg_type,
+                        payload_summary,
                         "Native messaging: message type does not map to an event"
                     );
                 }

@@ -78,7 +78,7 @@ pub fn detect_runtime(app_path: &Path) -> AppRuntime {
         return AppRuntime::Native;
     }
 
-    // Check for Electron Framework.framework
+    // Check for Electron Framework.framework (standard location)
     let electron_framework = frameworks_dir.join("Electron Framework.framework");
     if electron_framework.exists() {
         let version = read_electron_version(&frameworks_dir);
@@ -91,7 +91,8 @@ pub fn detect_runtime(app_path: &Path) -> AppRuntime {
         return AppRuntime::CEF;
     }
 
-    // Check for other Electron naming conventions (some apps bundle differently)
+    // Only scan the full Frameworks directory if the standard checks above
+    // didn't find anything — some apps bundle Electron under a different name.
     if let Ok(entries) = std::fs::read_dir(&frameworks_dir) {
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().to_string();

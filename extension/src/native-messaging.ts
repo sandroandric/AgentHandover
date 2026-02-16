@@ -59,15 +59,39 @@ const messageListeners: Set<NativeMessageCallback> = new Set();
 const disconnectListeners: Set<NativeDisconnectCallback> = new Set();
 
 // ---------------------------------------------------------------------------
+// Sent message buffer for reconnect resending
+// ---------------------------------------------------------------------------
+
+const RESEND_BUFFER_SIZE = 50;
+const RESEND_WINDOW_MS = 5000;
+const sentBuffer: Array<{ seq: number; msg: NativeOutboundMessage; timestamp: number }> = [];
+
+// ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
 
+/**
+ * Validates that an unknown message conforms to the NativeInboundMessage shape.
+ * Checks for required fields: type (string), seq (number), timestamp (string).
+ */
+export function isValidInboundMessage(msg: unknown): msg is NativeInboundMessage {
+  if (typeof msg !== 'object' || msg === null) return false;
+  const obj = msg as Record<string, unknown>;
+  return typeof obj.type === 'string'
+    && typeof obj.seq === 'number'
+    && typeof obj.timestamp === 'string';
+}
+
 function handleIncomingMessage(message: unknown): void {
-  const msg = message as NativeInboundMessage;
-  console.log('[OpenMimic:native] Received message from daemon:', msg.type, 'seq:', msg.seq);
+  if (!isValidInboundMessage(message)) {
+    console.warn('[OpenMimic:native] Received invalid message from daemon, ignoring:', message);
+    return;
+  }
+
+  console.log('[OpenMimic:native] Received message from daemon:', message.type, 'seq:', message.seq);
   for (const listener of messageListeners) {
     try {
-      listener(msg);
+      listener(message);
     } catch (err) {
       console.error('[OpenMimic:native] Listener threw:', err);
     }
@@ -153,8 +177,36 @@ export function sendToNative(type: string, payload: Record<string, unknown> = {}
     payload,
   };
 
+  // Track sent messages for potential resend on reconnect
+  sentBuffer.push({ seq: messageSeq, msg: message, timestamp: Date.now() });
+  if (sentBuffer.length > RESEND_BUFFER_SIZE) {
+    sentBuffer.shift();
+  }
+
   console.log('[OpenMimic:native] Sending to daemon:', type, 'seq:', messageSeq);
   port.postMessage(message);
+}
+
+/**
+ * Re-sends messages from the sent buffer that were sent within
+ * RESEND_WINDOW_MS before disconnect. Called after a successful reconnect
+ * to recover potentially lost messages.
+ */
+export function resendBufferedMessages(): void {
+  if (port === null) {
+    console.warn('[OpenMimic:native] Cannot resend: not connected');
+    return;
+  }
+
+  const cutoff = Date.now() - RESEND_WINDOW_MS;
+  const toResend = sentBuffer.filter((entry) => entry.timestamp >= cutoff);
+
+  if (toResend.length > 0) {
+    console.log('[OpenMimic:native] Resending', toResend.length, 'buffered messages after reconnect');
+    for (const entry of toResend) {
+      port.postMessage(entry.msg);
+    }
+  }
 }
 
 /**

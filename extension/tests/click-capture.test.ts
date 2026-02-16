@@ -341,4 +341,38 @@ describe('initClickCapture', () => {
     document.body.removeChild(div);
     cleanup();
   });
+
+  it('fires capture handler before bubble handler', () => {
+    const order: string[] = [];
+
+    // Register a bubble-phase handler first
+    const bubbleHandler = () => order.push('bubble');
+    document.addEventListener('click', bubbleHandler, false);
+
+    // The click capture module registers in capture phase
+    const sendFn = vi.fn(() => {
+      order.push('capture');
+    });
+    const cleanup = initClickCapture(sendFn);
+
+    const div = document.createElement('div');
+    document.body.appendChild(div);
+
+    div.click();
+
+    // Capture phase should fire before bubble phase
+    expect(order[0]).toBe('capture');
+    expect(order[1]).toBe('bubble');
+
+    document.body.removeChild(div);
+    document.removeEventListener('click', bubbleHandler, false);
+    cleanup();
+  });
 });
+
+// ---------------------------------------------------------------------------
+// Browser-level integration tests note
+// ---------------------------------------------------------------------------
+// NOTE: Browser-level integration tests (native messaging connection,
+// permission verification) require a real Chrome instance and cannot
+// run in jsdom.

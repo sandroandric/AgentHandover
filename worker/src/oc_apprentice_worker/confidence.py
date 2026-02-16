@@ -75,11 +75,23 @@ class ConfidenceScorer:
             - ``dwell_snapshot`` — ``True`` when a dwell (reading) snapshot
               supports this step's provenance
         """
+        # Reject unknown intents — they should not enter SOPs
+        if translation.intent == "unknown":
+            return ConfidenceScore(
+                total=0.0,
+                ui_anchor_score=0.0,
+                state_match_score=0.0,
+                provenance_score=0.0,
+                reasons=["unknown_intent"],
+                decision="reject",
+                evidence=self._build_evidence(translation, context),
+            )
+
         ui_score = self._score_ui_anchor(translation.target)
         state_score = self._score_state_match(translation, context)
         provenance = self._score_provenance(translation, context)
 
-        total = min(ui_score + state_score + provenance, 1.0)
+        total = max(0.0, min(ui_score + state_score + provenance, 1.0))
 
         reasons: list[str] = []
         if ui_score >= 0.35:

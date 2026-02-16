@@ -32,6 +32,8 @@ from oc_apprentice_worker.vlm_queue import VLMFallbackQueue, VLMJob
 
 logger = logging.getLogger("oc_apprentice_worker")
 
+# Default paths assume a single-user system. Use --db-path and --sops-dir
+# CLI args to override for multi-user or containerized deployments.
 DEFAULT_DB_PATH = Path.home() / ".local" / "share" / "oc-apprentice" / "events.db"
 DEFAULT_SOPS_DIR = Path.home() / ".openclaw" / "workspace" / "memory" / "apprentice"
 POLL_INTERVAL_SECONDS = 2.0
@@ -317,78 +319,105 @@ def main(argv: list[str] | None = None) -> None:
     with WorkerDB(args.db_path) as db:
         logger.info("Connected to database, entering main loop")
 
+        current_interval = args.poll_interval
+        max_interval = max(60.0, args.poll_interval * 16)
+        consecutive_errors = 0
+
         while not shutdown_requested:
-            unprocessed = db.get_unprocessed_events(limit=100)
-            pending_vlm = db.get_pending_vlm_jobs(limit=10)
+            try:
+                unprocessed = db.get_unprocessed_events(limit=100)
+                pending_vlm = db.get_pending_vlm_jobs(limit=10)
 
-            if unprocessed or pending_vlm:
-                logger.info(
-                    "Poll: %d unprocessed events, %d pending VLM jobs",
-                    len(unprocessed),
-                    len(pending_vlm),
-                )
-            else:
-                logger.debug("Poll: nothing to do")
-
-            if unprocessed:
-                # Check scheduler gate before running heavy pipeline
-                gate_result = idle_gate.check()
-                if not gate_result.can_run:
-                    logger.debug(
-                        "Idle gate blocked: %s — deferring pipeline",
-                        gate_result.blockers,
+                if unprocessed or pending_vlm:
+                    logger.info(
+                        "Poll: %d unprocessed events, %d pending VLM jobs",
+                        len(unprocessed),
+                        len(pending_vlm),
                     )
-                    time.sleep(args.poll_interval)
-                    continue
+                    # Reset backoff when work is found
+                    current_interval = args.poll_interval
+                else:
+                    logger.debug("Poll: nothing to do")
+                    # Exponential backoff when idle
+                    current_interval = min(current_interval * 2, max_interval)
 
-                summary = run_pipeline(
-                    unprocessed,
-                    episode_builder=episode_builder,
-                    clipboard_linker=clipboard_linker,
-                    pruner=pruner,
-                    translator=translator,
-                    scorer=scorer,
-                    vlm_queue=vlm_queue,
-                    openclaw_writer=openclaw_writer,
-                    formatter=formatter,
-                    versioner=versioner,
-                    index_generator=index_generator,
-                    sop_inducer=sop_inducer,
-                )
-                logger.info("Pipeline summary: %s", summary)
-
-                # Mark processed events so they are not re-read (GAP 4)
-                event_ids = [ev["id"] for ev in unprocessed if "id" in ev]
-                if event_ids:
-                    db.mark_events_processed(event_ids)
-
-                # Run Tier 2 deep scan on any text artifacts from this batch
-                text_artifacts = []
-                for ev in unprocessed:
-                    # Extract any text-like fields for deep scan
-                    window_json = ev.get("window_json")
-                    if window_json:
-                        text_artifacts.append({
-                            "id": ev.get("id", "unknown"),
-                            "text": window_json,
-                        })
-                    metadata_json = ev.get("metadata_json")
-                    if metadata_json:
-                        text_artifacts.append({
-                            "id": ev.get("id", "unknown"),
-                            "text": metadata_json,
-                        })
-
-                if text_artifacts:
-                    scan_result = deep_scanner.scan_artifacts(text_artifacts)
-                    if scan_result.has_pii:
-                        logger.warning(
-                            "Deep scan found %d PII match(es) in %d artifact(s)",
-                            scan_result.total_pii,
-                            scan_result.artifacts_scanned,
+                if unprocessed:
+                    # Check scheduler gate before running heavy pipeline
+                    gate_result = idle_gate.check()
+                    if not gate_result.can_run:
+                        logger.debug(
+                            "Idle gate blocked: %s — deferring pipeline",
+                            gate_result.blockers,
                         )
+                        time.sleep(current_interval)
+                        continue
 
-            time.sleep(args.poll_interval)
+                    summary = run_pipeline(
+                        unprocessed,
+                        episode_builder=episode_builder,
+                        clipboard_linker=clipboard_linker,
+                        pruner=pruner,
+                        translator=translator,
+                        scorer=scorer,
+                        vlm_queue=vlm_queue,
+                        openclaw_writer=openclaw_writer,
+                        formatter=formatter,
+                        versioner=versioner,
+                        index_generator=index_generator,
+                        sop_inducer=sop_inducer,
+                    )
+                    logger.info("Pipeline summary: %s", summary)
+
+                    # Mark processed events so they are not re-read (GAP 4)
+                    event_ids = [ev["id"] for ev in unprocessed if "id" in ev]
+                    if event_ids:
+                        db.mark_events_processed(event_ids)
+
+                    # Run Tier 2 deep scan on any text artifacts from this batch
+                    text_artifacts = []
+                    for ev in unprocessed:
+                        # Extract any text-like fields for deep scan
+                        window_json = ev.get("window_json")
+                        if window_json:
+                            text_artifacts.append({
+                                "id": ev.get("id", "unknown"),
+                                "text": window_json,
+                            })
+                        metadata_json = ev.get("metadata_json")
+                        if metadata_json:
+                            text_artifacts.append({
+                                "id": ev.get("id", "unknown"),
+                                "text": metadata_json,
+                            })
+
+                    if text_artifacts:
+                        scan_result = deep_scanner.scan_artifacts(text_artifacts)
+                        if scan_result.has_pii:
+                            logger.warning(
+                                "Deep scan found %d PII match(es) in %d artifact(s)",
+                                scan_result.total_pii,
+                                scan_result.artifacts_scanned,
+                            )
+
+                # Reset consecutive error counter on success
+                consecutive_errors = 0
+
+            except Exception:
+                consecutive_errors += 1
+                logger.error(
+                    "Error in main loop (consecutive: %d)",
+                    consecutive_errors,
+                    exc_info=True,
+                )
+                if consecutive_errors >= 10:
+                    logger.critical(
+                        "10 consecutive errors without successful processing, shutting down"
+                    )
+                    break
+                time.sleep(5)
+                continue
+
+            time.sleep(current_interval)
 
     logger.info("Worker shut down cleanly")
 
