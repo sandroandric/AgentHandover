@@ -1,0 +1,24 @@
+[package]
+name = "oc-apprentice-daemon"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "oc_apprentice_daemon"
+path = "src/lib.rs"
+
+[[bin]]
+name = "oc-apprentice-daemon"
+path = "src/main.rs"
+
+[dependencies]
+oc-apprentice-common = { path = "../common" }
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+chrono.workspace = true
+uuid.workspace = true

@@ -1,0 +1,12 @@
+/target
+*.swp
+*.swo
+.DS_Store
+*.db
+*.db-wal
+*.db-shm
+artifacts/
+node_modules/
+__pycache__/
+*.pyc
+.venv/
