@@ -22,3 +22,10 @@ anyhow.workspace = true
 thiserror.workspace = true
 chrono.workspace = true
 uuid.workspace = true
+sha2 = "0.10"
+hex = "0.4"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-graphics = "0.24"
+core-foundation = "0.10"
+accessibility-sys = "0.2"
