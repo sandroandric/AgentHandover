@@ -1,0 +1,50 @@
+# config.example.toml — OpenMimic Apprentice configuration
+# Copy to the OS-appropriate location:
+#   macOS:   ~/Library/Application Support/OpenClawApprentice/config.toml
+#   Windows: %AppData%\OpenClawApprentice\config.toml
+#   Linux:   $XDG_CONFIG_HOME/openclaw-apprentice/config.toml
+
+[observer]
+t_dwell_seconds = 3
+t_scroll_read_seconds = 8
+capture_screenshots = true
+screenshot_max_per_minute = 20
+multi_monitor_mode = "focused_window"
+
+[privacy]
+enable_inline_secret_redaction = true
+enable_clipboard_preview = false
+clipboard_preview_max_chars = 200
+secure_field_drop = true
+
+[browser]
+extension_id = "knldjmfmopnpolahpmmgbagdohdnhkik"
+native_host_name = "com.openclaw.apprentice"
+deny_network_egress = true
+
+[storage]
+retention_days_raw = 14
+retention_days_episodes = 90
+sqlite_wal_mode = true
+vacuum_min_free_gb = 5
+vacuum_safety_multiplier = 2.1
+
+[idle_jobs]
+require_ac_power = true
+min_battery_percent = 50
+max_cpu_percent = 30
+max_temp_c = 80
+run_window_local_time = "01:00-05:00"
+
+[vlm]
+enabled = true
+max_jobs_per_day = 50
+max_queue_size = 500
+job_ttl_days = 7
+max_compute_minutes_per_day = 20
+
+[openclaw]
+workspace_path = "~/.openclaw/workspace"
+sop_output_dir = "memory/apprentice/sops"
+index_path = "memory/apprentice/index.md"
+atomic_writes = true
