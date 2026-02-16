@@ -34,7 +34,15 @@ logger = logging.getLogger("oc_apprentice_worker")
 
 # Default paths assume a single-user system. Use --db-path and --sops-dir
 # CLI args to override for multi-user or containerized deployments.
-DEFAULT_DB_PATH = Path.home() / ".local" / "share" / "oc-apprentice" / "events.db"
+# Must match the daemon's default — see crates/daemon/src/main.rs.
+import platform as _platform
+
+if _platform.system() == "Darwin":
+    DEFAULT_DB_PATH = (
+        Path.home() / "Library" / "Application Support" / "oc-apprentice" / "events.db"
+    )
+else:
+    DEFAULT_DB_PATH = Path.home() / ".local" / "share" / "oc-apprentice" / "events.db"
 DEFAULT_SOPS_DIR = Path.home() / ".openclaw" / "workspace" / "memory" / "apprentice"
 POLL_INTERVAL_SECONDS = 2.0
 VLM_REJECT_THRESHOLD = 0.60

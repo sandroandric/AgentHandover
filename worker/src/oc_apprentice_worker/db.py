@@ -1,7 +1,10 @@
-"""Read-only SQLite interface to the daemon's event database.
+"""SQLite interface to the daemon's event database.
 
-The daemon owns all writes; this module opens the DB in read-only mode
-and uses WAL journal so reads never block the daemon's writes.
+The primary connection is opened read-only (``mode=ro``) so queries never
+block the daemon's writes.  A small number of write operations (e.g.
+marking events as processed) open a **separate, short-lived** writable
+connection to minimise lock contention.  See ``mark_events_processed``
+for details.
 """
 
 from __future__ import annotations
@@ -15,11 +18,15 @@ logger = logging.getLogger(__name__)
 
 
 class WorkerDB:
-    """Read-only connection to the daemon's SQLite database.
+    """Hybrid read/write connection to the daemon's SQLite database.
 
-    Opens the database via the SQLite URI interface with ``mode=ro``
-    so no accidental writes can occur.  WAL journal mode is set to
-    allow concurrent reads while the daemon continues to write.
+    The primary connection is opened via the SQLite URI interface with
+    ``mode=ro`` so routine queries never contend with daemon writes.
+    WAL journal mode enables concurrent reads.
+
+    Write operations (``mark_events_processed``) open a **separate**
+    short-lived writable connection that is closed immediately after
+    each call to minimise lock contention.
 
     Implements the context-manager protocol so it can be used as::
 

@@ -30,12 +30,12 @@ async fn main() -> Result<()> {
         let config_path = if cfg!(target_os = "macos") {
             std::env::var("HOME").ok().map(|home| {
                 std::path::PathBuf::from(home)
-                    .join("Library/Application Support/OpenClawApprentice/config.toml")
+                    .join("Library/Application Support/oc-apprentice/config.toml")
             })
         } else {
             std::env::var("HOME").ok().map(|home| {
                 std::path::PathBuf::from(home)
-                    .join(".config/oc-apprentice/config.toml")
+                    .join(".config/openclaw-apprentice/config.toml")
             })
         };
 
@@ -66,7 +66,17 @@ async fn main() -> Result<()> {
         capture_screenshots: app_config.observer.capture_screenshots,
         screenshot_max_per_minute: app_config.observer.screenshot_max_per_minute,
         poll_interval: std::time::Duration::from_millis(500),
-        db_path: PathBuf::from("openmimic.db"),
+        db_path: {
+            // Use the same standard path the worker expects so both
+            // processes find the database without manual --db-path flags.
+            let data_dir = if cfg!(target_os = "macos") {
+                dirs_or_home("Library/Application Support/oc-apprentice")
+            } else {
+                dirs_or_home(".local/share/oc-apprentice")
+            };
+            std::fs::create_dir_all(&data_dir).ok();
+            data_dir.join("events.db")
+        },
     };
 
     // Channel for observer -> storage communication
@@ -158,6 +168,7 @@ async fn main() -> Result<()> {
     // Spawn nightly maintenance trigger
     let maint_shutdown_rx = shutdown_tx.subscribe();
     let maint_db_path = db_path.clone();
+    let maint_storage_config = app_config.storage.clone();
     let maint_handle = tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
         let mut shutdown_rx = maint_shutdown_rx;
@@ -168,7 +179,7 @@ async fn main() -> Result<()> {
                     let hour = chrono::Local::now().hour();
                     if hour >= 1 && hour < 5 {
                         info!("Nightly maintenance window — running full maintenance");
-                        match run_maintenance(&maint_db_path) {
+                        match run_maintenance(&maint_db_path, &maint_storage_config) {
                             Ok(report) => {
                                 info!(
                                     events_purged = report.events_purged,
@@ -321,9 +332,17 @@ fn get_machine_id() -> String {
     format!("{}-{}", hostname, username)
 }
 
-/// Run full database maintenance cycle.
+/// Resolve a subpath under $HOME, e.g. `".local/share/oc-apprentice"`.
+fn dirs_or_home(subpath: &str) -> PathBuf {
+    std::env::var("HOME")
+        .map(|h| PathBuf::from(h).join(subpath))
+        .unwrap_or_else(|_| PathBuf::from(subpath))
+}
+
+/// Run full database maintenance cycle using values from the loaded config.
 fn run_maintenance(
     db_path: &std::path::Path,
+    storage_config: &oc_apprentice_common::config::StorageConfig,
 ) -> Result<oc_apprentice_storage::maintenance::MaintenanceReport> {
     use oc_apprentice_storage::maintenance::MaintenanceRunner;
 
@@ -331,9 +350,9 @@ fn run_maintenance(
     let runner = MaintenanceRunner::new(&conn);
     runner.run_full_maintenance(
         db_path,
-        14,  // retention_days_raw
-        90,  // retention_days_episodes
-        5,   // min_free_gb
-        2.5, // vacuum_safety_multiplier — extra buffer for concurrent writes during VACUUM
+        storage_config.retention_days_raw,
+        storage_config.retention_days_episodes,
+        storage_config.vacuum_min_free_gb,
+        storage_config.vacuum_safety_multiplier,
     )
 }

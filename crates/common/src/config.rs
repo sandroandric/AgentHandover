@@ -132,7 +132,7 @@ impl Default for StorageConfig {
             retention_days_episodes: 90,
             sqlite_wal_mode: true,
             vacuum_min_free_gb: 5,
-            vacuum_safety_multiplier: 2.1,
+            vacuum_safety_multiplier: 2.5,
         }
     }
 }
