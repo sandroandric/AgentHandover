@@ -1,6 +1,7 @@
 mod schema;
 mod migrations;
 pub mod artifact_store;
+pub mod maintenance;
 
 use anyhow::Result;
 use oc_apprentice_common::event::*;
@@ -40,6 +41,10 @@ impl EventStore {
         }
 
         Ok(())
+    }
+
+    pub fn connection(&self) -> &Connection {
+        &self.conn
     }
 
     pub fn schema_version(&self) -> u32 {
