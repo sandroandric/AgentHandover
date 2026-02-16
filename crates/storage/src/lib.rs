@@ -1,5 +1,6 @@
 mod schema;
 mod migrations;
+pub mod artifact_store;
 
 use anyhow::Result;
 use oc_apprentice_common::event::*;
