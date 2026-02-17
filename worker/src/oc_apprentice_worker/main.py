@@ -307,18 +307,6 @@ def main(argv: list[str] | None = None) -> None:
     index_generator = IndexGenerator()
     openclaw_writer = OpenClawWriter(workspace_dir=args.sops_dir.parent.parent)
 
-    # Try to import SOPInducer (requires prefixspan)
-    sop_inducer = None
-    try:
-        from oc_apprentice_worker.sop_inducer import SOPInducer
-        sop_inducer = SOPInducer()
-        logger.info("SOPInducer loaded (prefixspan available)")
-    except ImportError:
-        logger.warning(
-            "prefixspan not installed — SOP induction disabled. "
-            "Install with: pip install prefixspan"
-        )
-
     # Check VLM availability and hint if not installed
     from oc_apprentice_worker.setup_vlm import check_vlm_available
     vlm_status = check_vlm_available()
@@ -340,10 +328,20 @@ def main(argv: list[str] | None = None) -> None:
             "VLM not installed. For better native app observation, run: oc-setup-vlm"
         )
 
-    # Wire VLM worker into SOPInducer if available
-    if sop_inducer is not None and vlm_worker is not None:
-        sop_inducer._vlm_worker = vlm_worker
-        logger.info("VLM-assisted variable classification enabled for SOP induction")
+    # Try to import SOPInducer (requires prefixspan)
+    sop_inducer = None
+    try:
+        from oc_apprentice_worker.sop_inducer import SOPInducer
+        sop_inducer = SOPInducer(vlm_worker=vlm_worker)
+        if vlm_worker is not None:
+            logger.info("SOPInducer loaded with VLM-assisted variable classification")
+        else:
+            logger.info("SOPInducer loaded (prefixspan available)")
+    except ImportError:
+        logger.warning(
+            "prefixspan not installed — SOP induction disabled. "
+            "Install with: pip install prefixspan"
+        )
 
     # Initialize scheduler gate (GAP 5) and deep scanner (GAP 6)
     idle_gate = IdleJobGate(SchedulerConfig())
@@ -430,8 +428,8 @@ def main(argv: list[str] | None = None) -> None:
                                 scan_result.artifacts_scanned,
                             )
 
-                # Reset consecutive error counter on success
-                consecutive_errors = 0
+                    # Reset consecutive error counter after successful processing
+                    consecutive_errors = 0
 
             except Exception:
                 consecutive_errors += 1

@@ -54,23 +54,31 @@ class TestVLMClassifyVariable:
 
     def test_prompt_separation(self) -> None:
         """Prompt should contain INSTRUCTIONS/DATA separation."""
-        worker = _make_vlm_worker()
-        # We can check the prompt by looking at the mock backend
+        backend = MockVLMBackend()
+        worker = VLMWorker(
+            config=VLMConfig(backend=VLMBackend.MOCK),
+            backend=backend,
+        )
         worker.classify_variable(
             step_context="step_1",
             param_name="field",
             values=["val1", "val2"],
         )
-        # The mock backend was called, confirming the classify method ran
+        # Verify the mock backend was actually called
+        assert backend.call_count == 1
 
     def test_injection_safe_values(self) -> None:
         """Values that look like injection attempts should be sanitized."""
-        worker = _make_vlm_worker(responses=[{
+        backend = MockVLMBackend(responses=[{
             "classification": "variable",
             "var_type": "string",
             "confidence": 0.8,
             "reasoning": "test",
         }])
+        worker = VLMWorker(
+            config=VLMConfig(backend=VLMBackend.MOCK),
+            backend=backend,
+        )
         # Include a value that looks like an injection attempt
         result = worker.classify_variable(
             step_context="step_1",
@@ -83,6 +91,8 @@ class TestVLMClassifyVariable:
         )
         # Should still return a result (injection is sanitized, not rejected)
         assert result is not None
+        # Backend was called — sanitization happened internally, not as rejection
+        assert backend.call_count == 1
 
 
 class TestSOPInducerWithVLM:

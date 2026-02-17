@@ -155,16 +155,22 @@ fn run_osascript(script: &str) -> Option<String> {
         .spawn()
         .ok()?;
 
-    // Wait with timeout
+    // Wait with timeout via polling loop (runs inside spawn_blocking)
     let start = std::time::Instant::now();
     let timeout = Duration::from_millis(500);
 
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
+                // Process exited — read stdout directly from the child's pipe.
+                // Do NOT call wait_with_output() here (it would re-wait).
                 if status.success() {
-                    let output = child.wait_with_output().ok()?;
-                    return String::from_utf8(output.stdout).ok();
+                    let mut stdout_buf = Vec::new();
+                    if let Some(ref mut stdout) = child.stdout {
+                        use std::io::Read;
+                        let _ = stdout.read_to_end(&mut stdout_buf);
+                    }
+                    return String::from_utf8(stdout_buf).ok();
                 }
                 return None;
             }

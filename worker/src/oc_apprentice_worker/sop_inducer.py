@@ -417,7 +417,11 @@ class SOPInducer:
                             self._vlm_confidence_threshold,
                         )
             except Exception:
-                logger.debug("VLM classification failed for %s, falling back to heuristics", name)
+                logger.debug(
+                    "VLM classification failed for %s, falling back to heuristics",
+                    name,
+                    exc_info=True,
+                )
 
         # Heuristic classification fallback
         return self._classify_variable_heuristic(name, str_values, unique_values, values)

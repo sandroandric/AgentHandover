@@ -32,9 +32,13 @@ class TestCheckVLMAvailable:
 class TestPromptInstall:
     def test_non_interactive_declines(self, monkeypatch) -> None:
         """Non-interactive mode (not a TTY) should skip install."""
-        monkeypatch.setattr("sys.stdin", open("/dev/null"))
-        result = prompt_install("apple_silicon", {"mlx_vlm": False, "llama_cpp": False})
-        assert result is False
+        devnull = open("/dev/null")
+        try:
+            monkeypatch.setattr("sys.stdin", devnull)
+            result = prompt_install("apple_silicon", {"mlx_vlm": False, "llama_cpp": False})
+            assert result is False
+        finally:
+            devnull.close()
 
     def test_already_installed_skips(self, capsys) -> None:
         """If the recommended backend is already installed, skip prompt."""

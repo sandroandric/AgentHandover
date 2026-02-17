@@ -106,7 +106,12 @@ class MockVLMBackend(VLMInferenceBackend):
 
 
 class MLXVLMBackendStub(VLMInferenceBackend):
-    """Stub for mlx-vlm backend. Real implementation requires mlx-vlm package."""
+    """Stub for mlx-vlm backend.
+
+    This is a non-functional placeholder. It always reports unavailable
+    because it cannot perform real inference. A full implementation that
+    loads the mlx-vlm model and runs inference should replace this stub.
+    """
 
     def __init__(self, model_name: str = "mlx-community/llava-1.5-7b-4bit"):
         self._model_name = model_name
@@ -119,15 +124,17 @@ class MLXVLMBackendStub(VLMInferenceBackend):
         )
 
     def is_available(self) -> bool:
-        try:
-            import mlx_vlm  # noqa: F401
-            return True
-        except ImportError:
-            return False
+        # Stub cannot infer — always report unavailable.
+        # A real backend should check package import AND model readiness.
+        return False
 
 
 class LlamaCppBackendStub(VLMInferenceBackend):
-    """Stub for llama-cpp-python backend."""
+    """Stub for llama-cpp-python backend.
+
+    This is a non-functional placeholder. It always reports unavailable
+    because it cannot perform real inference.
+    """
 
     def __init__(self, model_path: str | None = None):
         self._model_path = model_path
@@ -139,11 +146,8 @@ class LlamaCppBackendStub(VLMInferenceBackend):
         )
 
     def is_available(self) -> bool:
-        try:
-            import llama_cpp  # noqa: F401
-            return True
-        except ImportError:
-            return False
+        # Stub cannot infer — always report unavailable.
+        return False
 
 
 class VLMWorker:
