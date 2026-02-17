@@ -34,9 +34,14 @@ def detect_platform() -> str:
 def check_vlm_available() -> dict[str, bool]:
     """Check which VLM backends are importable.
 
-    Returns a dict with keys 'mlx_vlm' and 'llama_cpp', each True/False.
+    Returns a dict with keys for each backend, each True/False.
     """
-    result: dict[str, bool] = {"mlx_vlm": False, "llama_cpp": False}
+    result: dict[str, bool] = {
+        "mlx_vlm": False,
+        "llama_cpp": False,
+        "ollama": False,
+        "openai_compat": False,
+    }
 
     try:
         import mlx_vlm  # noqa: F401
@@ -47,6 +52,21 @@ def check_vlm_available() -> dict[str, bool]:
     try:
         import llama_cpp  # noqa: F401
         result["llama_cpp"] = True
+    except ImportError:
+        pass
+
+    try:
+        import ollama
+        ollama.Client().list()
+        result["ollama"] = True
+    except Exception:
+        pass
+
+    try:
+        import openai  # noqa: F401
+        import os
+        if os.environ.get("OPENAI_API_KEY") or os.environ.get("OPENMIMIC_API_KEY"):
+            result["openai_compat"] = True
     except ImportError:
         pass
 
@@ -91,6 +111,9 @@ def prompt_install(plat: str, available: dict[str, bool]) -> bool:
     print("  VLM (Vision Language Model) enables better observation")
     print("  of native apps by analyzing screenshots with AI.")
     print("  It is RECOMMENDED for the best experience.")
+    print()
+    print("  Additional backends: pip install oc-apprentice-worker[vlm-ollama]")
+    print("                       pip install oc-apprentice-worker[vlm-openai]")
     print()
 
     try:
@@ -153,7 +176,9 @@ def main(argv: list[str] | None = None) -> None:
         print(f"Platform: {plat}")
         print(f"mlx-vlm available: {available['mlx_vlm']}")
         print(f"llama-cpp-python available: {available['llama_cpp']}")
-        any_available = available["mlx_vlm"] or available["llama_cpp"]
+        print(f"ollama available: {available['ollama']}")
+        print(f"openai-compat available: {available['openai_compat']}")
+        any_available = any(available.values())
         print(f"VLM ready: {any_available}")
         sys.exit(0 if any_available else 1)
 
@@ -169,7 +194,7 @@ def main(argv: list[str] | None = None) -> None:
         # Verify installation
         print("\n  Verifying installation...")
         new_available = check_vlm_available()
-        any_ready = new_available["mlx_vlm"] or new_available["llama_cpp"]
+        any_ready = any(new_available.values())
         if any_ready:
             print("  VLM is now available.")
         else:

@@ -41,6 +41,18 @@ max_jobs_per_day = 50
 max_queue_size = 500
 job_ttl_days = 7
 max_compute_minutes_per_day = 20
+# backend = "mlx-vlm"         # "mlx-vlm", "llama-cpp-python", "ollama", "openai-compat", "mock"
+# model_name = "mlx-community/llava-1.5-7b-4bit"
+# timeout_seconds = 120
+# --- llama-cpp-python specific ---
+# model_path = "/path/to/model.gguf"
+# clip_model_path = "/path/to/clip-model.gguf"
+# n_ctx = 2048
+# --- ollama specific ---
+# ollama_host = "http://localhost:11434"
+# --- openai-compat specific ---
+# api_key = ""                 # or set OPENMIMIC_API_KEY / OPENAI_API_KEY env var
+# base_url = ""                # for local providers (vLLM, LM Studio, etc.)
 
 [openclaw]
 workspace_path = "~/.openclaw/workspace"

@@ -25,8 +25,12 @@ class TestCheckVLMAvailable:
         assert isinstance(result, dict)
         assert "mlx_vlm" in result
         assert "llama_cpp" in result
+        assert "ollama" in result
+        assert "openai_compat" in result
         assert isinstance(result["mlx_vlm"], bool)
         assert isinstance(result["llama_cpp"], bool)
+        assert isinstance(result["ollama"], bool)
+        assert isinstance(result["openai_compat"], bool)
 
 
 class TestPromptInstall:
@@ -83,6 +87,8 @@ class TestMain:
             pass
         captured = capsys.readouterr()
         assert "Platform:" in captured.out
+        assert "ollama available:" in captured.out
+        assert "openai-compat available:" in captured.out
         assert "VLM ready:" in captured.out
 
     def test_dry_run_flag(self, capsys) -> None:

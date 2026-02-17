@@ -13,9 +13,17 @@ dependencies = ["prefixspan>=0.5.2", "pyyaml>=6.0"]
 dev = ["pytest>=7.0", "pytest-cov"]
 vlm-apple = ["mlx-vlm>=0.1"]
 vlm-cpu = ["llama-cpp-python>=0.2"]
+vlm-ollama = ["ollama>=0.3"]
+vlm-openai = ["openai>=1.0"]
 vlm = [
     "mlx-vlm>=0.1; platform_machine == 'arm64' and sys_platform == 'darwin'",
     "llama-cpp-python>=0.2; platform_machine != 'arm64' or sys_platform != 'darwin'",
+]
+vlm-all = [
+    "mlx-vlm>=0.1; platform_machine == 'arm64' and sys_platform == 'darwin'",
+    "llama-cpp-python>=0.2",
+    "ollama>=0.3",
+    "openai>=1.0",
 ]
 
 [project.scripts]

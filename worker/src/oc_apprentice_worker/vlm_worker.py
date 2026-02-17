@@ -6,11 +6,10 @@ import abc
 import base64
 import logging
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
-from pathlib import Path
-from typing import Any, Protocol
+from typing import Any
 
 from oc_apprentice_worker.injection_defense import InjectionDefense
 
@@ -21,6 +20,8 @@ class VLMBackend(str, Enum):
     """Supported VLM inference backends."""
     MLX_VLM = "mlx-vlm"           # Apple Silicon optimized
     LLAMA_CPP = "llama-cpp-python" # Cross-platform fallback
+    OLLAMA = "ollama"              # Local Ollama server
+    OPENAI_COMPAT = "openai-compat"  # OpenAI-compatible API
     MOCK = "mock"                  # For testing
 
 
@@ -35,6 +36,15 @@ class VLMConfig:
     max_compute_minutes_per_day: float = 20.0
     max_image_size_bytes: int = 10 * 1024 * 1024  # 10MB
     timeout_seconds: float = 120.0
+    # llama-cpp-python specific
+    model_path: str | None = None          # Path to .gguf model file
+    clip_model_path: str | None = None     # Path to CLIP .gguf for multimodal
+    n_ctx: int = 2048                      # Context window size
+    # openai-compat specific
+    api_key: str | None = None             # API key (also reads env vars)
+    base_url: str | None = None            # API base URL (None = standard OpenAI)
+    # ollama specific
+    ollama_host: str | None = None         # Ollama server URL (None = localhost:11434)
 
 
 @dataclass
@@ -105,51 +115,6 @@ class MockVLMBackend(VLMInferenceBackend):
         return self._call_count
 
 
-class MLXVLMBackendStub(VLMInferenceBackend):
-    """Stub for mlx-vlm backend.
-
-    This is a non-functional placeholder. It always reports unavailable
-    because it cannot perform real inference. A full implementation that
-    loads the mlx-vlm model and runs inference should replace this stub.
-    """
-
-    def __init__(self, model_name: str = "mlx-community/llava-1.5-7b-4bit"):
-        self._model_name = model_name
-        self._model = None
-
-    def infer(self, prompt: str, image_base64: str | None = None) -> dict[str, Any]:
-        raise NotImplementedError(
-            "mlx-vlm backend requires the mlx-vlm package. "
-            "Install with: pip install mlx-vlm"
-        )
-
-    def is_available(self) -> bool:
-        # Stub cannot infer — always report unavailable.
-        # A real backend should check package import AND model readiness.
-        return False
-
-
-class LlamaCppBackendStub(VLMInferenceBackend):
-    """Stub for llama-cpp-python backend.
-
-    This is a non-functional placeholder. It always reports unavailable
-    because it cannot perform real inference.
-    """
-
-    def __init__(self, model_path: str | None = None):
-        self._model_path = model_path
-
-    def infer(self, prompt: str, image_base64: str | None = None) -> dict[str, Any]:
-        raise NotImplementedError(
-            "llama-cpp-python backend requires the llama-cpp-python package. "
-            "Install with: pip install llama-cpp-python"
-        )
-
-    def is_available(self) -> bool:
-        # Stub cannot infer — always report unavailable.
-        return False
-
-
 class VLMWorker:
     """Processes VLM queue jobs with local inference.
 
@@ -174,9 +139,17 @@ class VLMWorker:
         if self.config.backend == VLMBackend.MOCK:
             return MockVLMBackend()
         elif self.config.backend == VLMBackend.MLX_VLM:
-            return MLXVLMBackendStub(self.config.model_name)
+            from oc_apprentice_worker.backends.mlx_vlm import MLXVLMBackend
+            return MLXVLMBackend(self.config)
         elif self.config.backend == VLMBackend.LLAMA_CPP:
-            return LlamaCppBackendStub()
+            from oc_apprentice_worker.backends.llama_cpp import LlamaCppBackend
+            return LlamaCppBackend(self.config)
+        elif self.config.backend == VLMBackend.OLLAMA:
+            from oc_apprentice_worker.backends.ollama import OllamaBackend
+            return OllamaBackend(self.config)
+        elif self.config.backend == VLMBackend.OPENAI_COMPAT:
+            from oc_apprentice_worker.backends.openai_compat import OpenAICompatBackend
+            return OpenAICompatBackend(self.config)
         raise ValueError(f"Unknown backend: {self.config.backend}")
 
     def _check_daily_reset(self) -> None:

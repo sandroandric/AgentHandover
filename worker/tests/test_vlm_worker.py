@@ -15,7 +15,7 @@ Covers:
 12. TestGetStats — returns correct stats snapshot
 13. TestConfidenceBoostCapped — confidence_boost capped at 0.30
 14. TestDailyReset — counters reset on new day
-15. TestBackendStubs — MLX and LlamaCpp stubs report not available, raise NotImplementedError
+15. TestBackendFactory — factory creates correct backend types for all 5 enum members
 """
 
 from __future__ import annotations
@@ -26,8 +26,6 @@ from datetime import datetime, timezone
 import pytest
 
 from oc_apprentice_worker.vlm_worker import (
-    LlamaCppBackendStub,
-    MLXVLMBackendStub,
     MockVLMBackend,
     VLMBackend,
     VLMConfig,
@@ -550,37 +548,41 @@ class TestDailyReset:
 # ---------------------------------------------------------------------------
 
 
-class TestBackendStubs:
-    def test_mlx_stub_not_available(self) -> None:
-        stub = MLXVLMBackendStub()
-        # mlx_vlm is not installed in test env
-        assert stub.is_available() is False
-
-    def test_mlx_stub_raises_not_implemented(self) -> None:
-        stub = MLXVLMBackendStub()
-        with pytest.raises(NotImplementedError, match="mlx-vlm"):
-            stub.infer("test")
-
-    def test_llama_cpp_stub_not_available(self) -> None:
-        stub = LlamaCppBackendStub()
-        # llama_cpp is not installed in test env
-        assert stub.is_available() is False
-
-    def test_llama_cpp_stub_raises_not_implemented(self) -> None:
-        stub = LlamaCppBackendStub()
-        with pytest.raises(NotImplementedError, match="llama-cpp-python"):
-            stub.infer("test")
+class TestBackendFactory:
+    """Test that _create_backend() returns correct backend types."""
 
     def test_worker_creates_mock_backend_by_default(self) -> None:
         worker = VLMWorker()
         assert isinstance(worker._backend, MockVLMBackend)
 
-    def test_worker_creates_mlx_backend(self) -> None:
+    def test_creates_mlx_backend(self) -> None:
+        from oc_apprentice_worker.backends.mlx_vlm import MLXVLMBackend
         config = VLMConfig(backend=VLMBackend.MLX_VLM)
         worker = VLMWorker(config=config)
-        assert isinstance(worker._backend, MLXVLMBackendStub)
+        assert isinstance(worker._backend, MLXVLMBackend)
 
-    def test_worker_creates_llama_cpp_backend(self) -> None:
+    def test_creates_llama_cpp_backend(self) -> None:
+        from oc_apprentice_worker.backends.llama_cpp import LlamaCppBackend
         config = VLMConfig(backend=VLMBackend.LLAMA_CPP)
         worker = VLMWorker(config=config)
-        assert isinstance(worker._backend, LlamaCppBackendStub)
+        assert isinstance(worker._backend, LlamaCppBackend)
+
+    def test_creates_ollama_backend(self) -> None:
+        from oc_apprentice_worker.backends.ollama import OllamaBackend
+        config = VLMConfig(backend=VLMBackend.OLLAMA)
+        worker = VLMWorker(config=config)
+        assert isinstance(worker._backend, OllamaBackend)
+
+    def test_creates_openai_compat_backend(self) -> None:
+        from oc_apprentice_worker.backends.openai_compat import OpenAICompatBackend
+        config = VLMConfig(backend=VLMBackend.OPENAI_COMPAT)
+        worker = VLMWorker(config=config)
+        assert isinstance(worker._backend, OpenAICompatBackend)
+
+    def test_enum_has_5_members(self) -> None:
+        assert len(VLMBackend) == 5
+        assert VLMBackend.MLX_VLM.value == "mlx-vlm"
+        assert VLMBackend.LLAMA_CPP.value == "llama-cpp-python"
+        assert VLMBackend.OLLAMA.value == "ollama"
+        assert VLMBackend.OPENAI_COMPAT.value == "openai-compat"
+        assert VLMBackend.MOCK.value == "mock"

@@ -311,16 +311,25 @@ def main(argv: list[str] | None = None) -> None:
     from oc_apprentice_worker.setup_vlm import check_vlm_available
     vlm_status = check_vlm_available()
     vlm_worker = None
-    if vlm_status["mlx_vlm"] or vlm_status["llama_cpp"]:
+    if any(vlm_status.values()):
         logger.info("VLM backend available — enhanced native app observation enabled")
         # Create VLM worker for variable classification
+        # Priority: mlx_vlm > ollama > llama_cpp > openai_compat
         try:
             from oc_apprentice_worker.vlm_worker import VLMWorker, VLMConfig, VLMBackend
-            backend_type = (
-                VLMBackend.MLX_VLM if vlm_status["mlx_vlm"] else VLMBackend.LLAMA_CPP
-            )
+            if vlm_status["mlx_vlm"]:
+                backend_type = VLMBackend.MLX_VLM
+            elif vlm_status["ollama"]:
+                backend_type = VLMBackend.OLLAMA
+            elif vlm_status["llama_cpp"]:
+                backend_type = VLMBackend.LLAMA_CPP
+            else:
+                backend_type = VLMBackend.OPENAI_COMPAT
             vlm_worker = VLMWorker(config=VLMConfig(backend=backend_type))
-            logger.info("VLM worker initialized for variable classification")
+            logger.info(
+                "VLM worker initialized (%s) for variable classification",
+                backend_type.value,
+            )
         except Exception:
             logger.warning("Failed to initialize VLM worker", exc_info=True)
     else:
