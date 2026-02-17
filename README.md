@@ -111,7 +111,8 @@ Copy the example configuration and edit as needed:
 
 ```bash
 # macOS
-cp config.example.toml ~/Library/Application\ Support/OpenClawApprentice/config.toml
+mkdir -p ~/Library/Application\ Support/oc-apprentice
+cp config.example.toml ~/Library/Application\ Support/oc-apprentice/config.toml
 
 # Linux
 mkdir -p "${XDG_CONFIG_HOME:-$HOME/.config}/openclaw-apprentice"

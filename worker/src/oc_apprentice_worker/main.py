@@ -25,8 +25,6 @@ from oc_apprentice_worker.exporter import IndexGenerator
 from oc_apprentice_worker.negative_demo import NegativeDemoPruner
 from oc_apprentice_worker.openclaw_writer import OpenClawWriter
 from oc_apprentice_worker.scheduler import IdleJobGate, SchedulerConfig
-from oc_apprentice_worker.sop_format import SOPFormatter
-from oc_apprentice_worker.sop_versioner import SOPVersioner
 from oc_apprentice_worker.translator import SemanticTranslator
 from oc_apprentice_worker.vlm_queue import VLMFallbackQueue, VLMJob
 
@@ -99,8 +97,6 @@ def run_pipeline(
     scorer: ConfidenceScorer,
     vlm_queue: VLMFallbackQueue,
     openclaw_writer: OpenClawWriter,
-    formatter: SOPFormatter,
-    versioner: SOPVersioner,
     index_generator: IndexGenerator,
     sop_inducer: object | None = None,
 ) -> dict:
@@ -303,8 +299,6 @@ def main(argv: list[str] | None = None) -> None:
     translator = SemanticTranslator()
     scorer = ConfidenceScorer()
     vlm_queue = VLMFallbackQueue()
-    formatter = SOPFormatter()
-    versioner = SOPVersioner(sops_dir=args.sops_dir / "sops")
     index_generator = IndexGenerator()
     openclaw_writer = OpenClawWriter(workspace_dir=args.sops_dir.parent.parent)
 
@@ -369,8 +363,6 @@ def main(argv: list[str] | None = None) -> None:
                         scorer=scorer,
                         vlm_queue=vlm_queue,
                         openclaw_writer=openclaw_writer,
-                        formatter=formatter,
-                        versioner=versioner,
                         index_generator=index_generator,
                         sop_inducer=sop_inducer,
                     )

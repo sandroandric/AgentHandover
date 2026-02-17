@@ -1,7 +1,6 @@
 # config.example.toml — OpenMimic Apprentice configuration
 # Copy to the OS-appropriate location:
-#   macOS:   ~/Library/Application Support/OpenClawApprentice/config.toml
-#   Windows: %AppData%\OpenClawApprentice\config.toml
+#   macOS:   ~/Library/Application Support/oc-apprentice/config.toml
 #   Linux:   $XDG_CONFIG_HOME/openclaw-apprentice/config.toml
 
 [observer]
@@ -27,7 +26,7 @@ retention_days_raw = 14
 retention_days_episodes = 90
 sqlite_wal_mode = true
 vacuum_min_free_gb = 5
-vacuum_safety_multiplier = 2.1
+vacuum_safety_multiplier = 2.5
 
 [idle_jobs]
 require_ac_power = true

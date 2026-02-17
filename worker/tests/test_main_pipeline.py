@@ -20,8 +20,6 @@ from oc_apprentice_worker.exporter import IndexGenerator
 from oc_apprentice_worker.main import run_pipeline
 from oc_apprentice_worker.negative_demo import NegativeDemoPruner
 from oc_apprentice_worker.openclaw_writer import OpenClawWriter
-from oc_apprentice_worker.sop_format import SOPFormatter
-from oc_apprentice_worker.sop_versioner import SOPVersioner
 from oc_apprentice_worker.translator import SemanticTranslator
 from oc_apprentice_worker.vlm_queue import VLMFallbackQueue
 
@@ -71,8 +69,6 @@ def _build_pipeline_components(tmp_path: Path) -> dict:
         "scorer": ConfidenceScorer(),
         "vlm_queue": VLMFallbackQueue(),
         "openclaw_writer": OpenClawWriter(workspace_dir=workspace),
-        "formatter": SOPFormatter(),
-        "versioner": SOPVersioner(sops_dir=workspace / "memory" / "apprentice" / "sops"),
         "index_generator": IndexGenerator(),
         "sop_inducer": None,
     }

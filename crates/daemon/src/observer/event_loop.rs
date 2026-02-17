@@ -237,11 +237,10 @@ pub async fn run_storage_writer(
 }
 
 /// Capture a screenshot and store it as an artifact.
-/// Returns a vec with a UUID for the artifact on success, or empty vec on failure.
-/// The UUID is used as the event's artifact_ids; the ArtifactStore's content-hash
-/// based ID is logged for filesystem correlation.
+/// Returns a vec with the artifact store's content-hash ID on success, or empty vec on failure.
+/// The returned ID can be used with `ArtifactStore::retrieve()` to read back the artifact.
 #[cfg(target_os = "macos")]
-fn capture_and_store_screenshot(store: &ArtifactStore) -> Vec<Uuid> {
+fn capture_and_store_screenshot(store: &ArtifactStore) -> Vec<String> {
     const MAX_RETRIES: u32 = 2;
 
     for attempt in 0..=MAX_RETRIES {
@@ -249,9 +248,8 @@ fn capture_and_store_screenshot(store: &ArtifactStore) -> Vec<Uuid> {
             Some((_width, _height, raw_pixels)) => {
                 match store.store(&raw_pixels, "screenshot") {
                     Ok(artifact_id) => {
-                        let uuid = Uuid::new_v4();
-                        debug!(uuid = %uuid, store_id = %artifact_id, "Screenshot captured and stored");
-                        return vec![uuid];
+                        debug!(artifact_id = %artifact_id, "Screenshot captured and stored");
+                        return vec![artifact_id];
                     }
                     Err(e) => {
                         warn!(error = %e, "Failed to store screenshot artifact");
@@ -273,7 +271,7 @@ fn capture_and_store_screenshot(store: &ArtifactStore) -> Vec<Uuid> {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn capture_and_store_screenshot(_store: &ArtifactStore) -> Vec<Uuid> {
+fn capture_and_store_screenshot(_store: &ArtifactStore) -> Vec<String> {
     vec![]
 }
 

@@ -12,7 +12,7 @@ pub struct Event {
     pub primary_display_id: String,
     pub cursor_global_px: Option<CursorPosition>,
     pub ui_scale: Option<f64>,
-    pub artifact_ids: Vec<Uuid>,
+    pub artifact_ids: Vec<String>,
     pub metadata: serde_json::Value,
     /// IDs of displays that the window spans across, if it spans multiple.
     /// None if there is no window or it fits within a single display.
