@@ -72,6 +72,28 @@ fi
 chmod 755 /usr/local/bin/oc-apprentice-daemon
 chmod 755 /usr/local/bin/openmimic
 
+# Chrome extension setup
+EXT_DIR="${LIB_DIR}/extension"
+if [ -d "${EXT_DIR}/dist" ]; then
+    echo "Chrome extension pre-built and ready."
+    echo "  Load it in Chrome: chrome://extensions -> Load unpacked -> ${EXT_DIR}"
+elif [ -d "${EXT_DIR}/src" ]; then
+    echo ""
+    echo "Chrome extension source is included but not pre-built."
+    echo "To build the extension:"
+    echo "  cd ${EXT_DIR}"
+    echo "  npm install && npm run build"
+    echo "Then load in Chrome: chrome://extensions -> Load unpacked -> ${EXT_DIR}/dist"
+else
+    echo ""
+    echo "Chrome extension not included in this package."
+    echo "To install it from source:"
+    echo "  git clone https://github.com/sandroandric/OpenMimic.git"
+    echo "  cd OpenMimic/extension && npm install && npm run build"
+    echo "Then load in Chrome: chrome://extensions -> Load unpacked -> extension/dist"
+fi
+
+echo ""
 echo "OpenMimic installed successfully."
 echo "Run 'openmimic doctor' to verify the installation."
 exit 0

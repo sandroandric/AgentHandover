@@ -67,6 +67,30 @@ pub fn run() -> Result<()> {
     // Check 10: Disk space
     all_ok &= check("Disk space (>1GB free)", || free_disk_gb() > 1);
 
+    // Check 11: Python virtual environment
+    check_optional(
+        "Python virtual environment",
+        || std::path::Path::new("/usr/local/lib/openmimic/venv/bin/python").exists(),
+        "Run installer or: python3 -m venv /usr/local/lib/openmimic/venv",
+    );
+
+    // Check 12: Chrome extension dist
+    check_optional(
+        "Chrome extension dist",
+        || {
+            std::path::Path::new("/usr/local/lib/openmimic/extension/dist").exists()
+                || find_local_extension_dist()
+        },
+        "Build with: cd extension && npm run build",
+    );
+
+    // Check 13: Worker process alive
+    check_optional(
+        "Worker process",
+        || oc_apprentice_common::pid::check_pid_file("worker").is_some(),
+        "Start with: openmimic start",
+    );
+
     println!();
     if all_ok {
         println!("{}", "All checks passed!".green().bold());
@@ -107,6 +131,28 @@ fn which(binary: &str) -> bool {
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
+}
+
+/// Check if extension/dist exists relative to common repo locations.
+fn find_local_extension_dist() -> bool {
+    // Check relative to the binary's location
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            // e.g. target/debug/ -> repo root is ../../
+            for ancestor in parent.ancestors().take(5) {
+                if ancestor.join("extension/dist").exists() {
+                    return true;
+                }
+            }
+        }
+    }
+    // Check current working directory
+    if let Ok(cwd) = std::env::current_dir() {
+        if cwd.join("extension/dist").exists() {
+            return true;
+        }
+    }
+    false
 }
 
 #[cfg(target_os = "macos")]

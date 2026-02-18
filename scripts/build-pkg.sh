@@ -22,9 +22,38 @@ cp "${REPO_ROOT}/target/universal-release/openmimic" "${PKG_ROOT}/usr/local/bin/
 
 # Copy extension
 echo "Staging extension..."
-if [ -d "${REPO_ROOT}/extension/dist" ]; then
-    cp -R "${REPO_ROOT}/extension/dist/"* "${PKG_ROOT}/usr/local/lib/openmimic/extension/"
-    cp "${REPO_ROOT}/extension/manifest.json" "${PKG_ROOT}/usr/local/lib/openmimic/extension/"
+EXT_SRC="${REPO_ROOT}/extension"
+EXT_DST="${PKG_ROOT}/usr/local/lib/openmimic/extension"
+
+if [ -d "${EXT_SRC}/dist" ]; then
+    # Pre-built dist exists — include it
+    cp -R "${EXT_SRC}/dist" "${EXT_DST}/dist"
+    cp "${EXT_SRC}/manifest.json" "${EXT_DST}/"
+    echo "  Extension dist included (pre-built)."
+elif command -v npm &>/dev/null && [ -f "${EXT_SRC}/package.json" ]; then
+    # npm available — build the dist at package time
+    echo "  Building extension with npm..."
+    (cd "${EXT_SRC}" && npm install --ignore-scripts && npm run build)
+    if [ -d "${EXT_SRC}/dist" ]; then
+        cp -R "${EXT_SRC}/dist" "${EXT_DST}/dist"
+        cp "${EXT_SRC}/manifest.json" "${EXT_DST}/"
+        echo "  Extension dist built and included."
+    else
+        echo "  Warning: npm build did not produce dist/. Including source."
+        cp -R "${EXT_SRC}/src" "${EXT_DST}/src"
+        cp "${EXT_SRC}/manifest.json" "${EXT_DST}/"
+        cp "${EXT_SRC}/package.json" "${EXT_DST}/"
+        [ -f "${EXT_SRC}/tsconfig.json" ] && cp "${EXT_SRC}/tsconfig.json" "${EXT_DST}/"
+        [ -f "${EXT_SRC}/webpack.config.js" ] && cp "${EXT_SRC}/webpack.config.js" "${EXT_DST}/"
+    fi
+elif [ -f "${EXT_SRC}/package.json" ]; then
+    # No npm, no dist — include source for user to build
+    echo "  npm not available, including extension source for manual build."
+    cp -R "${EXT_SRC}/src" "${EXT_DST}/src"
+    cp "${EXT_SRC}/manifest.json" "${EXT_DST}/"
+    cp "${EXT_SRC}/package.json" "${EXT_DST}/"
+    [ -f "${EXT_SRC}/tsconfig.json" ] && cp "${EXT_SRC}/tsconfig.json" "${EXT_DST}/"
+    [ -f "${EXT_SRC}/webpack.config.js" ] && cp "${EXT_SRC}/webpack.config.js" "${EXT_DST}/"
 fi
 
 # Copy launchd plists (templates)

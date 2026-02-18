@@ -8,10 +8,12 @@ VLM fallback enqueuing, SOP induction, formatting, and export.
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import signal
 import sys
+import tempfile
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -48,13 +50,18 @@ DEFAULT_SOPS_DIR = Path.home() / ".openclaw" / "workspace" / "memory" / "apprent
 POLL_INTERVAL_SECONDS = 2.0
 VLM_REJECT_THRESHOLD = 0.60
 
+_WORKER_VERSION = "0.1.0"
+_DB_RETRY_MAX_SECONDS = 120
+_DB_RETRY_POLL_SECONDS = 5
+_IDLE_LOG_INTERVAL_SECONDS = 300  # 5 minutes
+
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="oc-apprentice-worker",
         description="OpenMimic apprentice worker process",
     )
-    parser.add_argument("--version", action="version", version="%(prog)s 0.1.0")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {_WORKER_VERSION}")
     parser.add_argument(
         "--db-path",
         type=Path,
@@ -101,6 +108,65 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Also export SOPs as JSON (used with generic adapter)",
     )
     return parser.parse_args(argv)
+
+
+def _status_dir() -> Path:
+    """Return the standard data directory for status/PID files."""
+    if _platform.system() == "Darwin":
+        return Path.home() / "Library" / "Application Support" / "oc-apprentice"
+    return Path.home() / ".local" / "share" / "oc-apprentice"
+
+
+def _write_worker_status(
+    *,
+    started_at: str,
+    events_processed_today: int,
+    sops_generated: int,
+    last_pipeline_duration_ms: int | None,
+    consecutive_errors: int,
+    vlm_available: bool,
+    sop_inducer_available: bool,
+) -> None:
+    """Atomically write worker-status.json (tmp + fsync + rename)."""
+    status = {
+        "pid": os.getpid(),
+        "version": _WORKER_VERSION,
+        "started_at": started_at,
+        "heartbeat": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "events_processed_today": events_processed_today,
+        "sops_generated": sops_generated,
+        "last_pipeline_duration_ms": last_pipeline_duration_ms,
+        "consecutive_errors": consecutive_errors,
+        "vlm_available": vlm_available,
+        "sop_inducer_available": sop_inducer_available,
+    }
+    sdir = _status_dir()
+    sdir.mkdir(parents=True, exist_ok=True)
+    target = sdir / "worker-status.json"
+    try:
+        fd, tmp_path = tempfile.mkstemp(
+            dir=str(sdir), prefix=".worker-status.", suffix=".tmp"
+        )
+        with os.fdopen(fd, "w") as f:
+            json.dump(status, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.rename(tmp_path, str(target))
+    except Exception:
+        logger.debug("Failed to write worker-status.json", exc_info=True)
+        # Best-effort; don't crash the worker over a status file
+        try:
+            os.unlink(tmp_path)
+        except Exception:
+            pass
+
+
+def _remove_worker_status() -> None:
+    """Remove worker-status.json on clean shutdown."""
+    try:
+        (_status_dir() / "worker-status.json").unlink(missing_ok=True)
+    except Exception:
+        pass
 
 
 def run_pipeline(
@@ -306,6 +372,45 @@ def _run_deep_scan(scanner: DeepScanner, artifacts: list[dict]) -> None:
         logger.exception("Background deep scan failed")
 
 
+def _wait_for_db(db_path: Path, shutdown_flag: list[bool]) -> bool:
+    """Wait up to _DB_RETRY_MAX_SECONDS for the daemon to create the DB.
+
+    Returns True if DB appeared, False if timed out or shutdown requested.
+    """
+    if db_path.is_file():
+        return True
+
+    logger.info(
+        "Database not found at %s — waiting for daemon to create it "
+        "(up to %ds)...",
+        db_path,
+        _DB_RETRY_MAX_SECONDS,
+    )
+
+    elapsed = 0
+    while elapsed < _DB_RETRY_MAX_SECONDS:
+        if shutdown_flag[0]:
+            logger.info("Shutdown requested during DB wait — exiting")
+            return False
+        time.sleep(_DB_RETRY_POLL_SECONDS)
+        elapsed += _DB_RETRY_POLL_SECONDS
+        if db_path.is_file():
+            logger.info("Database appeared after %ds", elapsed)
+            return True
+        logger.info(
+            "Waiting for daemon to create database (%ds/%ds)...",
+            elapsed,
+            _DB_RETRY_MAX_SECONDS,
+        )
+
+    logger.error(
+        "Database not created after %ds. Is the daemon running? "
+        "Start it with: openmimic start",
+        _DB_RETRY_MAX_SECONDS,
+    )
+    return False
+
+
 def main(argv: list[str] | None = None) -> None:
     """Worker entry-point: connect to DB, poll for work, run until shutdown."""
     args = _parse_args(argv)
@@ -339,37 +444,44 @@ def main(argv: list[str] | None = None) -> None:
         handlers=[file_handler, stderr_handler],
     )
 
+    # Signal handling — set up BEFORE the DB retry loop so we can
+    # exit cleanly if the user hits Ctrl-C while waiting.
+    shutdown_flag: list[bool] = [False]
+
+    def _handle_signal(signum: int, _frame: object) -> None:
+        sig_name = signal.Signals(signum).name
+        logger.info("Received %s — requesting shutdown", sig_name)
+        shutdown_flag[0] = True
+
+    signal.signal(signal.SIGINT, _handle_signal)
+    signal.signal(signal.SIGTERM, _handle_signal)
+
     # Write PID file
-    if _platform.system() == "Darwin":
-        pid_dir = Path.home() / "Library" / "Application Support" / "oc-apprentice"
-    else:
-        pid_dir = Path.home() / ".local" / "share" / "oc-apprentice"
+    pid_dir = _status_dir()
     pid_dir.mkdir(parents=True, exist_ok=True)
     pid_file = pid_dir / "worker.pid"
     pid_file.write_text(str(os.getpid()))
     logger.info("PID file written: %s", pid_file)
 
-    logger.info("Starting oc-apprentice-worker")
+    logger.info("Starting oc-apprentice-worker v%s", _WORKER_VERSION)
     logger.info("Database path: %s", args.db_path)
     logger.info("Poll interval: %.1fs", args.poll_interval)
 
-    if not args.db_path.is_file():
-        logger.error("Database file not found: %s", args.db_path)
-        logger.error(
-            "Is the daemon running? The daemon must create the database first."
-        )
+    # Task 1: Retry loop — wait for the daemon to create the DB
+    if not _wait_for_db(args.db_path, shutdown_flag):
+        # Clean up PID file before exiting
+        try:
+            pid_file.unlink(missing_ok=True)
+        except Exception:
+            pass
         sys.exit(1)
 
-    shutdown_requested = False
-
-    def _handle_signal(signum: int, _frame: object) -> None:
-        nonlocal shutdown_requested
-        sig_name = signal.Signals(signum).name
-        logger.info("Received %s — requesting shutdown", sig_name)
-        shutdown_requested = True
-
-    signal.signal(signal.SIGINT, _handle_signal)
-    signal.signal(signal.SIGTERM, _handle_signal)
+    if shutdown_flag[0]:
+        try:
+            pid_file.unlink(missing_ok=True)
+        except Exception:
+            pass
+        return
 
     # Initialize pipeline components
     episode_builder = EpisodeBuilder()
@@ -390,7 +502,9 @@ def main(argv: list[str] | None = None) -> None:
     from oc_apprentice_worker.setup_vlm import check_vlm_available
     vlm_status = check_vlm_available()
     vlm_worker = None
+    vlm_available = False
     if any(vlm_status.values()):
+        vlm_available = True
         logger.info("VLM backend available — enhanced native app observation enabled")
         # Create VLM worker for variable classification
         # Priority: mlx_vlm > ollama > llama_cpp > openai_compat
@@ -418,9 +532,11 @@ def main(argv: list[str] | None = None) -> None:
 
     # Try to import SOPInducer (requires prefixspan)
     sop_inducer = None
+    sop_inducer_available = False
     try:
         from oc_apprentice_worker.sop_inducer import SOPInducer
         sop_inducer = SOPInducer(vlm_worker=vlm_worker)
+        sop_inducer_available = True
         if vlm_worker is not None:
             logger.info("SOPInducer loaded with VLM-assisted variable classification")
         else:
@@ -438,6 +554,26 @@ def main(argv: list[str] | None = None) -> None:
     # Single-thread pool for background deep scan (non-blocking privacy check)
     deep_scan_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="deep-scan")
 
+    # Cumulative counters for status reporting
+    started_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    total_events_processed: int = 0
+    total_sops_generated: int = 0
+    last_pipeline_duration_ms: int | None = None
+
+    # Task 5: Idle progress tracking
+    last_idle_log_time = time.monotonic()
+
+    # Write initial status file after DB connect
+    _write_worker_status(
+        started_at=started_at,
+        events_processed_today=total_events_processed,
+        sops_generated=total_sops_generated,
+        last_pipeline_duration_ms=last_pipeline_duration_ms,
+        consecutive_errors=0,
+        vlm_available=vlm_available,
+        sop_inducer_available=sop_inducer_available,
+    )
+
     with WorkerDB(args.db_path) as db:
         logger.info("Connected to database, entering main loop")
 
@@ -445,7 +581,7 @@ def main(argv: list[str] | None = None) -> None:
         max_interval = max(60.0, args.poll_interval * 16)
         consecutive_errors = 0
 
-        while not shutdown_requested:
+        while not shutdown_flag[0]:
             try:
                 unprocessed = db.get_unprocessed_events(limit=100)
                 pending_vlm = db.get_pending_vlm_jobs(limit=10)
@@ -458,10 +594,22 @@ def main(argv: list[str] | None = None) -> None:
                     )
                     # Reset backoff when work is found
                     current_interval = args.poll_interval
+                    # Reset idle log timer
+                    last_idle_log_time = time.monotonic()
                 else:
                     logger.debug("Poll: nothing to do")
                     # Exponential backoff when idle
                     current_interval = min(current_interval * 2, max_interval)
+
+                    # Task 5: Periodic idle progress message
+                    now_mono = time.monotonic()
+                    if now_mono - last_idle_log_time >= _IDLE_LOG_INTERVAL_SECONDS:
+                        logger.info(
+                            "Watching for activity... (%d events today, %d SOPs generated)",
+                            total_events_processed,
+                            total_sops_generated,
+                        )
+                        last_idle_log_time = now_mono
 
                 if unprocessed:
                     # Check scheduler gate before running heavy pipeline
@@ -474,6 +622,7 @@ def main(argv: list[str] | None = None) -> None:
                         time.sleep(current_interval)
                         continue
 
+                    pipeline_start = time.monotonic()
                     summary = run_pipeline(
                         unprocessed,
                         episode_builder=episode_builder,
@@ -486,7 +635,27 @@ def main(argv: list[str] | None = None) -> None:
                         index_generator=index_generator,
                         sop_inducer=sop_inducer,
                     )
+                    pipeline_elapsed_ms = int((time.monotonic() - pipeline_start) * 1000)
+                    last_pipeline_duration_ms = pipeline_elapsed_ms
                     logger.info("Pipeline summary: %s", summary)
+
+                    # Update cumulative counters
+                    total_events_processed += summary["events_in"]
+                    total_sops_generated += summary["sops_exported"]
+
+                    # Task 5: User-facing progress messages
+                    if summary["sops_exported"] > 0:
+                        logger.info(
+                            "Generated %d new SOP(s)!",
+                            summary["sops_exported"],
+                        )
+                    else:
+                        logger.info(
+                            "Processed %d events into %d episodes. "
+                            "SOPs generated after workflows repeated 2+ times.",
+                            summary["events_in"],
+                            summary["episodes"],
+                        )
 
                     # Mark processed events so they are not re-read (GAP 4)
                     event_ids = [ev["id"] for ev in unprocessed if "id" in ev]
@@ -517,6 +686,17 @@ def main(argv: list[str] | None = None) -> None:
                     # Reset consecutive error counter after successful processing
                     consecutive_errors = 0
 
+                # Write status file after each cycle (heartbeat)
+                _write_worker_status(
+                    started_at=started_at,
+                    events_processed_today=total_events_processed,
+                    sops_generated=total_sops_generated,
+                    last_pipeline_duration_ms=last_pipeline_duration_ms,
+                    consecutive_errors=consecutive_errors,
+                    vlm_available=vlm_available,
+                    sop_inducer_available=sop_inducer_available,
+                )
+
             except Exception:
                 consecutive_errors += 1
                 logger.error(
@@ -537,11 +717,12 @@ def main(argv: list[str] | None = None) -> None:
     # Wait for any in-flight deep scan to finish before exit
     deep_scan_pool.shutdown(wait=True)
 
-    # Remove PID file on clean shutdown
+    # Remove PID file and status file on clean shutdown
     try:
         pid_file.unlink(missing_ok=True)
     except Exception:
         pass
+    _remove_worker_status()
 
     logger.info("Worker shut down cleanly")
 
