@@ -11,5 +11,10 @@ extension/dist/
 __pycache__/
 *.pyc
 .venv/
+.build/
+*.o
+*.d
+*.swiftmodule
+*.pcm
 /.docdex/
 /.docdex-state/
