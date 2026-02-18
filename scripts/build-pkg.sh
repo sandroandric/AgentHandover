@@ -30,13 +30,21 @@ fi
 # Copy launchd plists (templates)
 cp "${REPO_ROOT}/resources/launchd/"*.plist "${PKG_ROOT}/usr/local/lib/openmimic/launchd/"
 
-# Copy worker Python package
+# Copy worker Python package (source only, no tests/build artifacts)
 echo "Staging worker..."
-cp -R "${REPO_ROOT}/worker" "${PKG_ROOT}/usr/local/lib/openmimic/worker"
+mkdir -p "${PKG_ROOT}/usr/local/lib/openmimic/worker"
+cp -R "${REPO_ROOT}/worker/src" "${PKG_ROOT}/usr/local/lib/openmimic/worker/src"
+cp "${REPO_ROOT}/worker/pyproject.toml" "${PKG_ROOT}/usr/local/lib/openmimic/worker/"
 
-# Copy SwiftUI app if built
-if [ -d "${REPO_ROOT}/app/OpenMimicApp/.build/release/OpenMimicApp.app" ]; then
-    cp -R "${REPO_ROOT}/app/OpenMimicApp/.build/release/OpenMimicApp.app" "${PKG_ROOT}/Applications/OpenMimic.app"
+# Copy SwiftUI app if built — SPM produces a binary, not a .app bundle.
+# Wrap it in a minimal .app structure for /Applications.
+APP_BINARY="${REPO_ROOT}/app/OpenMimicApp/.build/release/OpenMimicApp"
+if [ -f "${APP_BINARY}" ]; then
+    APP_BUNDLE="${PKG_ROOT}/Applications/OpenMimic.app/Contents/MacOS"
+    mkdir -p "${APP_BUNDLE}"
+    cp "${APP_BINARY}" "${APP_BUNDLE}/OpenMimic"
+    cp "${REPO_ROOT}/app/OpenMimicApp/Sources/OpenMimicApp/Info.plist" \
+       "${PKG_ROOT}/Applications/OpenMimic.app/Contents/Info.plist"
 fi
 
 # Copy install scripts

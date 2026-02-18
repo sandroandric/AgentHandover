@@ -54,6 +54,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         prog="oc-apprentice-worker",
         description="OpenMimic apprentice worker process",
     )
+    parser.add_argument("--version", action="version", version="%(prog)s 0.1.0")
     parser.add_argument(
         "--db-path",
         type=Path,
@@ -111,7 +112,7 @@ def run_pipeline(
     translator: SemanticTranslator,
     scorer: ConfidenceScorer,
     vlm_queue: VLMFallbackQueue,
-    openclaw_writer: OpenClawWriter,
+    openclaw_writer: SOPExportAdapter,
     index_generator: IndexGenerator,
     sop_inducer: object | None = None,
 ) -> dict:
@@ -282,7 +283,7 @@ def run_pipeline(
 
             # Update index with all SOP templates
             index_generator.update_index(
-                openclaw_writer.sops_dir, sop_templates
+                openclaw_writer.get_sops_dir(), sop_templates
             )
             logger.info("Exported %d SOPs", len(paths))
         except Exception:

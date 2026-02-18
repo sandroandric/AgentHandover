@@ -111,23 +111,38 @@ fn which(binary: &str) -> bool {
 
 #[cfg(target_os = "macos")]
 fn accessibility_sys_check() -> bool {
-    // Use osascript as a proxy check for accessibility permission
-    let output = std::process::Command::new("osascript")
-        .args([
-            "-e",
-            "tell application \"System Events\" to return name of first process",
-        ])
-        .output();
-    output.map(|o| o.status.success()).unwrap_or(false)
+    // Use the same AXIsProcessTrusted() API the daemon uses.
+    // accessibility-sys wraps this but we call it via the C ABI directly
+    // to avoid pulling the full crate into the CLI.
+    #[link(name = "ApplicationServices", kind = "framework")]
+    extern "C" {
+        fn AXIsProcessTrusted() -> bool;
+    }
+    unsafe { AXIsProcessTrusted() }
 }
 
 #[cfg(target_os = "macos")]
 fn screen_recording_check() -> bool {
-    // Check if the daemon status file reports screen recording permission
-    oc_apprentice_common::status::read_status_file::<serde_json::Value>("daemon-status.json")
-        .ok()
-        .and_then(|v| v.get("screen_recording_permitted")?.as_bool())
-        .unwrap_or(false)
+    // Independently probe screen recording by attempting a display capture.
+    // CGDisplayCreateImage returns NULL without Screen Recording permission.
+    #[link(name = "CoreGraphics", kind = "framework")]
+    extern "C" {
+        fn CGMainDisplayID() -> u32;
+        fn CGDisplayCreateImage(display_id: u32) -> *const std::ffi::c_void;
+    }
+    #[link(name = "CoreFoundation", kind = "framework")]
+    extern "C" {
+        fn CFRelease(cf: *const std::ffi::c_void);
+    }
+    unsafe {
+        let image = CGDisplayCreateImage(CGMainDisplayID());
+        if image.is_null() {
+            false
+        } else {
+            CFRelease(image);
+            true
+        }
+    }
 }
 
 fn native_messaging_manifest_path() -> std::path::PathBuf {

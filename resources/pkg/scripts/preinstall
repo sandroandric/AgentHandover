@@ -1,7 +1,12 @@
 #!/bin/bash
 # OpenMimic pre-install script — stops existing services if upgrading
 
-USER_HOME=$(eval echo ~"$USER")
+# Resolve the real user's home — installer runs as root so $USER may be "root".
+CONSOLE_USER=$(stat -f '%Su' /dev/console 2>/dev/null || echo "$USER")
+USER_HOME=$(dscl . -read /Users/"${CONSOLE_USER}" NFSHomeDirectory 2>/dev/null | awk '{print $2}')
+if [ -z "$USER_HOME" ] || [ ! -d "$USER_HOME" ]; then
+    USER_HOME=$(eval echo ~"$CONSOLE_USER")
+fi
 LAUNCH_AGENTS="${USER_HOME}/Library/LaunchAgents"
 
 # Stop existing services if they're running

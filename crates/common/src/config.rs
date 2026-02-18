@@ -190,7 +190,7 @@ impl Default for ExportConfig {
         Self {
             adapter: "openclaw".into(),
             json_export: false,
-            generic_output_dir: "~/Library/Application Support/oc-apprentice/sops".into(),
+            generic_output_dir: "sops".into(),
         }
     }
 }

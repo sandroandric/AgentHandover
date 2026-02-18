@@ -140,8 +140,9 @@ class OpenClawWriter(SOPExportAdapter):
             # Read file to extract title from first heading
             title = slug.replace("-", " ").title()
             try:
-                content = sop_file.read_text(encoding="utf-8")
-                for line in content.splitlines():
+                with sop_file.open(encoding="utf-8") as f:
+                    head = f.read(1024)
+                for line in head.splitlines():
                     if line.startswith("# "):
                         title = line[2:].strip()
                         break

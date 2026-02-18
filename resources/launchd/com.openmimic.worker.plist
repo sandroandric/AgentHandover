@@ -7,8 +7,9 @@
 
     <key>ProgramArguments</key>
     <array>
-        <string>/usr/local/bin/openmimic</string>
-        <string>run-worker</string>
+        <string>/usr/local/lib/openmimic/venv/bin/python</string>
+        <string>-m</string>
+        <string>oc_apprentice_worker</string>
     </array>
 
     <key>RunAtLoad</key>

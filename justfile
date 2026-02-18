@@ -77,9 +77,12 @@ test-rust:
     source ~/.cargo/env 2>/dev/null || true
     cargo test --workspace
 
-# Run Python tests
+# Run Python tests (separate roots to avoid namespace collision)
 test-python:
-    python -m pytest worker/tests/ tests/ -v
+    #!/usr/bin/env bash
+    set -euo pipefail
+    python -m pytest worker/tests/ -v
+    cd tests && python -m pytest e2e/ load/ -v
 
 # Run extension tests
 test-extension:

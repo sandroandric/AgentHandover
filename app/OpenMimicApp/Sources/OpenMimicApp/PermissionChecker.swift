@@ -14,7 +14,7 @@ enum PermissionChecker {
     /// Prompt the user to grant Accessibility permission.
     /// Opens System Settings to the correct pane.
     static func requestAccessibility() {
-        let options = [kAXTrustedCheckOptionPrompt.takeRetainedValue(): true] as CFDictionary
+        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue(): true] as CFDictionary
         AXIsProcessTrustedWithOptions(options)
     }
 

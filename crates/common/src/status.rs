@@ -32,8 +32,12 @@ pub struct WorkerStatus {
     pub sop_inducer_available: bool,
 }
 
-/// Standard location for status files.
-pub fn status_dir() -> PathBuf {
+/// Standard data directory for OpenMimic.
+///
+/// Used by status files, PID files, logs, database, and artifacts.
+/// - macOS: `~/Library/Application Support/oc-apprentice`
+/// - Linux: `~/.local/share/oc-apprentice`
+pub fn data_dir() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
     if cfg!(target_os = "macos") {
         PathBuf::from(home).join("Library/Application Support/oc-apprentice")
@@ -42,15 +46,24 @@ pub fn status_dir() -> PathBuf {
     }
 }
 
-/// Atomically write a status file (tmp + rename).
+/// Standard location for status files (delegates to `data_dir()`).
+pub fn status_dir() -> PathBuf {
+    data_dir()
+}
+
+/// Atomically write a status file (tmp + fsync + rename).
 pub fn write_status_file(filename: &str, status: &impl Serialize) -> std::io::Result<()> {
+    use std::io::Write;
+
     let dir = status_dir();
     std::fs::create_dir_all(&dir)?;
     let target = dir.join(filename);
     let tmp = dir.join(format!(".{}.tmp", filename));
     let json = serde_json::to_string_pretty(status)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
-    std::fs::write(&tmp, json.as_bytes())?;
+    let mut file = std::fs::File::create(&tmp)?;
+    file.write_all(json.as_bytes())?;
+    file.sync_all()?;
     std::fs::rename(&tmp, &target)?;
     Ok(())
 }

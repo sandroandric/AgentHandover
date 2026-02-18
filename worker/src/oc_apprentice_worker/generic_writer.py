@@ -26,9 +26,8 @@ class GenericWriter(SOPExportAdapter):
     """
 
     def __init__(self, output_dir: str | Path, json_export: bool = True):
-        self.output_dir = Path(output_dir)
+        self.output_dir = Path(output_dir).expanduser().resolve()
         self.sops_dir_path = self.output_dir / "sops"
-        # Alias for duck-type compatibility with OpenClawWriter.sops_dir
         self.sops_dir = self.sops_dir_path
         self.metadata_dir = self.output_dir / "metadata"
         self.json_export = json_export
@@ -90,8 +89,9 @@ class GenericWriter(SOPExportAdapter):
 
             title = slug.replace("-", " ").title()
             try:
-                content = sop_file.read_text(encoding="utf-8")
-                for line in content.splitlines():
+                with sop_file.open(encoding="utf-8") as f:
+                    head = f.read(1024)
+                for line in head.splitlines():
                     if line.startswith("# "):
                         title = line[2:].strip()
                         break

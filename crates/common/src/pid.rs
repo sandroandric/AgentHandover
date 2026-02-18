@@ -1,14 +1,9 @@
 use std::io;
 use std::path::PathBuf;
 
-/// Standard location for PID files.
+/// Standard location for PID files (delegates to shared `data_dir()`).
 pub fn pid_dir() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    if cfg!(target_os = "macos") {
-        PathBuf::from(home).join("Library/Application Support/oc-apprentice")
-    } else {
-        PathBuf::from(home).join(".local/share/oc-apprentice")
-    }
+    crate::status::data_dir()
 }
 
 /// Write a PID file. Returns the path written.
