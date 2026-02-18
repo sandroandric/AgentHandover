@@ -2,12 +2,19 @@
 
 Implements section 7.2: strict separation of observations (data) vs instructions (agent prompt).
 Lightweight local classifier flags prompt-like patterns and neutralizes them before VLM.
+
+Defense layers:
+1. Unicode normalization (NFKC + confusable homoglyph mapping)
+2. Regex-based pattern matching (15+ patterns)
+3. Base64 blob detection
+4. Post-sanitize density anomaly check
 """
 
 from __future__ import annotations
 
 import re
 import logging
+import unicodedata
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -68,7 +75,49 @@ INJECTION_PATTERNS: list[tuple[str, ThreatLevel, str]] = [
 
     # XML/HTML tag injection for structured prompts
     (r"</?(?:system|instruction|prompt|user|assistant)\s*/?>", ThreatLevel.HIGH, "tag_injection"),
+
+    # Embedded base64 blobs (real UI text almost never has 60+ char base64 strings)
+    (r"[A-Za-z0-9+/=]{60,}", ThreatLevel.MEDIUM, "base64_blob"),
 ]
+
+
+# Lightweight confusable homoglyph mapping — Cyrillic and Greek lookalikes to ASCII.
+# Used before regex scanning to defeat visual-spoofing bypasses.
+_CONFUSABLE_MAP: dict[str, str] = {
+    # Cyrillic lowercase → Latin
+    "\u0430": "a",  # а
+    "\u0441": "c",  # с
+    "\u0435": "e",  # е
+    "\u043e": "o",  # о
+    "\u0440": "p",  # р
+    "\u0445": "x",  # х
+    "\u0443": "y",  # у
+    "\u0456": "i",  # і
+    "\u0455": "s",  # ѕ
+    # Cyrillic uppercase → Latin
+    "\u0410": "A",  # А
+    "\u0421": "C",  # С
+    "\u0415": "E",  # Е
+    "\u041e": "O",  # О
+    "\u0420": "P",  # Р
+    "\u0425": "X",  # Х
+    "\u0423": "Y",  # У
+    "\u0412": "B",  # В
+    "\u041d": "H",  # Н
+    "\u041a": "K",  # К
+    "\u041c": "M",  # М
+    "\u0422": "T",  # Т
+    # Greek lowercase → Latin
+    "\u03b1": "a",  # α
+    "\u03bf": "o",  # ο
+    "\u03b5": "e",  # ε
+    "\u03b9": "i",  # ι
+    "\u03ba": "k",  # κ
+    "\u03c1": "p",  # ρ
+}
+
+# Build translation table once
+_CONFUSABLE_TABLE = str.maketrans(_CONFUSABLE_MAP)
 
 
 # Module-level compiled patterns — computed once to avoid recompilation on every init
@@ -92,10 +141,22 @@ class InjectionDefense:
         else:
             self._compiled = _COMPILED_PATTERNS
 
+    @staticmethod
+    def normalize(text: str) -> str:
+        """Normalize text to defeat Unicode bypass attacks.
+
+        Applies NFKC normalization (collapses fullwidth, superscripts,
+        ligatures, etc.) then maps common Cyrillic/Greek homoglyphs
+        to their ASCII lookalikes.
+        """
+        normalized = unicodedata.normalize("NFKC", text)
+        return normalized.translate(_CONFUSABLE_TABLE)
+
     def scan(self, text: str) -> ScanResult:
         """Scan text for injection patterns.
 
-        Returns ScanResult with threat level and details.
+        Normalizes Unicode first (NFKC + confusable mapping), then runs
+        regex patterns, then checks for density anomaly post-sanitization.
         """
         if not text:
             return ScanResult(
@@ -105,16 +166,29 @@ class InjectionDefense:
                 sanitized_length=0,
             )
 
+        # Normalize before scanning to defeat homoglyph bypass
+        scan_text = self.normalize(text)
+
         patterns_found = []
         max_threat = ThreatLevel.NONE
 
         for compiled, level, name in self._compiled:
-            if compiled.search(text):
+            if compiled.search(scan_text):
                 patterns_found.append(name)
                 if self._threat_rank(level) > self._threat_rank(max_threat):
                     max_threat = level
 
         sanitized = self.sanitize(text) if patterns_found else text
+
+        # Density anomaly: if sanitization removed more than half the content,
+        # escalate to at least HIGH — indicates heavy injection attempt
+        if patterns_found and len(text) > 20:
+            ratio = len(sanitized) / len(text)
+            if ratio < 0.5:
+                if "density_anomaly" not in patterns_found:
+                    patterns_found.append("density_anomaly")
+                if self._threat_rank(max_threat) < self._threat_rank(ThreatLevel.HIGH):
+                    max_threat = ThreatLevel.HIGH
 
         return ScanResult(
             threat_level=max_threat,
@@ -127,9 +201,10 @@ class InjectionDefense:
     def sanitize(self, text: str) -> str:
         """Remove or neutralize injection patterns from text.
 
-        Replaces detected patterns with [REDACTED_INJECTION] marker.
+        Normalizes Unicode first (to catch homoglyph-based injections),
+        then replaces detected patterns with [REDACTED_INJECTION] marker.
         """
-        result = text
+        result = self.normalize(text)
         for compiled, _level, _name in self._compiled:
             result = compiled.sub("[REDACTED_INJECTION]", result)
         return result

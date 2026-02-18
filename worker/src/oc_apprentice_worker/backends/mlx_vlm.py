@@ -46,10 +46,19 @@ class MLXVLMBackend(VLMInferenceBackend):
             self._model_config = load_config(self._config.model_name)
             logger.info("MLX-VLM model loaded successfully")
 
-    def infer(self, prompt: str, image_base64: str | None = None) -> dict[str, Any]:
+    def infer(
+        self,
+        prompt: str,
+        image_base64: str | None = None,
+        system_prompt: str | None = None,
+    ) -> dict[str, Any]:
         self._lazy_load()
         import mlx_vlm
         from mlx_vlm.prompt_utils import apply_chat_template
+
+        # MLX-VLM doesn't have native system-role support via chat template,
+        # so prepend system prompt to user prompt when provided.
+        full_prompt = f"{system_prompt}\n\n{prompt}" if system_prompt else prompt
 
         image = None
         if image_base64:
@@ -60,7 +69,7 @@ class MLXVLMBackend(VLMInferenceBackend):
 
         num_images = 1 if image is not None else 0
         formatted_prompt = apply_chat_template(
-            self._processor, self._model_config, prompt, num_images=num_images
+            self._processor, self._model_config, full_prompt, num_images=num_images
         )
 
         def _generate() -> str:

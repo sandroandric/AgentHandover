@@ -69,7 +69,12 @@ class LlamaCppBackend(VLMInferenceBackend):
             )
             logger.info("llama.cpp model loaded successfully")
 
-    def infer(self, prompt: str, image_base64: str | None = None) -> dict[str, Any]:
+    def infer(
+        self,
+        prompt: str,
+        image_base64: str | None = None,
+        system_prompt: str | None = None,
+    ) -> dict[str, Any]:
         self._lazy_load()
 
         content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
@@ -79,7 +84,11 @@ class LlamaCppBackend(VLMInferenceBackend):
                 "image_url": {"url": f"data:image/png;base64,{image_base64}"},
             })
 
-        messages = [{"role": "user", "content": content}]
+        # llama-cpp-python supports system messages via chat completion API
+        messages: list[dict[str, Any]] = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": content})
 
         def _generate() -> dict:
             return self._model.create_chat_completion(

@@ -13,6 +13,7 @@ import signal
 import sys
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -155,15 +156,26 @@ def run_pipeline(
         total_negative,
     )
 
-    # Step E: Translate positive events into semantic steps
+    # Step E: Translate positive events into semantic steps (parallel per episode)
     all_translations = []
     episode_sop_steps: list[list[dict]] = []
 
-    for ep_events in positive_episodes_events:
-        translations = translator.translate_batch(ep_events)
-        all_translations.extend(translations)
+    # Episodes are independent — translate in parallel
+    if len(positive_episodes_events) > 1:
+        with ThreadPoolExecutor(max_workers=min(4, len(positive_episodes_events))) as pool:
+            translation_batches = list(pool.map(
+                translator.translate_batch, positive_episodes_events
+            ))
+        for translations in translation_batches:
+            all_translations.extend(translations)
+    elif positive_episodes_events:
+        translation_batches = [translator.translate_batch(positive_episodes_events[0])]
+        all_translations.extend(translation_batches[0])
+    else:
+        translation_batches = []
 
-        # Score each translation and handle VLM fallback
+    # Score each episode's translations and handle VLM fallback
+    for translations in translation_batches:
         sop_steps_for_episode: list[dict] = []
 
         for idx, tr in enumerate(translations):
@@ -265,6 +277,20 @@ def run_pipeline(
     return summary
 
 
+def _run_deep_scan(scanner: DeepScanner, artifacts: list[dict]) -> None:
+    """Background callback for Tier 2 deep scan."""
+    try:
+        scan_result = scanner.scan_artifacts(artifacts)
+        if scan_result.has_pii:
+            logger.warning(
+                "Deep scan found %d PII match(es) in %d artifact(s)",
+                scan_result.total_pii,
+                scan_result.artifacts_scanned,
+            )
+    except Exception:
+        logger.exception("Background deep scan failed")
+
+
 def main(argv: list[str] | None = None) -> None:
     """Worker entry-point: connect to DB, poll for work, run until shutdown."""
     args = _parse_args(argv)
@@ -356,6 +382,9 @@ def main(argv: list[str] | None = None) -> None:
     idle_gate = IdleJobGate(SchedulerConfig())
     deep_scanner = DeepScanner()
 
+    # Single-thread pool for background deep scan (non-blocking privacy check)
+    deep_scan_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="deep-scan")
+
     with WorkerDB(args.db_path) as db:
         logger.info("Connected to database, entering main loop")
 
@@ -411,10 +440,9 @@ def main(argv: list[str] | None = None) -> None:
                     if event_ids:
                         db.mark_events_processed(event_ids)
 
-                    # Run Tier 2 deep scan on any text artifacts from this batch
+                    # Run Tier 2 deep scan in background thread (non-blocking)
                     text_artifacts = []
                     for ev in unprocessed:
-                        # Extract any text-like fields for deep scan
                         window_json = ev.get("window_json")
                         if window_json:
                             text_artifacts.append({
@@ -429,13 +457,9 @@ def main(argv: list[str] | None = None) -> None:
                             })
 
                     if text_artifacts:
-                        scan_result = deep_scanner.scan_artifacts(text_artifacts)
-                        if scan_result.has_pii:
-                            logger.warning(
-                                "Deep scan found %d PII match(es) in %d artifact(s)",
-                                scan_result.total_pii,
-                                scan_result.artifacts_scanned,
-                            )
+                        deep_scan_pool.submit(
+                            _run_deep_scan, deep_scanner, text_artifacts
+                        )
 
                     # Reset consecutive error counter after successful processing
                     consecutive_errors = 0
@@ -457,6 +481,8 @@ def main(argv: list[str] | None = None) -> None:
 
             time.sleep(current_interval)
 
+    # Wait for any in-flight deep scan to finish before exit
+    deep_scan_pool.shutdown(wait=True)
     logger.info("Worker shut down cleanly")
 
 

@@ -104,16 +104,13 @@ class SOPInducer:
             if len(pattern_steps) < self.min_pattern_length:
                 continue
 
-            # Collect all matching instances across episodes for variable abstraction
-            all_instances = self._collect_instances(
+            # Single-pass scan: collect instances, apps, and exceptions together
+            all_instances, apps, exceptions = self._scan_episodes_for_pattern(
                 non_empty, pattern_codes, code_to_signature, signature_to_steps
             )
 
             # Abstract variables
             variables = self._abstract_variables(pattern_steps, all_instances)
-
-            # Extract apps involved
-            apps = self._extract_apps(non_empty, pattern_codes, code_to_signature)
 
             # Compute average confidence
             confidence_avg = self._compute_avg_confidence(all_instances)
@@ -122,10 +119,9 @@ class SOPInducer:
             slug = self._generate_slug(pattern_steps)
             title = self._generate_title(pattern_steps, apps)
 
-            # Detect preconditions, postconditions, and exceptions
+            # Detect preconditions and postconditions from collected instances
             preconditions = self._detect_preconditions(all_instances)
             postconditions = self._detect_postconditions(all_instances)
-            exceptions = self._detect_exceptions(non_empty, pattern_codes, code_to_signature)
 
             results.append({
                 "slug": slug,
@@ -197,17 +193,17 @@ class SOPInducer:
         """
         abs_support = max(2, int(self.min_support * episode_count))
 
-        # Safety cap: subsample if input is too large to avoid memory explosion
+        # Safety cap: stratified subsample if input is too large
         avg_steps = sum(len(ep) for ep in encoded) / max(len(encoded), 1)
         data_size = episode_count * avg_steps
         mining_input = encoded
         if data_size > 50000:
             logger.warning(
-                "PrefixSpan input too large (%.0f), subsampling to stay under 50000",
+                "PrefixSpan input too large (%.0f), stratified subsampling to ~50000",
                 data_size,
             )
             target_episodes = int(50000 / max(avg_steps, 1))
-            mining_input = random.sample(encoded, min(target_episodes, len(encoded)))
+            mining_input = self._stratified_sample(encoded, target_episodes)
 
         ps = PrefixSpan(mining_input)
         # Mine frequent patterns with minimum length constraint
@@ -226,30 +222,111 @@ class SOPInducer:
 
         return patterns
 
-    def _collect_instances(
+    @staticmethod
+    def _stratified_sample(
+        encoded: list[list[int]], target_count: int
+    ) -> list[list[int]]:
+        """Stratified sampling by episode length to preserve pattern diversity.
+
+        Buckets episodes into short/medium/long by length, then samples
+        proportionally from each bucket.  This avoids bias against rare
+        patterns that only appear in unusually short or long episodes.
+        """
+        if target_count >= len(encoded):
+            return encoded
+
+        # Bucket by length: short (<= p25), medium (p25-p75), long (> p75)
+        lengths = sorted(len(ep) for ep in encoded)
+        p25 = lengths[len(lengths) // 4]
+        p75 = lengths[3 * len(lengths) // 4]
+
+        buckets: dict[str, list[list[int]]] = {"short": [], "medium": [], "long": []}
+        for ep in encoded:
+            ep_len = len(ep)
+            if ep_len <= p25:
+                buckets["short"].append(ep)
+            elif ep_len > p75:
+                buckets["long"].append(ep)
+            else:
+                buckets["medium"].append(ep)
+
+        # Sample proportionally from each bucket
+        result: list[list[int]] = []
+        total = len(encoded)
+        for bucket_name, bucket_eps in buckets.items():
+            if not bucket_eps:
+                continue
+            proportion = len(bucket_eps) / total
+            bucket_target = max(1, round(target_count * proportion))
+            bucket_target = min(bucket_target, len(bucket_eps))
+            result.extend(random.sample(bucket_eps, bucket_target))
+
+        # If rounding left us short or over, adjust
+        if len(result) > target_count:
+            result = random.sample(result, target_count)
+
+        return result
+
+    def _scan_episodes_for_pattern(
         self,
         episodes: list[list[dict]],
         pattern_codes: list[int],
         code_to_signature: dict[int, str],
         signature_to_steps: dict[str, list[dict]],
-    ) -> list[list[dict]]:
-        """Collect all matching instances of a pattern across episodes.
+    ) -> tuple[list[list[dict]], list[str], list[str]]:
+        """Single-pass scan: collect instances, apps, and exceptions together.
 
-        Each instance is a list of step dicts corresponding to the pattern
-        positions in a single episode.
+        Previously these were three separate scans (_collect_instances,
+        _extract_apps, _detect_exceptions), each computing ep_sigs and
+        calling _find_subsequence independently.  This combined version
+        does one pass over episodes per pattern.
+
+        Returns:
+            (all_instances, apps_sorted, exceptions)
         """
         pattern_sigs = [code_to_signature[c] for c in pattern_codes]
         instances: list[list[dict]] = []
+        apps: set[str] = set()
+        exceptions: list[str] = []
+        error_indicators = {"cancel", "error", "undo", "revert", "discard", "close"}
+        seen_exceptions: set[str] = set()
 
         for episode in episodes:
             ep_sigs = [self._step_signature(s) for s in episode]
-            # Find all occurrences of the pattern signature sequence in this episode
             matches = self._find_subsequence(ep_sigs, pattern_sigs)
+            if not matches:
+                continue
+
+            # Collect instances
             for match_indices in matches:
                 instance = [episode[i] for i in match_indices]
                 instances.append(instance)
 
-        return instances
+            # Extract apps and exceptions from the matching episode (one scan)
+            for step in episode:
+                # Apps
+                params = step.get("parameters", {})
+                if isinstance(params, dict):
+                    app = params.get("app_id") or params.get("app")
+                    if app:
+                        apps.add(app)
+                pre_state = step.get("pre_state", {})
+                if isinstance(pre_state, dict):
+                    app = pre_state.get("app_id") or pre_state.get("app")
+                    if app:
+                        apps.add(app)
+
+                # Exceptions
+                intent = step.get("step", "").lower()
+                target = step.get("target", "").lower()
+                for indicator in error_indicators:
+                    if indicator in intent or indicator in target:
+                        desc = f"{intent}:{target}" if target else intent
+                        if desc not in seen_exceptions:
+                            seen_exceptions.add(desc)
+                            exceptions.append(desc)
+
+        return instances, sorted(apps), exceptions
 
     def _find_subsequence(
         self, sequence: list[str], pattern: list[str]
@@ -510,38 +587,6 @@ class SOPInducer:
                     matches += 1
         return matches >= len(values) * 0.8
 
-    def _extract_apps(
-        self,
-        episodes: list[list[dict]],
-        pattern_codes: list[int],
-        code_to_signature: dict[int, str],
-    ) -> list[str]:
-        """Extract all application names involved in the pattern's episodes."""
-        apps: set[str] = set()
-        pattern_sigs = [code_to_signature[c] for c in pattern_codes]
-
-        for episode in episodes:
-            ep_sigs = [self._step_signature(s) for s in episode]
-            # Check if this episode contains the pattern
-            matches = self._find_subsequence(ep_sigs, pattern_sigs)
-            if matches:
-                for step in episode:
-                    # Look for app info in parameters or pre_state
-                    params = step.get("parameters", {})
-                    if isinstance(params, dict):
-                        app = params.get("app_id") or params.get("app")
-                        if app:
-                            apps.add(app)
-
-                    # Also check the step target for well-known app names
-                    target = step.get("target", "")
-                    pre_state = step.get("pre_state", {})
-                    if isinstance(pre_state, dict):
-                        app = pre_state.get("app_id") or pre_state.get("app")
-                        if app:
-                            apps.add(app)
-
-        return sorted(apps)
 
     def _compute_avg_confidence(self, instances: list[list[dict]]) -> float:
         """Compute average confidence across all steps in all instances."""
@@ -623,39 +668,6 @@ class SOPInducer:
 
         return postconditions
 
-    def _detect_exceptions(
-        self,
-        episodes: list[list[dict]],
-        pattern_codes: list[int],
-        code_to_signature: dict[int, str],
-    ) -> list[str]:
-        """Collect error/cancel events observed in episodes containing the pattern.
-
-        Looks for events with error/cancel indicators in their intent or
-        target that occur in episodes where the pattern was found.
-        """
-        exceptions: list[str] = []
-        error_indicators = {"cancel", "error", "undo", "revert", "discard", "close"}
-        pattern_sigs = [code_to_signature[c] for c in pattern_codes]
-        seen: set[str] = set()
-
-        for episode in episodes:
-            ep_sigs = [self._step_signature(s) for s in episode]
-            matches = self._find_subsequence(ep_sigs, pattern_sigs)
-            if not matches:
-                continue
-
-            for step in episode:
-                intent = step.get("step", "").lower()
-                target = step.get("target", "").lower()
-                for indicator in error_indicators:
-                    if indicator in intent or indicator in target:
-                        desc = f"{intent}:{target}" if target else intent
-                        if desc not in seen:
-                            seen.add(desc)
-                            exceptions.append(desc)
-
-        return exceptions
 
     def _generate_slug(self, steps: list[dict]) -> str:
         """Generate a URL-safe slug from the pattern's first few steps.

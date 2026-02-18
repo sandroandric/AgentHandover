@@ -68,7 +68,12 @@ class OpenAICompatBackend(VLMInferenceBackend):
             return _OPENAI_DEFAULT_MODEL
         return name
 
-    def infer(self, prompt: str, image_base64: str | None = None) -> dict[str, Any]:
+    def infer(
+        self,
+        prompt: str,
+        image_base64: str | None = None,
+        system_prompt: str | None = None,
+    ) -> dict[str, Any]:
         client = self._get_client()
 
         content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
@@ -78,10 +83,16 @@ class OpenAICompatBackend(VLMInferenceBackend):
                 "image_url": {"url": f"data:image/png;base64,{image_base64}"},
             })
 
+        # Build messages with system-role separation when provided
+        messages: list[dict[str, Any]] = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": content})
+
         def _call() -> Any:
             return client.chat.completions.create(
                 model=self._model_name,
-                messages=[{"role": "user", "content": content}],
+                messages=messages,
                 max_tokens=self._config.max_tokens,
                 temperature=self._config.temperature,
             )

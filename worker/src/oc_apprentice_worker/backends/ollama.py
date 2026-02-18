@@ -54,19 +54,29 @@ class OllamaBackend(VLMInferenceBackend):
             return _OLLAMA_DEFAULT_MODEL
         return name
 
-    def infer(self, prompt: str, image_base64: str | None = None) -> dict[str, Any]:
+    def infer(
+        self,
+        prompt: str,
+        image_base64: str | None = None,
+        system_prompt: str | None = None,
+    ) -> dict[str, Any]:
         client = self._get_client()
 
         images = [image_base64] if image_base64 else None
 
+        # Build messages with system-role separation when provided
+        messages: list[dict[str, Any]] = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        user_msg: dict[str, Any] = {"role": "user", "content": prompt}
+        if images:
+            user_msg["images"] = images
+        messages.append(user_msg)
+
         def _generate() -> dict:
             return client.chat(
                 model=self._model_name,
-                messages=[{
-                    "role": "user",
-                    "content": prompt,
-                    "images": images,
-                }],
+                messages=messages,
                 options={
                     "temperature": self._config.temperature,
                     "num_predict": self._config.max_tokens,
