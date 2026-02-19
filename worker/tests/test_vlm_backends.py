@@ -495,8 +495,12 @@ class TestOpenAICompatBackend:
         backend = OpenAICompatBackend(_make_config())
         assert backend.is_available() is False
 
-    def test_is_available_local_provider(self) -> None:
+    def test_is_available_local_provider(self, monkeypatch) -> None:
         from oc_apprentice_worker.backends.openai_compat import OpenAICompatBackend
+        import sys
+
+        fake_openai = types.ModuleType("openai")
+        monkeypatch.setitem(sys.modules, "openai", fake_openai)
 
         config = _make_config(base_url="http://localhost:8080/v1")
         backend = OpenAICompatBackend(config)

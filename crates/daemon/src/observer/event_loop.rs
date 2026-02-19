@@ -279,9 +279,13 @@ pub async fn run_observer_loop(
 }
 
 /// Storage writer task — receives events and writes them to SQLite.
+///
+/// The optional `shared_counter` is incremented on each successful insert so
+/// that the health watcher can report an accurate `events_today` value.
 pub async fn run_storage_writer(
     db_path: PathBuf,
     mut rx: mpsc::Receiver<ObserverMessage>,
+    shared_counter: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
 ) -> Result<()> {
     info!(path = %db_path.display(), "Storage writer starting");
 
@@ -295,6 +299,9 @@ pub async fn run_storage_writer(
                     error!(error = %e, "Failed to insert event");
                 } else {
                     event_count += 1;
+                    if let Some(ref counter) = shared_counter {
+                        counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
                     if event_count % 100 == 0 {
                         debug!(event_count, "Events stored");
                     }

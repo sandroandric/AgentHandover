@@ -126,12 +126,12 @@ async fn main() -> Result<()> {
     // Spawn storage writer
     let storage_handle = tokio::spawn({
         let db = db_path.clone();
-        async move { run_storage_writer(db, rx).await }
+        let counter = Arc::clone(&event_counter);
+        async move { run_storage_writer(db, rx, Some(counter)).await }
     });
 
     // Spawn native messaging server (Chrome extension bridge)
     let native_tx = tx.clone();
-    let native_event_counter = Arc::clone(&event_counter);
     let native_handle = tokio::spawn(async move {
         // Create a channel to receive events from the native messaging server
         let (nm_event_tx, mut nm_event_rx) = mpsc::channel(256);
@@ -141,9 +141,7 @@ async fn main() -> Result<()> {
         let forwarder_handle = tokio::spawn(async move {
             while let Some(event) = nm_event_rx.recv().await {
                 match forwarder_tx.try_send(ObserverMessage::Event(event)) {
-                    Ok(()) => {
-                        native_event_counter.fetch_add(1, Ordering::Relaxed);
-                    }
+                    Ok(()) => {}
                     Err(mpsc::error::TrySendError::Full(_)) => {
                         warn!("Native messaging forwarder: main channel full (backpressure), dropping event");
                     }
@@ -269,7 +267,6 @@ async fn main() -> Result<()> {
         use oc_apprentice_daemon::platform::clipboard_monitor;
         let clip_tx = tx.clone();
         let clip_shutdown_rx = shutdown_tx.subscribe();
-        let clip_event_counter = Arc::clone(&event_counter);
         tokio::spawn(async move {
             let (clip_event_tx, mut clip_event_rx) = mpsc::channel(256);
 
@@ -300,9 +297,7 @@ async fn main() -> Result<()> {
                                 display_ids_spanned: None,
                             };
                             match fwd_tx.try_send(ObserverMessage::Event(event)) {
-                                Ok(()) => {
-                                    clip_event_counter.fetch_add(1, Ordering::Relaxed);
-                                }
+                                Ok(()) => {}
                                 Err(mpsc::error::TrySendError::Full(_)) => {
                                     warn!("Clipboard forwarder: main channel full (backpressure), dropping event");
                                 }

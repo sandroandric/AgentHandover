@@ -6,7 +6,7 @@ fn config_path() -> std::path::PathBuf {
         std::path::PathBuf::from(home)
             .join("Library/Application Support/oc-apprentice/config.toml")
     } else {
-        std::path::PathBuf::from(home).join(".config/openclaw-apprentice/config.toml")
+        std::path::PathBuf::from(home).join(".config/oc-apprentice/config.toml")
     }
 }
 
