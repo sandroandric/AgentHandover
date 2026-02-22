@@ -218,8 +218,13 @@ def prompt_remote_setup() -> dict | None:
     if not validate_api_key(provider, api_key):
         print("  ⚠️  Key format looks incorrect, but proceeding anyway.")
 
-    print(f"\n  To persist the key, add to your shell profile:")
-    print(f"    export {env_var}=\"{api_key[:8]}...\"")
+    # Set the env var in the current process so the worker can use it
+    # immediately without requiring a shell restart.
+    os.environ[env_var] = api_key
+
+    print(f"\n  ✓ Key set in current process (env var: {env_var})")
+    print(f"\n  To persist across reboots, add to your shell profile:")
+    print(f"    export {env_var}=\"{api_key}\"")
 
     return {
         "provider": provider,

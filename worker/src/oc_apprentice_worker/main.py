@@ -82,6 +82,41 @@ def _read_vlm_config_field(field: str, default: str = "") -> str:
         return default
 
 
+def _read_keychain_api_key(provider: str) -> str:
+    """Read an API key from macOS Keychain (set by SwiftUI onboarding).
+
+    The onboarding stores keys with service 'com.openmimic.apprentice'
+    and account 'openmimic-{provider}-key'.  We retrieve via the
+    ``security`` CLI to avoid a native dependency.
+
+    Returns the key string, or "" if not found / not on macOS.
+    """
+    import subprocess
+
+    if _platform.system() != "Darwin":
+        return ""
+
+    account = f"openmimic-{provider}-key"
+    try:
+        result = subprocess.run(
+            [
+                "/usr/bin/security",
+                "find-generic-password",
+                "-s", "com.openmimic.apprentice",
+                "-a", account,
+                "-w",  # print password only
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+    except Exception:
+        pass
+    return ""
+
+
 def _read_llm_config() -> dict:
     """Read the entire [llm] section from config.toml.
 
@@ -514,6 +549,7 @@ def _process_vlm_jobs(
     db: "WorkerDB",
     pending_jobs: list[dict],
     vlm_worker: object,
+    vlm_queue: "VLMFallbackQueue | None" = None,
 ) -> None:
     """Process pending VLM jobs from the database using the VLM worker.
 
@@ -584,6 +620,13 @@ def _process_vlm_jobs(
                 db.mark_vlm_job_completed(
                     job_id, result_json=_json.dumps(result_dict)
                 )
+                # Reconcile in-memory queue so backpressure stays accurate
+                if vlm_queue is not None:
+                    try:
+                        compute_min = response.inference_time_seconds / 60.0
+                        vlm_queue.mark_completed(job_id, compute_min, result_dict)
+                    except KeyError:
+                        pass  # job may not exist in memory (DB-only)
                 logger.info(
                     "VLM job %s completed (%.1fs, boost=%.2f)",
                     job_id,
@@ -595,6 +638,13 @@ def _process_vlm_jobs(
                     "VLM job %s rejected: %s", job_id, response.error
                 )
                 db.mark_vlm_job_failed(job_id)
+                # Reconcile in-memory queue for failed jobs too
+                if vlm_queue is not None:
+                    for mem_job in vlm_queue._jobs:
+                        if mem_job.job_id == job_id:
+                            from oc_apprentice_worker.vlm_queue import VLMJobStatus
+                            mem_job.status = VLMJobStatus.FAILED
+                            break
 
         except Exception:
             logger.warning("VLM job %s failed", job_id, exc_info=True)
@@ -754,8 +804,18 @@ def main(argv: list[str] | None = None) -> None:
             try:
                 remote_model = _read_vlm_config_field("model", "")
                 api_key_env = _read_vlm_config_field("api_key_env", "")
-                # Resolve the actual API key from the named env var
+                # Resolve the actual API key:
+                # 1. Check env var (standard path, works with shell profiles)
+                # 2. Fall back to macOS Keychain (set by SwiftUI onboarding)
                 api_key_value = os.environ.get(api_key_env, "") if api_key_env else ""
+                if not api_key_value and vlm_provider_str:
+                    api_key_value = _read_keychain_api_key(vlm_provider_str)
+                    if api_key_value:
+                        logger.info(
+                            "Resolved API key from macOS Keychain "
+                            "(set by onboarding) for provider=%s",
+                            vlm_provider_str,
+                        )
                 vlm_config = VLMConfig(
                     backend=remote_backend,
                     mode="remote",
@@ -1036,7 +1096,7 @@ def main(argv: list[str] | None = None) -> None:
                 if pending_vlm and vlm_worker is not None:
                     gate_result = idle_gate.check()
                     if gate_result.can_run:
-                        _process_vlm_jobs(db, pending_vlm, vlm_worker)
+                        _process_vlm_jobs(db, pending_vlm, vlm_worker, vlm_queue)
 
                 # Write status file after each cycle (heartbeat).
                 # Use authoritative DB count for pending VLM jobs (the

@@ -53,9 +53,12 @@ class Openmimic < Formula
   end
 
   def post_install
-    # Create data directories under user's Application Support
-    (var/"oc-apprentice/logs").mkpath
-    (var/"oc-apprentice/artifacts").mkpath
+    # Create data directories under user's Application Support.
+    # LaunchAgents log to ~/Library/Application Support/oc-apprentice/logs/
+    # so we create that path (not var/) for consistency.
+    app_support = Pathname.new(Dir.home)/"Library/Application Support/oc-apprentice"
+    (app_support/"logs").mkpath
+    (app_support/"artifacts").mkpath
 
     # Install LaunchAgent plists to ~/Library/LaunchAgents/
     # (CLI `openmimic start` uses launchctl load on this directory)
@@ -181,7 +184,9 @@ class Openmimic < Formula
   service do
     run [opt_bin/"oc-apprentice-daemon"]
     keep_alive crashed: true
-    log_path var/"oc-apprentice/logs/daemon.log"
-    error_log_path var/"oc-apprentice/logs/daemon.error.log"
+    # Log to ~/Library/Application Support/oc-apprentice/logs/ — same
+    # location used by the LaunchAgent plists for consistency.
+    log_path Pathname.new(Dir.home)/"Library/Application Support/oc-apprentice/logs/daemon.log"
+    error_log_path Pathname.new(Dir.home)/"Library/Application Support/oc-apprentice/logs/daemon.error.log"
   end
 end

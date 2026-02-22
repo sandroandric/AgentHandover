@@ -105,10 +105,10 @@ struct OnboardingView: View {
                             NSApplication.shared.keyWindow?.close()
                         }
                         .buttonStyle(.borderedProminent)
+                        .disabled(!appState.extensionConnected)
 
-                        // Warn if completing without extension (reduced functionality)
                         if !appState.extensionConnected {
-                            Text("Extension not connected — browser observation will be limited")
+                            Text("Connect the Chrome extension first to enable observation")
                                 .font(.caption2)
                                 .foregroundColor(.orange)
                         }
@@ -529,21 +529,34 @@ struct OnboardingView: View {
         # api_key_env = "\(apiKeyEnv)"
         """
 
-        // Simple approach: if [vlm] section exists, append after it
-        // In production, a proper TOML writer would be used
+        // Strip any existing remote-mode keys from [vlm] section to avoid
+        // duplicates on repeated saves.  Then insert the new values.
+        let remoteKeys = ["mode", "provider", "model", "api_key_env"]
+        for key in remoteKeys {
+            // Match lines like: mode = "remote"  or  provider = "openai"
+            // (with optional leading whitespace and any quoted value)
+            let pattern = "(?m)^[ \\t]*\(key)[ \\t]*=[ \\t]*\"[^\"]*\"[ \\t]*\\n?"
+            if let regex = try? NSRegularExpression(pattern: pattern) {
+                let range = NSRange(content.startIndex..., in: content)
+                content = regex.stringByReplacingMatches(
+                    in: content, range: range, withTemplate: ""
+                )
+            }
+        }
+
+        let newFields = "mode = \"remote\"\nprovider = \"\(provider)\"\nmodel = \"\(model)\"\napi_key_env = \"\(apiKeyEnv)\"\n"
+
         if content.contains("[vlm]") {
-            // Find end of [vlm] section (next section or EOF)
             if let vlmRange = content.range(of: "[vlm]") {
-                // Find next section header after [vlm]
                 let afterVlm = content[vlmRange.upperBound...]
                 if let nextSection = afterVlm.range(of: "\n[") {
-                    content.insert(contentsOf: "\nmode = \"remote\"\nprovider = \"\(provider)\"\nmodel = \"\(model)\"\napi_key_env = \"\(apiKeyEnv)\"\n", at: nextSection.lowerBound)
+                    content.insert(contentsOf: "\n" + newFields, at: nextSection.lowerBound)
                 } else {
-                    content += "\nmode = \"remote\"\nprovider = \"\(provider)\"\nmodel = \"\(model)\"\napi_key_env = \"\(apiKeyEnv)\"\n"
+                    content += "\n" + newFields
                 }
             }
         } else {
-            content += "\n[vlm]\nmode = \"remote\"\nprovider = \"\(provider)\"\nmodel = \"\(model)\"\napi_key_env = \"\(apiKeyEnv)\"\n"
+            content += "\n[vlm]\n" + newFields
         }
 
         try? content.write(to: configPath, atomically: true, encoding: .utf8)

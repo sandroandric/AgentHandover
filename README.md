@@ -224,7 +224,7 @@ bash /usr/local/lib/openmimic/scripts/uninstall.sh
 
 ## Privacy
 
-- **Strictly local.** All VLM inference runs on your machine. The `OPENMIMIC_VLM_BASE_URL` environment variable only accepts localhost URLs (`http://localhost:*`, `http://127.0.0.1:*`, `http://[::1]:*`); remote endpoints are rejected at startup. Preferred backends (MLX, Ollama, llama.cpp) enforce `deny_network_egress`.
+- **Local by default, opt-in remote.** VLM inference runs locally (MLX, Ollama, llama.cpp) with `deny_network_egress` by default. Remote cloud APIs (OpenAI, Anthropic, Google) can be enabled via `mode = "remote"` in `config.toml` or through onboarding — requires explicit consent and shows a privacy warning. API keys are stored in macOS Keychain or env vars, never in config files.
 - **Auto-redaction.** API keys, tokens, passwords, and credit card numbers are detected and redacted before storage.
 - **Secure field exclusion.** Password and credit-card input fields are dropped entirely.
 - **Encryption at rest.** Screenshots and artifacts use zstd compression + XChaCha20-Poly1305 encryption.
