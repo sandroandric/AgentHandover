@@ -14,7 +14,7 @@ Download the latest `.pkg` from [Releases](https://github.com/sandroandric/OpenM
 
 ```bash
 brew tap sandroandric/openmimic
-brew install openmimic
+brew install --HEAD openmimic
 ```
 
 ### Option C: Build from Source
@@ -33,60 +33,90 @@ just build-all
 just test-all
 ```
 
-## First Run
+## First Run — Step by Step
 
-After installation, run the setup check:
+### 1. Run the health check
 
 ```bash
 openmimic doctor
 ```
 
-This verifies all components are installed and guides you through permissions setup.
+You should see 13 checks. Fix any that show `FAIL` before proceeding. Common first-time issues:
+- **Accessibility permission** — Open System Settings > Privacy & Security > Accessibility, add the `oc-apprentice-daemon` binary
+- **Screen Recording permission** — Same location, add `oc-apprentice-daemon`
 
-### Required Permissions
+### 2. Load the Chrome Extension
 
-OpenMimic needs two macOS permissions:
+This is **essential** — without the extension, OpenMimic only captures app switches and dwell events. With it, you get clicks, DOM context, page content, and much richer SOPs.
 
-1. **Accessibility** — to read window titles and UI elements
-2. **Screen Recording** — to capture screenshots for visual context
+1. Open `chrome://extensions` in Chrome
+2. Enable **Developer Mode** (toggle in top-right)
+3. Click **Load unpacked** and select:
+   - **.pkg install:** `/usr/local/lib/openmimic/extension/`
+   - **Homebrew:** Run `brew --prefix openmimic` to find path, then select `libexec/extension/`
+   - **Source build:** `extension/dist/`
+4. Verify the extension appears with ID `knldjmfmopnpolahpmmgbagdohdnhkik`
 
-Grant these in **System Settings > Privacy & Security**. The menu bar app will guide you through this on first launch.
-
-### Chrome Extension
-
-Load the extension for rich browser observation:
-
-1. Open `chrome://extensions`
-2. Enable **Developer Mode**
-3. Click **Load unpacked** and select `/usr/local/lib/openmimic/extension/`
-
-The extension communicates with the daemon locally via Chrome Native Messaging. No data leaves your machine.
-
-## Usage
-
-### Start Services
+### 3. Start services
 
 ```bash
 openmimic start all
 ```
 
-Services auto-start on login via launchd. Use the menu bar app or CLI to control them.
+Both daemon and worker start immediately and auto-restart on login.
 
-### Check Status
+### 4. Verify everything is working
 
 ```bash
 openmimic status
 ```
 
-Shows daemon and worker health, event counts, and SOP generation progress.
+Expected output:
+```
+  ● Daemon (running)
+    PID:        12345
+    Heartbeat:  2s ago
+    Events:     0 captured today
+    Perms:      OK
+    Extension:  connected (5s ago)    ← confirms Chrome extension is linked
 
-### View SOPs
+  ● Worker (running)
+    PID:        12346
+    Heartbeat:  3s ago
+    Events:     0 processed today
+    SOPs:       0 generated
+    SOP mining: ready
+```
+
+If Extension shows "NOT CONNECTED", go back to step 2.
+
+### 5. Watch it learn (optional)
+
+Open a live dashboard that refreshes every 2 seconds:
+
+```bash
+openmimic watch
+```
+
+Use your computer normally. You'll see event counts climb as OpenMimic observes.
+
+### 6. When do SOPs appear?
+
+SOPs are generated when OpenMimic detects **repeated workflows**:
+
+- **Minimum 2 repetitions** of the same workflow
+- **Minimum 3 steps** per workflow (e.g. click → type → submit)
+- Processing happens **immediately** after events are captured
+
+**Example:** Create a Jira ticket the same way twice. Within seconds of the second time, a SOP file appears:
 
 ```bash
 openmimic sops list          # List generated SOPs
 openmimic sops show <slug>   # View a specific SOP
 openmimic sops dir           # Print SOPs directory path
 ```
+
+SOPs are saved to `~/.openclaw/workspace/memory/apprentice/sops/`.
 
 ### View Logs
 
@@ -114,6 +144,7 @@ openmimic config path         # Print config file path
 | `openmimic logs <service> [-f] [-n N]` | View/follow log files |
 | `openmimic config show\|edit\|path` | Manage configuration |
 | `openmimic sops list\|show\|dir` | View generated SOPs |
+| `openmimic watch` | Live-updating status dashboard |
 | `openmimic doctor` | Run pre-flight checks |
 | `openmimic uninstall [--purge-data]` | Remove OpenMimic |
 
@@ -170,9 +201,9 @@ openmimic logs worker      # Check worker logs
 - Ensure Chrome extension is loaded and enabled
 
 **No SOPs being generated:**
-- SOPs require repeated workflow patterns (at least 3 similar episodes)
+- SOPs require repeated workflow patterns (at least 2 similar episodes with 3+ steps each)
 - Check `openmimic logs worker` for pipeline activity
-- Ensure idle processing window is configured (default: 1:00-5:00 AM)
+- VLM inference runs during idle window (default: 1:00-5:00 AM) — but core pipeline runs immediately
 
 **Extension not connecting:**
 - Verify native messaging host: `openmimic doctor`
@@ -193,7 +224,7 @@ bash /usr/local/lib/openmimic/scripts/uninstall.sh
 
 ## Privacy
 
-- **100% local.** No network egress from any component.
+- **Strictly local.** All VLM inference runs on your machine. The `OPENMIMIC_VLM_BASE_URL` environment variable only accepts localhost URLs (`http://localhost:*`, `http://127.0.0.1:*`, `http://[::1]:*`); remote endpoints are rejected at startup. Preferred backends (MLX, Ollama, llama.cpp) enforce `deny_network_egress`.
 - **Auto-redaction.** API keys, tokens, passwords, and credit card numbers are detected and redacted before storage.
 - **Secure field exclusion.** Password and credit-card input fields are dropped entirely.
 - **Encryption at rest.** Screenshots and artifacts use zstd compression + XChaCha20-Poly1305 encryption.

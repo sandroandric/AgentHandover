@@ -22,6 +22,8 @@ class VLMBackend(str, Enum):
     LLAMA_CPP = "llama-cpp-python" # Cross-platform fallback
     OLLAMA = "ollama"              # Local Ollama server
     OPENAI_COMPAT = "openai-compat"  # OpenAI-compatible API
+    ANTHROPIC = "anthropic"        # Anthropic Claude API
+    GOOGLE_GENAI = "google-genai"  # Google Generative AI API
     MOCK = "mock"                  # For testing
 
 
@@ -45,6 +47,11 @@ class VLMConfig:
     base_url: str | None = None            # API base URL (None = standard OpenAI)
     # ollama specific
     ollama_host: str | None = None         # Ollama server URL (None = localhost:11434)
+    # remote mode fields
+    mode: str = "local"                    # "local" or "remote"
+    provider: str | None = None            # "openai" | "anthropic" | "google"
+    remote_model: str | None = None        # provider-specific model override
+    api_key_env: str | None = None         # env var name holding the key
 
 
 @dataclass
@@ -169,6 +176,12 @@ class VLMWorker:
         elif self.config.backend == VLMBackend.OPENAI_COMPAT:
             from oc_apprentice_worker.backends.openai_compat import OpenAICompatBackend
             return OpenAICompatBackend(self.config)
+        elif self.config.backend == VLMBackend.ANTHROPIC:
+            from oc_apprentice_worker.backends.anthropic import AnthropicBackend
+            return AnthropicBackend(self.config)
+        elif self.config.backend == VLMBackend.GOOGLE_GENAI:
+            from oc_apprentice_worker.backends.google_genai import GoogleGenAIBackend
+            return GoogleGenAIBackend(self.config)
         raise ValueError(f"Unknown backend: {self.config.backend}")
 
     def _check_daily_reset(self) -> None:

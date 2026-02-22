@@ -56,6 +56,71 @@ _DB_RETRY_POLL_SECONDS = 5
 _IDLE_LOG_INTERVAL_SECONDS = 300  # 5 minutes
 
 
+def _read_vlm_config_field(field: str, default: str = "") -> str:
+    """Read a single field from the [vlm] section of config.toml.
+
+    Falls back to *default* if the field or file is missing.
+    """
+    import tomllib
+
+    if _platform.system() == "Darwin":
+        config_path = (
+            Path.home() / "Library" / "Application Support"
+            / "oc-apprentice" / "config.toml"
+        )
+    else:
+        config_path = Path.home() / ".config" / "oc-apprentice" / "config.toml"
+
+    if not config_path.is_file():
+        return default
+
+    try:
+        with open(config_path, "rb") as f:
+            cfg = tomllib.load(f)
+        return str(cfg.get("vlm", {}).get(field, default))
+    except Exception:
+        return default
+
+
+def _read_llm_config() -> dict:
+    """Read the entire [llm] section from config.toml.
+
+    Returns a dict with defaults for missing fields.
+    """
+    import tomllib
+
+    if _platform.system() == "Darwin":
+        config_path = (
+            Path.home() / "Library" / "Application Support"
+            / "oc-apprentice" / "config.toml"
+        )
+    else:
+        config_path = Path.home() / ".config" / "oc-apprentice" / "config.toml"
+
+    defaults = {
+        "enhance_sops": True,
+        "max_enhancements_per_day": 20,
+        "model": "",
+        "timeout_seconds": 60,
+        "temperature": 0.3,
+        "max_tokens": 800,
+    }
+
+    if not config_path.is_file():
+        return defaults
+
+    try:
+        with open(config_path, "rb") as f:
+            cfg = tomllib.load(f)
+        llm = cfg.get("llm", {})
+        for key, default_val in defaults.items():
+            if key in llm:
+                defaults[key] = llm[key]
+        return defaults
+    except Exception:
+        return defaults
+
+
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="oc-apprentice-worker",
@@ -107,6 +172,24 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=False,
         help="Also export SOPs as JSON (used with generic adapter)",
     )
+    parser.add_argument(
+        "--enhance-sops",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Enable/disable LLM-enhanced SOP descriptions (default: from config)",
+    )
+    parser.add_argument(
+        "--llm-model",
+        type=str,
+        default=None,
+        help="Override the LLM model for SOP enhancement",
+    )
+    parser.add_argument(
+        "--max-enhancements-per-day",
+        type=int,
+        default=None,
+        help="Max SOP enhancements per day (default: from config)",
+    )
     return parser.parse_args(argv)
 
 
@@ -126,6 +209,11 @@ def _write_worker_status(
     consecutive_errors: int,
     vlm_available: bool,
     sop_inducer_available: bool,
+    vlm_queue_pending: int = 0,
+    vlm_jobs_today: int = 0,
+    vlm_dropped_today: int = 0,
+    vlm_mode: str | None = None,
+    vlm_provider: str | None = None,
 ) -> None:
     """Atomically write worker-status.json (tmp + fsync + rename)."""
     status = {
@@ -139,7 +227,14 @@ def _write_worker_status(
         "consecutive_errors": consecutive_errors,
         "vlm_available": vlm_available,
         "sop_inducer_available": sop_inducer_available,
+        "vlm_queue_pending": vlm_queue_pending,
+        "vlm_jobs_today": vlm_jobs_today,
+        "vlm_dropped_today": vlm_dropped_today,
     }
+    if vlm_mode:
+        status["vlm_mode"] = vlm_mode
+    if vlm_provider:
+        status["vlm_provider"] = vlm_provider
     sdir = _status_dir()
     sdir.mkdir(parents=True, exist_ok=True)
     target = sdir / "worker-status.json"
@@ -181,6 +276,7 @@ def run_pipeline(
     openclaw_writer: SOPExportAdapter,
     index_generator: IndexGenerator,
     sop_inducer: object | None = None,
+    sop_enhancer: object | None = None,
 ) -> dict:
     """Run the full D->E->F pipeline on a batch of events.
 
@@ -341,6 +437,25 @@ def run_pipeline(
         except Exception:
             logger.exception("SOP induction failed")
 
+    # Step F1.5: Enhance SOPs with LLM-generated descriptions
+    if sop_enhancer is not None and sop_templates:
+        enhanced_count = 0
+        for template in sop_templates:
+            try:
+                enhanced = sop_enhancer.enhance_sop(template)
+                if "task_description" in enhanced:
+                    template.update(enhanced)
+                    enhanced_count += 1
+            except Exception:
+                logger.debug(
+                    "SOP enhancement failed for '%s'",
+                    template.get("slug", "unknown"),
+                    exc_info=True,
+                )
+        if enhanced_count:
+            logger.info("Enhanced %d/%d SOPs with LLM descriptions",
+                        enhanced_count, len(sop_templates))
+
     # Step F2: Format, version, and export SOPs
     if sop_templates:
         try:
@@ -370,6 +485,120 @@ def _run_deep_scan(scanner: DeepScanner, artifacts: list[dict]) -> None:
             )
     except Exception:
         logger.exception("Background deep scan failed")
+
+
+def _persist_vlm_jobs(db: "WorkerDB", vlm_queue: VLMFallbackQueue) -> None:
+    """Persist in-memory VLM queue jobs to the database."""
+    from oc_apprentice_worker.vlm_queue import VLMJobStatus
+
+    persisted = 0
+    for job in vlm_queue._jobs:
+        if job.status == VLMJobStatus.PENDING:
+            ttl_str = (
+                job.ttl_expires_at.strftime("%Y-%m-%dT%H:%M:%SZ")
+                if job.ttl_expires_at
+                else ""
+            )
+            if db.enqueue_vlm_job(
+                job_id=job.job_id,
+                event_id=job.event_id,
+                priority=job.priority_score,
+                ttl_expires_at=ttl_str,
+            ):
+                persisted += 1
+    if persisted:
+        logger.info("Persisted %d VLM jobs to database", persisted)
+
+
+def _process_vlm_jobs(
+    db: "WorkerDB",
+    pending_jobs: list[dict],
+    vlm_worker: object,
+) -> None:
+    """Process pending VLM jobs from the database using the VLM worker.
+
+    For each job:
+    1. Fetch the associated event for context
+    2. Build a VLMRequest with event metadata
+    3. Call vlm_worker.process_job() (not .infer() — that's the backend API)
+    4. Store the result and mark as completed/failed
+    """
+    from oc_apprentice_worker.vlm_worker import VLMRequest
+
+    import json as _json
+
+    for job_row in pending_jobs:
+        job_id = job_row.get("id", "")
+        event_id = job_row.get("event_id", "")
+
+        try:
+            # Fetch the event to get screenshot/DOM context
+            event = db.get_event_by_id(event_id)
+            if event is None:
+                logger.warning("VLM job %s: event %s not found, marking failed", job_id, event_id)
+                db.mark_vlm_job_failed(job_id)
+                continue
+
+            # Parse event metadata for VLMRequest fields
+            kind_json = event.get("kind_json", "{}")
+            window_json = event.get("window_json")
+
+            kind_data = {}
+            try:
+                kind_data = _json.loads(kind_json) if kind_json else {}
+            except (ValueError, TypeError):
+                pass
+
+            window_data = {}
+            try:
+                window_data = _json.loads(window_json) if window_json else {}
+            except (ValueError, TypeError):
+                pass
+
+            # Extract event type from kind data
+            event_type = "unknown"
+            if isinstance(kind_data, dict):
+                # kind_json is an enum variant like {"DwellSnapshot": {...}}
+                event_type = next(iter(kind_data), "unknown")
+
+            # Build VLMRequest with available context
+            request = VLMRequest(
+                job_id=job_id,
+                dom_context=window_json or None,
+                target_description=window_data.get("title", ""),
+                event_type=event_type,
+            )
+
+            # process_job() handles prompt building, injection defense,
+            # budget checks, and backend dispatch
+            response = vlm_worker.process_job(request)  # type: ignore[union-attr]
+
+            if response.success:
+                result_dict = {
+                    "target_description": response.target_description,
+                    "suggested_selector": response.suggested_selector,
+                    "confidence_boost": response.confidence_boost,
+                    "reasoning": response.reasoning,
+                    "inference_time_seconds": response.inference_time_seconds,
+                }
+                db.mark_vlm_job_completed(
+                    job_id, result_json=_json.dumps(result_dict)
+                )
+                logger.info(
+                    "VLM job %s completed (%.1fs, boost=%.2f)",
+                    job_id,
+                    response.inference_time_seconds,
+                    response.confidence_boost,
+                )
+            else:
+                logger.warning(
+                    "VLM job %s rejected: %s", job_id, response.error
+                )
+                db.mark_vlm_job_failed(job_id)
+
+        except Exception:
+            logger.warning("VLM job %s failed", job_id, exc_info=True)
+            db.mark_vlm_job_failed(job_id)
 
 
 def _wait_for_db(db_path: Path, shutdown_flag: list[bool]) -> bool:
@@ -498,37 +727,144 @@ def main(argv: list[str] | None = None) -> None:
     else:
         sop_writer = OpenClawWriter(workspace_dir=args.sops_dir.parent.parent)
 
-    # Check VLM availability and hint if not installed
-    from oc_apprentice_worker.setup_vlm import check_vlm_available
-    vlm_status = check_vlm_available()
+    # VLM initialization — supports local and remote modes
+    from oc_apprentice_worker.vlm_worker import VLMWorker, VLMConfig, VLMBackend
     vlm_worker = None
     vlm_available = False
-    if any(vlm_status.values()):
-        vlm_available = True
-        logger.info("VLM backend available — enhanced native app observation enabled")
-        # Create VLM worker for variable classification
-        # Priority: mlx_vlm > ollama > llama_cpp > openai_compat
-        try:
-            from oc_apprentice_worker.vlm_worker import VLMWorker, VLMConfig, VLMBackend
-            if vlm_status["mlx_vlm"]:
-                backend_type = VLMBackend.MLX_VLM
-            elif vlm_status["ollama"]:
-                backend_type = VLMBackend.OLLAMA
-            elif vlm_status["llama_cpp"]:
-                backend_type = VLMBackend.LLAMA_CPP
-            else:
-                backend_type = VLMBackend.OPENAI_COMPAT
-            vlm_worker = VLMWorker(config=VLMConfig(backend=backend_type))
-            logger.info(
-                "VLM worker initialized (%s) for variable classification",
-                backend_type.value,
-            )
-        except Exception:
-            logger.warning("Failed to initialize VLM worker", exc_info=True)
-    else:
+    vlm_mode_str = _read_vlm_config_field("mode", "local")
+    vlm_provider_str = _read_vlm_config_field("provider", "")
+
+    if vlm_mode_str == "remote" and vlm_provider_str:
+        # --- Remote mode: use cloud API ---
         logger.info(
-            "VLM not installed. For better native app observation, run: oc-setup-vlm"
+            "VLM mode: remote (provider=%s). "
+            "⚠️  Screenshots will be sent to %s cloud API for analysis.",
+            vlm_provider_str,
+            vlm_provider_str,
         )
+        _provider_to_backend = {
+            "openai": VLMBackend.OPENAI_COMPAT,
+            "anthropic": VLMBackend.ANTHROPIC,
+            "google": VLMBackend.GOOGLE_GENAI,
+        }
+        remote_backend = _provider_to_backend.get(vlm_provider_str)
+        if remote_backend is None:
+            logger.error("Unknown VLM provider: %s", vlm_provider_str)
+        else:
+            try:
+                remote_model = _read_vlm_config_field("model", "")
+                api_key_env = _read_vlm_config_field("api_key_env", "")
+                # Resolve the actual API key from the named env var
+                api_key_value = os.environ.get(api_key_env, "") if api_key_env else ""
+                vlm_config = VLMConfig(
+                    backend=remote_backend,
+                    mode="remote",
+                    provider=vlm_provider_str,
+                    remote_model=remote_model or None,
+                    api_key=api_key_value or None,
+                    api_key_env=api_key_env or None,
+                )
+                vlm_worker = VLMWorker(config=vlm_config)
+                vlm_available = True
+                model_display = remote_model or "(default)"
+                logger.info(
+                    "VLM worker initialized: remote/%s/%s",
+                    vlm_provider_str,
+                    model_display,
+                )
+            except Exception:
+                logger.warning("Failed to initialize remote VLM worker", exc_info=True)
+    else:
+        # --- Local mode: existing detection chain ---
+        from oc_apprentice_worker.setup_vlm import check_vlm_available
+        vlm_status = check_vlm_available()
+        if any(vlm_status.values()):
+            logger.info("VLM backend(s) detected — attempting initialization")
+            try:
+                if vlm_status["mlx_vlm"]:
+                    backend_type = VLMBackend.MLX_VLM
+                elif vlm_status["ollama"]:
+                    backend_type = VLMBackend.OLLAMA
+                elif vlm_status["llama_cpp"]:
+                    backend_type = VLMBackend.LLAMA_CPP
+                elif vlm_status.get("openai_compat"):
+                    base_url = os.environ.get("OPENMIMIC_VLM_BASE_URL", "")
+                    _local_prefixes = (
+                        "http://localhost", "http://127.0.0.1",
+                        "https://localhost", "https://127.0.0.1",
+                        "http://[::1]",
+                    )
+                    if base_url and any(base_url.startswith(p) for p in _local_prefixes):
+                        backend_type = VLMBackend.OPENAI_COMPAT
+                    else:
+                        logger.warning(
+                            "OpenAI-compat backend skipped: deny_network_egress is "
+                            "enforced by default. Set OPENMIMIC_VLM_BASE_URL to a "
+                            "local server (e.g. http://localhost:8000) to use it."
+                        )
+                        backend_type = None  # type: ignore[assignment]
+                else:
+                    backend_type = None  # type: ignore[assignment]
+                if backend_type is not None:
+                    vlm_worker = VLMWorker(config=VLMConfig(backend=backend_type))
+                    vlm_available = True
+                    logger.info(
+                        "VLM worker initialized (%s) — enhanced native app observation enabled",
+                        backend_type.value,
+                    )
+                else:
+                    logger.warning(
+                        "VLM backend(s) detected but none usable (check config). "
+                        "VLM features disabled."
+                    )
+            except Exception:
+                logger.warning("Failed to initialize VLM worker", exc_info=True)
+        else:
+            logger.info(
+                "VLM not installed. For better native app observation, run: oc-setup-vlm"
+            )
+
+    # Initialize LLM-enhanced SOP descriptions
+    sop_enhancer = None
+    llm_config = _read_llm_config()
+
+    # CLI args override config
+    if args.enhance_sops is not None:
+        llm_config["enhance_sops"] = args.enhance_sops
+    if args.llm_model is not None:
+        llm_config["model"] = args.llm_model
+    if args.max_enhancements_per_day is not None:
+        llm_config["max_enhancements_per_day"] = args.max_enhancements_per_day
+
+    if llm_config.get("enhance_sops", True):
+        try:
+            from oc_apprentice_worker.sop_enhancer import (
+                SOPEnhancer,
+                create_llm_backend,
+            )
+
+            # Build vlm config dict for create_llm_backend
+            vlm_cfg_dict = {
+                "mode": vlm_mode_str,
+                "provider": vlm_provider_str,
+                "model": _read_vlm_config_field("model", ""),
+                "api_key_env": _read_vlm_config_field("api_key_env", ""),
+            }
+            llm_backend = create_llm_backend(llm_config, vlm_cfg_dict)
+            if llm_backend is not None:
+                sop_enhancer = SOPEnhancer(
+                    backend=llm_backend,
+                    max_enhancements_per_day=int(
+                        llm_config.get("max_enhancements_per_day", 20)
+                    ),
+                )
+                logger.info("SOP enhancement enabled (LLM backend ready)")
+            else:
+                logger.info("SOP enhancement disabled (no LLM backend available)")
+        except Exception:
+            logger.debug("SOP enhancement unavailable", exc_info=True)
+    else:
+        logger.info("SOP enhancement disabled by config")
 
     # Try to import SOPInducer (requires prefixspan)
     sop_inducer = None
@@ -564,6 +900,7 @@ def main(argv: list[str] | None = None) -> None:
     last_idle_log_time = time.monotonic()
 
     # Write initial status file after DB connect
+    _vlm_stats = vlm_queue.get_stats()
     _write_worker_status(
         started_at=started_at,
         events_processed_today=total_events_processed,
@@ -572,6 +909,11 @@ def main(argv: list[str] | None = None) -> None:
         consecutive_errors=0,
         vlm_available=vlm_available,
         sop_inducer_available=sop_inducer_available,
+        vlm_queue_pending=_vlm_stats.pending_jobs,
+        vlm_jobs_today=_vlm_stats.jobs_today,
+        vlm_dropped_today=_vlm_stats.dropped_count,
+        vlm_mode=vlm_mode_str,
+        vlm_provider=vlm_provider_str or None,
     )
 
     with WorkerDB(args.db_path) as db:
@@ -612,16 +954,9 @@ def main(argv: list[str] | None = None) -> None:
                         last_idle_log_time = now_mono
 
                 if unprocessed:
-                    # Check scheduler gate before running heavy pipeline
-                    gate_result = idle_gate.check()
-                    if not gate_result.can_run:
-                        logger.debug(
-                            "Idle gate blocked: %s — deferring pipeline",
-                            gate_result.blockers,
-                        )
-                        time.sleep(current_interval)
-                        continue
-
+                    # Core pipeline ALWAYS runs — episodes, translation,
+                    # SOP mining, and export happen immediately so users
+                    # see SOPs as soon as patterns are detected.
                     pipeline_start = time.monotonic()
                     summary = run_pipeline(
                         unprocessed,
@@ -634,6 +969,7 @@ def main(argv: list[str] | None = None) -> None:
                         openclaw_writer=sop_writer,
                         index_generator=index_generator,
                         sop_inducer=sop_inducer,
+                        sop_enhancer=sop_enhancer,
                     )
                     pipeline_elapsed_ms = int((time.monotonic() - pipeline_start) * 1000)
                     last_pipeline_duration_ms = pipeline_elapsed_ms
@@ -662,31 +998,55 @@ def main(argv: list[str] | None = None) -> None:
                     if event_ids:
                         db.mark_events_processed(event_ids)
 
-                    # Run Tier 2 deep scan in background thread (non-blocking)
-                    text_artifacts = []
-                    for ev in unprocessed:
-                        window_json = ev.get("window_json")
-                        if window_json:
-                            text_artifacts.append({
-                                "id": ev.get("id", "unknown"),
-                                "text": window_json,
-                            })
-                        metadata_json = ev.get("metadata_json")
-                        if metadata_json:
-                            text_artifacts.append({
-                                "id": ev.get("id", "unknown"),
-                                "text": metadata_json,
-                            })
-
-                    if text_artifacts:
-                        deep_scan_pool.submit(
-                            _run_deep_scan, deep_scanner, text_artifacts
-                        )
+                    # Persist in-memory VLM queue jobs to the DB so they survive restarts
+                    if summary["vlm_enqueued"] > 0:
+                        _persist_vlm_jobs(db, vlm_queue)
 
                     # Reset consecutive error counter after successful processing
                     consecutive_errors = 0
 
-                # Write status file after each cycle (heartbeat)
+                    # --- Heavy jobs gated behind idle window ---
+                    # VLM inference and deep privacy scans are CPU/GPU
+                    # intensive and deferred to the idle window
+                    # (default 01:00-05:00, AC power, low CPU).
+                    gate_result = idle_gate.check()
+                    if gate_result.can_run:
+                        # Run Tier 2 deep scan in background (non-blocking)
+                        text_artifacts = []
+                        for ev in unprocessed:
+                            window_json = ev.get("window_json")
+                            if window_json:
+                                text_artifacts.append({
+                                    "id": ev.get("id", "unknown"),
+                                    "text": window_json,
+                                })
+                            metadata_json = ev.get("metadata_json")
+                            if metadata_json:
+                                text_artifacts.append({
+                                    "id": ev.get("id", "unknown"),
+                                    "text": metadata_json,
+                                })
+
+                        if text_artifacts:
+                            deep_scan_pool.submit(
+                                _run_deep_scan, deep_scanner, text_artifacts
+                            )
+
+                # Process pending VLM jobs only in idle window
+                if pending_vlm and vlm_worker is not None:
+                    gate_result = idle_gate.check()
+                    if gate_result.can_run:
+                        _process_vlm_jobs(db, pending_vlm, vlm_worker)
+
+                # Write status file after each cycle (heartbeat).
+                # Use authoritative DB count for pending VLM jobs (the
+                # in-memory queue only tracks enqueue-side stats; DB-side
+                # completions from _process_vlm_jobs are not reflected).
+                _vlm_stats = vlm_queue.get_stats()
+                try:
+                    db_vlm_pending = db.count_pending_vlm_jobs()
+                except Exception:
+                    db_vlm_pending = _vlm_stats.pending_jobs
                 _write_worker_status(
                     started_at=started_at,
                     events_processed_today=total_events_processed,
@@ -695,6 +1055,11 @@ def main(argv: list[str] | None = None) -> None:
                     consecutive_errors=consecutive_errors,
                     vlm_available=vlm_available,
                     sop_inducer_available=sop_inducer_available,
+                    vlm_queue_pending=db_vlm_pending,
+                    vlm_jobs_today=_vlm_stats.jobs_today,
+                    vlm_dropped_today=_vlm_stats.dropped_count,
+                    vlm_mode=vlm_mode_str,
+                    vlm_provider=vlm_provider_str or None,
                 )
 
             except Exception:

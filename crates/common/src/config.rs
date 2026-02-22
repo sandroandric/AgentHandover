@@ -16,6 +16,8 @@ pub struct AppConfig {
     #[serde(default)]
     pub vlm: VlmConfig,
     #[serde(default)]
+    pub llm: LlmConfig,
+    #[serde(default)]
     pub openclaw: OpenClawConfig,
     #[serde(default)]
     pub export: ExportConfig,
@@ -70,6 +72,63 @@ pub struct VlmConfig {
     pub max_queue_size: u32,
     pub job_ttl_days: u32,
     pub max_compute_minutes_per_day: u32,
+    /// VLM mode: "local" (default) or "remote" (cloud API).
+    #[serde(default = "default_vlm_mode")]
+    pub mode: String,
+    /// Remote provider: "openai" | "anthropic" | "google".
+    #[serde(default)]
+    pub provider: Option<String>,
+    /// Provider-specific model name override.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Environment variable name holding the API key (NEVER store keys directly!).
+    #[serde(default)]
+    pub api_key_env: Option<String>,
+}
+
+fn default_vlm_mode() -> String {
+    "local".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LlmConfig {
+    /// Enable LLM-enhanced SOP descriptions.
+    #[serde(default = "default_llm_enhance_sops")]
+    pub enhance_sops: bool,
+    /// Maximum SOP enhancements per day.
+    #[serde(default = "default_llm_max_enhancements")]
+    pub max_enhancements_per_day: u32,
+    /// Model override (empty = inherit from VLM config).
+    #[serde(default)]
+    pub model: String,
+    /// Timeout for LLM inference in seconds.
+    #[serde(default = "default_llm_timeout")]
+    pub timeout_seconds: u32,
+    /// Temperature for LLM inference.
+    #[serde(default = "default_llm_temperature")]
+    pub temperature: f64,
+    /// Max tokens for LLM response.
+    #[serde(default = "default_llm_max_tokens")]
+    pub max_tokens: u32,
+}
+
+fn default_llm_enhance_sops() -> bool { true }
+fn default_llm_max_enhancements() -> u32 { 20 }
+fn default_llm_timeout() -> u32 { 60 }
+fn default_llm_temperature() -> f64 { 0.3 }
+fn default_llm_max_tokens() -> u32 { 800 }
+
+impl Default for LlmConfig {
+    fn default() -> Self {
+        Self {
+            enhance_sops: default_llm_enhance_sops(),
+            max_enhancements_per_day: default_llm_max_enhancements(),
+            model: String::new(),
+            timeout_seconds: default_llm_timeout(),
+            temperature: default_llm_temperature(),
+            max_tokens: default_llm_max_tokens(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -99,6 +158,7 @@ impl Default for AppConfig {
             storage: StorageConfig::default(),
             idle_jobs: IdleJobsConfig::default(),
             vlm: VlmConfig::default(),
+            llm: LlmConfig::default(),
             openclaw: OpenClawConfig::default(),
             export: ExportConfig::default(),
         }
@@ -170,6 +230,10 @@ impl Default for VlmConfig {
             max_queue_size: 500,
             job_ttl_days: 7,
             max_compute_minutes_per_day: 20,
+            mode: default_vlm_mode(),
+            provider: None,
+            model: None,
+            api_key_env: None,
         }
     }
 }

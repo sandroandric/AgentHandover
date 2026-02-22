@@ -15,6 +15,9 @@ vlm-apple = ["mlx-vlm>=0.1"]
 vlm-cpu = ["llama-cpp-python>=0.2"]
 vlm-ollama = ["ollama>=0.3"]
 vlm-openai = ["openai>=1.0"]
+vlm-anthropic = ["anthropic>=0.39"]
+vlm-google = ["google-genai>=1.0"]
+vlm-remote = ["openai>=1.0", "anthropic>=0.39", "google-genai>=1.0"]
 vlm = [
     "mlx-vlm>=0.1; platform_machine == 'arm64' and sys_platform == 'darwin'",
     "llama-cpp-python>=0.2; platform_machine != 'arm64' or sys_platform != 'darwin'",
@@ -24,6 +27,8 @@ vlm-all = [
     "llama-cpp-python>=0.2",
     "ollama>=0.3",
     "openai>=1.0",
+    "anthropic>=0.39",
+    "google-genai>=1.0",
 ]
 
 [project.scripts]

@@ -39,6 +39,15 @@ struct DaemonStatusFile: Codable {
     let screen_recording_permitted: Bool
     let db_path: String
     let uptime_seconds: UInt64
+    let last_extension_message: String?
+}
+
+/// Decoded extension-heartbeat.json
+struct ExtensionHeartbeatFile: Codable {
+    let pid: UInt32
+    let last_message: String
+    let messages_this_session: UInt64
+    let session_started: String
 }
 
 /// Decoded worker-status.json
@@ -53,6 +62,11 @@ struct WorkerStatusFile: Codable {
     let consecutive_errors: UInt32
     let vlm_available: Bool
     let sop_inducer_available: Bool
+    let vlm_queue_pending: UInt64?
+    let vlm_jobs_today: UInt64?
+    let vlm_dropped_today: UInt64?
+    let vlm_mode: String?
+    let vlm_provider: String?
 }
 
 @MainActor
@@ -61,14 +75,21 @@ final class AppState: ObservableObject {
 
     @Published var daemonStatus: DaemonStatusFile?
     @Published var workerStatus: WorkerStatusFile?
+    @Published var extensionHeartbeat: ExtensionHeartbeatFile?
     @Published var daemonRunning = false
     @Published var workerRunning = false
+    @Published var extensionConnected = false
     @Published var health: ServiceHealth = .down
     @Published var userStopped = false
 
     // Permissions
     @Published var accessibilityGranted = false
     @Published var screenRecordingGranted = false
+
+    // VLM
+    @Published var vlmAvailable = false
+    @Published var vlmMode: String = "local"
+    @Published var vlmProvider: String?
 
     // MARK: - Computed
 
@@ -95,6 +116,15 @@ final class AppState: ObservableObject {
 
     var workerVersion: String {
         workerStatus?.version ?? "unknown"
+    }
+
+    var vlmQueuePending: UInt64 {
+        workerStatus?.vlm_queue_pending ?? 0
+    }
+
+    /// True when VLM queue has significant backlog (>50 pending jobs).
+    var vlmBacklogged: Bool {
+        vlmQueuePending > 50
     }
 
     // MARK: - Polling
@@ -130,8 +160,10 @@ final class AppState: ObservableObject {
     func refreshStatus() {
         readDaemonStatus()
         readWorkerStatus()
+        readExtensionHeartbeat()
         updateHealth()
         checkPermissions()
+        updateVLMStatus()
     }
 
     private func readDaemonStatus() {
@@ -160,6 +192,60 @@ final class AppState: ObservableObject {
         workerRunning = isHeartbeatFresh(status.heartbeat) && isProcessRunning(pid: status.pid)
     }
 
+    private func readExtensionHeartbeat() {
+        let path = statusDir.appendingPathComponent("extension-heartbeat.json")
+        guard let data = try? Data(contentsOf: path),
+              let heartbeat = try? JSONDecoder().decode(ExtensionHeartbeatFile.self, from: data) else {
+            extensionHeartbeat = nil
+            // Fall back to daemon's last_extension_message
+            if let daemonExt = daemonStatus?.last_extension_message {
+                extensionConnected = isHeartbeatFresh(daemonExt)
+            } else {
+                extensionConnected = false
+            }
+            return
+        }
+
+        extensionHeartbeat = heartbeat
+        extensionConnected = isHeartbeatFresh(heartbeat.last_message)
+    }
+
+    private func updateVLMStatus() {
+        vlmAvailable = workerStatus?.vlm_available ?? false
+        // Read vlm mode from config.toml
+        readVLMConfig()
+    }
+
+    private func readVLMConfig() {
+        let configPath = statusDir.appendingPathComponent("config.toml")
+        guard let content = try? String(contentsOf: configPath, encoding: .utf8) else {
+            return
+        }
+        // Simple TOML parsing for vlm section
+        var inVlmSection = false
+        for line in content.components(separatedBy: "\n") {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("[") {
+                inVlmSection = trimmed == "[vlm]"
+                continue
+            }
+            if inVlmSection {
+                if trimmed.hasPrefix("mode") {
+                    let value = trimmed.components(separatedBy: "=").last?
+                        .trimmingCharacters(in: .whitespaces)
+                        .trimmingCharacters(in: CharacterSet(charactersIn: "\"")) ?? "local"
+                    vlmMode = value
+                }
+                if trimmed.hasPrefix("provider") {
+                    let value = trimmed.components(separatedBy: "=").last?
+                        .trimmingCharacters(in: .whitespaces)
+                        .trimmingCharacters(in: CharacterSet(charactersIn: "\""))
+                    vlmProvider = value
+                }
+            }
+        }
+    }
+
     private func updateHealth() {
         if userStopped {
             health = .stopped
@@ -174,6 +260,7 @@ final class AppState: ObservableObject {
         let hasWarnings = !(daemonStatus?.permissions_ok ?? true)
             || (workerStatus?.consecutive_errors ?? 0) > 0
             || !daemonRunning || !workerRunning
+            || vlmBacklogged
 
         health = hasWarnings ? .warning : .healthy
     }

@@ -2,6 +2,8 @@ pub mod config;
 pub mod doctor;
 pub mod logs;
 pub mod service;
+pub mod setup;
 pub mod sops;
 pub mod status;
 pub mod uninstall;
+pub mod watch;

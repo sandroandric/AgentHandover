@@ -2,6 +2,8 @@ import SwiftUI
 
 struct MenuBarView: View {
     @EnvironmentObject var appState: AppState
+    @EnvironmentObject var delegate: AppDelegate
+    @AppStorage("hasCompletedOnboarding") private var hasCompletedOnboarding = false
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
@@ -35,6 +37,19 @@ struct MenuBarView: View {
             .padding(.vertical, 8)
         }
         .frame(width: 300)
+        .onChange(of: delegate.pendingOnboarding) { pending in
+            if pending {
+                delegate.pendingOnboarding = false
+                openWindow(id: "onboarding")
+            }
+        }
+        .onAppear {
+            // Also check on first appear (when user clicks menu bar icon)
+            if !hasCompletedOnboarding && delegate.pendingOnboarding {
+                delegate.pendingOnboarding = false
+                openWindow(id: "onboarding")
+            }
+        }
     }
 
     // MARK: - Sections
@@ -68,6 +83,19 @@ struct MenuBarView: View {
             StatRow(label: "Events Today", value: "\(appState.eventsToday)")
             StatRow(label: "SOPs Generated", value: "\(appState.sopsGenerated)")
 
+            // VLM queue status (only shown when VLM is available)
+            if appState.workerStatus?.vlm_available == true {
+                let pending = appState.vlmQueuePending
+                if pending > 0 {
+                    StatRow(
+                        label: "VLM Queue",
+                        value: appState.vlmBacklogged
+                            ? "\(pending) pending ⚠️"
+                            : "\(pending) pending"
+                    )
+                }
+            }
+
             HStack(spacing: 12) {
                 ServicePill(
                     name: "Daemon",
@@ -76,6 +104,10 @@ struct MenuBarView: View {
                 ServicePill(
                     name: "Worker",
                     running: appState.workerRunning
+                )
+                ServicePill(
+                    name: "Extension",
+                    running: appState.extensionConnected
                 )
             }
         }
@@ -151,12 +183,34 @@ struct MenuBarView: View {
             .padding(.horizontal, 16)
             .padding(.vertical, 6)
 
-            // Permissions / Setup
-            if !appState.accessibilityGranted || !appState.screenRecordingGranted {
+            // Setup / Permissions / Extension CTA
+            if !hasCompletedOnboarding {
+                Button(action: {
+                    openWindow(id: "onboarding")
+                }) {
+                    Label("Complete Setup", systemImage: "sparkles")
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .foregroundColor(.blue)
+                }
+                .buttonStyle(.plain)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 6)
+            } else if !appState.accessibilityGranted || !appState.screenRecordingGranted {
                 Button(action: {
                     openWindow(id: "onboarding")
                 }) {
                     Label("Fix Permissions", systemImage: "exclamationmark.shield")
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .foregroundColor(.orange)
+                }
+                .buttonStyle(.plain)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 6)
+            } else if !appState.extensionConnected {
+                Button(action: {
+                    openWindow(id: "onboarding")
+                }) {
+                    Label("Connect Extension", systemImage: "puzzlepiece.extension")
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .foregroundColor(.orange)
                 }

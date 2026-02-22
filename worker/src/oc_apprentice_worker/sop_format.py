@@ -64,6 +64,24 @@ class SOPFormatter:
         lines.append(f"# {title}")
         lines.append("")
 
+        # Task Description section (LLM-generated) if present
+        task_description = sop.get("task_description")
+        if task_description:
+            lines.append("## Task Description")
+            lines.append("")
+            lines.append(task_description)
+            lines.append("")
+
+        # Execution Overview section (LLM-generated) if present
+        execution_overview = sop.get("execution_overview")
+        if isinstance(execution_overview, dict) and execution_overview:
+            lines.append("## Execution Overview")
+            lines.append("")
+            for key, value in execution_overview.items():
+                label = key.replace("_", " ").title()
+                lines.append(f"- **{label}**: {value}")
+            lines.append("")
+
         # Variables section if present
         if variables:
             lines.append("## Input Variables")
@@ -152,6 +170,15 @@ class SOPFormatter:
             "exceptions_seen": sop.get("exceptions_seen", []),
             "tags": sop.get("tags", []),
         }
+
+        # Add LLM-enhanced fields when present
+        task_description = sop.get("task_description")
+        if task_description:
+            frontmatter["task_description"] = task_description
+
+        execution_overview = sop.get("execution_overview")
+        if isinstance(execution_overview, dict) and execution_overview:
+            frontmatter["execution_overview"] = execution_overview
 
         return frontmatter
 

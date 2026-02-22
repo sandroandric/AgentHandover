@@ -13,7 +13,10 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-SOP_SCHEMA_VERSION = "1.0.0"
+SOP_SCHEMA_VERSION = "1.1.0"
+
+# Accepted schema versions for backward compatibility
+_ACCEPTED_VERSIONS = frozenset(("1.0.0", "1.1.0"))
 
 _GENERATOR = "openmimic"
 _GENERATOR_VERSION = "0.1.0"
@@ -91,7 +94,7 @@ def sop_to_json(sop_template: dict) -> dict:
             entry["choices"] = var["choices"]
         json_variables.append(entry)
 
-    return {
+    result: dict = {
         "schema_version": SOP_SCHEMA_VERSION,
         "slug": sop_template.get("slug", "unknown"),
         "title": sop_template.get("title", "Untitled"),
@@ -114,6 +117,17 @@ def sop_to_json(sop_template: dict) -> dict:
         },
     }
 
+    # Add LLM-enhanced fields when present (schema 1.1.0)
+    task_description = sop_template.get("task_description")
+    if task_description:
+        result["task_description"] = task_description
+
+    execution_overview = sop_template.get("execution_overview")
+    if isinstance(execution_overview, dict) and execution_overview:
+        result["execution_overview"] = execution_overview
+
+    return result
+
 
 def validate_sop_json(data: dict) -> list[str]:
     """Validate a SOP JSON dict against the schema.
@@ -130,11 +144,11 @@ def validate_sop_json(data: dict) -> list[str]:
         if field not in data:
             errors.append(f"Missing required field: {field}")
 
-    # Schema version check
-    if "schema_version" in data and data["schema_version"] != SOP_SCHEMA_VERSION:
+    # Schema version check — accept all versions in _ACCEPTED_VERSIONS
+    if "schema_version" in data and data["schema_version"] not in _ACCEPTED_VERSIONS:
         errors.append(
             f"Unsupported schema version: {data['schema_version']} "
-            f"(expected {SOP_SCHEMA_VERSION})"
+            f"(expected one of {sorted(_ACCEPTED_VERSIONS)})"
         )
 
     # Steps must be a list of dicts with required sub-fields
@@ -176,5 +190,20 @@ def validate_sop_json(data: dict) -> list[str]:
                 f"Invalid confidence_summary: {data['confidence_summary']!r} "
                 f"(expected one of {sorted(_CONFIDENCE_LABELS)})"
             )
+
+    # LLM-enhanced optional fields (schema 1.1.0)
+    if "task_description" in data:
+        if not isinstance(data["task_description"], str):
+            errors.append("Field 'task_description' must be a string")
+
+    if "execution_overview" in data:
+        if not isinstance(data["execution_overview"], dict):
+            errors.append("Field 'execution_overview' must be a dict")
+        else:
+            for key, val in data["execution_overview"].items():
+                if not isinstance(val, str):
+                    errors.append(
+                        f"execution_overview['{key}'] must be a string"
+                    )
 
     return errors

@@ -2,6 +2,8 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 mod commands;
+mod display;
+mod paths;
 
 #[derive(Parser)]
 #[command(name = "openmimic", version, about = "OpenMimic CLI — manage the apprentice system")]
@@ -53,6 +55,20 @@ enum Commands {
     Sops {
         #[command(subcommand)]
         action: SopsAction,
+    },
+    /// Live-updating status dashboard (refreshes every 2s)
+    Watch,
+    /// Interactive setup wizard
+    Setup {
+        /// Check status only, don't modify anything
+        #[arg(long)]
+        check: bool,
+        /// Set up Chrome extension only
+        #[arg(long)]
+        extension: bool,
+        /// Set up VLM only
+        #[arg(long)]
+        vlm: bool,
     },
     /// Run pre-flight checks
     Doctor,
@@ -106,6 +122,8 @@ fn main() -> Result<()> {
             SopsAction::Show { slug } => commands::sops::show(&slug),
             SopsAction::Dir => commands::sops::dir(),
         },
+        Commands::Watch => commands::watch::run(),
+        Commands::Setup { check, extension, vlm } => commands::setup::run(check, extension, vlm),
         Commands::Doctor => commands::doctor::run(),
         Commands::Uninstall { purge_data } => commands::uninstall::run(purge_data),
     }

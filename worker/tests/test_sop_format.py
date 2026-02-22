@@ -279,3 +279,157 @@ class TestMissingFileNotEdited:
         was_edited, reason = formatter.detect_manual_edit(str(filepath))
         assert was_edited is False
         assert reason == "no_hash_in_frontmatter"
+
+
+# ---------------------------------------------------------------------------
+# LLM-enhanced fields in body and frontmatter
+# ---------------------------------------------------------------------------
+
+
+class TestTaskDescriptionInBody:
+    """Task description section appears in formatted body."""
+
+    def test_task_description_in_body(self):
+        formatter = SOPFormatter()
+        template = _sample_sop_template()
+        template["task_description"] = "This workflow automates form submission."
+        result = formatter.format_sop(template)
+        _, body = formatter._extract_frontmatter_and_body(result)
+        assert "## Task Description" in body
+        assert "This workflow automates form submission." in body
+
+    def test_task_description_before_steps(self):
+        formatter = SOPFormatter()
+        template = _sample_sop_template()
+        template["task_description"] = "Automates form submission."
+        result = formatter.format_sop(template)
+        _, body = formatter._extract_frontmatter_and_body(result)
+        desc_pos = body.index("## Task Description")
+        steps_pos = body.index("## Steps")
+        assert desc_pos < steps_pos
+
+    def test_no_task_description_section_when_absent(self):
+        formatter = SOPFormatter()
+        template = _sample_sop_template()
+        result = formatter.format_sop(template)
+        _, body = formatter._extract_frontmatter_and_body(result)
+        assert "## Task Description" not in body
+
+    def test_task_description_in_frontmatter(self):
+        formatter = SOPFormatter()
+        template = _sample_sop_template()
+        template["task_description"] = "Form submission workflow."
+        result = formatter.format_sop(template)
+        fm, _ = formatter._extract_frontmatter_and_body(result)
+        assert fm["task_description"] == "Form submission workflow."
+
+    def test_task_description_absent_from_frontmatter_when_not_set(self):
+        formatter = SOPFormatter()
+        template = _sample_sop_template()
+        result = formatter.format_sop(template)
+        fm, _ = formatter._extract_frontmatter_and_body(result)
+        assert "task_description" not in fm
+
+
+class TestExecutionOverviewInBody:
+    """Execution overview section appears in formatted body."""
+
+    def test_execution_overview_in_body(self):
+        formatter = SOPFormatter()
+        template = _sample_sop_template()
+        template["execution_overview"] = {
+            "goal": "Submit contact form",
+            "typical_duration": "30 seconds",
+        }
+        result = formatter.format_sop(template)
+        _, body = formatter._extract_frontmatter_and_body(result)
+        assert "## Execution Overview" in body
+        assert "**Goal**: Submit contact form" in body
+        assert "**Typical Duration**: 30 seconds" in body
+
+    def test_execution_overview_before_steps(self):
+        formatter = SOPFormatter()
+        template = _sample_sop_template()
+        template["execution_overview"] = {"goal": "Test"}
+        result = formatter.format_sop(template)
+        _, body = formatter._extract_frontmatter_and_body(result)
+        overview_pos = body.index("## Execution Overview")
+        steps_pos = body.index("## Steps")
+        assert overview_pos < steps_pos
+
+    def test_no_execution_overview_section_when_absent(self):
+        formatter = SOPFormatter()
+        template = _sample_sop_template()
+        result = formatter.format_sop(template)
+        _, body = formatter._extract_frontmatter_and_body(result)
+        assert "## Execution Overview" not in body
+
+    def test_execution_overview_in_frontmatter(self):
+        formatter = SOPFormatter()
+        template = _sample_sop_template()
+        template["execution_overview"] = {
+            "goal": "Submit form",
+            "prerequisites": "Browser open",
+        }
+        result = formatter.format_sop(template)
+        fm, _ = formatter._extract_frontmatter_and_body(result)
+        assert fm["execution_overview"]["goal"] == "Submit form"
+        assert fm["execution_overview"]["prerequisites"] == "Browser open"
+
+    def test_execution_overview_absent_from_frontmatter_when_not_set(self):
+        formatter = SOPFormatter()
+        template = _sample_sop_template()
+        result = formatter.format_sop(template)
+        fm, _ = formatter._extract_frontmatter_and_body(result)
+        assert "execution_overview" not in fm
+
+    def test_empty_execution_overview_not_in_body(self):
+        formatter = SOPFormatter()
+        template = _sample_sop_template()
+        template["execution_overview"] = {}
+        result = formatter.format_sop(template)
+        _, body = formatter._extract_frontmatter_and_body(result)
+        assert "## Execution Overview" not in body
+
+    def test_non_dict_execution_overview_not_in_body(self):
+        formatter = SOPFormatter()
+        template = _sample_sop_template()
+        template["execution_overview"] = "not a dict"
+        result = formatter.format_sop(template)
+        _, body = formatter._extract_frontmatter_and_body(result)
+        assert "## Execution Overview" not in body
+
+
+class TestBothEnhancedFieldsTogether:
+    """Both task_description and execution_overview together."""
+
+    def test_both_sections_present(self):
+        formatter = SOPFormatter()
+        template = _sample_sop_template()
+        template["task_description"] = "Automates form submission."
+        template["execution_overview"] = {
+            "goal": "Submit the form",
+            "success_criteria": "Confirmation page shown",
+        }
+        result = formatter.format_sop(template)
+        _, body = formatter._extract_frontmatter_and_body(result)
+
+        assert "## Task Description" in body
+        assert "## Execution Overview" in body
+        assert "## Steps" in body
+
+        # Order: title > task desc > overview > steps
+        desc_pos = body.index("## Task Description")
+        overview_pos = body.index("## Execution Overview")
+        steps_pos = body.index("## Steps")
+        assert desc_pos < overview_pos < steps_pos
+
+    def test_both_in_frontmatter(self):
+        formatter = SOPFormatter()
+        template = _sample_sop_template()
+        template["task_description"] = "Automates form submission."
+        template["execution_overview"] = {"goal": "Submit form"}
+        result = formatter.format_sop(template)
+        fm, _ = formatter._extract_frontmatter_and_body(result)
+        assert "task_description" in fm
+        assert "execution_overview" in fm

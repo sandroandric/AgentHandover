@@ -16,10 +16,22 @@ LIB_DIR="/usr/local/lib/openmimic"
 mkdir -p "${DATA_DIR}/logs"
 mkdir -p "${DATA_DIR}/artifacts"
 
-# Copy launchd plists to LaunchAgents
+# Write launchd plists with user-specific log paths
+# (cannot use static plists because log paths need the real user's home)
 mkdir -p "${LAUNCH_AGENTS}"
+LOG_DIR="${DATA_DIR}/logs"
+
 cp "${LIB_DIR}/launchd/com.openmimic.daemon.plist" "${LAUNCH_AGENTS}/"
+sed -i '' \
+    -e "s|/tmp/com.openmimic.daemon.stdout.log|${LOG_DIR}/daemon.stdout.log|" \
+    -e "s|/tmp/com.openmimic.daemon.stderr.log|${LOG_DIR}/daemon.stderr.log|" \
+    "${LAUNCH_AGENTS}/com.openmimic.daemon.plist"
+
 cp "${LIB_DIR}/launchd/com.openmimic.worker.plist" "${LAUNCH_AGENTS}/"
+sed -i '' \
+    -e "s|/tmp/com.openmimic.worker.stdout.log|${LOG_DIR}/worker.stdout.log|" \
+    -e "s|/tmp/com.openmimic.worker.stderr.log|${LOG_DIR}/worker.stderr.log|" \
+    "${LAUNCH_AGENTS}/com.openmimic.worker.plist"
 
 # Create default config if none exists
 if [ ! -f "${DATA_DIR}/config.toml" ]; then
@@ -56,6 +68,7 @@ cat > "${NM_DIR}/com.openclaw.apprentice.json" << JSON
     "description": "OpenMimic native messaging host",
     "path": "/usr/local/bin/oc-apprentice-daemon",
     "type": "stdio",
+    "args": ["--native-messaging"],
     "allowed_origins": [
         "chrome-extension://knldjmfmopnpolahpmmgbagdohdnhkik/"
     ]
@@ -74,7 +87,7 @@ chmod 755 /usr/local/bin/openmimic
 
 # Chrome extension setup
 EXT_DIR="${LIB_DIR}/extension"
-if [ -d "${EXT_DIR}/dist" ]; then
+if [ -f "${EXT_DIR}/manifest.json" ] && [ -f "${EXT_DIR}/background.js" ]; then
     echo "Chrome extension pre-built and ready."
     echo "  Load it in Chrome: chrome://extensions -> Load unpacked -> ${EXT_DIR}"
 elif [ -d "${EXT_DIR}/src" ]; then

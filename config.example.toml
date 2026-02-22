@@ -1,7 +1,7 @@
 # config.example.toml — OpenMimic Apprentice configuration
 # Copy to the OS-appropriate location:
 #   macOS:   ~/Library/Application Support/oc-apprentice/config.toml
-#   Linux:   $XDG_CONFIG_HOME/openclaw-apprentice/config.toml
+#   Linux:   ~/.config/oc-apprentice/config.toml
 
 [observer]
 t_dwell_seconds = 3
@@ -53,6 +53,19 @@ max_compute_minutes_per_day = 20
 # --- openai-compat specific ---
 # api_key = ""                 # or set OPENMIMIC_API_KEY / OPENAI_API_KEY env var
 # base_url = ""                # for local providers (vLLM, LM Studio, etc.)
+# --- remote mode (cloud APIs) ---
+# mode = "local"               # "local" (default) or "remote" (cloud API)
+# provider = "openai"          # "openai" | "anthropic" | "google"
+# model = "gpt-4o-mini"        # provider-specific model name
+# api_key_env = "OPENAI_API_KEY"  # env var name (NEVER store keys directly!)
+
+[llm]
+enhance_sops = true
+max_enhancements_per_day = 20
+# model = "llama3.2:3b"        # lighter text model for local; empty = inherit from vlm
+# timeout_seconds = 60
+# temperature = 0.3
+# max_tokens = 800
 
 [openclaw]
 workspace_path = "~/.openclaw/workspace"

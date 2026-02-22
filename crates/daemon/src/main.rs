@@ -2,7 +2,7 @@ use anyhow::Result;
 use chrono::Timelike;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use tokio::sync::{mpsc, watch};
 use tracing::{info, warn, error};
 use tracing_subscriber::EnvFilter;
@@ -15,8 +15,43 @@ use oc_apprentice_daemon::observer::event_loop::{
 };
 use oc_apprentice_daemon::observer::health::HealthWatcher;
 
+/// Check if this process was launched by Chrome Native Messaging.
+///
+/// Chrome NM launches the host binary with stdin connected to a pipe (not a
+/// terminal and not /dev/null).  The launchd-managed daemon has stdin pointing
+/// to /dev/null.  We detect this by checking if stdin is *not* a tty and if
+/// the `--native-messaging` flag was passed (Chrome doesn't pass it, but we
+/// add it to the NM manifest to be explicit), OR if stdin is a pipe.
+fn is_native_messaging_mode() -> bool {
+    // Explicit flag check first
+    let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|a| a == "--native-messaging") {
+        return true;
+    }
+    // Auto-detect: check if stdin is a pipe (Chrome NM mode)
+    // When launched by launchd, stdin is /dev/null (not a pipe)
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        unsafe {
+            let fd = std::io::stdin().as_raw_fd();
+            let mut stat: libc::stat = std::mem::zeroed();
+            if libc::fstat(fd, &mut stat) == 0 {
+                // S_IFIFO = pipe/FIFO
+                return (stat.st_mode & libc::S_IFMT) == libc::S_IFIFO;
+            }
+        }
+    }
+    false
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
+    // If launched by Chrome NM, run in lightweight NM-only mode
+    if is_native_messaging_mode() {
+        return run_native_messaging_bridge().await;
+    }
+
     let log_dir = {
         let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
         if cfg!(target_os = "macos") {
@@ -50,6 +85,10 @@ async fn main() -> Result<()> {
 
     // Shared event counter — incremented by storage writer, read by health watcher
     let event_counter = Arc::new(AtomicU64::new(0));
+
+    // Timestamp (epoch millis) of the last Chrome extension NM message.
+    // 0 = no message received yet.  Updated by the NM forwarder task.
+    let last_nm_message_epoch_ms = Arc::new(AtomicI64::new(0));
 
     // Load AppConfig from standard config file location, fall back to defaults
     let app_config = {
@@ -132,14 +171,18 @@ async fn main() -> Result<()> {
 
     // Spawn native messaging server (Chrome extension bridge)
     let native_tx = tx.clone();
+    let nm_ts_clone = Arc::clone(&last_nm_message_epoch_ms);
     let native_handle = tokio::spawn(async move {
         // Create a channel to receive events from the native messaging server
         let (nm_event_tx, mut nm_event_rx) = mpsc::channel(256);
 
         // Spawn the forwarder that bridges Event -> ObserverMessage
         let forwarder_tx = native_tx;
+        let nm_ts = nm_ts_clone;
         let forwarder_handle = tokio::spawn(async move {
             while let Some(event) = nm_event_rx.recv().await {
+                // Track last NM message timestamp for extension-connected detection
+                nm_ts.store(chrono::Utc::now().timestamp_millis(), Ordering::Relaxed);
                 match forwarder_tx.try_send(ObserverMessage::Event(event)) {
                     Ok(()) => {}
                     Err(mpsc::error::TrySendError::Full(_)) => {
@@ -167,6 +210,7 @@ async fn main() -> Result<()> {
     let health_db_path = db_path.clone();
     let health_start_time = start_time;
     let health_event_counter = Arc::clone(&event_counter);
+    let health_nm_ts = Arc::clone(&last_nm_message_epoch_ms);
     let health_handle = tokio::spawn(async move {
         let artifact_dir = health_db_path.parent()
             .map(|p| p.join("artifacts"))
@@ -193,6 +237,18 @@ async fn main() -> Result<()> {
 
                     // Write daemon status file for external consumers (CLI, menu bar app)
                     let now = chrono::Utc::now();
+                    // Convert last NM message epoch_ms to DateTime, if any.
+                    // If the in-memory atomic is 0 (no NM message in THIS daemon
+                    // process), fall back to the extension-heartbeat.json file
+                    // written by the separate NM bridge process.
+                    let last_nm_ms = health_nm_ts.load(Ordering::Relaxed);
+                    let last_ext_msg = if last_nm_ms > 0 {
+                        chrono::DateTime::from_timestamp_millis(last_nm_ms)
+                    } else {
+                        // Fall back to extension heartbeat file (written by NM bridge)
+                        oc_apprentice_common::status::read_extension_heartbeat()
+                    };
+
                     let daemon_status = oc_apprentice_common::status::DaemonStatus {
                         pid: std::process::id(),
                         version: env!("CARGO_PKG_VERSION").to_string(),
@@ -206,6 +262,7 @@ async fn main() -> Result<()> {
                         uptime_seconds: now.signed_duration_since(health_start_time)
                             .num_seconds()
                             .unsigned_abs(),
+                        last_extension_message: last_ext_msg,
                     };
                     if let Err(e) = oc_apprentice_common::status::write_status_file(
                         "daemon-status.json",
@@ -236,13 +293,41 @@ async fn main() -> Result<()> {
                     let hour = chrono::Local::now().hour();
                     if hour >= 1 && hour < 5 {
                         info!("Nightly maintenance window — running full maintenance");
-                        match run_maintenance(&maint_db_path, &maint_storage_config) {
+                        let artifact_dir = maint_db_path.parent()
+                            .map(|p| p.join("artifacts"));
+                        match run_maintenance(
+                            &maint_db_path,
+                            &maint_storage_config,
+                            artifact_dir.as_deref(),
+                        ) {
                             Ok(report) => {
+                                // Actually delete artifact files from disk
+                                let mut files_deleted = 0usize;
+                                let mut files_failed = 0usize;
+                                for path_str in &report.artifact_paths_to_delete {
+                                    let path = std::path::Path::new(path_str);
+                                    if path.exists() {
+                                        match std::fs::remove_file(path) {
+                                            Ok(()) => files_deleted += 1,
+                                            Err(e) => {
+                                                warn!(
+                                                    path = %path.display(),
+                                                    error = %e,
+                                                    "Failed to delete artifact file"
+                                                );
+                                                files_failed += 1;
+                                            }
+                                        }
+                                    }
+                                }
                                 info!(
                                     events_purged = report.events_purged,
                                     episodes_purged = report.episodes_purged,
                                     vlm_purged = report.vlm_jobs_purged,
-                                    artifacts = report.artifact_paths_to_delete.len(),
+                                    artifact_rows = report.artifact_paths_to_delete.len(),
+                                    artifact_size_evicted = report.artifact_size_evicted,
+                                    artifact_files_deleted = files_deleted,
+                                    artifact_files_failed = files_failed,
                                     vacuumed = report.vacuumed,
                                     "Nightly maintenance completed"
                                 );
@@ -356,6 +441,159 @@ async fn main() -> Result<()> {
     observer_result
 }
 
+/// Lightweight mode: only run the Native Messaging bridge.
+///
+/// Chrome launches a new process for each NM session.  This mode skips the
+/// full observer loop, health watcher, clipboard monitor, and maintenance
+/// timer — it only relays browser events from Chrome to the shared SQLite DB
+/// (which is managed by the launchd-managed daemon instance).
+async fn run_native_messaging_bridge() -> Result<()> {
+    // Minimal logging — write to a separate log so NM output stays clean
+    let log_dir = {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+        if cfg!(target_os = "macos") {
+            PathBuf::from(&home).join("Library/Application Support/oc-apprentice/logs")
+        } else {
+            PathBuf::from(&home).join(".local/share/oc-apprentice/logs")
+        }
+    };
+    std::fs::create_dir_all(&log_dir).ok();
+
+    let file_appender = rolling::daily(&log_dir, "nm-bridge.log");
+    let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
+
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::from_default_env()
+                .add_directive("info".parse()?),
+        )
+        .with_writer(non_blocking)
+        .with_ansi(false)
+        .init();
+
+    info!("oc-apprentice-daemon starting in native-messaging bridge mode");
+
+    // Open the shared database (created by the full daemon)
+    let db_path = {
+        let data_dir = if cfg!(target_os = "macos") {
+            dirs_or_home("Library/Application Support/oc-apprentice")
+        } else {
+            dirs_or_home(".local/share/oc-apprentice")
+        };
+        data_dir.join("events.db")
+    };
+
+    if !db_path.exists() {
+        error!("Database not found at {}. Is the daemon running?", db_path.display());
+        // Still run — the NM server needs to respond to Chrome even if DB is missing
+    }
+
+    // Open the storage writer directly
+    let (tx, rx) = mpsc::channel(1000);
+    let storage_handle = tokio::spawn({
+        let db = db_path.clone();
+        async move { run_storage_writer(db, rx, None).await }
+    });
+
+    // Write initial extension heartbeat immediately so CLI/SwiftUI can detect
+    // the bridge right away (before any Chrome messages arrive).
+    let session_started = chrono::Utc::now();
+    let initial_heartbeat = oc_apprentice_common::status::ExtensionHeartbeat {
+        pid: std::process::id(),
+        last_message: session_started,
+        messages_this_session: 0,
+        session_started,
+    };
+    if let Err(e) = oc_apprentice_common::status::write_status_file(
+        oc_apprentice_common::status::EXTENSION_HEARTBEAT_FILE,
+        &initial_heartbeat,
+    ) {
+        warn!("Failed to write initial extension heartbeat: {}", e);
+    }
+
+    // Run native messaging — this blocks until Chrome closes the pipe
+    let mut server = native_messaging::stdio_server();
+    let (nm_event_tx, mut nm_event_rx) = mpsc::channel(256);
+
+    let forwarder_tx = tx;
+    let forwarder_handle = tokio::spawn(async move {
+        let mut message_count: u64 = 0;
+        let mut last_heartbeat_write = std::time::Instant::now();
+
+        while let Some(event) = nm_event_rx.recv().await {
+            message_count += 1;
+
+            // Write extension heartbeat every 5 seconds (throttled)
+            if last_heartbeat_write.elapsed() >= std::time::Duration::from_secs(5) {
+                let heartbeat = oc_apprentice_common::status::ExtensionHeartbeat {
+                    pid: std::process::id(),
+                    last_message: chrono::Utc::now(),
+                    messages_this_session: message_count,
+                    session_started,
+                };
+                if let Err(e) = oc_apprentice_common::status::write_status_file(
+                    oc_apprentice_common::status::EXTENSION_HEARTBEAT_FILE,
+                    &heartbeat,
+                ) {
+                    warn!("Failed to write extension heartbeat: {}", e);
+                }
+                last_heartbeat_write = std::time::Instant::now();
+            }
+
+            match forwarder_tx.try_send(ObserverMessage::Event(event)) {
+                Ok(()) => {}
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    warn!("NM bridge: channel full, dropping event");
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    info!("NM bridge: channel closed");
+                    break;
+                }
+            }
+        }
+
+        // Write final heartbeat on clean exit so stale detection is accurate
+        let final_heartbeat = oc_apprentice_common::status::ExtensionHeartbeat {
+            pid: std::process::id(),
+            last_message: chrono::Utc::now(),
+            messages_this_session: message_count,
+            session_started,
+        };
+        if let Err(e) = oc_apprentice_common::status::write_status_file(
+            oc_apprentice_common::status::EXTENSION_HEARTBEAT_FILE,
+            &final_heartbeat,
+        ) {
+            warn!("Failed to write final extension heartbeat: {}", e);
+        }
+    });
+
+    if let Err(e) = server.run(nm_event_tx).await {
+        // Normal: Chrome closed the NM connection
+        info!("Native messaging session ended: {}", e);
+    }
+    // nm_event_tx is now dropped (it was moved into server.run()).
+    // This causes nm_event_rx.recv() in the forwarder to return None,
+    // so the forwarder loop exits cleanly after draining any buffered items.
+
+    // Await the forwarder — do NOT abort, so it can flush remaining events
+    // from nm_event_rx into the storage writer channel (tx/forwarder_tx).
+    if let Err(e) = forwarder_handle.await {
+        warn!("NM bridge: forwarder task error: {}", e);
+    }
+    // forwarder_tx is now dropped (the forwarder task owned it and has exited),
+    // so the storage writer's rx.recv() will return None after draining.
+
+    // Await the storage writer to flush any remaining events to SQLite.
+    match storage_handle.await {
+        Ok(Ok(())) => info!("NM bridge: storage writer drained cleanly"),
+        Ok(Err(e)) => warn!("NM bridge: storage writer error: {}", e),
+        Err(e) => warn!("NM bridge: storage writer join error: {}", e),
+    }
+
+    info!("NM bridge exiting");
+    Ok(())
+}
+
 /// Derive an encryption key unique to this machine.
 ///
 /// On macOS, uses `sysctl -n kern.uuid` (IOPlatformUUID) as seed material.
@@ -403,8 +641,12 @@ fn dirs_or_home(subpath: &str) -> PathBuf {
 fn run_maintenance(
     db_path: &std::path::Path,
     storage_config: &oc_apprentice_common::config::StorageConfig,
+    artifact_dir: Option<&std::path::Path>,
 ) -> Result<oc_apprentice_storage::maintenance::MaintenanceReport> {
     use oc_apprentice_storage::maintenance::MaintenanceRunner;
+
+    // Default artifact max: 10 GB
+    const ARTIFACT_MAX_BYTES: u64 = 10 * 1024 * 1024 * 1024;
 
     let conn = rusqlite::Connection::open(db_path)?;
     let runner = MaintenanceRunner::new(&conn);
@@ -414,5 +656,7 @@ fn run_maintenance(
         storage_config.retention_days_episodes,
         storage_config.vacuum_min_free_gb,
         storage_config.vacuum_safety_multiplier,
+        artifact_dir,
+        Some(ARTIFACT_MAX_BYTES),
     )
 }

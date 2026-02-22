@@ -13,6 +13,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from oc_apprentice_worker.exporter import AtomicWriter
+
 if TYPE_CHECKING:
     from oc_apprentice_worker.sop_format import SOPFormatter
 
@@ -52,8 +54,8 @@ class SOPVersioner:
         canonical = self.get_canonical_path(slug)
 
         if not canonical.exists():
-            # No existing file — write directly
-            canonical.write_text(content, encoding="utf-8")
+            # No existing file — write atomically
+            AtomicWriter.write(canonical, content)
             return canonical
 
         # Existing file found — check for manual edits
@@ -62,12 +64,12 @@ class SOPVersioner:
         if was_edited:
             # Manual edit detected — write as draft, don't overwrite
             draft = self.get_draft_path(slug)
-            draft.write_text(content, encoding="utf-8")
+            AtomicWriter.write(draft, content)
             return draft
 
-        # Not manually edited — archive old, write new
+        # Not manually edited — archive old, write new atomically
         self.archive_sop(canonical)
-        canonical.write_text(content, encoding="utf-8")
+        AtomicWriter.write(canonical, content)
         return canonical
 
     def archive_sop(self, filepath: Path) -> Path:

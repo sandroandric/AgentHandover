@@ -8,6 +8,7 @@ import pytest
 
 from oc_apprentice_worker.sop_schema import (
     SOP_SCHEMA_VERSION,
+    _ACCEPTED_VERSIONS,
     sop_to_json,
     validate_sop_json,
 )
@@ -77,7 +78,7 @@ class TestSopToJsonTopLevel:
     def test_schema_version(self):
         result = sop_to_json(_sample_template())
         assert result["schema_version"] == SOP_SCHEMA_VERSION
-        assert result["schema_version"] == "1.0.0"
+        assert result["schema_version"] == "1.1.0"
 
     def test_slug_and_title(self):
         result = sop_to_json(_sample_template(slug="my_slug", title="My Title"))
@@ -424,6 +425,30 @@ class TestValidateSopJsonSchemaVersion:
         errors = validate_sop_json(data)
         assert any("Unsupported schema version" in e for e in errors)
 
+    def test_version_1_0_0_accepted(self):
+        data = {
+            "schema_version": "1.0.0",
+            "slug": "x",
+            "title": "x",
+            "steps": [],
+        }
+        errors = validate_sop_json(data)
+        assert not any("Unsupported schema version" in e for e in errors)
+
+    def test_version_1_1_0_accepted(self):
+        data = {
+            "schema_version": "1.1.0",
+            "slug": "x",
+            "title": "x",
+            "steps": [],
+        }
+        errors = validate_sop_json(data)
+        assert not any("Unsupported schema version" in e for e in errors)
+
+    def test_accepted_versions_contains_both(self):
+        assert "1.0.0" in _ACCEPTED_VERSIONS
+        assert "1.1.0" in _ACCEPTED_VERSIONS
+
 
 class TestValidateSopJsonConfidenceSummary:
     """Confidence summary must be a known label."""
@@ -479,3 +504,142 @@ class TestFrontmatterParity:
         assert "tags" in result                    # tags
         assert "steps" in result                   # (body content)
         assert "metadata" in result                # generator info
+
+
+# ---------------------------------------------------------------------------
+# LLM-enhanced fields (schema 1.1.0)
+# ---------------------------------------------------------------------------
+
+
+class TestSopToJsonEnhancedFields:
+    """LLM-enhanced task_description and execution_overview in JSON export."""
+
+    def test_task_description_included(self):
+        template = _sample_template()
+        template["task_description"] = "This workflow submits a form."
+        result = sop_to_json(template)
+        assert result["task_description"] == "This workflow submits a form."
+
+    def test_execution_overview_included(self):
+        template = _sample_template()
+        template["execution_overview"] = {
+            "goal": "Submit the contact form",
+            "prerequisites": "Browser open",
+        }
+        result = sop_to_json(template)
+        assert result["execution_overview"]["goal"] == "Submit the contact form"
+        assert result["execution_overview"]["prerequisites"] == "Browser open"
+
+    def test_enhanced_fields_omitted_when_absent(self):
+        result = sop_to_json(_sample_template())
+        assert "task_description" not in result
+        assert "execution_overview" not in result
+
+    def test_empty_task_description_omitted(self):
+        template = _sample_template()
+        template["task_description"] = ""
+        result = sop_to_json(template)
+        # Falsy string should not be included
+        assert "task_description" not in result
+
+    def test_empty_execution_overview_omitted(self):
+        template = _sample_template()
+        template["execution_overview"] = {}
+        result = sop_to_json(template)
+        assert "execution_overview" not in result
+
+    def test_non_dict_execution_overview_omitted(self):
+        template = _sample_template()
+        template["execution_overview"] = "not a dict"
+        result = sop_to_json(template)
+        assert "execution_overview" not in result
+
+    def test_both_enhanced_fields_together(self):
+        template = _sample_template()
+        template["task_description"] = "Fills and submits form."
+        template["execution_overview"] = {
+            "goal": "Submit form",
+            "typical_duration": "30 seconds",
+        }
+        result = sop_to_json(template)
+        assert "task_description" in result
+        assert "execution_overview" in result
+
+    def test_enhanced_json_serializable(self):
+        template = _sample_template()
+        template["task_description"] = "Test desc"
+        template["execution_overview"] = {"goal": "Test"}
+        result = sop_to_json(template)
+        serialized = json.dumps(result, default=str)
+        roundtripped = json.loads(serialized)
+        assert roundtripped["task_description"] == "Test desc"
+
+
+class TestValidateSopJsonEnhancedFields:
+    """Validation of LLM-enhanced optional fields."""
+
+    def test_valid_task_description(self):
+        data = {
+            "schema_version": "1.1.0",
+            "slug": "x",
+            "title": "x",
+            "steps": [],
+            "task_description": "A valid description.",
+        }
+        errors = validate_sop_json(data)
+        assert not any("task_description" in e for e in errors)
+
+    def test_invalid_task_description_type(self):
+        data = {
+            "schema_version": "1.1.0",
+            "slug": "x",
+            "title": "x",
+            "steps": [],
+            "task_description": 42,
+        }
+        errors = validate_sop_json(data)
+        assert any("task_description" in e for e in errors)
+
+    def test_valid_execution_overview(self):
+        data = {
+            "schema_version": "1.1.0",
+            "slug": "x",
+            "title": "x",
+            "steps": [],
+            "execution_overview": {"goal": "Test goal", "typical_duration": "1 min"},
+        }
+        errors = validate_sop_json(data)
+        assert not any("execution_overview" in e for e in errors)
+
+    def test_invalid_execution_overview_type(self):
+        data = {
+            "schema_version": "1.1.0",
+            "slug": "x",
+            "title": "x",
+            "steps": [],
+            "execution_overview": "not a dict",
+        }
+        errors = validate_sop_json(data)
+        assert any("execution_overview" in e for e in errors)
+
+    def test_execution_overview_non_string_value(self):
+        data = {
+            "schema_version": "1.1.0",
+            "slug": "x",
+            "title": "x",
+            "steps": [],
+            "execution_overview": {"goal": 42},
+        }
+        errors = validate_sop_json(data)
+        assert any("execution_overview" in e and "goal" in e for e in errors)
+
+    def test_enhanced_fields_optional(self):
+        """Enhanced fields are optional — absence is not an error."""
+        data = {
+            "schema_version": "1.1.0",
+            "slug": "x",
+            "title": "x",
+            "steps": [],
+        }
+        errors = validate_sop_json(data)
+        assert errors == []

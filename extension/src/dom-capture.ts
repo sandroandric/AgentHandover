@@ -33,6 +33,10 @@ export const MAX_TEXT_LENGTH = 500;
 /** Maximum recursion depth when walking the DOM tree. */
 export const MAX_TREE_DEPTH = 30;
 
+/** Maximum total node count in a single snapshot.
+ *  Prevents oversized NM messages from heavy pages (e.g. Google Sheets). */
+export const MAX_NODE_COUNT = 3000;
+
 /** Minimum element dimension in pixels; elements smaller are filtered out. */
 export const MIN_ELEMENT_SIZE = 1;
 
@@ -469,6 +473,16 @@ function getDirectText(element: Element): string {
 // ---------------------------------------------------------------------------
 
 /**
+ * Mutable counter shared across an entire walkDOM traversal to enforce
+ * the MAX_NODE_COUNT limit.  Using an object allows pass-by-reference
+ * semantics through the recursive calls.
+ */
+export interface NodeCounter {
+  count: number;
+  truncated: boolean;
+}
+
+/**
  * Recursively walks the DOM tree starting from `node`, building a DomNode
  * tree that includes only viewport-visible elements.
  *
@@ -477,11 +491,22 @@ function getDirectText(element: Element): string {
  *
  * @param node     The DOM node to process.
  * @param depth    Current recursion depth (capped at MAX_TREE_DEPTH).
+ * @param counter  Shared counter tracking total nodes produced (for MAX_NODE_COUNT).
  * @returns        A DomNode if the element is visible and relevant, or null.
  */
-export function walkDOM(node: Node, depth: number = 0): DomNode | null {
+export function walkDOM(
+  node: Node,
+  depth: number = 0,
+  counter: NodeCounter = { count: 0, truncated: false },
+): DomNode | null {
   // Guard against infinite recursion.
   if (depth > MAX_TREE_DEPTH) {
+    return null;
+  }
+
+  // Guard against oversized snapshots.
+  if (counter.count >= MAX_NODE_COUNT) {
+    counter.truncated = true;
     return null;
   }
 
@@ -536,6 +561,7 @@ export function walkDOM(node: Node, depth: number = 0): DomNode | null {
 
   // Build the DomNode for this element.
   const domNode = extractNodeInfo(element);
+  counter.count++;
 
   // Capture inline text for leaf-like elements.
   if (INLINE_TEXT_TAGS.has(tag)) {
@@ -551,7 +577,11 @@ export function walkDOM(node: Node, depth: number = 0): DomNode | null {
   // Pierce Shadow DOM: if the element has an open shadowRoot, walk its children.
   if (element.shadowRoot) {
     for (const shadowChild of Array.from(element.shadowRoot.children)) {
-      const childNode = walkDOM(shadowChild, depth + 1);
+      if (counter.count >= MAX_NODE_COUNT) {
+        counter.truncated = true;
+        break;
+      }
+      const childNode = walkDOM(shadowChild, depth + 1, counter);
       if (childNode) {
         childNode.isShadowRoot = true;
         children.push(childNode);
@@ -561,13 +591,18 @@ export function walkDOM(node: Node, depth: number = 0): DomNode | null {
 
   // Walk light DOM children.
   for (const child of Array.from(element.children)) {
+    if (counter.count >= MAX_NODE_COUNT) {
+      counter.truncated = true;
+      break;
+    }
+
     // Skip <slot> elements if we already processed the shadow root —
     // slotted content is already included via the shadow tree.
     if (element.shadowRoot && child.tagName === 'SLOT') {
       continue;
     }
 
-    const childNode = walkDOM(child, depth + 1);
+    const childNode = walkDOM(child, depth + 1, counter);
     if (childNode) {
       children.push(childNode);
     }
@@ -600,13 +635,26 @@ export function captureViewportDOM(): DomNode[] {
     return [];
   }
 
+  const counter: NodeCounter = { count: 0, truncated: false };
   const roots: DomNode[] = [];
 
   for (const child of Array.from(body.children)) {
-    const node = walkDOM(child, 0);
+    if (counter.count >= MAX_NODE_COUNT) {
+      counter.truncated = true;
+      break;
+    }
+    const node = walkDOM(child, 0, counter);
     if (node) {
       roots.push(node);
     }
+  }
+
+  // Signal to consumers that the snapshot was capped.
+  if (counter.truncated) {
+    roots.push({
+      tag: '#truncated',
+      innerText: `[DOM snapshot capped at ${MAX_NODE_COUNT} nodes]`,
+    });
   }
 
   return roots;

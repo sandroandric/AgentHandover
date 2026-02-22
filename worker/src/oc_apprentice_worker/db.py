@@ -116,9 +116,108 @@ class WorkerDB:
         )
         return self._rows_to_dicts(cur.fetchall())
 
+    def count_pending_vlm_jobs(self) -> int:
+        """Return the count of pending VLM jobs in the database.
+
+        This is authoritative (unlike in-memory queue stats) and should
+        be used for status reporting after DB-side processing.
+        """
+        cur = self._conn.execute(
+            "SELECT COUNT(*) AS cnt FROM vlm_queue WHERE status = 'pending'"
+        )
+        row = cur.fetchone()
+        return row["cnt"] if row else 0
+
     # ------------------------------------------------------------------
     # Write operations (via separate writable connection)
     # ------------------------------------------------------------------
+
+    def _get_writable_path(self) -> str | None:
+        """Extract the file path from the read-only connection."""
+        resolved = self._conn.execute("PRAGMA database_list").fetchone()
+        return resolved["file"] if resolved else None
+
+    def enqueue_vlm_job(
+        self,
+        job_id: str,
+        event_id: str,
+        priority: float,
+        ttl_expires_at: str,
+    ) -> bool:
+        """Insert a VLM job into the persistent queue.
+
+        Returns True on success, False on failure.
+        """
+        db_path = self._get_writable_path()
+        if not db_path:
+            logger.error("Cannot determine DB path for VLM enqueue")
+            return False
+
+        write_conn = sqlite3.connect(db_path)
+        try:
+            write_conn.execute("PRAGMA busy_timeout = 5000;")
+            write_conn.execute(
+                "INSERT OR IGNORE INTO vlm_queue (id, event_id, priority, status, ttl_expires_at) "
+                "VALUES (?, ?, ?, 'pending', ?)",
+                (job_id, event_id, priority, ttl_expires_at),
+            )
+            write_conn.commit()
+            return True
+        except sqlite3.Error as exc:
+            logger.error("Failed to enqueue VLM job: %s", exc)
+            return False
+        finally:
+            write_conn.close()
+
+    def mark_vlm_job_completed(
+        self,
+        job_id: str,
+        result_json: str | None = None,
+    ) -> bool:
+        """Mark a VLM job as completed (or failed)."""
+        db_path = self._get_writable_path()
+        if not db_path:
+            return False
+
+        write_conn = sqlite3.connect(db_path)
+        try:
+            write_conn.execute("PRAGMA busy_timeout = 5000;")
+            write_conn.execute(
+                "UPDATE vlm_queue SET status = 'completed', "
+                "processed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), "
+                "result_json = ? WHERE id = ?",
+                (result_json, job_id),
+            )
+            write_conn.commit()
+            return True
+        except sqlite3.Error as exc:
+            logger.error("Failed to mark VLM job completed: %s", exc)
+            return False
+        finally:
+            write_conn.close()
+
+    def mark_vlm_job_failed(self, job_id: str) -> bool:
+        """Mark a VLM job as failed."""
+        db_path = self._get_writable_path()
+        if not db_path:
+            return False
+
+        write_conn = sqlite3.connect(db_path)
+        try:
+            write_conn.execute("PRAGMA busy_timeout = 5000;")
+            write_conn.execute(
+                "UPDATE vlm_queue SET status = 'failed', "
+                "processed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
+                "WHERE id = ?",
+                (job_id,),
+            )
+            write_conn.commit()
+            return True
+        except sqlite3.Error as exc:
+            logger.error("Failed to mark VLM job failed: %s", exc)
+            return False
+        finally:
+            write_conn.close()
 
     def mark_events_processed(self, event_ids: list[str]) -> int:
         """Mark the given events as processed (``processed = 1``).
@@ -137,11 +236,7 @@ class WorkerDB:
         if not all(isinstance(eid, str) and len(eid) <= 36 for eid in event_ids):
             raise ValueError("Invalid event IDs")
 
-        resolved = self._conn.execute(
-            "PRAGMA database_list"
-        ).fetchone()
-        # Extract the file path from our read-only connection
-        db_path = resolved["file"] if resolved else None
+        db_path = self._get_writable_path()
         if not db_path:
             logger.error("Cannot determine database path for writable connection")
             return 0

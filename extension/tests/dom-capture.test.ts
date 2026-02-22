@@ -29,7 +29,9 @@ import {
   MAX_TABLE_ROWS,
   MAX_TEXT_LENGTH,
   MAX_TREE_DEPTH,
+  MAX_NODE_COUNT,
 } from '../src/dom-capture';
+import type { NodeCounter } from '../src/dom-capture';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -689,6 +691,94 @@ describe('walkDOM', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Node Count Cap (MAX_NODE_COUNT)
+// ---------------------------------------------------------------------------
+
+describe('MAX_NODE_COUNT cap', () => {
+  beforeEach(() => {
+    setViewportSize(1024, 768);
+    document.body.innerHTML = '';
+  });
+
+  it('walkDOM respects counter and stops producing nodes', () => {
+    // Build a flat list of children under a parent.
+    const parent = document.createElement('div');
+    document.body.appendChild(parent);
+    mockBBox(parent, { x: 0, y: 0, width: 800, height: 600 });
+
+    for (let i = 0; i < 20; i++) {
+      const child = document.createElement('span');
+      child.textContent = `Item ${i}`;
+      parent.appendChild(child);
+      mockBBox(child, { x: 0, y: i * 20, width: 100, height: 18 });
+    }
+
+    // Pass a counter that already has a high count, leaving room for only a few nodes.
+    const counter: NodeCounter = { count: MAX_NODE_COUNT - 5, truncated: false };
+    const result = walkDOM(parent, 0, counter);
+
+    expect(result).not.toBeNull();
+    // The parent itself counts as 1, so at most 4 children can be produced.
+    // The counter should have been set to truncated.
+    expect(counter.truncated).toBe(true);
+    // Children produced should be fewer than the 20 available.
+    const childCount = result!.children?.length ?? 0;
+    expect(childCount).toBeLessThan(20);
+  });
+
+  it('walkDOM returns null when counter is already at max', () => {
+    const el = document.createElement('div');
+    document.body.appendChild(el);
+    mockBBox(el, { x: 10, y: 10, width: 100, height: 50 });
+
+    const counter: NodeCounter = { count: MAX_NODE_COUNT, truncated: false };
+    const result = walkDOM(el, 0, counter);
+
+    expect(result).toBeNull();
+    expect(counter.truncated).toBe(true);
+  });
+
+  it('captureViewportDOM appends #truncated marker when cap is hit', () => {
+    // Create more elements than MAX_NODE_COUNT.
+    // Each element is a leaf, so each produces exactly 1 node.
+    const count = MAX_NODE_COUNT + 100;
+    for (let i = 0; i < count; i++) {
+      const el = document.createElement('span');
+      el.textContent = `N${i}`;
+      document.body.appendChild(el);
+      // Place them in viewport.
+      mockBBox(el, { x: 0, y: 0, width: 50, height: 10 });
+    }
+
+    const result = captureViewportDOM();
+
+    // The last element should be the truncation marker.
+    const lastNode = result[result.length - 1];
+    expect(lastNode.tag).toBe('#truncated');
+    expect(lastNode.innerText).toContain(`${MAX_NODE_COUNT}`);
+
+    // Total real nodes (excluding marker) should be at most MAX_NODE_COUNT.
+    const realNodes = result.filter((n) => n.tag !== '#truncated');
+    expect(realNodes.length).toBeLessThanOrEqual(MAX_NODE_COUNT);
+  });
+
+  it('captureViewportDOM does not add #truncated when under cap', () => {
+    // Create just a few elements — well under the cap.
+    for (let i = 0; i < 5; i++) {
+      const el = document.createElement('div');
+      el.setAttribute('data-testid', `el-${i}`);
+      document.body.appendChild(el);
+      mockBBox(el, { x: 0, y: i * 50, width: 200, height: 40 });
+    }
+
+    const result = captureViewportDOM();
+    const marker = result.find((n) => n.tag === '#truncated');
+    expect(marker).toBeUndefined();
+    expect(result.length).toBe(5);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Full Capture Integration
 // ---------------------------------------------------------------------------
 
@@ -827,5 +917,9 @@ describe('constants', () => {
 
   it('MAX_TREE_DEPTH is 30', () => {
     expect(MAX_TREE_DEPTH).toBe(30);
+  });
+
+  it('MAX_NODE_COUNT is 3000', () => {
+    expect(MAX_NODE_COUNT).toBe(3000);
   });
 });

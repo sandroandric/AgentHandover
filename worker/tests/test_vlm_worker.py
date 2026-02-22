@@ -585,12 +585,14 @@ class TestBackendFactory:
         worker = VLMWorker(config=config)
         assert isinstance(worker._backend, OpenAICompatBackend)
 
-    def test_enum_has_5_members(self) -> None:
-        assert len(VLMBackend) == 5
+    def test_enum_has_7_members(self) -> None:
+        assert len(VLMBackend) == 7
         assert VLMBackend.MLX_VLM.value == "mlx-vlm"
         assert VLMBackend.LLAMA_CPP.value == "llama-cpp-python"
         assert VLMBackend.OLLAMA.value == "ollama"
         assert VLMBackend.OPENAI_COMPAT.value == "openai-compat"
+        assert VLMBackend.ANTHROPIC.value == "anthropic"
+        assert VLMBackend.GOOGLE_GENAI.value == "google-genai"
         assert VLMBackend.MOCK.value == "mock"
 
 

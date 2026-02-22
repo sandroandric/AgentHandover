@@ -26,17 +26,18 @@ EXT_SRC="${REPO_ROOT}/extension"
 EXT_DST="${PKG_ROOT}/usr/local/lib/openmimic/extension"
 
 if [ -d "${EXT_SRC}/dist" ]; then
-    # Pre-built dist exists — include it
-    cp -R "${EXT_SRC}/dist" "${EXT_DST}/dist"
-    cp "${EXT_SRC}/manifest.json" "${EXT_DST}/"
+    # Pre-built dist exists — copy contents flat so the extension dir
+    # is directly loadable in Chrome (manifest.json + JS at root level).
+    # webpack's CopyWebpackPlugin already copies manifest.json into dist/.
+    cp -R "${EXT_SRC}/dist/." "${EXT_DST}/"
     echo "  Extension dist included (pre-built)."
 elif command -v npm &>/dev/null && [ -f "${EXT_SRC}/package.json" ]; then
     # npm available — build the dist at package time
     echo "  Building extension with npm..."
     (cd "${EXT_SRC}" && npm install --ignore-scripts && npm run build)
     if [ -d "${EXT_SRC}/dist" ]; then
-        cp -R "${EXT_SRC}/dist" "${EXT_DST}/dist"
-        cp "${EXT_SRC}/manifest.json" "${EXT_DST}/"
+        # Copy contents flat (manifest.json + JS at root level)
+        cp -R "${EXT_SRC}/dist/." "${EXT_DST}/"
         echo "  Extension dist built and included."
     else
         echo "  Warning: npm build did not produce dist/. Including source."

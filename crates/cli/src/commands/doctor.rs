@@ -1,6 +1,8 @@
 use anyhow::Result;
 use colored::Colorize;
 
+use crate::paths;
+
 pub fn run() -> Result<()> {
     println!("{}", "OpenMimic Doctor".bold());
     println!("{}", "=".repeat(50));
@@ -42,14 +44,32 @@ pub fn run() -> Result<()> {
     }
 
     // Check 7: Database exists and is writable
+    // On fresh installs the daemon hasn't created the DB yet — advisory, not fatal.
     let db_path = data_dir.join("events.db");
-    all_ok &= check("Database", || {
-        db_path.exists()
-            && std::fs::OpenOptions::new()
-                .write(true)
-                .open(&db_path)
-                .is_ok()
-    });
+    let daemon_pid_exists = data_dir.join("daemon.pid").exists();
+    if daemon_pid_exists {
+        // Daemon has started at least once — DB should exist
+        all_ok &= check("Database", || {
+            db_path.exists()
+                && std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(&db_path)
+                    .is_ok()
+        });
+    } else {
+        // Fresh install — daemon never ran, DB expected to not exist
+        check_optional(
+            "Database",
+            || {
+                db_path.exists()
+                    && std::fs::OpenOptions::new()
+                        .write(true)
+                        .open(&db_path)
+                        .is_ok()
+            },
+            "Run 'openmimic start' to create database",
+        );
+    }
 
     // Check 8: Native messaging host manifest
     let nm_manifest = native_messaging_manifest_path();
@@ -68,19 +88,19 @@ pub fn run() -> Result<()> {
     all_ok &= check("Disk space (>1GB free)", || free_disk_gb() > 1);
 
     // Check 11: Python virtual environment
+    // Check pkg path, Homebrew libexec (resolved from binary), and known opt paths.
     check_optional(
         "Python virtual environment",
-        || std::path::Path::new("/usr/local/lib/openmimic/venv/bin/python").exists(),
-        "Run installer or: python3 -m venv /usr/local/lib/openmimic/venv",
+        || paths::find_venv_python().is_some(),
+        "Run installer or: brew install --HEAD openmimic",
     );
 
-    // Check 12: Chrome extension dist
+    // Check 12: Chrome extension
+    // Homebrew installs dist contents flat into libexec/extension/ (no dist subdir).
+    // Pkg installer uses /usr/local/lib/openmimic/extension/dist/.
     check_optional(
-        "Chrome extension dist",
-        || {
-            std::path::Path::new("/usr/local/lib/openmimic/extension/dist").exists()
-                || find_local_extension_dist()
-        },
+        "Chrome extension",
+        || paths::find_any_extension_path().is_some(),
         "Build with: cd extension && npm run build",
     );
 
@@ -133,27 +153,8 @@ fn which(binary: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Check if extension/dist exists relative to common repo locations.
-fn find_local_extension_dist() -> bool {
-    // Check relative to the binary's location
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(parent) = exe.parent() {
-            // e.g. target/debug/ -> repo root is ../../
-            for ancestor in parent.ancestors().take(5) {
-                if ancestor.join("extension/dist").exists() {
-                    return true;
-                }
-            }
-        }
-    }
-    // Check current working directory
-    if let Ok(cwd) = std::env::current_dir() {
-        if cwd.join("extension/dist").exists() {
-            return true;
-        }
-    }
-    false
-}
+// Path resolution functions (find_homebrew_libexec, find_venv_python,
+// find_extension_dir, find_local_extension_dist) are now in crate::paths.
 
 #[cfg(target_os = "macos")]
 fn accessibility_sys_check() -> bool {

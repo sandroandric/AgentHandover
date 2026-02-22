@@ -129,6 +129,73 @@ impl<'a> MaintenanceRunner<'a> {
         }
     }
 
+    /// Evict the oldest artifact records (by event timestamp) until the total
+    /// on-disk folder size drops below `max_bytes`.
+    ///
+    /// Returns the file paths of records removed from the DB; the caller is
+    /// responsible for deleting the actual files.
+    pub fn evict_artifacts_by_size(
+        &self,
+        artifact_dir: &Path,
+        max_bytes: u64,
+    ) -> Result<Vec<String>> {
+        let current_size = get_dir_size_shallow(artifact_dir);
+        if current_size <= max_bytes {
+            return Ok(vec![]);
+        }
+
+        let excess = current_size - max_bytes;
+        info!(
+            current_mb = current_size / (1024 * 1024),
+            max_mb = max_bytes / (1024 * 1024),
+            excess_mb = excess / (1024 * 1024),
+            "Artifact directory exceeds size cap, evicting oldest artifacts"
+        );
+
+        // Fetch oldest artifacts first (by event timestamp ascending).
+        let mut stmt = self.conn.prepare(
+            "SELECT a.file_path FROM artifacts a \
+             INNER JOIN events e ON a.event_id = e.id \
+             ORDER BY e.timestamp ASC",
+        )?;
+
+        let all_paths: Vec<String> = stmt
+            .query_map([], |row| row.get(0))?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        let mut freed: u64 = 0;
+        let mut evict_paths: Vec<String> = Vec::new();
+
+        for path_str in &all_paths {
+            if freed >= excess {
+                break;
+            }
+            let p = Path::new(path_str);
+            let file_size = p.metadata().map(|m| m.len()).unwrap_or(0);
+            freed += file_size;
+            evict_paths.push(path_str.clone());
+        }
+
+        if !evict_paths.is_empty() {
+            // Delete evicted records from the DB
+            let placeholders: String = evict_paths.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+            let sql = format!("DELETE FROM artifacts WHERE file_path IN ({})", placeholders);
+            let params: Vec<&dyn rusqlite::types::ToSql> = evict_paths
+                .iter()
+                .map(|s| s as &dyn rusqlite::types::ToSql)
+                .collect();
+            self.conn.execute(&sql, params.as_slice())?;
+            info!(
+                evicted = evict_paths.len(),
+                freed_mb = freed / (1024 * 1024),
+                "Evicted oldest artifacts to meet size cap"
+            );
+        }
+
+        Ok(evict_paths)
+    }
+
     /// Run the full nightly maintenance cycle.
     pub fn run_full_maintenance(
         &self,
@@ -137,9 +204,20 @@ impl<'a> MaintenanceRunner<'a> {
         retention_days_episodes: u32,
         min_free_gb: u64,
         vacuum_safety_multiplier: f64,
+        artifact_dir: Option<&Path>,
+        artifact_max_bytes: Option<u64>,
     ) -> Result<MaintenanceReport> {
         let events_purged = self.purge_old_events(retention_days_raw)?;
-        let artifact_paths = self.purge_old_artifacts(retention_days_raw)?;
+        let mut artifact_paths = self.purge_old_artifacts(retention_days_raw)?;
+
+        // Size-based eviction: evict oldest artifacts if folder exceeds cap
+        let mut artifact_size_evicted: usize = 0;
+        if let (Some(dir), Some(max_bytes)) = (artifact_dir, artifact_max_bytes) {
+            let evicted = self.evict_artifacts_by_size(dir, max_bytes)?;
+            artifact_size_evicted = evicted.len();
+            artifact_paths.extend(evicted);
+        }
+
         let episodes_purged = self.purge_old_episodes(retention_days_episodes)?;
         let vlm_purged = self.purge_expired_vlm_jobs()?;
         self.wal_checkpoint()?;
@@ -148,6 +226,7 @@ impl<'a> MaintenanceRunner<'a> {
         Ok(MaintenanceReport {
             events_purged,
             artifact_paths_to_delete: artifact_paths,
+            artifact_size_evicted,
             episodes_purged,
             vlm_jobs_purged: vlm_purged,
             vacuumed,
@@ -159,9 +238,34 @@ impl<'a> MaintenanceRunner<'a> {
 pub struct MaintenanceReport {
     pub events_purged: usize,
     pub artifact_paths_to_delete: Vec<String>,
+    /// Number of artifacts evicted due to folder size exceeding the cap
+    /// (on top of normal retention-based purge).
+    pub artifact_size_evicted: usize,
     pub episodes_purged: usize,
     pub vlm_jobs_purged: usize,
     pub vacuumed: bool,
+}
+
+/// Sum file sizes in a directory, traversing one level of subdirectories.
+fn get_dir_size_shallow(dir: &Path) -> u64 {
+    let mut total = 0u64;
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() {
+                total += path.metadata().map(|m| m.len()).unwrap_or(0);
+            } else if path.is_dir() {
+                if let Ok(sub_entries) = std::fs::read_dir(&path) {
+                    for sub_entry in sub_entries.flatten() {
+                        if sub_entry.path().is_file() {
+                            total += sub_entry.path().metadata().map(|m| m.len()).unwrap_or(0);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    total
 }
 
 #[cfg(unix)]

@@ -1,8 +1,9 @@
 use anyhow::Result;
-use chrono::{DateTime, Utc};
 use colored::Colorize;
 use oc_apprentice_common::pid;
 use oc_apprentice_common::status;
+
+use crate::display::{format_number, format_relative_time, is_heartbeat_stale};
 
 pub fn run() -> Result<()> {
     println!("{}", "OpenMimic Status".bold());
@@ -17,40 +18,6 @@ pub fn run() -> Result<()> {
     print_service_status("Worker", "worker-status.json", "worker");
 
     Ok(())
-}
-
-/// Format a relative time string like "2s ago", "5m ago", "2h ago".
-fn format_relative_time(timestamp: &str) -> String {
-    match timestamp.parse::<DateTime<Utc>>() {
-        Ok(dt) => {
-            let now = Utc::now();
-            let diff = now.signed_duration_since(dt);
-            let secs = diff.num_seconds();
-            if secs < 0 {
-                "just now".to_string()
-            } else if secs < 60 {
-                format!("{}s ago", secs)
-            } else if secs < 3600 {
-                format!("{}m ago", secs / 60)
-            } else if secs < 86400 {
-                format!("{}h ago", secs / 3600)
-            } else {
-                format!("{}d ago", secs / 86400)
-            }
-        }
-        Err(_) => timestamp.to_string(),
-    }
-}
-
-/// Check if a heartbeat is stale (older than 2 minutes).
-fn is_heartbeat_stale(timestamp: &str) -> bool {
-    match timestamp.parse::<DateTime<Utc>>() {
-        Ok(dt) => {
-            let now = Utc::now();
-            now.signed_duration_since(dt).num_seconds() > 120
-        }
-        Err(_) => false,
-    }
 }
 
 fn print_service_status(name: &str, status_file: &str, pid_name: &str) {
@@ -108,6 +75,43 @@ fn print_service_status(name: &str, status_file: &str, pid_name: &str) {
                 println!("    Perms:      {}", perms_str);
             }
 
+            // Chrome extension connection status
+            // Check daemon-status.json first (populated when NM runs in-process),
+            // then fall back to extension-heartbeat.json (written by separate NM bridge).
+            let ext_ts_from_daemon = value.get("last_extension_message").and_then(|v| v.as_str());
+            let ext_heartbeat = status::read_extension_heartbeat();
+
+            if let Some(ext_ts) = ext_ts_from_daemon {
+                let relative = format_relative_time(ext_ts);
+                if is_heartbeat_stale(ext_ts) {
+                    // Daemon's in-memory value is stale, but NM bridge file might be fresh
+                    if ext_heartbeat.is_some() {
+                        println!("    Extension:  {}", "connected (via NM bridge)".green());
+                    } else {
+                        println!(
+                            "    Extension:  {}",
+                            format!("last seen {} (stale)", relative).yellow()
+                        );
+                    }
+                } else {
+                    println!("    Extension:  {}", format!("connected ({})", relative).green());
+                }
+            } else if ext_heartbeat.is_some() {
+                // No in-memory NM data, but heartbeat file is fresh
+                println!("    Extension:  {}", "connected (via NM bridge)".green());
+            } else {
+                // No NM message from any source
+                let uptime = value.get("uptime_seconds").and_then(|v| v.as_u64()).unwrap_or(0);
+                if uptime > 600 {
+                    println!(
+                        "    Extension:  {}",
+                        "not connected — load the Chrome extension for full capture".yellow()
+                    );
+                } else {
+                    println!("    Extension:  {}", "waiting for connection...".dimmed());
+                }
+            }
+
             // Worker-specific fields
             if let Some(events) = value
                 .get("events_processed_today")
@@ -125,8 +129,47 @@ fn print_service_status(name: &str, status_file: &str, pid_name: &str) {
                 println!("    Pipeline:   last run {}ms", duration);
             }
             if let Some(vlm) = value.get("vlm_available").and_then(|v| v.as_bool()) {
+                let vlm_mode = value
+                    .get("vlm_mode")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("local");
+                let vlm_provider = value
+                    .get("vlm_provider")
+                    .and_then(|v| v.as_str());
                 let vlm_str = if vlm {
-                    "available".green()
+                    // Show mode/provider info
+                    let mode_info = if vlm_mode == "remote" {
+                        let provider = vlm_provider.unwrap_or("unknown");
+                        format!("remote ({})", provider)
+                    } else {
+                        "local".to_string()
+                    };
+
+                    // Show queue depth alongside availability
+                    let pending = value
+                        .get("vlm_queue_pending")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    let jobs_today = value
+                        .get("vlm_jobs_today")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    let dropped = value
+                        .get("vlm_dropped_today")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    if pending > 0 || jobs_today > 0 {
+                        let mut parts = vec![format!("{} pending", pending)];
+                        if jobs_today > 0 {
+                            parts.push(format!("{} today", jobs_today));
+                        }
+                        if dropped > 0 {
+                            parts.push(format!("{} dropped", dropped));
+                        }
+                        format!("{} ({})", mode_info, parts.join(", ")).into()
+                    } else {
+                        format!("{}", mode_info).green()
+                    }
                 } else {
                     "not installed".dimmed()
                 };
@@ -141,7 +184,7 @@ fn print_service_status(name: &str, status_file: &str, pid_name: &str) {
                 } else {
                     "not installed".dimmed()
                 };
-                println!("    Inducer:    {}", inducer_str);
+                println!("    SOP mining: {}", inducer_str);
             }
 
             if let Some(errors) = value.get("consecutive_errors").and_then(|v| v.as_u64()) {
@@ -165,15 +208,3 @@ fn print_service_status(name: &str, status_file: &str, pid_name: &str) {
     }
 }
 
-/// Format a number with comma separators (e.g. 1247 -> "1,247").
-fn format_number(n: u64) -> String {
-    let s = n.to_string();
-    let mut result = String::new();
-    for (i, c) in s.chars().rev().enumerate() {
-        if i > 0 && i % 3 == 0 {
-            result.push(',');
-        }
-        result.push(c);
-    }
-    result.chars().rev().collect()
-}
