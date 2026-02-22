@@ -248,3 +248,140 @@ class TestPipelineMixedEvents:
 
         assert summary["events_in"] == 4
         assert summary["translations"] >= 1
+
+
+# ---------------------------------------------------------------------------
+# Regression: _process_vlm_jobs → record_completion wiring
+# ---------------------------------------------------------------------------
+
+
+class TestProcessVLMJobsReconciliation:
+    """Verify _process_vlm_jobs calls vlm_queue.record_completion on success
+    and marks in-memory jobs as FAILED on rejection/error.
+
+    This is a regression guard for the mark_completed → record_completion
+    rename (was AttributeError at runtime, silently marking all VLM jobs
+    as failed).
+    """
+
+    def test_success_path_calls_record_completion(self):
+        """On VLM success, in-memory queue job must move to COMPLETED."""
+        from unittest.mock import MagicMock, patch
+        from oc_apprentice_worker.main import _process_vlm_jobs
+        from oc_apprentice_worker.vlm_queue import (
+            VLMFallbackQueue,
+            VLMJob,
+            VLMJobStatus,
+        )
+
+        # Set up a mock DB that returns a valid event
+        db = MagicMock()
+        db.get_event_by_id.return_value = {
+            "kind_json": '{"DwellSnapshot": {}}',
+            "window_json": '{"title": "Test Page"}',
+        }
+
+        # Set up a mock VLM worker that returns a successful response
+        response = MagicMock()
+        response.success = True
+        response.target_description = "Submit button"
+        response.suggested_selector = "#submit"
+        response.confidence_boost = 0.15
+        response.reasoning = "Clearly a submit button"
+        response.inference_time_seconds = 1.2
+
+        vlm_worker = MagicMock()
+        vlm_worker.process_job.return_value = response
+
+        # Set up a real VLM queue with a job in it
+        vlm_queue = VLMFallbackQueue()
+        job = VLMJob(
+            job_id="job-001",
+            event_id="evt-001",
+            episode_id="",
+            semantic_step_index=0,
+            confidence_score=0.4,
+            priority_score=0.8,
+        )
+        vlm_queue.enqueue(job)
+        assert job.status == VLMJobStatus.PENDING
+
+        # Process the job
+        pending_jobs = [{"id": "job-001", "event_id": "evt-001"}]
+        _process_vlm_jobs(db, pending_jobs, vlm_worker, vlm_queue)
+
+        # The in-memory job should now be COMPLETED
+        assert job.status == VLMJobStatus.COMPLETED
+        assert job.result is not None
+        assert job.result["confidence_boost"] == 0.15
+
+        # DB should also be marked as completed
+        db.mark_vlm_job_completed.assert_called_once()
+
+    def test_failure_path_marks_in_memory_failed(self):
+        """On VLM rejection, in-memory queue job should be FAILED."""
+        from unittest.mock import MagicMock
+        from oc_apprentice_worker.main import _process_vlm_jobs
+        from oc_apprentice_worker.vlm_queue import (
+            VLMFallbackQueue,
+            VLMJob,
+            VLMJobStatus,
+        )
+
+        db = MagicMock()
+        db.get_event_by_id.return_value = {
+            "kind_json": '{"DwellSnapshot": {}}',
+            "window_json": '{"title": "Test"}',
+        }
+
+        response = MagicMock()
+        response.success = False
+        response.error = "Budget exhausted"
+
+        vlm_worker = MagicMock()
+        vlm_worker.process_job.return_value = response
+
+        vlm_queue = VLMFallbackQueue()
+        job = VLMJob(
+            job_id="job-002",
+            event_id="evt-002",
+            episode_id="",
+            semantic_step_index=0,
+            confidence_score=0.3,
+            priority_score=0.7,
+        )
+        vlm_queue.enqueue(job)
+
+        pending_jobs = [{"id": "job-002", "event_id": "evt-002"}]
+        _process_vlm_jobs(db, pending_jobs, vlm_worker, vlm_queue)
+
+        assert job.status == VLMJobStatus.FAILED
+        db.mark_vlm_job_failed.assert_called_once_with("job-002")
+
+    def test_without_vlm_queue_still_works(self):
+        """Passing vlm_queue=None should not crash (backward compat)."""
+        from unittest.mock import MagicMock
+        from oc_apprentice_worker.main import _process_vlm_jobs
+
+        db = MagicMock()
+        db.get_event_by_id.return_value = {
+            "kind_json": '{"DwellSnapshot": {}}',
+            "window_json": '{"title": "Test"}',
+        }
+
+        response = MagicMock()
+        response.success = True
+        response.target_description = "OK button"
+        response.suggested_selector = "#ok"
+        response.confidence_boost = 0.1
+        response.reasoning = "OK"
+        response.inference_time_seconds = 0.5
+
+        vlm_worker = MagicMock()
+        vlm_worker.process_job.return_value = response
+
+        pending_jobs = [{"id": "job-003", "event_id": "evt-003"}]
+        # Should not raise — vlm_queue defaults to None
+        _process_vlm_jobs(db, pending_jobs, vlm_worker)
+
+        db.mark_vlm_job_completed.assert_called_once()

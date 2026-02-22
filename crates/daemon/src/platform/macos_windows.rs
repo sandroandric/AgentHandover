@@ -274,8 +274,10 @@ fn get_dict_bool_cfstr(dict: CFDictionaryRef, key: CFStringRef) -> Option<bool> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     #[test]
+    #[serial(macos_ffi)]
     fn test_get_display_topology_returns_at_least_one() {
         let displays = get_display_topology();
         assert!(!displays.is_empty(), "Should detect at least one display");
@@ -286,6 +288,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(macos_ffi)]
     fn test_get_focused_window_returns_some_info() {
         // In a desktop environment, there should be at least one window.
         // In CI/headless this may return None, which is acceptable.
@@ -297,6 +300,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(macos_ffi)]
     fn test_get_cursor_position_returns_coordinates() {
         let pos = get_cursor_position();
         // In a desktop environment this should always succeed.

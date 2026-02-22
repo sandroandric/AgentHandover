@@ -279,8 +279,10 @@ pub async fn run_clipboard_monitor(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     #[test]
+    #[serial(macos_ffi)]
     fn test_get_pasteboard_change_count() {
         // Should return a non-negative value on a desktop macOS system.
         let count = get_pasteboard_change_count();
@@ -290,6 +292,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(macos_ffi)]
     fn test_get_pasteboard_types() {
         // On a desktop macOS system with anything on the clipboard,
         // this should return at least one type.
@@ -299,6 +302,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(macos_ffi)]
     fn test_capture_clipboard_meta() {
         let meta = capture_clipboard_meta();
         if let Some(m) = meta {

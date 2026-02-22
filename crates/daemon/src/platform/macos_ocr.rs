@@ -158,6 +158,7 @@ pub async fn recognize_text_async(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     #[test]
     fn test_ocr_result_serde_roundtrip() {
@@ -178,12 +179,14 @@ mod tests {
     }
 
     #[test]
+    #[serial(macos_ffi)]
     fn test_empty_pixels_returns_none() {
         let result = recognize_text(&[], 0, 0);
         assert!(result.is_none());
     }
 
     #[test]
+    #[serial(macos_ffi)]
     fn test_small_image_returns_none() {
         // 1x1 BGRA pixel — below the 10x10 minimum for Vision framework
         let pixels = vec![0u8; 4];
@@ -192,6 +195,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(macos_ffi)]
     fn test_9x9_below_minimum() {
         // 9x9 BGRA — just below the 10x10 minimum
         let pixels = vec![0u8; 9 * 9 * 4];
@@ -200,6 +204,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(macos_ffi)]
     fn test_undersized_buffer_returns_none() {
         // Claims 100x100 but only provides 4 bytes
         let pixels = vec![0u8; 4];
@@ -208,6 +213,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial(macos_ffi)]
     async fn test_async_respects_timeout() {
         // Empty pixels should return quickly with None
         let result = recognize_text_async(vec![], 0, 0).await;

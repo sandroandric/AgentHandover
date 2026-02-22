@@ -139,8 +139,10 @@ pub async fn is_secure_field_focused_async() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     #[test]
+    #[serial(macos_ffi)]
     fn test_check_accessibility_permission() {
         // This test just verifies the function doesn't panic.
         // The actual result depends on whether the test runner has AX permissions.
@@ -148,6 +150,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(macos_ffi)]
     fn test_is_secure_field_focused_does_not_hang() {
         // Verify the function completes within a reasonable time.
         // It should return false in a normal test environment.
@@ -158,6 +161,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial(macos_ffi)]
     async fn test_is_secure_field_focused_async_respects_timeout() {
         // Verify the async version completes within its 100ms timeout.
         let start = std::time::Instant::now();
