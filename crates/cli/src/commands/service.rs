@@ -45,49 +45,39 @@ fn is_job_running(label: &str) -> bool {
 }
 
 /// Start a single service, verifying it is actually running afterward.
-fn start_one(label: &str, display_name: &str) -> Result<bool> {
+/// Returns `Err` if the service failed to start so the CLI exits non-zero.
+fn start_one(label: &str, display_name: &str) -> Result<()> {
     println!("Starting {}...", display_name);
     let result = launchctl(&["load", "-w", &plist_path(label)])?;
 
     // Give launchd a moment to spawn the process, then verify.
     std::thread::sleep(std::time::Duration::from_millis(500));
-    let running = is_job_running(label);
 
-    if running {
+    if is_job_running(label) {
         println!("  {} started.", display_name);
-        Ok(true)
+        Ok(())
     } else {
-        eprintln!(
-            "  ⚠ {} may not have started.{}",
-            display_name,
-            if !result.stderr.is_empty() {
-                format!(" launchctl said: {}", result.stderr)
-            } else {
-                " Verify with: openmimic status".to_string()
-            }
-        );
-        Ok(false)
+        let detail = if !result.stderr.is_empty() {
+            format!("launchctl said: {}", result.stderr)
+        } else {
+            "job not listed after load. Check plist with: launchctl load -w <path>".to_string()
+        };
+        bail!("{} failed to start: {}", display_name, detail);
     }
 }
 
 pub fn start(service: &str) -> Result<()> {
     match service {
-        "daemon" => {
-            start_one(DAEMON_LABEL, "daemon")?;
-        }
-        "worker" => {
-            start_one(WORKER_LABEL, "worker")?;
-        }
+        "daemon" => start_one(DAEMON_LABEL, "daemon")?,
+        "worker" => start_one(WORKER_LABEL, "worker")?,
         "all" => {
-            let d = start_one(DAEMON_LABEL, "daemon")?;
-            let w = start_one(WORKER_LABEL, "worker")?;
-            if d && w {
-                println!("  All services started.");
-            } else {
-                eprintln!(
-                    "  ⚠ One or more services may not have started. Run {} to check.",
-                    "openmimic status"
-                );
+            // Attempt both; collect failures so we report all of them.
+            let d = start_one(DAEMON_LABEL, "daemon");
+            let w = start_one(WORKER_LABEL, "worker");
+            match (d, w) {
+                (Ok(()), Ok(())) => println!("  All services started."),
+                (Err(e1), Err(e2)) => bail!("{}\n{}", e1, e2),
+                (Err(e), Ok(())) | (Ok(()), Err(e)) => return Err(e),
             }
         }
         _ => bail!(
