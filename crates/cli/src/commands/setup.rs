@@ -208,12 +208,7 @@ fn start_service(label: &str) {
         home, label
     );
     let plist = std::path::Path::new(&plist_path);
-    if plist.exists() {
-        let _ = std::process::Command::new("launchctl")
-            .args(["load", "-w", &plist_path])
-            .output();
-        println!("    Loaded {}", label);
-    } else {
+    if !plist.exists() {
         println!(
             "    {} launchd plist not found at {}",
             "⚠".yellow(),
@@ -222,6 +217,38 @@ fn start_service(label: &str) {
         println!(
             "    Run {} to install plists.",
             "brew install --HEAD openmimic".cyan()
+        );
+        return;
+    }
+
+    let output = std::process::Command::new("launchctl")
+        .args(["load", "-w", &plist_path])
+        .output();
+    let stderr = match &output {
+        Ok(o) => String::from_utf8_lossy(&o.stderr).trim().to_string(),
+        Err(e) => format!("{}", e),
+    };
+
+    // Give launchd a moment to spawn, then verify the job is actually listed.
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    let running = std::process::Command::new("launchctl")
+        .args(["list", label])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+
+    if running {
+        println!("    {} {} loaded and running", "✓".green(), label);
+    } else {
+        println!(
+            "    {} {} may not have started{}",
+            "⚠".yellow(),
+            label,
+            if stderr.is_empty() {
+                String::from(". Verify with: openmimic status")
+            } else {
+                format!(": {}", stderr)
+            }
         );
     }
 }

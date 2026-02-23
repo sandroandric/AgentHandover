@@ -109,14 +109,13 @@ fi
 # Build allowed_origins
 # ---------------------------------------------------------------------------
 
-if [[ -n "$EXTENSION_ID" ]]; then
-    ALLOWED_ORIGINS="[\"chrome-extension://${EXTENSION_ID}/\"]"
-else
-    echo "Warning: no --extension-id provided."
-    echo "You will need to update the manifest with your extension ID later."
-    echo "Using placeholder ID. Re-run with --extension-id <YOUR_EXTENSION_ID>."
-    ALLOWED_ORIGINS="[\"chrome-extension://PLACEHOLDER_EXTENSION_ID/\"]"
+if [[ -z "$EXTENSION_ID" ]]; then
+    # Use the stable extension ID derived from the RSA key in manifest.json.
+    # Override via --extension-id if you build/sign the extension yourself.
+    EXTENSION_ID="knldjmfmopnpolahpmmgbagdohdnhkik"
+    echo "Using default extension ID: ${EXTENSION_ID}"
 fi
+ALLOWED_ORIGINS="[\"chrome-extension://${EXTENSION_ID}/\"]"
 
 # ---------------------------------------------------------------------------
 # Generate and install the manifest
@@ -141,10 +140,6 @@ echo ""
 echo "  Host name:    ${HOST_NAME}"
 echo "  Manifest:     ${MANIFEST_PATH}"
 echo "  Daemon path:  ${DAEMON_PATH}"
-if [[ -n "$EXTENSION_ID" ]]; then
-    echo "  Extension ID: ${EXTENSION_ID}"
-else
-    echo "  Extension ID: (placeholder — update with --extension-id)"
-fi
+echo "  Extension ID: ${EXTENSION_ID}"
 echo ""
 echo "To verify, check: cat \"${MANIFEST_PATH}\""

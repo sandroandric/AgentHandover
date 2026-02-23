@@ -13,17 +13,28 @@ final class ServiceController {
 
     // MARK: - Start
 
-    static func startDaemon() {
+    /// Start daemon and return whether the job is actually running afterward.
+    @discardableResult
+    static func startDaemon() -> Bool {
         launchctl(["load", "-w", plistPath(daemonLabel)])
+        Thread.sleep(forTimeInterval: 0.5)
+        return isJobRunning(label: daemonLabel)
     }
 
-    static func startWorker() {
+    /// Start worker and return whether the job is actually running afterward.
+    @discardableResult
+    static func startWorker() -> Bool {
         launchctl(["load", "-w", plistPath(workerLabel)])
+        Thread.sleep(forTimeInterval: 0.5)
+        return isJobRunning(label: workerLabel)
     }
 
-    static func startAll() {
-        startDaemon()
-        startWorker()
+    /// Start all services and return true only if both are verified running.
+    @discardableResult
+    static func startAll() -> Bool {
+        let d = startDaemon()
+        let w = startWorker()
+        return d && w
     }
 
     // MARK: - Stop
@@ -84,6 +95,12 @@ final class ServiceController {
     }
 
     // MARK: - Helpers
+
+    /// Check whether a launchd job is actually running via `launchctl list <label>`.
+    static func isJobRunning(label: String) -> Bool {
+        let result = launchctl(["list", label])
+        return result.exitCode == 0
+    }
 
     private static func plistPath(_ label: String) -> String {
         launchAgentsDir.appendingPathComponent("\(label).plist").path

@@ -798,7 +798,13 @@ def _check_export_trigger(
 
     if fmt in ("openclaw", "all"):
         try:
-            openclaw_writer.write_all_sops(sop_templates)
+            if output_dir:
+                # Respect output_dir: create a new writer pointing there
+                from oc_apprentice_worker.openclaw_writer import OpenClawWriter
+                oc_writer = OpenClawWriter(workspace_dir=Path(output_dir))
+            else:
+                oc_writer = openclaw_writer
+            oc_writer.write_all_sops(sop_templates)
             exported += len(sop_templates)
             logger.info("Export trigger: wrote %d OpenClaw file(s)", len(sop_templates))
         except Exception:

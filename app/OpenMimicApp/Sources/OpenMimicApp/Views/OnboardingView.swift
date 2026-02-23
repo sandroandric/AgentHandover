@@ -11,6 +11,7 @@ struct OnboardingView: View {
     @State private var chromeOpenError: String? = nil
     @State private var vlmPullInProgress = false
     @State private var vlmPullOutput = ""
+    @State private var serviceStartFailed = false
 
     // Cloud VLM state
     enum VLMMode: String, CaseIterable {
@@ -100,14 +101,22 @@ struct OnboardingView: View {
                 } else {
                     VStack(spacing: 4) {
                         Button("Start Observing") {
-                            ServiceController.startAll()
-                            onComplete?()
-                            NSApplication.shared.keyWindow?.close()
+                            let ok = ServiceController.startAll()
+                            if ok {
+                                onComplete?()
+                                NSApplication.shared.keyWindow?.close()
+                            } else {
+                                serviceStartFailed = true
+                            }
                         }
                         .buttonStyle(.borderedProminent)
                         .disabled(!appState.extensionConnected)
 
-                        if !appState.extensionConnected {
+                        if serviceStartFailed {
+                            Text("Services may not have started. Check openmimic status in Terminal.")
+                                .font(.caption2)
+                                .foregroundColor(.red)
+                        } else if !appState.extensionConnected {
                             Text("Connect the Chrome extension first to enable observation")
                                 .font(.caption2)
                                 .foregroundColor(.orange)

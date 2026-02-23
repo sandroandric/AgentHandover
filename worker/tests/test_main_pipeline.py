@@ -555,6 +555,29 @@ class TestCheckExportTrigger:
         # Trigger should still be removed to avoid infinite loop
         assert not (tmp_path / "export-trigger.json").exists()
 
+    def test_openclaw_output_dir_override(self, tmp_path: Path, monkeypatch):
+        """When output_dir is set for openclaw format, a new OpenClawWriter
+        is created pointing to that directory instead of using the default."""
+        from oc_apprentice_worker import main as main_mod
+        monkeypatch.setattr(main_mod, "_status_dir", lambda: tmp_path)
+
+        custom_output = tmp_path / "custom_oc"
+        templates = [{"slug": "test", "title": "Test", "steps": [], "variables": []}]
+        self._write_cache(tmp_path, templates)
+        self._write_trigger(tmp_path, "openclaw", output_dir=str(custom_output))
+
+        default_writer = MagicMock()
+        main_mod._check_export_trigger(
+            openclaw_writer=default_writer, sops_dir=tmp_path / "sops"
+        )
+
+        # Default writer should NOT be called because output_dir triggers
+        # creation of a fresh OpenClawWriter.
+        default_writer.write_all_sops.assert_not_called()
+        # The custom writer should have written to custom_output/memory/apprentice/sops/
+        assert (custom_output / "memory" / "apprentice" / "sops").exists()
+        assert not (tmp_path / "export-trigger.json").exists()
+
     def test_all_format_exports_all_three(self, tmp_path: Path, monkeypatch):
         from oc_apprentice_worker import main as main_mod
         monkeypatch.setattr(main_mod, "_status_dir", lambda: tmp_path)
@@ -568,7 +591,7 @@ class TestCheckExportTrigger:
         writer = MagicMock()
         main_mod._check_export_trigger(openclaw_writer=writer, sops_dir=sops_dir)
 
-        # OpenClaw writer called
+        # OpenClaw writer called (no output_dir → uses default writer)
         writer.write_all_sops.assert_called_once()
         # SKILL.md created
         assert (sops_dir.parent.parent / "skills").exists()

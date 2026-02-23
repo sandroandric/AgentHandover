@@ -29,6 +29,9 @@ brew install just
 # Build everything
 just build-all
 
+# Install Chrome native messaging host (required for extension connection)
+./scripts/setup.sh
+
 # Run tests
 just test-all
 ```
