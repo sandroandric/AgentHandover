@@ -197,7 +197,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--adapter",
-        choices=["openclaw", "generic"],
+        choices=["openclaw", "generic", "skill-md", "all"],
         default="openclaw",
         help="SOP export adapter (default: openclaw)",
     )
@@ -312,6 +312,7 @@ def run_pipeline(
     index_generator: IndexGenerator,
     sop_inducer: object | None = None,
     sop_enhancer: object | None = None,
+    skill_md_writer: "SOPExportAdapter | None" = None,
 ) -> dict:
     """Run the full D->E->F pipeline on a batch of events.
 
@@ -326,6 +327,7 @@ def run_pipeline(
         "vlm_enqueued": 0,
         "sops_induced": 0,
         "sops_exported": 0,
+        "skills_exported": 0,
     }
 
     if not events:
@@ -505,7 +507,265 @@ def run_pipeline(
         except Exception:
             logger.exception("SOP export failed")
 
+        # Step F3: Also export as SKILL.md if skill_md_writer is configured
+        if skill_md_writer is not None:
+            try:
+                skill_paths = skill_md_writer.write_all_sops(sop_templates)
+                summary["skills_exported"] = len(skill_paths)
+                logger.info("Exported %d SKILL.md files", len(skill_paths))
+            except Exception:
+                logger.exception("SKILL.md export failed")
+
     return summary
+
+
+def _process_focus_sessions(
+    db: "WorkerDB",
+    *,
+    episode_builder: EpisodeBuilder,
+    clipboard_linker: ClipboardLinker,
+    translator: SemanticTranslator,
+    scorer: "ConfidenceScorer",
+    vlm_queue: "VLMFallbackQueue",
+    sop_inducer: object | None,
+    sop_enhancer: object | None,
+    openclaw_writer: "SOPExportAdapter",
+    skill_md_writer: "SOPExportAdapter | None" = None,
+    index_generator: "IndexGenerator",
+) -> int:
+    """Process completed focus recording sessions.
+
+    Queries for events tagged with focus_session_id, groups them by session,
+    runs through the episode builder + translator, and calls
+    ``induce_from_focus_session()`` (bypassing PrefixSpan multi-episode
+    requirement) to produce a SOP from a single demonstration.
+
+    Note: ``NegativeDemoPruner`` is deliberately skipped here because focus
+    sessions are single-shot demonstrations — there are no negative counter-
+    examples to learn from.
+
+    Returns the number of SOPs exported from focus sessions.
+    """
+    state_dir = _status_dir()
+    signal_path = state_dir / "focus-session.json"
+
+    if not signal_path.is_file():
+        return 0
+
+    try:
+        with open(signal_path) as f:
+            signal = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        logger.debug("Could not read focus-session.json", exc_info=True)
+        return 0
+
+    if signal.get("status") != "stopped":
+        return 0
+
+    session_id = signal.get("session_id", "")
+    title = signal.get("title", "Untitled focus session")
+
+    if not session_id:
+        return 0
+
+    # Query events tagged with this focus session ID
+    focus_events = db.get_focus_session_events(session_id)
+    if not focus_events:
+        logger.info(
+            "Focus session '%s' (%s) has no events yet, will retry next cycle",
+            title,
+            session_id,
+        )
+        return 0
+
+    logger.info(
+        "Processing focus session '%s' (%s): %d events",
+        title,
+        session_id,
+        len(focus_events),
+    )
+
+    # Run through episode builder
+    episodes = episode_builder.process_events(focus_events)
+    if not episodes:
+        logger.warning("Focus session '%s' produced no episodes", title)
+        # Clear the signal so we don't retry endlessly
+        _clear_focus_signal(signal_path)
+        return 0
+
+    # Translate episodes into semantic steps
+    episode_sop_steps: list[list[dict]] = []
+    for ep in episodes:
+        translations = translator.translate_batch(ep.events)
+        sop_steps: list[dict] = []
+        for tr in translations:
+            context: dict = {}
+            if tr.pre_state.get("window_title"):
+                context["expected_title"] = tr.pre_state["window_title"]
+            if tr.pre_state.get("app_id"):
+                context["expected_app"] = tr.pre_state["app_id"]
+
+            conf = scorer.score(tr, context)
+            if conf.decision in ("accept", "accept_flagged"):
+                target_desc = ""
+                selector = None
+                if tr.target:
+                    target_desc = tr.target.selector
+                    selector = tr.target.selector
+
+                sop_steps.append({
+                    "step": tr.intent,
+                    "target": target_desc,
+                    "selector": selector,
+                    "parameters": tr.parameters,
+                    "confidence": conf.total,
+                    "pre_state": tr.pre_state,
+                })
+        if sop_steps:
+            episode_sop_steps.append(sop_steps)
+
+    if not episode_sop_steps:
+        logger.warning("Focus session '%s' produced no SOP steps", title)
+        _clear_focus_signal(signal_path)
+        return 0
+
+    # Induce SOP from focus session (bypasses PrefixSpan)
+    sop_templates: list[dict] = []
+    if sop_inducer is not None:
+        try:
+            sop_templates = sop_inducer.induce_from_focus_session(
+                episode_sop_steps, title
+            )
+        except Exception:
+            logger.exception("Focus session SOP induction failed for '%s'", title)
+
+    # Enhance with LLM descriptions
+    if sop_enhancer is not None and sop_templates:
+        for template in sop_templates:
+            try:
+                enhanced = sop_enhancer.enhance_sop(template)
+                if "task_description" in enhanced:
+                    template.update(enhanced)
+            except Exception:
+                logger.debug(
+                    "Focus SOP enhancement failed for '%s'",
+                    template.get("slug", "unknown"),
+                    exc_info=True,
+                )
+
+    # Export
+    exported = 0
+    if sop_templates:
+        try:
+            paths = openclaw_writer.write_all_sops(sop_templates)
+            exported = len(paths)
+            index_generator.update_index(
+                openclaw_writer.get_sops_dir(), sop_templates
+            )
+            logger.info(
+                "Focus session '%s': exported %d SOP(s)", title, exported
+            )
+        except Exception:
+            logger.exception("Focus session SOP export failed")
+
+        # Also export as SKILL.md if writer is configured
+        if skill_md_writer is not None:
+            try:
+                skill_md_writer.write_all_sops(sop_templates)
+                logger.info(
+                    "Focus session '%s': SKILL.md export complete", title
+                )
+            except Exception:
+                logger.exception("Focus session SKILL.md export failed")
+
+    # Clear the signal file so it's not reprocessed
+    _clear_focus_signal(signal_path)
+
+    return exported
+
+
+def _clear_focus_signal(signal_path: Path) -> None:
+    """Remove the focus session signal file."""
+    try:
+        signal_path.unlink(missing_ok=True)
+    except Exception:
+        logger.debug("Failed to remove focus-session.json", exc_info=True)
+
+
+def _check_export_trigger(
+    *,
+    openclaw_writer: "SOPExportAdapter",
+    skill_md_writer: "SOPExportAdapter | None",
+    sop_inducer: object | None,
+) -> None:
+    """Check for and process an export-trigger.json file written by the CLI.
+
+    The CLI ``openmimic export`` writes a trigger file requesting re-export of
+    existing SOPs in a specific format (skill-md, generic, openclaw).  The
+    worker picks it up here, runs the re-export, and removes the trigger.
+    """
+    state_dir = _status_dir()
+    trigger_path = state_dir / "export-trigger.json"
+
+    if not trigger_path.is_file():
+        return
+
+    try:
+        with open(trigger_path) as f:
+            trigger = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        logger.debug("Could not read export-trigger.json", exc_info=True)
+        return
+
+    fmt = trigger.get("format", "")
+    sop_slug = trigger.get("sop_slug")
+    logger.info("Processing export trigger: format=%s slug=%s", fmt, sop_slug)
+
+    # Get existing SOP templates from the inducer cache if available
+    sop_templates: list[dict] = []
+    if sop_inducer is not None and hasattr(sop_inducer, "get_cached_sops"):
+        sop_templates = sop_inducer.get_cached_sops()
+
+    # If we have no cached SOPs, try reading from the OpenClaw writer's directory
+    if not sop_templates:
+        sops_dir = openclaw_writer.get_sops_dir()
+        if sops_dir.exists():
+            existing = openclaw_writer.list_sops()
+            if sop_slug:
+                existing = [s for s in existing if s.get("slug") == sop_slug]
+            # We only have inventory info, not full templates — log a note
+            if existing:
+                logger.info(
+                    "Found %d existing SOP(s) but cannot re-export without "
+                    "full templates.  Run the pipeline first to populate the cache.",
+                    len(existing),
+                )
+
+    if sop_templates:
+        if sop_slug:
+            sop_templates = [
+                t for t in sop_templates if t.get("slug") == sop_slug
+            ]
+
+        if fmt in ("skill-md", "all") and skill_md_writer is not None:
+            try:
+                skill_md_writer.write_all_sops(sop_templates)
+                logger.info("Export trigger: wrote %d SKILL.md file(s)", len(sop_templates))
+            except Exception:
+                logger.exception("Export trigger: SKILL.md write failed")
+
+        if fmt in ("openclaw", "all"):
+            try:
+                openclaw_writer.write_all_sops(sop_templates)
+                logger.info("Export trigger: wrote %d OpenClaw file(s)", len(sop_templates))
+            except Exception:
+                logger.exception("Export trigger: OpenClaw write failed")
+
+    # Remove the trigger whether we succeeded or not
+    try:
+        trigger_path.unlink(missing_ok=True)
+    except Exception:
+        logger.debug("Failed to remove export-trigger.json", exc_info=True)
 
 
 def _run_deep_scan(scanner: DeepScanner, artifacts: list[dict]) -> None:
@@ -771,9 +1031,17 @@ def main(argv: list[str] | None = None) -> None:
     vlm_queue = VLMFallbackQueue()
     index_generator = IndexGenerator()
     # Create export adapter based on config
+    skill_md_writer = None
     if args.adapter == "generic":
         from oc_apprentice_worker.generic_writer import GenericWriter
         sop_writer = GenericWriter(output_dir=args.sops_dir, json_export=args.json_export)
+    elif args.adapter == "skill-md":
+        from oc_apprentice_worker.skill_md_writer import SkillMdWriter
+        sop_writer = SkillMdWriter(workspace_dir=args.sops_dir.parent.parent)
+    elif args.adapter == "all":
+        sop_writer = OpenClawWriter(workspace_dir=args.sops_dir.parent.parent)
+        from oc_apprentice_worker.skill_md_writer import SkillMdWriter
+        skill_md_writer = SkillMdWriter(workspace_dir=args.sops_dir.parent.parent)
     else:
         sop_writer = OpenClawWriter(workspace_dir=args.sops_dir.parent.parent)
 
@@ -985,6 +1253,33 @@ def main(argv: list[str] | None = None) -> None:
 
         while not shutdown_flag[0]:
             try:
+                # Process any completed focus recording sessions first
+                focus_sops = _process_focus_sessions(
+                    db,
+                    episode_builder=episode_builder,
+                    clipboard_linker=clipboard_linker,
+                    translator=translator,
+                    scorer=scorer,
+                    vlm_queue=vlm_queue,
+                    sop_inducer=sop_inducer,
+                    sop_enhancer=sop_enhancer,
+                    openclaw_writer=sop_writer,
+                    skill_md_writer=skill_md_writer,
+                    index_generator=index_generator,
+                )
+                if focus_sops > 0:
+                    total_sops_generated += focus_sops
+                    logger.info(
+                        "Focus recording: generated %d SOP(s)!", focus_sops
+                    )
+
+                # Check for CLI-requested export triggers
+                _check_export_trigger(
+                    openclaw_writer=sop_writer,
+                    skill_md_writer=skill_md_writer,
+                    sop_inducer=sop_inducer,
+                )
+
                 unprocessed = db.get_unprocessed_events(limit=100)
                 pending_vlm = db.get_pending_vlm_jobs(limit=10)
 
@@ -1030,6 +1325,7 @@ def main(argv: list[str] | None = None) -> None:
                         index_generator=index_generator,
                         sop_inducer=sop_inducer,
                         sop_enhancer=sop_enhancer,
+                        skill_md_writer=skill_md_writer,
                     )
                     pipeline_elapsed_ms = int((time.monotonic() - pipeline_start) * 1000)
                     last_pipeline_duration_ms = pipeline_elapsed_ms

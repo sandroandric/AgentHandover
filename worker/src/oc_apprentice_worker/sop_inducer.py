@@ -69,6 +69,7 @@ class SOPInducer:
                 "variables": [{"name": "customer_name", "type": "string", "example": "..."}],
                 "confidence_avg": 0.87,
                 "episode_count": 5,
+                "abs_support": 5,
                 "apps_involved": ["Chrome", "Excel"],
             }
         """
@@ -130,6 +131,7 @@ class SOPInducer:
                 "variables": variables,
                 "confidence_avg": round(confidence_avg, 4),
                 "episode_count": support_count,
+                "abs_support": support_count,
                 "apps_involved": sorted(set(apps)),
                 "preconditions": preconditions,
                 "postconditions": postconditions,
@@ -634,6 +636,102 @@ class SOPInducer:
                 preconditions.append(f"url_open:{url}")
 
         return preconditions
+
+    def induce_from_focus_session(
+        self, episodes: list[list[dict]], title: str
+    ) -> list[dict]:
+        """Produce SOP templates from a single focus recording session.
+
+        Unlike ``induce()`` which requires multiple episodes and PrefixSpan
+        mining, this method converts episode steps directly into a SOP
+        template from a single demonstration.
+
+        Args:
+            episodes: Episodes built from focus session events. Typically
+                1-2 episodes from a single session.
+            title: User-provided title for the workflow.
+
+        Returns:
+            List of SOP template dicts (usually 1) with
+            ``source: "focus_recording"`` metadata.
+        """
+        if not episodes:
+            return []
+
+        # Flatten all episodes into one sequence of steps
+        all_steps: list[dict] = []
+        for ep in episodes:
+            all_steps.extend(ep)
+
+        if not all_steps:
+            return []
+
+        # Collect apps involved
+        apps: set[str] = set()
+        for step in all_steps:
+            params = step.get("parameters", {})
+            if isinstance(params, dict):
+                app = params.get("app_id") or params.get("app")
+                if app:
+                    apps.add(app)
+            pre_state = step.get("pre_state", {})
+            if isinstance(pre_state, dict):
+                app = pre_state.get("app_id") or pre_state.get("app")
+                if app:
+                    apps.add(app)
+
+        # Generate slug from title
+        slug = self._generate_slug_from_title(title)
+
+        # Compute average confidence
+        confidence_avg = self._compute_avg_confidence([all_steps])
+
+        # Detect pre/postconditions from the single instance
+        preconditions = self._detect_preconditions([all_steps])
+        postconditions = self._detect_postconditions([all_steps])
+
+        template = {
+            "slug": slug,
+            "title": title,
+            "steps": [s.copy() for s in all_steps],
+            "variables": [],  # single demo — no variable abstraction possible
+            "confidence_avg": round(confidence_avg, 4),
+            "episode_count": 1,
+            "abs_support": 1,
+            "apps_involved": sorted(apps),
+            "preconditions": preconditions,
+            "postconditions": postconditions,
+            "exceptions_seen": [],
+            "source": "focus_recording",
+            "focus_title": title,
+        }
+
+        logger.info(
+            "Focus session SOP: '%s' with %d steps (confidence=%.2f)",
+            title,
+            len(all_steps),
+            confidence_avg,
+        )
+
+        return [template]
+
+    def _generate_slug_from_title(self, title: str) -> str:
+        """Generate a URL-safe slug from a user-provided title.
+
+        Normalizes to lowercase, replaces spaces/special chars with hyphens,
+        and appends a short hash for uniqueness.
+        """
+        import hashlib
+        import re
+        import unicodedata
+
+        slug = unicodedata.normalize("NFKD", title)
+        slug = re.sub(r"[^\w\s-]", "", slug).strip().lower()
+        slug = re.sub(r"[\s_]+", "-", slug)
+        slug = slug[:60]
+
+        hash_suffix = hashlib.sha256(title.encode("utf-8")).hexdigest()[:6]
+        return f"{slug}-{hash_suffix}"
 
     def _detect_postconditions(self, instances: list[list[dict]]) -> list[str]:
         """Detect the final state after the SOP completes.

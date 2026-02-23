@@ -819,6 +819,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "toml",
+ "tracing",
  "uuid",
 ]
 
@@ -917,6 +918,7 @@ dependencies = [
  "oc-apprentice-common",
  "serde",
  "serde_json",
+ "uuid",
 ]
 
 [[package]]

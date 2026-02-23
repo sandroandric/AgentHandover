@@ -19,6 +19,7 @@ fn sample_daemon_status() -> DaemonStatus {
         db_path: "/tmp/test.db".to_string(),
         uptime_seconds: 3600,
         last_extension_message: None,
+        focus_session: None,
     }
 }
 
@@ -224,6 +225,7 @@ fn daemon_status_with_extension_message_roundtrip() {
         db_path: "/tmp/test.db".to_string(),
         uptime_seconds: 600,
         last_extension_message: Some(now),
+        focus_session: None,
     };
 
     let json = serde_json::to_string_pretty(&status).expect("serialize");

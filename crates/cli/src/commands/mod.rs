@@ -1,5 +1,7 @@
 pub mod config;
 pub mod doctor;
+pub mod export;
+pub mod focus;
 pub mod logs;
 pub mod service;
 pub mod setup;

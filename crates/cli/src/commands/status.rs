@@ -1,5 +1,6 @@
 use anyhow::Result;
 use colored::Colorize;
+use oc_apprentice_common::focus_session::read_focus_signal;
 use oc_apprentice_common::pid;
 use oc_apprentice_common::status;
 
@@ -16,8 +17,48 @@ pub fn run() -> Result<()> {
 
     // Worker status
     print_service_status("Worker", "worker-status.json", "worker");
+    println!();
+
+    // Focus session status
+    print_focus_status();
 
     Ok(())
+}
+
+fn print_focus_status() {
+    let state_dir = status::data_dir();
+    match read_focus_signal(&state_dir) {
+        Some(signal) if signal.is_recording() => {
+            // Calculate elapsed time
+            let elapsed = if let Ok(started) = chrono::DateTime::parse_from_rfc3339(&signal.started_at) {
+                let duration = chrono::Utc::now().signed_duration_since(started);
+                let mins = duration.num_minutes();
+                let secs = duration.num_seconds() % 60;
+                format!("{}m {}s", mins, secs)
+            } else {
+                "unknown".to_string()
+            };
+
+            println!(
+                "  {} Focus: {} \"{}\" ({})",
+                "●".red(),
+                "Recording".red().bold(),
+                signal.title,
+                elapsed,
+            );
+        }
+        Some(signal) if signal.is_stopped() => {
+            println!(
+                "  {} Focus: {} \"{}\" — awaiting worker processing",
+                "◉".yellow(),
+                "Stopped".yellow(),
+                signal.title,
+            );
+        }
+        _ => {
+            println!("  {} Focus: {}", "○".dimmed(), "idle".dimmed());
+        }
+    }
 }
 
 fn print_service_status(name: &str, status_file: &str, pid_name: &str) {

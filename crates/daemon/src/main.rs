@@ -249,6 +249,18 @@ async fn main() -> Result<()> {
                         oc_apprentice_common::status::read_extension_heartbeat()
                     };
 
+                    // Read focus session signal for status reporting
+                    let focus_session_info = {
+                        let state_dir = oc_apprentice_common::status::data_dir();
+                        oc_apprentice_common::focus_session::read_focus_signal(&state_dir)
+                            .filter(|s| s.is_recording())
+                            .map(|s| oc_apprentice_common::status::FocusSessionInfo {
+                                session_id: s.session_id,
+                                title: s.title,
+                                started_at: s.started_at,
+                            })
+                    };
+
                     let daemon_status = oc_apprentice_common::status::DaemonStatus {
                         pid: std::process::id(),
                         version: env!("CARGO_PKG_VERSION").to_string(),
@@ -263,6 +275,7 @@ async fn main() -> Result<()> {
                             .num_seconds()
                             .unsigned_abs(),
                         last_extension_message: last_ext_msg,
+                        focus_session: focus_session_info,
                     };
                     if let Err(e) = oc_apprentice_common::status::write_status_file(
                         "daemon-status.json",

@@ -78,6 +78,34 @@ enum Commands {
         #[arg(long)]
         purge_data: bool,
     },
+    /// Focus recording mode — record a single workflow demonstration
+    Focus {
+        #[command(subcommand)]
+        action: FocusAction,
+    },
+    /// Export SOPs in a specific format
+    Export {
+        /// Output format
+        #[arg(long, default_value = "skill-md")]
+        format: String,
+        /// Export a specific SOP by slug (default: all)
+        #[arg(long)]
+        sop: Option<String>,
+        /// Output directory (default: workspace/skills)
+        #[arg(long)]
+        output: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum FocusAction {
+    /// Start recording a workflow demonstration
+    Start {
+        /// A descriptive title for the workflow (e.g. "Expense report filing")
+        title: String,
+    },
+    /// Stop the active focus recording session
+    Stop,
 }
 
 #[derive(Subcommand)]
@@ -126,5 +154,12 @@ fn main() -> Result<()> {
         Commands::Setup { check, extension, vlm } => commands::setup::run(check, extension, vlm),
         Commands::Doctor => commands::doctor::run(),
         Commands::Uninstall { purge_data } => commands::uninstall::run(purge_data),
+        Commands::Focus { action } => match action {
+            FocusAction::Start { title } => commands::focus::start(&title),
+            FocusAction::Stop => commands::focus::stop(),
+        },
+        Commands::Export { format, sop, output } => {
+            commands::export::run(&format, sop.as_deref(), output.as_deref())
+        }
     }
 }

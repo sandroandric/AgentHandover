@@ -224,6 +224,7 @@ class TestPipelineSummaryKeys:
         expected_keys = {
             "events_in", "episodes", "positive_events", "negative_events",
             "translations", "vlm_enqueued", "sops_induced", "sops_exported",
+            "skills_exported",
         }
         assert set(summary.keys()) == expected_keys
 

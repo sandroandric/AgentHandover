@@ -63,6 +63,10 @@ pub async fn run_observer_loop(
     let mut screenshot_count_this_minute: u32 = 0;
     let mut last_minute_reset = Utc::now();
 
+    // Focus recording session tracking
+    let state_dir = oc_apprentice_common::status::data_dir();
+    let mut active_focus_session_id: Option<String> = None;
+
     // AppleScript throttle: at most once per 2 seconds per app
     #[cfg(target_os = "macos")]
     let mut applescript_last_query: HashMap<String, Instant> = HashMap::new();
@@ -79,6 +83,36 @@ pub async fn run_observer_loop(
                     info!("Observer loop received shutdown signal");
                     let _ = tx.send(ObserverMessage::Shutdown).await;
                     break;
+                }
+
+                // Check for focus recording session signal (cheap stat() call)
+                match oc_apprentice_common::focus_session::read_focus_signal(&state_dir) {
+                    Some(signal) if signal.is_recording() => {
+                        if active_focus_session_id.as_deref() != Some(&signal.session_id) {
+                            info!(
+                                session_id = %signal.session_id,
+                                title = %signal.title,
+                                "Focus recording session started"
+                            );
+                            active_focus_session_id = Some(signal.session_id);
+                        }
+                    }
+                    Some(signal) if signal.is_stopped() => {
+                        if active_focus_session_id.is_some() {
+                            info!(
+                                session_id = %signal.session_id,
+                                "Focus recording session stopped"
+                            );
+                            active_focus_session_id = None;
+                        }
+                    }
+                    _ => {
+                        // No signal file or unknown status — clear active session
+                        if active_focus_session_id.is_some() {
+                            debug!("Focus session signal file removed, clearing active session");
+                            active_focus_session_id = None;
+                        }
+                    }
                 }
 
                 // Reset screenshot counter every minute
@@ -175,6 +209,7 @@ pub async fn run_observer_loop(
                             }
                         }
 
+                        tag_focus_session(&mut event, &active_focus_session_id);
                         redact_event(&mut event, &redactor);
                         let _ = tx.send(ObserverMessage::Event(event)).await;
                         dwell.on_manipulation_input();
@@ -191,6 +226,7 @@ pub async fn run_observer_loop(
                             &display_topology,
                             &primary_display_id,
                         );
+                        tag_focus_session(&mut event, &active_focus_session_id);
                         redact_event(&mut event, &redactor);
                         let _ = tx.send(ObserverMessage::Event(event)).await;
                     }
@@ -229,6 +265,7 @@ pub async fn run_observer_loop(
                         }
                     }
 
+                    tag_focus_session(&mut event, &active_focus_session_id);
                     redact_event(&mut event, &redactor);
                     let _ = tx.send(ObserverMessage::Event(event)).await;
                 }
@@ -262,6 +299,7 @@ pub async fn run_observer_loop(
                         }
                     }
 
+                    tag_focus_session(&mut event, &active_focus_session_id);
                     redact_event(&mut event, &redactor);
                     let _ = tx.send(ObserverMessage::Event(event)).await;
                 }
@@ -465,6 +503,13 @@ fn detect_spanning_displays(
         Some(spanned_ids)
     } else {
         None
+    }
+}
+
+/// Tag an event with the active focus session ID, if any.
+fn tag_focus_session(event: &mut Event, focus_session_id: &Option<String>) {
+    if let Some(ref session_id) = focus_session_id {
+        event.metadata["focus_session_id"] = serde_json::Value::String(session_id.clone());
     }
 }
 
@@ -737,6 +782,29 @@ mod tests {
 
         let result = detect_spanning_displays(&window, &displays);
         assert!(result.is_none(), "Window within a single display should not report spanning");
+    }
+
+    #[test]
+    fn test_tag_focus_session_active() {
+        let mut event = make_test_event_with_kind(EventKind::DwellSnapshot);
+        let session_id = Some("test-session-123".to_string());
+
+        tag_focus_session(&mut event, &session_id);
+
+        assert_eq!(
+            event.metadata["focus_session_id"].as_str().unwrap(),
+            "test-session-123"
+        );
+    }
+
+    #[test]
+    fn test_tag_focus_session_none() {
+        let mut event = make_test_event_with_kind(EventKind::DwellSnapshot);
+        let session_id: Option<String> = None;
+
+        tag_focus_session(&mut event, &session_id);
+
+        assert!(event.metadata.get("focus_session_id").is_none());
     }
 
     #[test]

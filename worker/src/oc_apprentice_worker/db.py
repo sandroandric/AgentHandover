@@ -89,6 +89,20 @@ class WorkerDB:
         row = cur.fetchone()
         return dict(row) if row is not None else None
 
+    def get_focus_session_events(self, session_id: str) -> list[dict]:
+        """Return all events tagged with the given focus session ID.
+
+        Events are identified by a ``focus_session_id`` key in their
+        ``metadata_json`` column.  Ordered by timestamp ascending.
+        """
+        cur = self._conn.execute(
+            "SELECT * FROM events "
+            "WHERE json_extract(metadata_json, '$.focus_session_id') = ? "
+            "ORDER BY timestamp ASC",
+            (session_id,),
+        )
+        return self._rows_to_dicts(cur.fetchall())
+
     # ------------------------------------------------------------------
     # Episodes
     # ------------------------------------------------------------------

@@ -50,6 +50,14 @@ struct ExtensionHeartbeatFile: Codable {
     let session_started: String
 }
 
+/// Decoded focus-session.json
+struct FocusSessionSignalFile: Codable {
+    let session_id: String
+    let title: String
+    let started_at: String
+    let status: String
+}
+
 /// Decoded worker-status.json
 struct WorkerStatusFile: Codable {
     let pid: UInt32
@@ -90,6 +98,12 @@ final class AppState: ObservableObject {
     @Published var vlmAvailable = false
     @Published var vlmMode: String = "local"
     @Published var vlmProvider: String?
+
+    // Focus Recording
+    @Published var focusSessionActive = false
+    @Published var focusSessionTitle: String = ""
+    @Published var focusSessionId: String?
+    @Published var focusSessionStartedAt: String?
 
     // MARK: - Computed
 
@@ -161,6 +175,7 @@ final class AppState: ObservableObject {
         readDaemonStatus()
         readWorkerStatus()
         readExtensionHeartbeat()
+        readFocusSession()
         updateHealth()
         checkPermissions()
         updateVLMStatus()
@@ -208,6 +223,23 @@ final class AppState: ObservableObject {
 
         extensionHeartbeat = heartbeat
         extensionConnected = isHeartbeatFresh(heartbeat.last_message)
+    }
+
+    private func readFocusSession() {
+        let path = statusDir.appendingPathComponent("focus-session.json")
+        guard let data = try? Data(contentsOf: path),
+              let signal = try? JSONDecoder().decode(FocusSessionSignalFile.self, from: data) else {
+            focusSessionActive = false
+            focusSessionTitle = ""
+            focusSessionId = nil
+            focusSessionStartedAt = nil
+            return
+        }
+
+        focusSessionActive = signal.status == "recording"
+        focusSessionTitle = signal.title
+        focusSessionId = signal.session_id
+        focusSessionStartedAt = signal.started_at
     }
 
     private func updateVLMStatus() {

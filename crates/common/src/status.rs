@@ -2,6 +2,14 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+/// Info about an active focus recording session.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FocusSessionInfo {
+    pub session_id: String,
+    pub title: String,
+    pub started_at: String,
+}
+
 /// Status written by the daemon every 60s to daemon-status.json
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DaemonStatus {
@@ -19,6 +27,9 @@ pub struct DaemonStatus {
     /// via Native Messaging.  `None` if no message has been received yet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_extension_message: Option<DateTime<Utc>>,
+    /// Active focus recording session, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub focus_session: Option<FocusSessionInfo>,
 }
 
 /// Status written by the worker each poll cycle to worker-status.json
