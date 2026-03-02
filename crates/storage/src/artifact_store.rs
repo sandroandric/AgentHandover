@@ -19,6 +19,20 @@ const NONCE_SIZE: usize = 24; // XChaCha20 uses 24-byte nonces
 const COMPRESSION_ZSTD: u8 = 1;
 const ENCRYPTION_XCHACHA20POLY1305: u8 = 1;
 
+/// Metadata returned after storing an artifact, for insertion into the DB.
+pub struct ArtifactMeta {
+    /// Unique artifact ID (e.g. "screenshot_a1b2c3d4").
+    pub artifact_id: String,
+    /// Type of artifact (e.g. "screenshot").
+    pub artifact_type: String,
+    /// Absolute path to the stored file on disk.
+    pub file_path: PathBuf,
+    /// Uncompressed original size in bytes.
+    pub original_size_bytes: u64,
+    /// Compressed+encrypted size on disk.
+    pub stored_size_bytes: u64,
+}
+
 pub struct ArtifactStore {
     base_path: PathBuf,
     key: [u8; 32],
@@ -36,7 +50,10 @@ impl ArtifactStore {
     }
 
     /// Store: capture -> compress -> encrypt -> write (spec order from §6.2)
-    pub fn store(&self, data: &[u8], artifact_type: &str) -> Result<String> {
+    ///
+    /// Returns [`ArtifactMeta`] with the artifact ID, file path, and size info
+    /// so the caller can record the artifact in the database.
+    pub fn store(&self, data: &[u8], artifact_type: &str) -> Result<ArtifactMeta> {
         // 1. Compress with zstd (level 3 — balanced speed/ratio)
         let compressed = zstd::encode_all(data, 3)?;
 
@@ -85,12 +102,20 @@ impl ArtifactStore {
 
         fs::rename(&tmp_path, &final_path)?;
 
+        let stored_size_bytes = fs::metadata(&final_path).map(|m| m.len()).unwrap_or(0);
+
         // Cache the path for fast retrieval
         if let Ok(mut cache) = self.path_cache.write() {
-            cache.insert(artifact_id.clone(), final_path);
+            cache.insert(artifact_id.clone(), final_path.clone());
         }
 
-        Ok(artifact_id)
+        Ok(ArtifactMeta {
+            artifact_id,
+            artifact_type: artifact_type.to_string(),
+            file_path: final_path,
+            original_size_bytes: data.len() as u64,
+            stored_size_bytes,
+        })
     }
 
     /// Retrieve: read -> decrypt -> decompress (reverse of store)

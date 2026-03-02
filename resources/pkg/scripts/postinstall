@@ -1,5 +1,10 @@
 #!/bin/bash
 # OpenMimic post-install script
+set -e
+
+# Track non-fatal warnings that shouldn't abort install but should be reported.
+WARNINGS=""
+warn() { WARNINGS="${WARNINGS}\n  ⚠ $1"; }
 
 # Resolve the real user's home — installer runs as root so $USER may be "root".
 # Use the console owner (the logged-in user) as the target.
@@ -75,17 +80,22 @@ cat > "${NM_DIR}/com.openclaw.apprentice.json" << JSON
 }
 JSON
 
-# Set up Python virtual environment for worker
+# Set up Python virtual environment for worker (non-fatal: worker is optional
+# on first install — user can run `openmimic setup --vlm` later).
 if [ ! -d "${LIB_DIR}/venv" ]; then
-    python3 -m venv "${LIB_DIR}/venv"
-    "${LIB_DIR}/venv/bin/pip" install --quiet "${LIB_DIR}/worker/"
+    if python3 -m venv "${LIB_DIR}/venv" 2>/dev/null && \
+       "${LIB_DIR}/venv/bin/pip" install --quiet "${LIB_DIR}/worker/" 2>/dev/null; then
+        echo "  Python virtual environment created."
+    else
+        warn "Python venv creation failed. Run: python3 -m venv ${LIB_DIR}/venv && ${LIB_DIR}/venv/bin/pip install ${LIB_DIR}/worker/"
+    fi
 fi
 
 # Set proper permissions
 chmod 755 /usr/local/bin/oc-apprentice-daemon
 chmod 755 /usr/local/bin/openmimic
 
-# Chrome extension setup
+# Chrome extension setup (informational only — never fatal)
 EXT_DIR="${LIB_DIR}/extension"
 if [ -f "${EXT_DIR}/manifest.json" ] && [ -f "${EXT_DIR}/background.js" ]; then
     echo "Chrome extension pre-built and ready."
@@ -107,6 +117,14 @@ else
 fi
 
 echo ""
-echo "OpenMimic installed successfully."
-echo "Run 'openmimic doctor' to verify the installation."
-exit 0
+if [ -n "$WARNINGS" ]; then
+    echo "OpenMimic installed with warnings:"
+    echo -e "$WARNINGS"
+    echo ""
+    echo "Run 'openmimic doctor' to diagnose issues."
+    exit 1
+else
+    echo "OpenMimic installed successfully."
+    echo "Run 'openmimic doctor' to verify the installation."
+    exit 0
+fi

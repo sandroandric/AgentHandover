@@ -321,8 +321,8 @@ class TestProcessVLMJobsReconciliation:
         # DB should also be marked as completed
         db.mark_vlm_job_completed.assert_called_once()
 
-    def test_failure_path_marks_in_memory_failed(self):
-        """On VLM rejection, in-memory queue job should be FAILED."""
+    def test_budget_exhaustion_defers_job(self):
+        """Budget errors should defer (keep PENDING), not mark FAILED."""
         from unittest.mock import MagicMock
         from oc_apprentice_worker.main import _process_vlm_jobs
         from oc_apprentice_worker.vlm_queue import (
@@ -358,8 +358,49 @@ class TestProcessVLMJobsReconciliation:
         pending_jobs = [{"id": "job-002", "event_id": "evt-002"}]
         _process_vlm_jobs(db, pending_jobs, vlm_worker, vlm_queue)
 
+        # Budget errors are deferred — job stays PENDING for retry after reset
+        assert job.status == VLMJobStatus.PENDING
+        db.mark_vlm_job_failed.assert_not_called()
+
+    def test_non_budget_failure_marks_in_memory_failed(self):
+        """Non-budget VLM errors should mark the job as FAILED."""
+        from unittest.mock import MagicMock
+        from oc_apprentice_worker.main import _process_vlm_jobs
+        from oc_apprentice_worker.vlm_queue import (
+            VLMFallbackQueue,
+            VLMJob,
+            VLMJobStatus,
+        )
+
+        db = MagicMock()
+        db.get_event_by_id.return_value = {
+            "kind_json": '{"DwellSnapshot": {}}',
+            "window_json": '{"title": "Test"}',
+        }
+
+        response = MagicMock()
+        response.success = False
+        response.error = "Model inference failed: OOM"
+
+        vlm_worker = MagicMock()
+        vlm_worker.process_job.return_value = response
+
+        vlm_queue = VLMFallbackQueue()
+        job = VLMJob(
+            job_id="job-003",
+            event_id="evt-003",
+            episode_id="",
+            semantic_step_index=0,
+            confidence_score=0.3,
+            priority_score=0.7,
+        )
+        vlm_queue.enqueue(job)
+
+        pending_jobs = [{"id": "job-003", "event_id": "evt-003"}]
+        _process_vlm_jobs(db, pending_jobs, vlm_worker, vlm_queue)
+
         assert job.status == VLMJobStatus.FAILED
-        db.mark_vlm_job_failed.assert_called_once_with("job-002")
+        db.mark_vlm_job_failed.assert_called_once_with("job-003")
 
     def test_without_vlm_queue_still_works(self):
         """Passing vlm_queue=None should not crash (backward compat)."""

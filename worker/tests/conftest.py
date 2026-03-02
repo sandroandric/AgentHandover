@@ -1,7 +1,8 @@
 """Shared fixtures for worker tests.
 
 Creates temporary SQLite databases with the same schema that the
-Rust daemon writes (``crates/storage/src/migrations/v001_initial.sql``).
+Rust daemon writes (``crates/storage/src/migrations/v001_initial.sql``
+plus ``v002_add_display_ids_spanned.sql``).
 """
 
 from __future__ import annotations
@@ -15,7 +16,7 @@ from pathlib import Path
 import pytest
 
 # ---------------------------------------------------------------------------
-# Schema — mirrors crates/storage/src/migrations/v001_initial.sql exactly
+# Schema — mirrors crates/storage/src/migrations/v001 + v002 exactly
 # ---------------------------------------------------------------------------
 
 DAEMON_SCHEMA = """\
@@ -33,7 +34,8 @@ CREATE TABLE IF NOT EXISTS events (
     metadata_json TEXT NOT NULL DEFAULT '{}',
     processed INTEGER NOT NULL DEFAULT 0,
     episode_id TEXT,
-    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    display_ids_spanned_json TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp);

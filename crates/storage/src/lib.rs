@@ -154,6 +154,33 @@ impl EventStore {
         Ok(())
     }
 
+    /// Insert an artifact record into the `artifacts` table so maintenance
+    /// (retention, size-based eviction) can find and clean up real files.
+    pub fn insert_artifact(
+        &self,
+        artifact_id: &str,
+        event_id: &str,
+        artifact_type: &str,
+        file_path: &str,
+        original_size_bytes: u64,
+        stored_size_bytes: u64,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO artifacts \
+             (id, event_id, artifact_type, file_path, original_size_bytes, stored_size_bytes) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                artifact_id,
+                event_id,
+                artifact_type,
+                file_path,
+                original_size_bytes as i64,
+                stored_size_bytes as i64,
+            ],
+        )?;
+        Ok(())
+    }
+
     pub fn get_event(&self, id: Uuid) -> Result<Option<Event>> {
         use rusqlite::OptionalExtension;
 

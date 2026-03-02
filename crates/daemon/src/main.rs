@@ -183,7 +183,7 @@ async fn main() -> Result<()> {
             while let Some(event) = nm_event_rx.recv().await {
                 // Track last NM message timestamp for extension-connected detection
                 nm_ts.store(chrono::Utc::now().timestamp_millis(), Ordering::Relaxed);
-                match forwarder_tx.try_send(ObserverMessage::Event(event)) {
+                match forwarder_tx.try_send(ObserverMessage::Event { event, artifacts: vec![] }) {
                     Ok(()) => {}
                     Err(mpsc::error::TrySendError::Full(_)) => {
                         warn!("Native messaging forwarder: main channel full (backpressure), dropping event");
@@ -394,7 +394,7 @@ async fn main() -> Result<()> {
                                 metadata: serde_json::json!({}),
                                 display_ids_spanned: None,
                             };
-                            match fwd_tx.try_send(ObserverMessage::Event(event)) {
+                            match fwd_tx.try_send(ObserverMessage::Event { event, artifacts: vec![] }) {
                                 Ok(()) => {}
                                 Err(mpsc::error::TrySendError::Full(_)) => {
                                     warn!("Clipboard forwarder: main channel full (backpressure), dropping event");
@@ -553,7 +553,7 @@ async fn run_native_messaging_bridge() -> Result<()> {
                 last_heartbeat_write = std::time::Instant::now();
             }
 
-            match forwarder_tx.try_send(ObserverMessage::Event(event)) {
+            match forwarder_tx.try_send(ObserverMessage::Event { event, artifacts: vec![] }) {
                 Ok(()) => {}
                 Err(mpsc::error::TrySendError::Full(_)) => {
                     warn!("NM bridge: channel full, dropping event");

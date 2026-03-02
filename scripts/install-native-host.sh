@@ -81,17 +81,20 @@ MANIFEST_DIR="$(detect_manifest_dir)"
 # ---------------------------------------------------------------------------
 
 if [[ -z "$DAEMON_PATH" ]]; then
-    # Try to find the binary in the project's cargo target directories
+    # Try to find the binary in the project's cargo target directories.
+    # Priority: universal binary (just build-all) > release > debug.
     SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
     PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-    if [[ -x "${PROJECT_ROOT}/target/release/oc-apprentice-daemon" ]]; then
+    if [[ -x "${PROJECT_ROOT}/target/universal-release/oc-apprentice-daemon" ]]; then
+        DAEMON_PATH="${PROJECT_ROOT}/target/universal-release/oc-apprentice-daemon"
+    elif [[ -x "${PROJECT_ROOT}/target/release/oc-apprentice-daemon" ]]; then
         DAEMON_PATH="${PROJECT_ROOT}/target/release/oc-apprentice-daemon"
     elif [[ -x "${PROJECT_ROOT}/target/debug/oc-apprentice-daemon" ]]; then
         DAEMON_PATH="${PROJECT_ROOT}/target/debug/oc-apprentice-daemon"
     else
         echo "Error: could not find oc-apprentice-daemon binary." >&2
-        echo "Build first with: cargo build --release" >&2
+        echo "Build first with: just build-all (or cargo build --release)" >&2
         echo "Or specify with: $0 --daemon-path /path/to/oc-apprentice-daemon" >&2
         exit 1
     fi

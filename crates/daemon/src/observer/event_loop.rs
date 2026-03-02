@@ -2,7 +2,7 @@ use anyhow::Result;
 use chrono::Utc;
 use oc_apprentice_common::event::*;
 use oc_apprentice_common::redaction::Redactor;
-use oc_apprentice_storage::artifact_store::ArtifactStore;
+use oc_apprentice_storage::artifact_store::{ArtifactMeta, ArtifactStore};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -13,9 +13,13 @@ use tracing::{info, debug, warn, error};
 use uuid::Uuid;
 
 /// Messages sent from the observer to the storage writer.
-#[derive(Debug)]
 pub enum ObserverMessage {
-    Event(Event),
+    Event {
+        event: Event,
+        /// Metadata for artifacts associated with this event, so the storage
+        /// writer can insert rows into the `artifacts` table.
+        artifacts: Vec<ArtifactMeta>,
+    },
     Shutdown,
 }
 
@@ -211,7 +215,7 @@ pub async fn run_observer_loop(
 
                         tag_focus_session(&mut event, &active_focus_session_id);
                         redact_event(&mut event, &redactor);
-                        let _ = tx.send(ObserverMessage::Event(event)).await;
+                        let _ = tx.send(ObserverMessage::Event { event, artifacts: vec![] }).await;
                         dwell.on_manipulation_input();
                     }
                     last_app_id = current_app.clone();
@@ -228,7 +232,7 @@ pub async fn run_observer_loop(
                         );
                         tag_focus_session(&mut event, &active_focus_session_id);
                         redact_event(&mut event, &redactor);
-                        let _ = tx.send(ObserverMessage::Event(event)).await;
+                        let _ = tx.send(ObserverMessage::Event { event, artifacts: vec![] }).await;
                     }
                     last_window_title = current_title;
                 }
@@ -244,6 +248,8 @@ pub async fn run_observer_loop(
                         &primary_display_id,
                     );
 
+                    let mut dwell_artifacts: Vec<ArtifactMeta> = vec![];
+
                     // Capture screenshot on dwell if enabled and under rate limit
                     if config.capture_screenshots
                         && screenshot_count_this_minute < config.screenshot_max_per_minute
@@ -252,6 +258,7 @@ pub async fn run_observer_loop(
                             let result = capture_and_store_screenshot(store).await;
                             screenshot_count_this_minute += result.artifact_ids.len() as u32;
                             event.artifact_ids = result.artifact_ids;
+                            dwell_artifacts = result.artifact_metas;
 
                             // Run OCR on captured screenshot pixels (async, off executor)
                             #[cfg(target_os = "macos")]
@@ -267,7 +274,7 @@ pub async fn run_observer_loop(
 
                     tag_focus_session(&mut event, &active_focus_session_id);
                     redact_event(&mut event, &redactor);
-                    let _ = tx.send(ObserverMessage::Event(event)).await;
+                    let _ = tx.send(ObserverMessage::Event { event, artifacts: dwell_artifacts }).await;
                 }
 
                 if dwell.is_scroll_reading() {
@@ -278,6 +285,8 @@ pub async fn run_observer_loop(
                         &primary_display_id,
                     );
 
+                    let mut scroll_artifacts: Vec<ArtifactMeta> = vec![];
+
                     // Capture screenshot on scroll-read if enabled and under rate limit
                     if config.capture_screenshots
                         && screenshot_count_this_minute < config.screenshot_max_per_minute
@@ -286,6 +295,7 @@ pub async fn run_observer_loop(
                             let result = capture_and_store_screenshot(store).await;
                             screenshot_count_this_minute += result.artifact_ids.len() as u32;
                             event.artifact_ids = result.artifact_ids;
+                            scroll_artifacts = result.artifact_metas;
 
                             // Run OCR on captured screenshot pixels (async, off executor)
                             #[cfg(target_os = "macos")]
@@ -301,7 +311,7 @@ pub async fn run_observer_loop(
 
                     tag_focus_session(&mut event, &active_focus_session_id);
                     redact_event(&mut event, &redactor);
-                    let _ = tx.send(ObserverMessage::Event(event)).await;
+                    let _ = tx.send(ObserverMessage::Event { event, artifacts: scroll_artifacts }).await;
                 }
             }
             _ = shutdown_rx.changed() => {
@@ -332,10 +342,25 @@ pub async fn run_storage_writer(
 
     while let Some(msg) = rx.recv().await {
         match msg {
-            ObserverMessage::Event(event) => {
+            ObserverMessage::Event { event, artifacts } => {
                 if let Err(e) = store.insert_event(&event) {
                     error!(error = %e, "Failed to insert event");
                 } else {
+                    // Insert artifact records so maintenance can find real files.
+                    let event_id_str = event.id.to_string();
+                    for meta in &artifacts {
+                        if let Err(e) = store.insert_artifact(
+                            &meta.artifact_id,
+                            &event_id_str,
+                            &meta.artifact_type,
+                            &meta.file_path.display().to_string(),
+                            meta.original_size_bytes,
+                            meta.stored_size_bytes,
+                        ) {
+                            warn!(error = %e, artifact_id = %meta.artifact_id, "Failed to insert artifact record");
+                        }
+                    }
+
                     event_count += 1;
                     if let Some(ref counter) = shared_counter {
                         counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -346,7 +371,34 @@ pub async fn run_storage_writer(
                 }
             }
             ObserverMessage::Shutdown => {
-                info!(event_count, "Storage writer shutting down");
+                info!(event_count, "Storage writer received shutdown, draining remaining events");
+                // Drain any events that were queued before/alongside the Shutdown message.
+                while let Ok(msg) = rx.try_recv() {
+                    if let ObserverMessage::Event { event, artifacts } = msg {
+                        if let Err(e) = store.insert_event(&event) {
+                            error!(error = %e, "Failed to insert event during drain");
+                        } else {
+                            let event_id_str = event.id.to_string();
+                            for meta in &artifacts {
+                                if let Err(e) = store.insert_artifact(
+                                    &meta.artifact_id,
+                                    &event_id_str,
+                                    &meta.artifact_type,
+                                    &meta.file_path.display().to_string(),
+                                    meta.original_size_bytes,
+                                    meta.stored_size_bytes,
+                                ) {
+                                    warn!(error = %e, "Failed to insert artifact during drain");
+                                }
+                            }
+                            event_count += 1;
+                            if let Some(ref counter) = shared_counter {
+                                counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            }
+                        }
+                    }
+                }
+                info!(event_count, "Storage writer shut down");
                 break;
             }
         }
@@ -355,9 +407,11 @@ pub async fn run_storage_writer(
     Ok(())
 }
 
-/// Result of screenshot capture: artifact IDs and optional raw pixel data for OCR.
+/// Result of screenshot capture: artifact metadata and optional raw pixel data for OCR.
 struct ScreenshotResult {
     artifact_ids: Vec<String>,
+    /// Full metadata for DB insertion.
+    artifact_metas: Vec<ArtifactMeta>,
     /// Raw BGRA pixels + dimensions, available for OCR processing.
     raw_pixels: Option<(usize, usize, Vec<u8>)>,
 }
@@ -372,10 +426,12 @@ async fn capture_and_store_screenshot(store: &ArtifactStore) -> ScreenshotResult
         match crate::capture::screenshot::capture_main_display() {
             Some((width, height, raw_pixels)) => {
                 match store.store(&raw_pixels, "screenshot") {
-                    Ok(artifact_id) => {
-                        debug!(artifact_id = %artifact_id, "Screenshot captured and stored");
+                    Ok(meta) => {
+                        debug!(artifact_id = %meta.artifact_id, "Screenshot captured and stored");
+                        let id = meta.artifact_id.clone();
                         return ScreenshotResult {
-                            artifact_ids: vec![artifact_id],
+                            artifact_ids: vec![id],
+                            artifact_metas: vec![meta],
                             raw_pixels: Some((width, height, raw_pixels)),
                         };
                     }
@@ -383,6 +439,7 @@ async fn capture_and_store_screenshot(store: &ArtifactStore) -> ScreenshotResult
                         warn!(error = %e, "Failed to store screenshot artifact");
                         return ScreenshotResult {
                             artifact_ids: vec![],
+                            artifact_metas: vec![],
                             raw_pixels: None,
                         };
                     }
@@ -400,6 +457,7 @@ async fn capture_and_store_screenshot(store: &ArtifactStore) -> ScreenshotResult
     }
     ScreenshotResult {
         artifact_ids: vec![],
+        artifact_metas: vec![],
         raw_pixels: None,
     }
 }
@@ -408,6 +466,7 @@ async fn capture_and_store_screenshot(store: &ArtifactStore) -> ScreenshotResult
 async fn capture_and_store_screenshot(_store: &ArtifactStore) -> ScreenshotResult {
     ScreenshotResult {
         artifact_ids: vec![],
+        artifact_metas: vec![],
         raw_pixels: None,
     }
 }

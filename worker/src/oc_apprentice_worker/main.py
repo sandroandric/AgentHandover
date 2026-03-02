@@ -393,14 +393,19 @@ def run_pipeline(
         sop_steps_for_episode: list[dict] = []
 
         for idx, tr in enumerate(translations):
-            # Build scoring context
+            # Build scoring context from PREVIOUS step's post_state so the
+            # context match score reflects an independent expectation rather
+            # than trivially matching pre_state against itself.
             context: dict = {}
-            if tr.pre_state.get("window_title"):
-                context["expected_title"] = tr.pre_state["window_title"]
-            if tr.pre_state.get("url"):
-                context["expected_url"] = tr.pre_state["url"]
-            if tr.pre_state.get("app_id"):
-                context["expected_app"] = tr.pre_state["app_id"]
+            if idx > 0:
+                prev_tr = translations[idx - 1]
+                prev_post = prev_tr.post_state if hasattr(prev_tr, "post_state") else {}
+                if prev_post.get("window_title"):
+                    context["expected_title"] = prev_post["window_title"]
+                if prev_post.get("url"):
+                    context["expected_url"] = prev_post["url"]
+                if prev_post.get("app_id"):
+                    context["expected_app"] = prev_post["app_id"]
 
             # Check clipboard provenance
             raw_event_id = tr.raw_event_id
@@ -601,12 +606,16 @@ def _process_focus_sessions(
     for ep in episodes:
         translations = translator.translate_batch(ep.events)
         sop_steps: list[dict] = []
-        for tr in translations:
+        for idx, tr in enumerate(translations):
+            # Context from previous step's post_state (see normal pipeline comment)
             context: dict = {}
-            if tr.pre_state.get("window_title"):
-                context["expected_title"] = tr.pre_state["window_title"]
-            if tr.pre_state.get("app_id"):
-                context["expected_app"] = tr.pre_state["app_id"]
+            if idx > 0:
+                prev_tr = translations[idx - 1]
+                prev_post = prev_tr.post_state if hasattr(prev_tr, "post_state") else {}
+                if prev_post.get("window_title"):
+                    context["expected_title"] = prev_post["window_title"]
+                if prev_post.get("app_id"):
+                    context["expected_app"] = prev_post["app_id"]
 
             conf = scorer.score(tr, context)
             if conf.decision in ("accept", "accept_flagged"):
@@ -961,6 +970,17 @@ def _process_vlm_jobs(
                     response.confidence_boost,
                 )
             else:
+                # Budget exhaustion is transient — leave job as pending so it
+                # gets retried after the daily budget resets.
+                if response.error and "budget" in response.error.lower():
+                    logger.info(
+                        "VLM job %s deferred: %s (will retry after budget reset)",
+                        job_id,
+                        response.error,
+                    )
+                    # All remaining jobs are also over budget; stop this cycle.
+                    break
+
                 logger.warning(
                     "VLM job %s rejected: %s", job_id, response.error
                 )

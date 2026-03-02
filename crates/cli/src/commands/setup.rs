@@ -44,17 +44,30 @@ pub fn run(check_only: bool, extension_only: bool, vlm_only: bool) -> Result<()>
         return Ok(());
     }
 
-    // Full wizard: run all steps sequentially
+    // Full wizard: run all steps sequentially, collect warnings.
+    let mut warnings: Vec<String> = Vec::new();
+
     step_permissions(check_only)?;
     println!();
-    step_services(check_only)?;
+
+    if let Err(e) = step_services(check_only) {
+        warnings.push(format!("Services: {}", e));
+    }
     println!();
+
     step_chrome_extension(check_only)?;
     println!();
     step_vlm(check_only)?;
     println!();
 
-    println!("{}", "Setup complete!".green().bold());
+    if warnings.is_empty() {
+        println!("{}", "Setup complete!".green().bold());
+    } else {
+        println!("{}", "Setup finished with warnings:".yellow().bold());
+        for w in &warnings {
+            println!("  {} {}", "⚠".yellow(), w);
+        }
+    }
     println!(
         "Run {} to verify everything is working.",
         "openmimic status".cyan()
@@ -178,13 +191,17 @@ fn step_services(check_only: bool) -> Result<()> {
     let daemon_running = pid::check_pid_file("daemon").is_some();
     let worker_running = pid::check_pid_file("worker").is_some();
 
+    let mut failures: Vec<String> = Vec::new();
+
     if daemon_running {
         println!("  {} Daemon running", "✓".green());
     } else {
         println!("  {} Daemon {}", "✗".red(), "not running".red());
         if !check_only {
             println!("    Starting daemon...");
-            start_service("com.openmimic.daemon");
+            if !start_service("com.openmimic.daemon") {
+                failures.push("daemon failed to start".to_string());
+            }
         }
     }
 
@@ -194,14 +211,22 @@ fn step_services(check_only: bool) -> Result<()> {
         println!("  {} Worker {}", "✗".red(), "not running".red());
         if !check_only {
             println!("    Starting worker...");
-            start_service("com.openmimic.worker");
+            if !start_service("com.openmimic.worker") {
+                failures.push("worker failed to start".to_string());
+            }
         }
     }
 
-    Ok(())
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        anyhow::bail!("{}", failures.join(", "))
+    }
 }
 
-fn start_service(label: &str) {
+/// Attempt to start a launchd service. Returns `true` if the service is
+/// confirmed running after load, `false` otherwise.
+fn start_service(label: &str) -> bool {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
     let plist_path = format!(
         "{}/Library/LaunchAgents/{}.plist",
@@ -218,7 +243,7 @@ fn start_service(label: &str) {
             "    Run {} to install plists.",
             "brew install --HEAD openmimic".cyan()
         );
-        return;
+        return false;
     }
 
     let output = std::process::Command::new("launchctl")
@@ -239,6 +264,7 @@ fn start_service(label: &str) {
 
     if running {
         println!("    {} {} loaded and running", "✓".green(), label);
+        true
     } else {
         println!(
             "    {} {} may not have started{}",
@@ -250,6 +276,7 @@ fn start_service(label: &str) {
                 format!(": {}", stderr)
             }
         );
+        false
     }
 }
 
