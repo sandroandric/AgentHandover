@@ -37,46 +37,77 @@ def _data_dir(tmp_path: Path) -> Path:
 
 
 def _create_test_db(db_path: Path) -> None:
-    """Create a minimal events database with the schema the daemon would create."""
+    """Create a minimal events database with the schema the daemon would create.
+
+    Mirrors crates/storage/src/migrations/v001_initial.sql + v002 exactly.
+    """
     conn = sqlite3.connect(str(db_path))
     conn.execute("PRAGMA journal_mode=WAL")
 
-    # Minimal schema matching what storage crate creates
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS events (
-            id TEXT PRIMARY KEY,
+            id TEXT PRIMARY KEY NOT NULL,
             timestamp TEXT NOT NULL,
-            kind TEXT NOT NULL,
+            kind_json TEXT NOT NULL,
             window_json TEXT,
-            display_topology_json TEXT DEFAULT '[]',
-            primary_display_id TEXT DEFAULT 'unknown',
-            cursor_global_px_json TEXT,
+            display_topology_json TEXT NOT NULL DEFAULT '[]',
+            primary_display_id TEXT NOT NULL DEFAULT 'unknown',
+            cursor_x INTEGER,
+            cursor_y INTEGER,
             ui_scale REAL,
-            artifact_ids_json TEXT DEFAULT '[]',
-            metadata_json TEXT DEFAULT '{}',
-            display_ids_spanned_json TEXT,
-            processed INTEGER DEFAULT 0
+            artifact_ids_json TEXT NOT NULL DEFAULT '[]',
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            processed INTEGER NOT NULL DEFAULT 0,
+            episode_id TEXT,
+            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+            display_ids_spanned_json TEXT
         );
+
+        CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp);
+        CREATE INDEX IF NOT EXISTS idx_events_processed ON events(processed);
+        CREATE INDEX IF NOT EXISTS idx_events_episode_id ON events(episode_id);
+
+        CREATE TABLE IF NOT EXISTS artifacts (
+            id TEXT PRIMARY KEY NOT NULL,
+            event_id TEXT NOT NULL REFERENCES events(id),
+            artifact_type TEXT NOT NULL,
+            file_path TEXT NOT NULL,
+            compression_algo TEXT NOT NULL DEFAULT 'zstd',
+            encryption_algo TEXT NOT NULL DEFAULT 'xchacha20poly1305',
+            original_size_bytes INTEGER NOT NULL,
+            stored_size_bytes INTEGER NOT NULL,
+            artifact_version INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_artifacts_event_id ON artifacts(event_id);
 
         CREATE TABLE IF NOT EXISTS episodes (
-            id TEXT PRIMARY KEY,
+            id TEXT PRIMARY KEY NOT NULL,
+            segment_id INTEGER NOT NULL DEFAULT 0,
+            prev_segment_id INTEGER,
+            thread_id TEXT,
             start_time TEXT NOT NULL,
-            end_time TEXT NOT NULL,
-            event_ids_json TEXT NOT NULL,
-            metadata_json TEXT DEFAULT '{}'
+            end_time TEXT,
+            event_count INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'open',
+            summary TEXT,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
         );
 
-        CREATE TABLE IF NOT EXISTS vlm_jobs (
-            job_id TEXT PRIMARY KEY,
-            event_id TEXT NOT NULL,
-            episode_id TEXT DEFAULT '',
-            semantic_step_index INTEGER DEFAULT 0,
-            confidence_score REAL DEFAULT 0.0,
-            priority_score REAL DEFAULT 0.0,
-            status TEXT DEFAULT 'pending',
-            created_at TEXT NOT NULL,
-            completed_at TEXT
+        CREATE TABLE IF NOT EXISTS vlm_queue (
+            id TEXT PRIMARY KEY NOT NULL,
+            event_id TEXT NOT NULL REFERENCES events(id),
+            priority REAL NOT NULL DEFAULT 0.5,
+            status TEXT NOT NULL DEFAULT 'pending',
+            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+            processed_at TEXT,
+            result_json TEXT,
+            ttl_expires_at TEXT NOT NULL
         );
+
+        CREATE INDEX IF NOT EXISTS idx_vlm_queue_status ON vlm_queue(status, priority DESC);
     """)
     conn.commit()
     conn.close()
@@ -97,7 +128,7 @@ def _insert_synthetic_events(db_path: Path, count: int = 10) -> list[str]:
 
         # Alternate between click and navigation events
         if i % 2 == 0:
-            kind = json.dumps({
+            kind_json = json.dumps({
                 "BrowserClick": {
                     "url": f"https://example.com/page-{i}",
                     "selector": f"button#action-{i}",
@@ -108,24 +139,24 @@ def _insert_synthetic_events(db_path: Path, count: int = 10) -> list[str]:
                 }
             })
         else:
-            kind = json.dumps({
-                "WindowFocusChange": {
-                    "app_id": "com.google.Chrome",
-                    "window_title": f"Page {i} - Chrome",
-                }
+            kind_json = json.dumps({
+                "FocusChange": {}
             })
 
         window_json = json.dumps({
             "app_id": "com.google.Chrome",
-            "window_title": f"Test Page {i}",
+            "title": f"Test Page {i}",
+        })
+
+        metadata_json = json.dumps({
             "url": f"https://example.com/page-{i}",
-            "bundle_id": "com.google.Chrome",
         })
 
         conn.execute(
-            """INSERT INTO events (id, timestamp, kind, window_json, processed)
-               VALUES (?, ?, ?, ?, 0)""",
-            (event_id, ts, kind, window_json),
+            """INSERT INTO events (id, timestamp, kind_json, window_json,
+               metadata_json, display_topology_json, primary_display_id, processed)
+               VALUES (?, ?, ?, ?, ?, '[]', 'main', 0)""",
+            (event_id, ts, kind_json, window_json, metadata_json),
         )
 
     conn.commit()
@@ -206,7 +237,8 @@ class TestDatabaseSetup:
 
         assert "events" in tables
         assert "episodes" in tables
-        assert "vlm_jobs" in tables
+        assert "vlm_queue" in tables
+        assert "artifacts" in tables
 
     def test_insert_synthetic_events(self, tmp_path: Path):
         db_path = tmp_path / "events.db"
@@ -254,13 +286,17 @@ class TestWorkerPipeline:
             events.append({
                 "id": str(uuid.uuid4()),
                 "timestamp": datetime.now(timezone.utc).isoformat(),
-                "kind": "BrowserClick",
+                "kind_json": json.dumps({"ClickIntent": {}}),
                 "window_json": json.dumps({
                     "app_id": "com.google.Chrome",
-                    "window_title": f"Test Page {i}",
+                    "title": f"Test Page {i}",
+                }),
+                "metadata_json": json.dumps({
                     "url": f"https://example.com/{i}",
                 }),
-                "metadata_json": "{}",
+                "display_topology_json": "[]",
+                "primary_display_id": "main",
+                "processed": 0,
             })
 
         workspace = tmp_path / "workspace"

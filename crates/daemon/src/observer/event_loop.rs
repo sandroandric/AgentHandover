@@ -13,6 +13,11 @@ use tracing::{info, debug, warn, error};
 use uuid::Uuid;
 
 /// Messages sent from the observer to the storage writer.
+///
+/// The storage writer exits when all senders are dropped (channel close),
+/// so there is no explicit Shutdown variant — proper teardown ordering in
+/// `main.rs` guarantees all producers are stopped before we await the
+/// writer task.
 pub enum ObserverMessage {
     Event {
         event: Event,
@@ -20,7 +25,6 @@ pub enum ObserverMessage {
         /// writer can insert rows into the `artifacts` table.
         artifacts: Vec<ArtifactMeta>,
     },
-    Shutdown,
 }
 
 /// Configuration for the observer event loop.
@@ -85,7 +89,6 @@ pub async fn run_observer_loop(
                 // Check shutdown
                 if *shutdown_rx.borrow() {
                     info!("Observer loop received shutdown signal");
-                    let _ = tx.send(ObserverMessage::Shutdown).await;
                     break;
                 }
 
@@ -315,8 +318,12 @@ pub async fn run_observer_loop(
                 }
             }
             _ = shutdown_rx.changed() => {
-                info!("Observer loop: shutdown watch triggered");
-                let _ = tx.send(ObserverMessage::Shutdown).await;
+                info!("Observer loop: shutdown signal received, stopping");
+                // Don't send a Shutdown message — just break.  Dropping `tx`
+                // (along with aborting other producer tasks in main.rs) will
+                // close the channel, causing the storage writer's `recv()` to
+                // return None and exit cleanly.  This eliminates the race
+                // where events queued after a try_recv() drain could be lost.
                 break;
             }
         }
@@ -330,6 +337,11 @@ pub async fn run_observer_loop(
 ///
 /// The optional `shared_counter` is incremented on each successful insert so
 /// that the health watcher can report an accurate `events_today` value.
+///
+/// Exits when all channel senders are dropped (i.e. when the observer loop
+/// and all background producers have been stopped).  This guarantees every
+/// event that was successfully sent to the channel gets written — no race
+/// between a one-shot drain and concurrent producers.
 pub async fn run_storage_writer(
     db_path: PathBuf,
     mut rx: mpsc::Receiver<ObserverMessage>,
@@ -340,70 +352,39 @@ pub async fn run_storage_writer(
     let store = oc_apprentice_storage::EventStore::open(&db_path)?;
     let mut event_count = 0u64;
 
+    // recv() returns None only when ALL senders have been dropped, so every
+    // in-flight event is guaranteed to be processed before we exit.
     while let Some(msg) = rx.recv().await {
-        match msg {
-            ObserverMessage::Event { event, artifacts } => {
-                if let Err(e) = store.insert_event(&event) {
-                    error!(error = %e, "Failed to insert event");
-                } else {
-                    // Insert artifact records so maintenance can find real files.
-                    let event_id_str = event.id.to_string();
-                    for meta in &artifacts {
-                        if let Err(e) = store.insert_artifact(
-                            &meta.artifact_id,
-                            &event_id_str,
-                            &meta.artifact_type,
-                            &meta.file_path.display().to_string(),
-                            meta.original_size_bytes,
-                            meta.stored_size_bytes,
-                        ) {
-                            warn!(error = %e, artifact_id = %meta.artifact_id, "Failed to insert artifact record");
-                        }
-                    }
-
-                    event_count += 1;
-                    if let Some(ref counter) = shared_counter {
-                        counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    }
-                    if event_count % 100 == 0 {
-                        debug!(event_count, "Events stored");
-                    }
+        let ObserverMessage::Event { event, artifacts } = msg;
+        if let Err(e) = store.insert_event(&event) {
+            error!(error = %e, "Failed to insert event");
+        } else {
+            // Insert artifact records so maintenance can find real files.
+            let event_id_str = event.id.to_string();
+            for meta in &artifacts {
+                if let Err(e) = store.insert_artifact(
+                    &meta.artifact_id,
+                    &event_id_str,
+                    &meta.artifact_type,
+                    &meta.file_path.display().to_string(),
+                    meta.original_size_bytes,
+                    meta.stored_size_bytes,
+                ) {
+                    warn!(error = %e, artifact_id = %meta.artifact_id, "Failed to insert artifact record");
                 }
             }
-            ObserverMessage::Shutdown => {
-                info!(event_count, "Storage writer received shutdown, draining remaining events");
-                // Drain any events that were queued before/alongside the Shutdown message.
-                while let Ok(msg) = rx.try_recv() {
-                    if let ObserverMessage::Event { event, artifacts } = msg {
-                        if let Err(e) = store.insert_event(&event) {
-                            error!(error = %e, "Failed to insert event during drain");
-                        } else {
-                            let event_id_str = event.id.to_string();
-                            for meta in &artifacts {
-                                if let Err(e) = store.insert_artifact(
-                                    &meta.artifact_id,
-                                    &event_id_str,
-                                    &meta.artifact_type,
-                                    &meta.file_path.display().to_string(),
-                                    meta.original_size_bytes,
-                                    meta.stored_size_bytes,
-                                ) {
-                                    warn!(error = %e, "Failed to insert artifact during drain");
-                                }
-                            }
-                            event_count += 1;
-                            if let Some(ref counter) = shared_counter {
-                                counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            }
-                        }
-                    }
-                }
-                info!(event_count, "Storage writer shut down");
-                break;
+
+            event_count += 1;
+            if let Some(ref counter) = shared_counter {
+                counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            if event_count % 100 == 0 {
+                debug!(event_count, "Events stored");
             }
         }
     }
 
+    info!(event_count, "Storage writer: channel closed, all events persisted");
     Ok(())
 }
 

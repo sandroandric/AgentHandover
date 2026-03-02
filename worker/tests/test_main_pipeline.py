@@ -195,22 +195,35 @@ class TestPipelineTranslation:
 
 class TestPipelineVLMEnqueue:
     def test_low_confidence_enqueues_vlm(self, tmp_path: Path) -> None:
-        """Events with no UI anchors should get rejected and enqueued."""
+        """Events with no UI anchors should get rejected and enqueued for VLM."""
         base = datetime(2026, 2, 16, 10, 0, 0, tzinfo=timezone.utc)
-        # Create events with no target metadata (will produce vision_bbox fallback only)
+        # Create events with no target metadata — no selectors, no ariaLabel.
+        # The confidence scorer should reject these (low evidence) and the
+        # pipeline should auto-enqueue them for VLM enrichment.
         events = [
             _make_event(
                 app_id="com.apple.Safari",
                 kind="ClickIntent",
                 timestamp=_ts(base),
             ),
+            _make_event(
+                app_id="com.apple.Safari",
+                kind="ClickIntent",
+                timestamp=_ts(base + timedelta(seconds=1)),
+            ),
         ]
 
         components = _build_pipeline_components(tmp_path)
         summary = run_pipeline(events, **components)
 
-        # With no UI anchor, confidence should be very low -> reject -> VLM enqueue
-        assert summary["vlm_enqueued"] >= 0  # May or may not enqueue depending on scoring
+        # With no UI anchor, translations should exist but all be rejected →
+        # each rejected translation with score below VLM_REJECT_THRESHOLD
+        # gets auto-enqueued for VLM screenshot analysis.
+        assert summary["translations"] >= 1, "Should have at least one translation"
+        assert summary["vlm_enqueued"] >= 1, (
+            f"Low-confidence translations (no target) should be enqueued for VLM, "
+            f"but got vlm_enqueued={summary['vlm_enqueued']}"
+        )
 
 
 # ------------------------------------------------------------------

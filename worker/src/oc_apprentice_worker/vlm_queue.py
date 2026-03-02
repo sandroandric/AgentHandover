@@ -465,4 +465,5 @@ class VLMFallbackQueue:
                     )
                     self._jobs_dispatched_today = 0
                     self._compute_minutes_today = 0.0
+                    self._dropped_count = 0
                     self._today = today

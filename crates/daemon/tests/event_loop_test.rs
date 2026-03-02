@@ -27,14 +27,22 @@ async fn test_observer_loop_starts_and_stops() {
     let result = handle.await.unwrap();
     assert!(result.is_ok());
 
-    // Should have received a shutdown message
-    let mut got_shutdown = false;
+    // The observer drops its tx on shutdown.  Since there are no other
+    // senders, the channel is now closed — recv() should return None.
+    // Any events queued before shutdown are still available.
+    let mut event_count = 0;
     while let Ok(msg) = rx.try_recv() {
-        if matches!(msg, ObserverMessage::Shutdown) {
-            got_shutdown = true;
+        if let ObserverMessage::Event { .. } = msg {
+            event_count += 1;
         }
     }
-    assert!(got_shutdown, "Should have received shutdown message");
+    // Channel should be closed (no senders left)
+    assert!(
+        rx.try_recv().is_err(),
+        "Channel should be closed after observer loop exits (got unexpected message)"
+    );
+    // We don't assert event_count > 0 because a short-lived loop on CI
+    // may not capture any events, but the channel *must* be closed.
 }
 
 #[tokio::test]

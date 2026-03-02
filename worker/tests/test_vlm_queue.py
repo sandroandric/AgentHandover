@@ -475,6 +475,22 @@ class TestDailyCounterReset:
         assert stats.jobs_today == 0
         assert stats.compute_minutes_today == pytest.approx(0.0)
 
+    def test_dropped_count_resets_at_midnight(self) -> None:
+        budget = QueueBudget(max_queue_size=1)
+        queue = VLMFallbackQueue(budget=budget)
+
+        # Fill queue, then cause a drop
+        queue.enqueue(_make_job(priority=0.9))
+        queue.enqueue(_make_job(priority=0.1))  # drops the lower-priority one
+        assert queue._dropped_count == 1
+
+        # Simulate day change
+        yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).date()
+        queue._today = yesterday
+
+        stats = queue.get_stats()
+        assert stats.dropped_count == 0, "dropped_count should reset daily"
+
     def test_can_dispatch_after_reset(self) -> None:
         budget = QueueBudget(max_jobs_per_day=2)
         queue = VLMFallbackQueue(budget=budget)
