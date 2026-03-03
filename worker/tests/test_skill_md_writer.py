@@ -116,7 +116,7 @@ class TestSkillMdWriter:
         assert "## Metadata" in content
         assert "Confidence: 0.92" in content
         assert "Observed: 5 time(s)" in content
-        assert "Schema: 1.1.0" in content
+        assert "Schema: 2.0.0" in content
 
     def test_write_sop_content_has_when_to_use(self):
         template = _make_sop_template()
@@ -263,3 +263,254 @@ class TestSkillMdWriter:
         data = json.loads(path.read_text())
         assert data["key"] == "value"
         assert "generated_at" in data
+
+
+def _make_v2_sop_template(**overrides) -> dict:
+    """Create a v2 SOP template (from VLM pipeline) for testing."""
+    template = {
+        "slug": "deploy-feature-staging",
+        "title": "Deploy Feature to Staging",
+        "source": "v2_focus_recording",
+        "steps": [
+            {
+                "step": "Review code changes",
+                "target": "",
+                "selector": None,
+                "parameters": {
+                    "app": "VS Code",
+                    "location": "~/openmimic/worker/main.py",
+                    "verify": "git status shows expected files changed",
+                },
+                "confidence": 0.85,
+                "pre_state": {},
+            },
+            {
+                "step": "Run unit tests",
+                "target": "",
+                "selector": None,
+                "parameters": {
+                    "app": "VS Code → Terminal",
+                    "input": "pytest tests/ -v",
+                    "verify": "Output shows all tests passed",
+                },
+                "confidence": 0.90,
+                "pre_state": {},
+            },
+            {
+                "step": "Commit and push",
+                "target": "",
+                "selector": None,
+                "parameters": {
+                    "app": "VS Code → Terminal",
+                    "input": "git add -A && git commit -m '{{commit_message}}'",
+                    "verify": "Push completes without errors",
+                },
+                "confidence": 0.88,
+                "pre_state": {},
+            },
+        ],
+        "variables": [
+            {
+                "name": "commit_message",
+                "type": "string",
+                "example": "feat: add scene annotator",
+                "description": "Descriptive commit message",
+            },
+            {
+                "name": "staging_url",
+                "type": "string",
+                "example": "staging-api.openmimic.dev",
+                "description": "Staging base URL",
+            },
+        ],
+        "confidence_avg": 0.82,
+        "episode_count": 1,
+        "apps_involved": ["VS Code", "Chrome"],
+        "preconditions": ["Repository access with push permissions", "CI/CD pipeline configured"],
+        "task_description": "This workflow deploys a new feature from local development to staging.",
+        "execution_overview": {
+            "when_to_use": "New feature branch is ready for staging",
+            "success_criteria": "All CI jobs pass; staging health endpoint returns healthy",
+            "common_errors": "CI fails on test job; Staging health returns old version",
+        },
+        "confidence_breakdown": {
+            "demo_count": 0.15,
+            "step_consistency": 0.30,
+            "annotation_quality": 0.17,
+            "variable_detection": 0.10,
+            "focus_bonus": 0.10,
+            "reasons": ["demos=1", "focus_recording_bonus"],
+        },
+    }
+    template.update(overrides)
+    return template
+
+
+class TestSkillMdWriterV2:
+    """Tests for v2 (VLM pipeline) SOP rendering."""
+
+    def setup_method(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.writer = SkillMdWriter(workspace_dir=self.tmpdir)
+
+    def test_v2_detected_by_source(self):
+        template = _make_v2_sop_template()
+        assert self.writer._is_v2_sop(template)
+
+    def test_v1_not_detected_as_v2(self):
+        template = _make_sop_template()
+        assert not self.writer._is_v2_sop(template)
+
+    def test_v2_has_description_section(self):
+        template = _make_v2_sop_template()
+        path = self.writer.write_sop(template)
+        content = path.read_text()
+        assert "## Description" in content
+        assert "deploys a new feature" in content
+
+    def test_v2_has_when_to_use(self):
+        template = _make_v2_sop_template()
+        path = self.writer.write_sop(template)
+        content = path.read_text()
+        assert "## When to Use" in content
+        assert "New feature branch is ready" in content
+
+    def test_v2_has_prerequisites(self):
+        template = _make_v2_sop_template()
+        path = self.writer.write_sop(template)
+        content = path.read_text()
+        assert "## Prerequisites" in content
+        assert "Repository access" in content
+        assert "CI/CD pipeline" in content
+
+    def test_v2_steps_have_semantic_fields(self):
+        template = _make_v2_sop_template()
+        path = self.writer.write_sop(template)
+        content = path.read_text()
+        # Step headings
+        assert "### Step 1:" in content
+        assert "### Step 2:" in content
+        assert "### Step 3:" in content
+        # Semantic fields
+        assert "- **Action**:" in content
+        assert "- **App**: VS Code" in content
+        assert "- **Verify**:" in content
+
+    def test_v2_step_input_rendered(self):
+        template = _make_v2_sop_template()
+        path = self.writer.write_sop(template)
+        content = path.read_text()
+        assert "- **Input**: `pytest tests/ -v`" in content
+
+    def test_v2_step_location_rendered(self):
+        template = _make_v2_sop_template()
+        path = self.writer.write_sop(template)
+        content = path.read_text()
+        assert "- **Location**: `~/openmimic/worker/main.py`" in content
+
+    def test_v2_success_criteria(self):
+        template = _make_v2_sop_template()
+        path = self.writer.write_sop(template)
+        content = path.read_text()
+        assert "## Success Criteria" in content
+        assert "CI jobs pass" in content
+
+    def test_v2_variables_table(self):
+        template = _make_v2_sop_template()
+        path = self.writer.write_sop(template)
+        content = path.read_text()
+        assert "## Variables" in content
+        assert "| Variable |" in content
+        assert "{{commit_message}}" in content
+        assert "feat: add scene annotator" in content
+
+    def test_v2_common_errors(self):
+        template = _make_v2_sop_template()
+        path = self.writer.write_sop(template)
+        content = path.read_text()
+        assert "## Common Errors" in content
+        assert "CI fails on test job" in content
+
+    def test_v2_metadata_focus_mode(self):
+        template = _make_v2_sop_template(source="v2_focus_recording")
+        path = self.writer.write_sop(template)
+        content = path.read_text()
+        assert "## Metadata" in content
+        assert "Mode: Focus Recording" in content
+
+    def test_v2_metadata_passive_mode(self):
+        template = _make_v2_sop_template(source="v2_passive_discovery")
+        path = self.writer.write_sop(template)
+        content = path.read_text()
+        assert "Mode: Passive Discovery" in content
+
+    def test_v2_metadata_demonstrations(self):
+        template = _make_v2_sop_template(episode_count=3)
+        path = self.writer.write_sop(template)
+        content = path.read_text()
+        assert "3 demonstration(s)" in content
+
+    def test_v2_metadata_apps_listed(self):
+        template = _make_v2_sop_template()
+        path = self.writer.write_sop(template)
+        content = path.read_text()
+        assert "Apps: VS Code, Chrome" in content
+
+    def test_v2_no_dom_hints_when_no_selectors(self):
+        template = _make_v2_sop_template()
+        path = self.writer.write_sop(template)
+        content = path.read_text()
+        assert "## DOM Hints" not in content
+
+    def test_v2_dom_hints_when_selectors_present(self):
+        template = _make_v2_sop_template()
+        template["steps"][0]["selector"] = "#review-btn"
+        path = self.writer.write_sop(template)
+        content = path.read_text()
+        assert "## DOM Hints" in content
+        assert "<details>" in content
+        assert "`#review-btn`" in content
+
+    def test_v2_empty_task_description_no_section(self):
+        template = _make_v2_sop_template(task_description="")
+        path = self.writer.write_sop(template)
+        content = path.read_text()
+        assert "## Description" not in content
+
+    def test_v2_no_prerequisites_no_section(self):
+        template = _make_v2_sop_template(preconditions=[])
+        path = self.writer.write_sop(template)
+        content = path.read_text()
+        assert "## Prerequisites" not in content
+
+    def test_v2_no_variables_no_section(self):
+        template = _make_v2_sop_template()
+        template["variables"] = []
+        path = self.writer.write_sop(template)
+        content = path.read_text()
+        assert "## Variables" not in content
+
+    def test_v2_index_includes_v2_sops(self):
+        templates = [_make_v2_sop_template()]
+        self.writer.write_all_sops(templates)
+        index_path = self.writer.skills_dir / "SKILLS-INDEX.md"
+        assert index_path.exists()
+        content = index_path.read_text()
+        assert "deploy-feature-staging" in content
+
+    def test_v2_mixed_v1_v2_export(self):
+        """Both v1 and v2 SOPs export correctly side by side."""
+        templates = [
+            _make_sop_template(),
+            _make_v2_sop_template(),
+        ]
+        paths = self.writer.write_all_sops(templates)
+        assert len(paths) == 2
+
+        v1_content = paths[0].read_text()
+        v2_content = paths[1].read_text()
+
+        # v1 uses numbered list steps
+        assert "1. **Click" in v1_content
+        # v2 uses ### Step N: headings
+        assert "### Step 1:" in v2_content

@@ -81,6 +81,16 @@ async fn main() -> Result<()> {
         .expect("Failed to write daemon PID file");
     info!(path = %pid_path.display(), "PID file written");
 
+    // Request accessibility permission with system prompt.
+    // This registers the current binary's CDHash in the TCC database,
+    // so permission survives rebuilds. If not yet granted, macOS opens
+    // System Settings > Accessibility.
+    #[cfg(target_os = "macos")]
+    {
+        use oc_apprentice_daemon::platform::accessibility;
+        accessibility::request_accessibility_with_prompt();
+    }
+
     let start_time = chrono::Utc::now();
 
     // Shared event counter — incremented by storage writer, read by health watcher
@@ -143,6 +153,21 @@ async fn main() -> Result<()> {
             };
             std::fs::create_dir_all(&data_dir).ok();
             data_dir.join("events.db")
+        },
+        dhash_threshold: app_config.observer.dhash_threshold,
+        screenshot_format: app_config.observer.screenshot_format.clone(),
+        screenshot_quality: app_config.observer.screenshot_quality,
+        screenshot_scale: app_config.observer.screenshot_scale,
+        screenshots_dir: {
+            // Screenshots dir lives alongside the database
+            let data_dir = if cfg!(target_os = "macos") {
+                dirs_or_home("Library/Application Support/oc-apprentice")
+            } else {
+                dirs_or_home(".local/share/oc-apprentice")
+            };
+            let dir = data_dir.join("screenshots");
+            std::fs::create_dir_all(&dir).ok();
+            dir
         },
     };
 

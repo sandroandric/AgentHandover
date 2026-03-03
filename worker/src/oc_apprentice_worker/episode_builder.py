@@ -1,5 +1,16 @@
 """Episode Builder v1 — cluster events into episodes by app/URL/entities.
 
+.. deprecated:: 0.2.0
+    This module is part of the v1 pipeline (heuristic-based episode
+    construction).  It is superseded by ``task_segmenter.py`` in the v2
+    VLM-based pipeline, which uses semantic embeddings and VLM annotations
+    to identify task boundaries instead of app/URL/timing heuristics.
+
+    The v1 pipeline (episode_builder → translator → sop_inducer →
+    sop_enhancer) remains functional for backward compatibility but will
+    not receive new features.  Use v2 (scene_annotator → frame_differ →
+    task_segmenter → sop_generator) for new deployments.
+
 Implements section 8 of the OpenMimic spec: thread-multiplexed episode
 construction with soft (time) and hard (event count) caps.
 

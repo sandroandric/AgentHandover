@@ -280,3 +280,87 @@ class TestEmptyDatabase:
     def test_no_vlm_jobs(self, tmp_db_path: Path) -> None:
         with WorkerDB(tmp_db_path) as db:
             assert db.get_pending_vlm_jobs() == []
+
+
+# ------------------------------------------------------------------
+# 8. Episode store — persist translated episodes across pipeline cycles
+# ------------------------------------------------------------------
+
+
+class TestEpisodeStore:
+    """Episode store persists and retrieves translated episode steps."""
+
+    def test_save_and_retrieve_episode(self, tmp_db_path: Path) -> None:
+        steps = [
+            {"step": "click", "target": "button", "confidence": 0.8},
+            {"step": "type", "target": "input", "confidence": 0.7},
+        ]
+
+        with WorkerDB(tmp_db_path) as db:
+            assert db.save_episode_steps("ep-1", "app:safari", steps)
+            stored = db.get_all_episode_steps()
+
+        assert len(stored) == 1
+        assert len(stored[0]) == 2
+        assert stored[0][0]["step"] == "click"
+        assert stored[0][1]["step"] == "type"
+
+    def test_multiple_episodes_accumulated(self, tmp_db_path: Path) -> None:
+        steps_a = [{"step": "click", "target": "a"}]
+        steps_b = [{"step": "navigate", "target": "b"}, {"step": "read", "target": "c"}]
+
+        with WorkerDB(tmp_db_path) as db:
+            db.save_episode_steps("ep-1", "app:a", steps_a)
+            db.save_episode_steps("ep-2", "app:b", steps_b)
+            stored = db.get_all_episode_steps()
+
+        assert len(stored) == 2
+
+    def test_replace_on_duplicate_episode_id(self, tmp_db_path: Path) -> None:
+        steps_v1 = [{"step": "click", "target": "old"}]
+        steps_v2 = [{"step": "click", "target": "new"}, {"step": "type", "target": "x"}]
+
+        with WorkerDB(tmp_db_path) as db:
+            db.save_episode_steps("ep-1", "app:a", steps_v1)
+            db.save_episode_steps("ep-1", "app:a", steps_v2)
+            stored = db.get_all_episode_steps()
+
+        assert len(stored) == 1
+        assert len(stored[0]) == 2
+        assert stored[0][0]["target"] == "new"
+
+    def test_empty_steps_skipped(self, tmp_db_path: Path) -> None:
+        with WorkerDB(tmp_db_path) as db:
+            assert db.save_episode_steps("ep-1", "app:a", [])
+            stored = db.get_all_episode_steps()
+
+        assert len(stored) == 0
+
+    def test_count_stored_episodes(self, tmp_db_path: Path) -> None:
+        with WorkerDB(tmp_db_path) as db:
+            assert db.count_stored_episodes() == 0
+            db.save_episode_steps("ep-1", "a", [{"step": "click"}])
+            db.save_episode_steps("ep-2", "b", [{"step": "type"}])
+            assert db.count_stored_episodes() == 2
+
+    def test_cleanup_old_episodes(
+        self, tmp_db_path: Path, write_conn: sqlite3.Connection
+    ) -> None:
+        with WorkerDB(tmp_db_path) as db:
+            db.save_episode_steps("ep-1", "a", [{"step": "click"}])
+            # Backdate the record to 30 days ago
+            write_conn.execute(
+                "UPDATE translated_episodes SET created_at = "
+                "datetime('now', '-30 days') WHERE episode_id = 'ep-1'"
+            )
+            write_conn.commit()
+            # Cleanup with 14-day retention should remove it
+            deleted = db.cleanup_old_episodes(max_age_days=14)
+            assert deleted == 1
+            assert db.count_stored_episodes() == 0
+
+    def test_get_episode_steps_on_fresh_db(self, tmp_db_path: Path) -> None:
+        """Episode store works on a DB that has never had the table created."""
+        with WorkerDB(tmp_db_path) as db:
+            stored = db.get_all_episode_steps()
+        assert stored == []

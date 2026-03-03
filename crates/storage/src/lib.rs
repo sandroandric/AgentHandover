@@ -89,6 +89,11 @@ impl EventStore {
                     .execute_batch(include_str!("migrations/v002_add_display_ids_spanned.sql"))?;
             }
 
+            if current_version < 3 {
+                self.conn
+                    .execute_batch(include_str!("migrations/v003_add_scene_annotation.sql"))?;
+            }
+
             self.conn
                 .pragma_update(None, "user_version", schema::CURRENT_SCHEMA_VERSION)?;
         }

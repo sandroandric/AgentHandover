@@ -13,10 +13,10 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-SOP_SCHEMA_VERSION = "1.1.0"
+SOP_SCHEMA_VERSION = "2.0.0"
 
 # Accepted schema versions for backward compatibility
-_ACCEPTED_VERSIONS = frozenset(("1.0.0", "1.1.0"))
+_ACCEPTED_VERSIONS = frozenset(("1.0.0", "1.1.0", "2.0.0"))
 
 _GENERATOR = "openmimic"
 _GENERATOR_VERSION = "0.1.0"
@@ -117,7 +117,7 @@ def sop_to_json(sop_template: dict) -> dict:
         },
     }
 
-    # Add LLM-enhanced fields when present (schema 1.1.0)
+    # Add LLM-enhanced fields when present (schema 1.1.0+)
     task_description = sop_template.get("task_description")
     if task_description:
         result["task_description"] = task_description
@@ -125,6 +125,15 @@ def sop_to_json(sop_template: dict) -> dict:
     execution_overview = sop_template.get("execution_overview")
     if isinstance(execution_overview, dict) and execution_overview:
         result["execution_overview"] = execution_overview
+
+    # v2 fields (schema 2.0.0): source mode & confidence breakdown
+    source = sop_template.get("source")
+    if source:
+        result["source"] = source
+
+    confidence_breakdown = sop_template.get("confidence_breakdown")
+    if isinstance(confidence_breakdown, dict) and confidence_breakdown:
+        result["confidence_breakdown"] = confidence_breakdown
 
     return result
 
@@ -205,5 +214,14 @@ def validate_sop_json(data: dict) -> list[str]:
                     errors.append(
                         f"execution_overview['{key}'] must be a string"
                     )
+
+    # v2 optional fields (schema 2.0.0)
+    if "source" in data:
+        if not isinstance(data["source"], str):
+            errors.append("Field 'source' must be a string")
+
+    if "confidence_breakdown" in data:
+        if not isinstance(data["confidence_breakdown"], dict):
+            errors.append("Field 'confidence_breakdown' must be a dict")
 
     return errors

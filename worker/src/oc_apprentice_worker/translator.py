@@ -1,5 +1,12 @@
 """Semantic Translator — resolve UI actions via structured metadata (no VLM).
 
+.. note:: v2 Pipeline Relationship
+    In the v2 VLM-based pipeline, the semantic translator's primary
+    translation role is replaced by ``scene_annotator.py`` (which reads
+    the screen directly via VLM).  However, the translator's DOM
+    extraction logic is still used to provide CSS selector hints for the
+    DOM Hints appendix in SKILL.md files.
+
 Implements section 9.1 of the OpenMimic spec: translate raw events with
 DOM/ARIA/accessibility data into semantic steps.  VLM is used only as a
 fallback when structured metadata is insufficient.
@@ -162,7 +169,13 @@ class SemanticTranslator:
             return "unknown"
 
         if isinstance(parsed, dict) and parsed:
-            kind_name = next(iter(parsed))
+            # Two serialisation formats:
+            # 1. Flat struct:  {"type": "AppSwitch", "from_app": "...", ...}
+            # 2. Rust enum:   {"AppSwitch": {"from_app": "...", ...}}
+            if "type" in parsed:
+                kind_name = parsed["type"]
+            else:
+                kind_name = next(iter(parsed))
             return _KIND_INTENT_MAP.get(kind_name, "unknown")
 
         return "unknown"
@@ -184,30 +197,32 @@ class SemanticTranslator:
           3. Visible innerText (0.25-0.35)
           4. Role + position (0.15-0.25)
           5. Vision bbox (0.10)
+          6. App context — window/app name (0.10-0.15) — native app fallback
         """
         metadata = self._parse_metadata(event)
-        if not metadata:
-            return None
 
-        target = metadata.get("target", {})
-        if not isinstance(target, dict):
-            target = {}
+        if metadata:
+            target = metadata.get("target", {})
+            if not isinstance(target, dict):
+                target = {}
 
-        # Try resolution methods in priority order
-        resolvers = [
-            self._try_aria_label,
-            self._try_test_id,
-            self._try_inner_text,
-            self._try_role_position,
-            self._try_vision_bbox,
-        ]
+            # Try DOM-level resolution methods in priority order
+            resolvers = [
+                self._try_aria_label,
+                self._try_test_id,
+                self._try_inner_text,
+                self._try_role_position,
+                self._try_vision_bbox,
+            ]
 
-        for resolver in resolvers:
-            anchor = resolver(metadata)
-            if anchor is not None:
-                return anchor
+            for resolver in resolvers:
+                anchor = resolver(metadata)
+                if anchor is not None:
+                    return anchor
 
-        return None
+        # Fallback: use app/window context from kind_json and window_json
+        # for native app events that lack DOM-level selectors
+        return self._try_app_context(event)
 
     def _try_aria_label(self, metadata: dict) -> UIAnchor | None:
         """Try to resolve via ARIA-label. Confidence: 0.40-0.45.
@@ -401,6 +416,57 @@ class SemanticTranslator:
             raw_evidence={"x": x_val, "y": y_val},
         )
 
+    def _try_app_context(self, event: dict) -> UIAnchor | None:
+        """Fallback anchor from app/window context. Confidence: 0.10-0.15.
+
+        For native macOS app events that lack DOM-level selectors, use
+        the app name and window title from ``kind_json`` and ``window_json``
+        as a low-confidence anchor.
+        """
+        # Extract app name from kind_json
+        kind_json = event.get("kind_json", "")
+        try:
+            kind_data = json.loads(kind_json) if isinstance(kind_json, str) else kind_json
+        except (json.JSONDecodeError, TypeError):
+            kind_data = {}
+
+        app_name = ""
+        if isinstance(kind_data, dict):
+            # AppSwitch has to_app; others may not
+            app_name = kind_data.get("to_app", "")
+
+        # Also try window_json
+        window = self._parse_window(event)
+        window_app = window.get("app_id", "")
+        window_title = window.get("title", "")
+
+        # Use the most informative identifier
+        # Strip PID prefix if present: "pid:1234:AppName" → "AppName"
+        identifier = app_name or window_app
+        if identifier and ":" in identifier:
+            parts = identifier.split(":")
+            identifier = parts[-1] if len(parts) >= 3 else identifier
+
+        if not identifier:
+            return None
+
+        # Window title adds specificity
+        confidence = 0.15 if window_title else 0.10
+
+        selector = identifier
+        if window_title:
+            selector = f"{identifier}:{window_title}"
+
+        return UIAnchor(
+            method="app_context",
+            selector=selector,
+            confidence_contribution=confidence,
+            raw_evidence={
+                "app_name": identifier,
+                "window_title": window_title,
+            },
+        )
+
     # ------------------------------------------------------------------
     # Parameter extraction
     # ------------------------------------------------------------------
@@ -433,6 +499,17 @@ class SemanticTranslator:
                     params["url"] = metadata["url"]
                 if metadata.get("app_name"):
                     params["app_name"] = metadata["app_name"]
+            # For AppSwitch events, extract from/to app from kind_json
+            kind_json = event.get("kind_json", "")
+            try:
+                kind_data = json.loads(kind_json) if isinstance(kind_json, str) else kind_json
+                if isinstance(kind_data, dict):
+                    if kind_data.get("to_app"):
+                        params["app_name"] = kind_data["to_app"]
+                    if kind_data.get("from_app"):
+                        params["from_app"] = kind_data["from_app"]
+            except (json.JSONDecodeError, TypeError):
+                pass
 
         elif intent == "copy":
             if metadata:

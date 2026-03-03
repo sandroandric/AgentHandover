@@ -26,9 +26,14 @@ from oc_apprentice_worker.db import WorkerDB
 from oc_apprentice_worker.deep_scan import DeepScanner
 from oc_apprentice_worker.episode_builder import EpisodeBuilder
 from oc_apprentice_worker.exporter import IndexGenerator
+from oc_apprentice_worker.focus_processor import FocusProcessor
+from oc_apprentice_worker.frame_differ import DiffConfig, FrameDiffer
 from oc_apprentice_worker.negative_demo import NegativeDemoPruner
 from oc_apprentice_worker.export_adapter import SOPExportAdapter
 from oc_apprentice_worker.openclaw_writer import OpenClawWriter
+from oc_apprentice_worker.scene_annotator import AnnotationConfig, SceneAnnotator
+from oc_apprentice_worker.sop_generator import SOPGenerator, SOPGeneratorConfig
+from oc_apprentice_worker.task_segmenter import TaskSegmenter, SegmenterConfig
 from oc_apprentice_worker.scheduler import IdleJobGate, SchedulerConfig
 from oc_apprentice_worker.translator import SemanticTranslator
 from oc_apprentice_worker.vlm_queue import VLMFallbackQueue, VLMJob
@@ -80,6 +85,60 @@ def _read_vlm_config_field(field: str, default: str = "") -> str:
         return str(cfg.get("vlm", {}).get(field, default))
     except Exception:
         return default
+
+
+def _read_idle_jobs_config() -> dict:
+    """Read [idle_jobs] from config.toml and return kwargs for SchedulerConfig.
+
+    Returns an empty dict if the section is missing or unreadable.
+    """
+    import tomllib
+    from datetime import time as dt_time
+
+    if _platform.system() == "Darwin":
+        config_path = (
+            Path.home() / "Library" / "Application Support"
+            / "oc-apprentice" / "config.toml"
+        )
+    else:
+        config_path = Path.home() / ".config" / "oc-apprentice" / "config.toml"
+
+    if not config_path.is_file():
+        return {}
+
+    try:
+        with open(config_path, "rb") as f:
+            cfg = tomllib.load(f)
+        section = cfg.get("idle_jobs", {})
+        if not section:
+            return {}
+
+        result: dict = {}
+        if "require_ac_power" in section:
+            result["require_ac_power"] = bool(section["require_ac_power"])
+        if "min_battery_percent" in section:
+            result["min_battery_percent"] = int(section["min_battery_percent"])
+        if "max_cpu_percent" in section:
+            result["max_cpu_percent"] = int(section["max_cpu_percent"])
+        if "max_temp_c" in section:
+            result["max_temp_c"] = int(section["max_temp_c"])
+        if "run_window_local_time" in section:
+            # Format: "HH:MM-HH:MM"
+            window = section["run_window_local_time"]
+            parts = window.split("-")
+            if len(parts) == 2:
+                start_parts = parts[0].strip().split(":")
+                end_parts = parts[1].strip().split(":")
+                result["run_window_start"] = dt_time(
+                    int(start_parts[0]), int(start_parts[1])
+                )
+                result["run_window_end"] = dt_time(
+                    int(end_parts[0]), int(end_parts[1])
+                )
+        return result
+    except Exception:
+        logger.debug("Failed to read [idle_jobs] config", exc_info=True)
+        return {}
 
 
 def _read_keychain_api_key(provider: str) -> str:
@@ -154,6 +213,182 @@ def _read_llm_config() -> dict:
         return defaults
     except Exception:
         return defaults
+
+
+def _read_vlm_v2_config() -> dict:
+    """Read v2 scene annotation pipeline config from the [vlm] section.
+
+    Returns a dict with defaults for all v2-specific fields.
+    """
+    return {
+        "annotation_enabled": _read_vlm_config_field(
+            "annotation_enabled", "true"
+        ).lower() in ("true", "1", "yes"),
+        "annotation_model": _read_vlm_config_field(
+            "annotation_model", "qwen3.5:2b"
+        ),
+        "sop_model": _read_vlm_config_field("sop_model", "qwen3.5:4b"),
+        "stale_skip_count": int(
+            _read_vlm_config_field("stale_skip_count", "3")
+        ),
+        "sliding_window_max_age_sec": int(
+            _read_vlm_config_field("sliding_window_max_age_sec", "600")
+        ),
+        "ollama_host": _read_vlm_config_field(
+            "ollama_host", "http://localhost:11434"
+        ),
+    }
+
+
+def _check_v2_schema(db: "WorkerDB") -> bool:
+    """Check if the database has the v2 annotation columns.
+
+    Returns True if the schema supports v2 scene annotation.
+    """
+    try:
+        db._conn.execute(
+            "SELECT annotation_status FROM events LIMIT 0"
+        )
+        return True
+    except Exception:
+        return False
+
+
+def _process_annotations(
+    db: "WorkerDB",
+    annotator: "SceneAnnotator",
+    screenshots_dir: Path,
+    *,
+    batch_size: int = 5,
+) -> dict:
+    """Process a batch of unannotated screenshots through the scene annotator.
+
+    Returns stats dict with counts of annotated/skipped/failed events.
+    """
+    unannotated = db.get_unannotated_events(limit=batch_size)
+    if not unannotated:
+        return {"annotated": 0, "skipped": 0, "failed": 0}
+
+    stats = {"annotated": 0, "skipped": 0, "failed": 0}
+
+    for event in unannotated:
+        event_id = event.get("id", "unknown")
+        timestamp = event.get("timestamp", "")
+
+        # Get sliding window context (last N annotations within time window)
+        recent = db.get_recent_annotations(
+            before_timestamp=timestamp,
+            limit=annotator.config.sliding_window_size,
+            max_age_seconds=annotator.config.sliding_window_max_age_sec,
+        )
+
+        # Run annotation
+        result = annotator.annotate_event(
+            event,
+            recent_annotations=recent,
+            artifact_dir=str(screenshots_dir),
+        )
+
+        # Save result to DB
+        if result.status == "completed" and result.annotation:
+            db.save_annotation(
+                event_id,
+                json.dumps(result.annotation),
+                status="completed",
+            )
+            stats["annotated"] += 1
+            what_doing = (
+                result.annotation
+                .get("task_context", {})
+                .get("what_doing", "?")
+            )
+            logger.info(
+                "Annotated event %s (%.1fs): %s",
+                event_id[:8],
+                result.inference_time_seconds,
+                what_doing[:80],
+            )
+        elif result.status in ("skipped", "missing_screenshot"):
+            db.save_annotation(event_id, "", status=result.status)
+            stats["skipped"] += 1
+            logger.debug(
+                "Annotation %s for %s: %s",
+                result.status,
+                event_id[:8],
+                result.error or "",
+            )
+        else:
+            db.save_annotation(event_id, "", status="failed")
+            stats["failed"] += 1
+            logger.warning(
+                "Annotation failed for %s: %s",
+                event_id[:8],
+                result.error,
+            )
+
+    return stats
+
+
+def _process_diffs(
+    db: "WorkerDB",
+    differ: "FrameDiffer",
+    *,
+    batch_size: int = 10,
+) -> dict:
+    """Process annotated events that need frame-to-frame diffs.
+
+    For each event, finds the previous annotated event and computes
+    the diff (either a code-only marker for edge cases or an LLM-based
+    action diff).
+
+    Returns stats dict with counts of diffs/edge_cases/failed.
+    """
+    needs_diff = db.get_events_needing_diff(limit=batch_size)
+    if not needs_diff:
+        return {"diffs": 0, "edge_cases": 0, "failed": 0}
+
+    stats = {"diffs": 0, "edge_cases": 0, "failed": 0}
+
+    for event in needs_diff:
+        event_id = event.get("id", "unknown")
+        timestamp = event.get("timestamp", "")
+
+        # Get the previous annotated event
+        prev_event = db.get_annotation_before(timestamp)
+        if prev_event is None:
+            # First annotated event — no predecessor to diff against
+            db.save_frame_diff(
+                event_id, json.dumps({"diff_type": "first_frame"})
+            )
+            stats["edge_cases"] += 1
+            continue
+
+        # Compute diff
+        result = differ.diff_pair(prev_event, event)
+
+        # Save
+        db.save_frame_diff(event_id, json.dumps(result.diff))
+
+        diff_type = result.diff.get("diff_type", "unknown")
+        if diff_type == "action":
+            stats["diffs"] += 1
+            logger.debug(
+                "Diff for %s (%.1fs): %s",
+                event_id[:8],
+                result.inference_time_seconds,
+                result.diff.get("step_description", "?")[:80],
+            )
+        elif diff_type == "diff_failed":
+            stats["failed"] += 1
+            logger.debug(
+                "Diff failed for %s: %s",
+                event_id[:8],
+                result.diff.get("error", "?"),
+            )
+        else:
+            stats["edge_cases"] += 1
+
+    return stats
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -249,6 +484,9 @@ def _write_worker_status(
     vlm_dropped_today: int = 0,
     vlm_mode: str | None = None,
     vlm_provider: str | None = None,
+    v2_annotations_today: int = 0,
+    v2_diffs_today: int = 0,
+    v2_annotation_enabled: bool = False,
 ) -> None:
     """Atomically write worker-status.json (tmp + fsync + rename)."""
     status = {
@@ -270,6 +508,10 @@ def _write_worker_status(
         status["vlm_mode"] = vlm_mode
     if vlm_provider:
         status["vlm_provider"] = vlm_provider
+    if v2_annotation_enabled:
+        status["v2_annotation_enabled"] = True
+        status["v2_annotations_today"] = v2_annotations_today
+        status["v2_diffs_today"] = v2_diffs_today
     sdir = _status_dir()
     sdir.mkdir(parents=True, exist_ok=True)
     target = sdir / "worker-status.json"
@@ -313,6 +555,7 @@ def run_pipeline(
     sop_inducer: object | None = None,
     sop_enhancer: object | None = None,
     skill_md_writer: "SOPExportAdapter | None" = None,
+    db: "WorkerDB | None" = None,
 ) -> dict:
     """Run the full D->E->F pipeline on a batch of events.
 
@@ -416,10 +659,20 @@ def run_pipeline(
             if tr.intent == "read":
                 context["dwell_snapshot"] = True
 
+            # Apply VLM confidence boost if a completed VLM job exists
+            # for this event (reconciliation after VLM processing)
+            if db is not None:
+                vlm_boost = db.get_completed_vlm_boost(tr.raw_event_id)
+                if vlm_boost > 0.0:
+                    context["vlm_boost"] = vlm_boost
+
             conf = scorer.score(tr, context)
 
-            # Auto-enqueue VLM job for rejected translations
-            if conf.decision == "reject" and conf.total < VLM_REJECT_THRESHOLD:
+            # Auto-enqueue VLM job for rejected translations —
+            # but skip if there's already a completed VLM job for this event
+            # (avoid infinite re-enqueue loops)
+            has_vlm = db is not None and db.has_completed_vlm_job(tr.raw_event_id)
+            if conf.decision == "reject" and conf.total < VLM_REJECT_THRESHOLD and not has_vlm:
                 priority = vlm_queue.compute_priority(
                     conf.total,
                     tr.intent,
@@ -468,16 +721,40 @@ def run_pipeline(
         summary["vlm_enqueued"],
     )
 
-    # Step F: Induce SOPs from episode step sequences
-    # Only attempt if we have the sop_inducer (requires prefixspan)
+    # Step E2: Persist translated episode steps to the episode store
+    # so future pipeline cycles can see them during SOP induction.
+    if db is not None and episode_sop_steps:
+        for i, ep_steps in enumerate(episode_sop_steps):
+            ep = episodes[i] if i < len(episodes) else None
+            ep_id = ep.episode_id if ep else str(uuid.uuid4())
+            thread_id = ep.thread_id if ep else "unknown"
+            db.save_episode_steps(ep_id, thread_id, ep_steps)
+        logger.debug(
+            "Persisted %d episode(s) to episode store", len(episode_sop_steps)
+        )
+
+    # Step F: Induce SOPs from ALL historical episodes (not just current batch)
+    # Load stored episodes + current batch for cross-cycle pattern mining.
     sop_templates: list[dict] = []
-    if sop_inducer is not None and episode_sop_steps:
-        try:
-            sop_templates = sop_inducer.induce(episode_sop_steps)
-            summary["sops_induced"] = len(sop_templates)
-            logger.info("Induced %d SOP templates", len(sop_templates))
-        except Exception:
-            logger.exception("SOP induction failed")
+    if sop_inducer is not None:
+        all_episodes_for_mining: list[list[dict]] = []
+        if db is not None:
+            all_episodes_for_mining = db.get_all_episode_steps(max_age_days=14)
+            logger.info(
+                "Loaded %d historical episode(s) from store for SOP mining",
+                len(all_episodes_for_mining),
+            )
+        else:
+            # Fallback: only use current batch (original behaviour)
+            all_episodes_for_mining = episode_sop_steps
+
+        if all_episodes_for_mining:
+            try:
+                sop_templates = sop_inducer.induce(all_episodes_for_mining)
+                summary["sops_induced"] = len(sop_templates)
+                logger.info("Induced %d SOP templates", len(sop_templates))
+            except Exception:
+                logger.exception("SOP induction failed")
 
     # Step F1.5: Enhance SOPs with LLM-generated descriptions
     if sop_enhancer is not None and sop_templates:
@@ -699,6 +976,237 @@ def _process_focus_sessions(
     return exported
 
 
+def _process_focus_sessions_v2(
+    db: "WorkerDB",
+    *,
+    focus_processor: "FocusProcessor",
+    openclaw_writer: "SOPExportAdapter",
+    skill_md_writer: "SOPExportAdapter | None" = None,
+    index_generator: "IndexGenerator",
+    screenshots_dir: str | Path = "",
+) -> int:
+    """Process completed focus recording sessions via v2 VLM pipeline.
+
+    Uses the scene annotator + frame differ + SOP generator instead of
+    the v1 episode builder + translator + PrefixSpan path.  Produces
+    semantic SOPs with exact screen-observed details.
+
+    Returns the number of SOPs exported.
+    """
+    state_dir = _status_dir()
+    signal_path = state_dir / "focus-session.json"
+
+    if not signal_path.is_file():
+        return 0
+
+    try:
+        with open(signal_path) as f:
+            signal = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        logger.debug("Could not read focus-session.json", exc_info=True)
+        return 0
+
+    if signal.get("status") != "stopped":
+        return 0
+
+    session_id = signal.get("session_id", "")
+    title = signal.get("title", "Untitled focus session")
+
+    if not session_id:
+        return 0
+
+    # Query events tagged with this focus session ID
+    focus_events = db.get_focus_session_events(session_id)
+    if not focus_events:
+        logger.info(
+            "Focus v2 session '%s' (%s) has no events yet, will retry",
+            title, session_id,
+        )
+        return 0
+
+    logger.info(
+        "Focus v2: processing session '%s' (%s): %d events",
+        title, session_id, len(focus_events),
+    )
+
+    # Run through v2 focus processor
+    result = focus_processor.process_session(
+        db, session_id, title, focus_events,
+        screenshots_dir=screenshots_dir,
+    )
+
+    exported = 0
+    if result.success and result.sop:
+        sop_templates = [result.sop]
+
+        # Export via primary writer
+        try:
+            paths = openclaw_writer.write_all_sops(sop_templates)
+            exported = len(paths)
+            index_generator.update_index(
+                openclaw_writer.get_sops_dir(), sop_templates
+            )
+            logger.info(
+                "Focus v2 session '%s': exported %d SOP(s) (%.1fs VLM time)",
+                title, exported, result.inference_time_seconds,
+            )
+        except Exception:
+            logger.exception("Focus v2 SOP export failed")
+
+        # Also export as SKILL.md
+        if skill_md_writer is not None:
+            try:
+                skill_md_writer.write_all_sops(sop_templates)
+                logger.info("Focus v2 session '%s': SKILL.md export complete", title)
+            except Exception:
+                logger.exception("Focus v2 SKILL.md export failed")
+
+        # Cache for CLI export trigger
+        _save_sop_cache(sop_templates)
+    else:
+        logger.warning(
+            "Focus v2 session '%s' SOP generation failed: %s",
+            title, result.error,
+        )
+
+    # Clear signal file
+    _clear_focus_signal(signal_path)
+    return exported
+
+
+def _process_passive_discovery(
+    db: "WorkerDB",
+    *,
+    segmenter: "TaskSegmenter",
+    sop_generator: "SOPGenerator",
+    openclaw_writer: "SOPExportAdapter",
+    skill_md_writer: "SOPExportAdapter | None" = None,
+    index_generator: "IndexGenerator",
+) -> int:
+    """Run passive discovery: segment annotations → generate SOPs.
+
+    Called periodically (every 2 hours, on idle, or by CLI trigger).
+    Returns the number of SOPs generated.
+
+    Pipeline:
+      1. Load recent annotated events from DB
+      2. Run task segmenter (embeddings + clustering + noise filter)
+      3. Persist segments to DB
+      4. For clusters with ≥2 demonstrations, generate passive SOPs
+      5. Export SOPs
+    """
+    # Step 1: Load annotated events
+    events = db.get_annotated_events_in_window(
+        hours=segmenter.config.default_window_hours,
+    )
+    if not events:
+        logger.debug("Passive discovery: no annotated events in window")
+        return 0
+
+    logger.info(
+        "Passive discovery: processing %d annotated events", len(events),
+    )
+
+    # Step 2: Run segmentation
+    seg_result = segmenter.segment(events)
+
+    if not seg_result.segments:
+        logger.info(
+            "Passive discovery: no task segments found (%d noise frames)",
+            seg_result.noise_frames_dropped,
+        )
+        return 0
+
+    logger.info(
+        "Passive discovery: %d segments in %d clusters "
+        "(%.1fs embedding, %d noise dropped)",
+        len(seg_result.segments),
+        len(seg_result.clusters),
+        seg_result.embedding_time_seconds,
+        seg_result.noise_frames_dropped,
+    )
+
+    # Step 3: Persist segments to DB
+    for seg in seg_result.segments:
+        event_ids = [f.event_id for f in seg.frames]
+        db.save_task_segment(
+            segment_id=seg.segment_id,
+            cluster_id=seg.cluster_id,
+            task_label=seg.task_label,
+            event_ids=event_ids,
+            apps=seg.apps_involved,
+            start_time=seg.start_time,
+            end_time=seg.end_time,
+        )
+
+    # Step 4: Generate SOPs for clusters with ≥ min_demonstrations
+    ready_clusters = segmenter.get_sop_ready_clusters(seg_result)
+
+    if not ready_clusters:
+        logger.info(
+            "Passive discovery: no clusters with ≥%d demonstrations yet",
+            segmenter.config.min_demonstrations,
+        )
+        return 0
+
+    total_exported = 0
+
+    for task_label, demonstrations in ready_clusters:
+        logger.info(
+            "Passive discovery: generating SOP for '%s' (%d demos)",
+            task_label[:60], len(demonstrations),
+        )
+
+        result = sop_generator.generate_from_passive(
+            demonstrations, task_label=task_label,
+        )
+
+        if not result.success or not result.sop:
+            logger.warning(
+                "Passive SOP generation failed for '%s': %s",
+                task_label[:60], result.error,
+            )
+            continue
+
+        sop_templates = [result.sop]
+
+        # Export
+        try:
+            paths = openclaw_writer.write_all_sops(sop_templates)
+            total_exported += len(paths)
+            index_generator.update_index(
+                openclaw_writer.get_sops_dir(), sop_templates,
+            )
+            logger.info(
+                "Passive SOP '%s': exported %d SOP(s) (%.1fs VLM)",
+                task_label[:60], len(paths), result.inference_time_seconds,
+            )
+        except Exception:
+            logger.exception("Passive SOP export failed for '%s'", task_label[:60])
+
+        if skill_md_writer is not None:
+            try:
+                skill_md_writer.write_all_sops(sop_templates)
+            except Exception:
+                logger.exception("Passive SKILL.md export failed")
+
+        _save_sop_cache(sop_templates)
+
+        # Mark cluster segments as SOP-generated
+        for seg in seg_result.clusters.get(
+            # Find the cluster_id for this task_label
+            next(
+                (cid for cid, segs in seg_result.clusters.items()
+                 if any(s.task_label == task_label for s in segs)),
+                -1,
+            ),
+            [],
+        ):
+            db.mark_segment_sop_generated(seg.segment_id)
+
+    return total_exported
+
+
 def _clear_focus_signal(signal_path: Path) -> None:
     """Remove the focus session signal file."""
     try:
@@ -886,7 +1394,7 @@ def _process_vlm_jobs(
     pending_jobs: list[dict],
     vlm_worker: object,
     vlm_queue: "VLMFallbackQueue | None" = None,
-) -> None:
+) -> list[str]:
     """Process pending VLM jobs from the database using the VLM worker.
 
     For each job:
@@ -894,10 +1402,13 @@ def _process_vlm_jobs(
     2. Build a VLMRequest with event metadata
     3. Call vlm_worker.process_job() (not .infer() — that's the backend API)
     4. Store the result and mark as completed/failed
+    5. Return event IDs for successful completions (for reconciliation)
     """
     from oc_apprentice_worker.vlm_worker import VLMRequest
 
     import json as _json
+
+    completed_event_ids: list[str] = []
 
     for job_row in pending_jobs:
         job_id = job_row.get("id", "")
@@ -963,6 +1474,7 @@ def _process_vlm_jobs(
                         vlm_queue.record_completion(job_id, compute_min, result_dict)
                     except KeyError:
                         pass  # job may not exist in memory (DB-only)
+                completed_event_ids.append(event_id)
                 logger.info(
                     "VLM job %s completed (%.1fs, boost=%.2f)",
                     job_id,
@@ -996,6 +1508,8 @@ def _process_vlm_jobs(
         except Exception:
             logger.warning("VLM job %s failed", job_id, exc_info=True)
             db.mark_vlm_job_failed(job_id)
+
+    return completed_event_ids
 
 
 def _wait_for_db(db_path: Path, shutdown_flag: list[bool]) -> bool:
@@ -1221,11 +1735,18 @@ def main(argv: list[str] | None = None) -> None:
                 else:
                     backend_type = None  # type: ignore[assignment]
                 if backend_type is not None:
-                    vlm_worker = VLMWorker(config=VLMConfig(backend=backend_type))
+                    # Read optional model override from config.toml [vlm] section
+                    config_model = _read_vlm_config_field("model", "")
+                    vlm_kwargs: dict = {"backend": backend_type}
+                    if config_model:
+                        vlm_kwargs["model_name"] = config_model
+                    vlm_worker = VLMWorker(config=VLMConfig(**vlm_kwargs))
                     vlm_available = True
+                    model_display = config_model or "(default)"
                     logger.info(
-                        "VLM worker initialized (%s) — enhanced native app observation enabled",
+                        "VLM worker initialized (%s, model=%s) — enhanced native app observation enabled",
                         backend_type.value,
+                        model_display,
                     )
                 else:
                     logger.warning(
@@ -1286,7 +1807,15 @@ def main(argv: list[str] | None = None) -> None:
     sop_inducer_available = False
     try:
         from oc_apprentice_worker.sop_inducer import SOPInducer
-        sop_inducer = SOPInducer(vlm_worker=vlm_worker)
+        # Use low min_support (abs_support will be max(2, ...)) and
+        # min_pattern_length=2 to enable cold-start pattern discovery.
+        # The sliding-window mining inside the inducer creates enough
+        # sequences for PrefixSpan even with few real episodes.
+        sop_inducer = SOPInducer(
+            min_support=0.05,
+            min_pattern_length=2,
+            vlm_worker=vlm_worker,
+        )
         sop_inducer_available = True
         if vlm_worker is not None:
             logger.info("SOPInducer loaded with VLM-assisted variable classification")
@@ -1298,8 +1827,67 @@ def main(argv: list[str] | None = None) -> None:
             "Install with: pip install prefixspan"
         )
 
+    # Initialize v2 scene annotation pipeline
+    v2_cfg = _read_vlm_v2_config()
+    scene_annotator: SceneAnnotator | None = None
+    frame_differ: FrameDiffer | None = None
+    v2_annotation_enabled = v2_cfg["annotation_enabled"]
+    screenshots_dir = _status_dir() / "screenshots"
+
+    focus_processor: FocusProcessor | None = None
+    task_segmenter: TaskSegmenter | None = None
+    sop_generator: SOPGenerator | None = None
+
+    if v2_annotation_enabled:
+        ann_config = AnnotationConfig(
+            model=v2_cfg["annotation_model"],
+            ollama_host=v2_cfg["ollama_host"],
+            stale_skip_count=v2_cfg["stale_skip_count"],
+            sliding_window_max_age_sec=v2_cfg["sliding_window_max_age_sec"],
+        )
+        scene_annotator = SceneAnnotator(config=ann_config)
+
+        diff_config = DiffConfig(
+            model=v2_cfg["annotation_model"],
+            ollama_host=v2_cfg["ollama_host"],
+        )
+        frame_differ = FrameDiffer(config=diff_config)
+
+        # SOP generator (4B thinking model) for focus session SOPs
+        sop_gen_config = SOPGeneratorConfig(
+            model=v2_cfg["sop_model"],
+            ollama_host=v2_cfg["ollama_host"],
+        )
+        sop_generator = SOPGenerator(config=sop_gen_config)
+
+        # Focus processor orchestrates: annotate → diff → generate SOP
+        focus_processor = FocusProcessor(
+            annotator=scene_annotator,
+            differ=frame_differ,
+            sop_generator=sop_generator,
+        )
+
+        # Task segmenter for passive discovery (CPU-only, no GPU)
+        seg_config = SegmenterConfig(
+            ollama_host=v2_cfg["ollama_host"],
+        )
+        task_segmenter = TaskSegmenter(config=seg_config)
+
+        logger.info(
+            "v2 scene annotation pipeline enabled "
+            "(annotation=%s, sop=%s, stale_skip=%d, window=%ds)",
+            v2_cfg["annotation_model"],
+            v2_cfg["sop_model"],
+            v2_cfg["stale_skip_count"],
+            v2_cfg["sliding_window_max_age_sec"],
+        )
+    else:
+        logger.info("v2 scene annotation pipeline disabled by config")
+
     # Initialize scheduler gate (GAP 5) and deep scanner (GAP 6)
-    idle_gate = IdleJobGate(SchedulerConfig())
+    # Read idle_jobs config from config.toml if available
+    _idle_cfg = _read_idle_jobs_config()
+    idle_gate = IdleJobGate(SchedulerConfig(**_idle_cfg))
     deep_scanner = DeepScanner()
 
     # Single-thread pool for background deep scan (non-blocking privacy check)
@@ -1310,9 +1898,20 @@ def main(argv: list[str] | None = None) -> None:
     total_events_processed: int = 0
     total_sops_generated: int = 0
     last_pipeline_duration_ms: int | None = None
+    total_v2_annotations: int = 0
+    total_v2_diffs: int = 0
+    v2_schema_ok: bool = False  # set after first DB check
 
     # Task 5: Idle progress tracking
     last_idle_log_time = time.monotonic()
+
+    # Episode store cleanup — run once per day
+    _last_episode_cleanup = 0.0
+
+    # Passive discovery timer — run every 2 hours (7200s)
+    _PASSIVE_DISCOVERY_INTERVAL = 7200
+    _last_passive_discovery = 0.0
+    total_passive_sops: int = 0
 
     # Write initial status file after DB connect
     _vlm_stats = vlm_queue.get_stats()
@@ -1329,6 +1928,9 @@ def main(argv: list[str] | None = None) -> None:
         vlm_dropped_today=_vlm_stats.dropped_count,
         vlm_mode=vlm_mode_str,
         vlm_provider=vlm_provider_str or None,
+        v2_annotation_enabled=v2_annotation_enabled,
+        v2_annotations_today=total_v2_annotations,
+        v2_diffs_today=total_v2_diffs,
     )
 
     with WorkerDB(args.db_path) as db:
@@ -1340,20 +1942,33 @@ def main(argv: list[str] | None = None) -> None:
 
         while not shutdown_flag[0]:
             try:
-                # Process any completed focus recording sessions first
-                focus_sops = _process_focus_sessions(
-                    db,
-                    episode_builder=episode_builder,
-                    clipboard_linker=clipboard_linker,
-                    translator=translator,
-                    scorer=scorer,
-                    vlm_queue=vlm_queue,
-                    sop_inducer=sop_inducer,
-                    sop_enhancer=sop_enhancer,
-                    openclaw_writer=sop_writer,
-                    skill_md_writer=skill_md_writer,
-                    index_generator=index_generator,
-                )
+                # Process any completed focus recording sessions first.
+                # Use v2 VLM pipeline when available (semantic SOPs from
+                # screen annotations), fall back to v1 (episode builder +
+                # translator + PrefixSpan).
+                if focus_processor is not None and v2_schema_ok:
+                    focus_sops = _process_focus_sessions_v2(
+                        db,
+                        focus_processor=focus_processor,
+                        openclaw_writer=sop_writer,
+                        skill_md_writer=skill_md_writer,
+                        index_generator=index_generator,
+                        screenshots_dir=screenshots_dir,
+                    )
+                else:
+                    focus_sops = _process_focus_sessions(
+                        db,
+                        episode_builder=episode_builder,
+                        clipboard_linker=clipboard_linker,
+                        translator=translator,
+                        scorer=scorer,
+                        vlm_queue=vlm_queue,
+                        sop_inducer=sop_inducer,
+                        sop_enhancer=sop_enhancer,
+                        openclaw_writer=sop_writer,
+                        skill_md_writer=skill_md_writer,
+                        index_generator=index_generator,
+                    )
                 if focus_sops > 0:
                     total_sops_generated += focus_sops
                     logger.info(
@@ -1412,6 +2027,7 @@ def main(argv: list[str] | None = None) -> None:
                         sop_inducer=sop_inducer,
                         sop_enhancer=sop_enhancer,
                         skill_md_writer=skill_md_writer,
+                        db=db,
                     )
                     pipeline_elapsed_ms = int((time.monotonic() - pipeline_start) * 1000)
                     last_pipeline_duration_ms = pipeline_elapsed_ms
@@ -1478,7 +2094,106 @@ def main(argv: list[str] | None = None) -> None:
                 if pending_vlm and vlm_worker is not None:
                     gate_result = idle_gate.check()
                     if gate_result.can_run:
-                        _process_vlm_jobs(db, pending_vlm, vlm_worker, vlm_queue)
+                        vlm_completed_events = _process_vlm_jobs(
+                            db, pending_vlm, vlm_worker, vlm_queue
+                        )
+                        # VLM reconciliation: reset events with completed VLM
+                        # boosts so the pipeline re-evaluates them with higher
+                        # confidence scores.
+                        if vlm_completed_events:
+                            db.mark_events_unprocessed(vlm_completed_events)
+                            logger.info(
+                                "VLM reconciliation: %d events reset for re-scoring with boost",
+                                len(vlm_completed_events),
+                            )
+
+                # --- v2 Scene Annotation Pipeline ---
+                # Process unannotated screenshots and compute frame diffs.
+                # Schema check happens once on first iteration.
+                if scene_annotator is not None and not v2_schema_ok:
+                    v2_schema_ok = _check_v2_schema(db)
+                    if v2_schema_ok:
+                        logger.info(
+                            "v2 schema detected — scene annotation pipeline active"
+                        )
+                    else:
+                        logger.info(
+                            "v2 schema not found — scene annotation disabled "
+                            "(run daemon to apply migration)"
+                        )
+
+                if scene_annotator is not None and v2_schema_ok:
+                    ann_stats = _process_annotations(
+                        db, scene_annotator, screenshots_dir
+                    )
+                    total_v2_annotations += ann_stats["annotated"]
+
+                    if ann_stats["annotated"] > 0:
+                        logger.info(
+                            "v2 annotation: %d annotated, %d skipped, %d failed",
+                            ann_stats["annotated"],
+                            ann_stats["skipped"],
+                            ann_stats["failed"],
+                        )
+
+                if frame_differ is not None and v2_schema_ok:
+                    diff_stats = _process_diffs(db, frame_differ)
+                    total_v2_diffs += diff_stats["diffs"]
+
+                    if diff_stats["diffs"] > 0 or diff_stats["failed"] > 0:
+                        logger.info(
+                            "v2 frame diff: %d action diffs, %d edge cases, %d failed",
+                            diff_stats["diffs"],
+                            diff_stats["edge_cases"],
+                            diff_stats["failed"],
+                        )
+
+                # --- v2 Passive Discovery (periodic) ---
+                # Run task segmenter + passive SOP generation every 2 hours,
+                # or when user has been idle for 5+ minutes.
+                if (
+                    task_segmenter is not None
+                    and sop_generator is not None
+                    and v2_schema_ok
+                ):
+                    _now_mono_pd = time.monotonic()
+                    should_segment = (
+                        _now_mono_pd - _last_passive_discovery
+                        >= _PASSIVE_DISCOVERY_INTERVAL
+                    )
+                    # Also run during extended idle (no unprocessed events
+                    # for several cycles = user is away)
+                    if not should_segment and not unprocessed and not pending_vlm:
+                        # Check idle gate — passive discovery during idle window
+                        pd_gate = idle_gate.check()
+                        if pd_gate.can_run and (
+                            _now_mono_pd - _last_passive_discovery >= 300
+                        ):
+                            should_segment = True
+
+                    if should_segment:
+                        try:
+                            pd_sops = _process_passive_discovery(
+                                db,
+                                segmenter=task_segmenter,
+                                sop_generator=sop_generator,
+                                openclaw_writer=sop_writer,
+                                skill_md_writer=skill_md_writer,
+                                index_generator=index_generator,
+                            )
+                            if pd_sops > 0:
+                                total_passive_sops += pd_sops
+                                total_sops_generated += pd_sops
+                                logger.info(
+                                    "Passive discovery: generated %d SOP(s)!",
+                                    pd_sops,
+                                )
+                        except Exception:
+                            logger.warning(
+                                "Passive discovery failed",
+                                exc_info=True,
+                            )
+                        _last_passive_discovery = _now_mono_pd
 
                 # Write status file after each cycle (heartbeat).
                 # Use authoritative DB count for pending VLM jobs (the
@@ -1502,7 +2217,19 @@ def main(argv: list[str] | None = None) -> None:
                     vlm_dropped_today=_vlm_stats.dropped_count,
                     vlm_mode=vlm_mode_str,
                     vlm_provider=vlm_provider_str or None,
+                    v2_annotation_enabled=v2_annotation_enabled,
+                    v2_annotations_today=total_v2_annotations,
+                    v2_diffs_today=total_v2_diffs,
                 )
+
+                # Episode store cleanup — once per day (86400s)
+                _now_mono = time.monotonic()
+                if _now_mono - _last_episode_cleanup > 86400:
+                    try:
+                        db.cleanup_old_episodes(max_age_days=14)
+                    except Exception:
+                        logger.debug("Episode store cleanup failed", exc_info=True)
+                    _last_episode_cleanup = _now_mono
 
             except Exception:
                 consecutive_errors += 1

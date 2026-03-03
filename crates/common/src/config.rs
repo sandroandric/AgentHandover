@@ -30,6 +30,18 @@ pub struct ObserverConfig {
     pub capture_screenshots: bool,
     pub screenshot_max_per_minute: u32,
     pub multi_monitor_mode: String,
+    /// Screenshot format: "jpeg" (default, half-res) or "png" (full-res).
+    #[serde(default = "default_screenshot_format")]
+    pub screenshot_format: String,
+    /// JPEG quality 1-100 (default: 70). Only used when format = "jpeg".
+    #[serde(default = "default_screenshot_quality")]
+    pub screenshot_quality: u8,
+    /// Screenshot scale factor (default: 0.5 = half resolution).
+    #[serde(default = "default_screenshot_scale")]
+    pub screenshot_scale: f64,
+    /// dHash perceptual hash threshold (hamming distance). Lower = stricter dedup.
+    #[serde(default = "default_dhash_threshold")]
+    pub dhash_threshold: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -84,11 +96,37 @@ pub struct VlmConfig {
     /// Environment variable name holding the API key (NEVER store keys directly!).
     #[serde(default)]
     pub api_key_env: Option<String>,
+
+    // --- v2 scene annotation pipeline fields ---
+
+    /// Model for per-frame annotation (default: "qwen3.5:2b").
+    #[serde(default = "default_annotation_model")]
+    pub annotation_model: String,
+    /// Model for SOP generation (default: "qwen3.5:4b").
+    #[serde(default = "default_sop_model")]
+    pub sop_model: String,
+    /// Enable continuous scene annotation pipeline.
+    #[serde(default = "default_annotation_enabled")]
+    pub annotation_enabled: bool,
+    /// Skip annotation after N consecutive non-workflow same-app frames.
+    #[serde(default = "default_stale_skip_count")]
+    pub stale_skip_count: u32,
+    /// Max age (seconds) for sliding window context frames (default: 600 = 10 min).
+    #[serde(default = "default_sliding_window_max_age_sec")]
+    pub sliding_window_max_age_sec: u64,
 }
 
-fn default_vlm_mode() -> String {
-    "local".to_string()
-}
+fn default_screenshot_format() -> String { "jpeg".to_string() }
+fn default_screenshot_quality() -> u8 { 70 }
+fn default_screenshot_scale() -> f64 { 0.5 }
+fn default_dhash_threshold() -> u32 { 10 }
+
+fn default_vlm_mode() -> String { "local".to_string() }
+fn default_annotation_model() -> String { "qwen3.5:2b".to_string() }
+fn default_sop_model() -> String { "qwen3.5:4b".to_string() }
+fn default_annotation_enabled() -> bool { true }
+fn default_stale_skip_count() -> u32 { 3 }
+fn default_sliding_window_max_age_sec() -> u64 { 600 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LlmConfig {
@@ -173,6 +211,10 @@ impl Default for ObserverConfig {
             capture_screenshots: true,
             screenshot_max_per_minute: 20,
             multi_monitor_mode: "focused_window".into(),
+            screenshot_format: default_screenshot_format(),
+            screenshot_quality: default_screenshot_quality(),
+            screenshot_scale: default_screenshot_scale(),
+            dhash_threshold: default_dhash_threshold(),
         }
     }
 }
@@ -234,6 +276,11 @@ impl Default for VlmConfig {
             provider: None,
             model: None,
             api_key_env: None,
+            annotation_model: default_annotation_model(),
+            sop_model: default_sop_model(),
+            annotation_enabled: default_annotation_enabled(),
+            stale_skip_count: default_stale_skip_count(),
+            sliding_window_max_age_sec: default_sliding_window_max_age_sec(),
         }
     }
 }

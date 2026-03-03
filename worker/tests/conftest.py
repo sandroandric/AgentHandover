@@ -35,7 +35,10 @@ CREATE TABLE IF NOT EXISTS events (
     processed INTEGER NOT NULL DEFAULT 0,
     episode_id TEXT,
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-    display_ids_spanned_json TEXT
+    display_ids_spanned_json TEXT,
+    scene_annotation_json TEXT DEFAULT NULL,
+    annotation_status TEXT NOT NULL DEFAULT 'pending',
+    frame_diff_json TEXT DEFAULT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp);
@@ -83,6 +86,9 @@ CREATE TABLE IF NOT EXISTS vlm_queue (
 );
 
 CREATE INDEX IF NOT EXISTS idx_vlm_queue_status ON vlm_queue(status, priority DESC);
+
+CREATE INDEX IF NOT EXISTS idx_events_annotation_status
+    ON events(annotation_status);
 """
 
 

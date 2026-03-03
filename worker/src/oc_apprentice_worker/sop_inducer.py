@@ -1,5 +1,14 @@
 """SOP Inducer — mine repeated subgraphs from episodes to produce SOP templates.
 
+.. deprecated:: 0.2.0
+    This module is part of the v1 pipeline (PrefixSpan-based pattern mining).
+    It is superseded by ``sop_generator.py`` in the v2 VLM-based pipeline,
+    which generates semantic SOPs directly from VLM annotations and frame
+    diffs rather than mining exact sequential patterns.
+
+    The v1 pipeline remains functional for backward compatibility but will
+    not receive new features.
+
 Implements section 10.1 of the OpenMimic spec.  Uses PrefixSpan to discover
 frequent sequential patterns across episodes, then abstracts variable slots
 where values differ across instances.
@@ -47,11 +56,17 @@ class SOPInducer:
         min_pattern_length: int = 3,
         vlm_worker: object | None = None,
         vlm_confidence_threshold: float = 0.7,
+        window_size: int = 8,
+        window_stride: int = 3,
     ):
         self.min_support = min_support
         self.min_pattern_length = min_pattern_length
         self._vlm_worker = vlm_worker
         self._vlm_confidence_threshold = vlm_confidence_threshold
+        self._window_size = window_size
+        self._window_stride = window_stride
+        # Track VLM failures to avoid blocking on broken backends
+        self._vlm_consecutive_failures: int = 0
 
     def induce(self, episodes: list[list[dict]]) -> list[dict]:
         """Mine frequent patterns from episodes and produce SOP templates.
@@ -76,18 +91,54 @@ class SOPInducer:
         if not episodes:
             return []
 
+        # Reset VLM failure counter per induction cycle
+        self._vlm_consecutive_failures = 0
+
         # Filter out empty episodes
         non_empty = [ep for ep in episodes if ep]
         if not non_empty:
             return []
 
-        # Build encoding tables
-        encoded, code_to_signature, signature_to_steps = self._encode_steps(non_empty)
+        # Create overlapping windows for pattern mining.
+        # During cold-start (few episodes, each with many events), single
+        # episodes per app make it impossible for PrefixSpan to find
+        # patterns (needs 2+ sequences).  Sliding windows create multiple
+        # shorter sequences from long episodes, enabling sub-pattern
+        # discovery even from a single session.
+        mining_windows = self._create_mining_windows(non_empty)
+        logger.debug(
+            "Mining windows: %d original episodes -> %d windows "
+            "(window_size=%d, stride=%d)",
+            len(non_empty),
+            len(mining_windows),
+            self._window_size,
+            self._window_stride,
+        )
 
-        # Mine frequent patterns
-        raw_patterns = self._mine_patterns(encoded, len(non_empty))
+        # Build encoding tables from mining windows
+        encoded, code_to_signature, signature_to_steps = self._encode_steps(
+            mining_windows
+        )
+
+        # Mine frequent patterns from windows
+        raw_patterns = self._mine_patterns(encoded, len(mining_windows))
         if not raw_patterns:
+            logger.info(
+                "No frequent patterns found (min_support=%.2f, "
+                "abs_support=%d, min_length=%d, episodes=%d, windows=%d)",
+                self.min_support,
+                max(2, int(self.min_support * len(mining_windows))),
+                self.min_pattern_length,
+                len(non_empty),
+                len(mining_windows),
+            )
             return []
+
+        logger.info(
+            "PrefixSpan found %d candidate patterns from %d windows",
+            len(raw_patterns),
+            len(mining_windows),
+        )
 
         results: list[dict] = []
         for support_count, pattern_codes in raw_patterns:
@@ -105,7 +156,8 @@ class SOPInducer:
             if len(pattern_steps) < self.min_pattern_length:
                 continue
 
-            # Single-pass scan: collect instances, apps, and exceptions together
+            # Collect instances from ORIGINAL episodes (not windows)
+            # to get full-context matches with proper provenance.
             all_instances, apps, exceptions = self._scan_episodes_for_pattern(
                 non_empty, pattern_codes, code_to_signature, signature_to_steps
             )
@@ -138,7 +190,202 @@ class SOPInducer:
                 "exceptions_seen": exceptions,
             })
 
+        # Deduplicate: prefer longer patterns over their sub-patterns,
+        # and cap total output to avoid flooding the export pipeline.
+        results = self._deduplicate_patterns(results)
+
+        logger.info(
+            "Induced %d SOP templates after deduplication", len(results)
+        )
         return results
+
+    def _deduplicate_patterns(
+        self, templates: list[dict], max_output: int = 50
+    ) -> list[dict]:
+        """Remove sub-patterns, rotations, and trivially repetitive patterns.
+
+        When sliding-window mining produces many overlapping patterns,
+        shorter patterns are often just prefixes or suffixes of longer
+        ones.  This method:
+
+        1. Filters out patterns with too little step diversity (e.g.
+           only ``read`` and ``switch_app`` repeating) — these are not
+           actionable SOPs.
+        2. Groups patterns by their unique step-signature *set* and keeps
+           only the longest/best per group (rotation dedup).
+        3. Removes strict contiguous sub-patterns.
+        4. Caps total output.
+
+        Ranking priority:
+        1. Pattern length (longer = more informative SOP)
+        2. Support count (more evidence = higher confidence)
+        3. Average confidence score
+        """
+        if not templates:
+            return []
+
+        # ---------------------------------------------------------------
+        # Phase 1: Filter trivially repetitive patterns
+        # ---------------------------------------------------------------
+        # Patterns consisting of only 1 unique intent (e.g. all "read")
+        # or only "read" + "switch_app" with no other diversity are
+        # unlikely to produce useful SOPs.  Require at least 2 unique
+        # intents, and unless the pattern has 3+ unique intents (rich),
+        # require 3+ steps to keep.
+        _LOW_VALUE_INTENTS = {"read", "switch_app"}
+        filtered: list[dict] = []
+        for tpl in templates:
+            steps = tpl.get("steps", [])
+            unique_intents = set(s.get("step", "") for s in steps)
+
+            # Must have at least 2 unique intents
+            if len(unique_intents) < 2:
+                continue
+
+            # If ALL intents are low-value (read + switch_app only),
+            # require a longer pattern (>= 4 steps) to keep
+            if unique_intents <= _LOW_VALUE_INTENTS and len(steps) < 4:
+                continue
+
+            filtered.append(tpl)
+
+        # ---------------------------------------------------------------
+        # Phase 2: Group by step-signature set (rotation dedup)
+        # ---------------------------------------------------------------
+        # Patterns with the same multiset of step signatures are likely
+        # rotations of each other.  Keep only the one with best score.
+        from collections import Counter as _Counter
+
+        sig_groups: dict[tuple, list[dict]] = defaultdict(list)
+        for tpl in filtered:
+            sig_counter = _Counter(
+                f"{s.get('step', '')}::{s.get('target', '')}"
+                for s in tpl.get("steps", [])
+            )
+            # Canonical key: sorted (signature, count) pairs
+            key = tuple(sorted(sig_counter.items()))
+            sig_groups[key].append(tpl)
+
+        # Pick the best template per group
+        grouped: list[dict] = []
+        for group in sig_groups.values():
+            best = max(
+                group,
+                key=lambda t: (
+                    len(t.get("steps", [])),
+                    t.get("abs_support", 0),
+                    t.get("confidence_avg", 0.0),
+                ),
+            )
+            grouped.append(best)
+
+        # ---------------------------------------------------------------
+        # Phase 3: Remove strict sub-patterns
+        # ---------------------------------------------------------------
+        sig_tuples: list[tuple[tuple[str, ...], dict]] = []
+        for tpl in grouped:
+            sig = tuple(
+                f"{s.get('step', '')}::{s.get('target', '')}"
+                for s in tpl.get("steps", [])
+            )
+            sig_tuples.append((sig, tpl))
+
+        sig_tuples.sort(key=lambda x: len(x[0]), reverse=True)
+
+        kept_sigs: list[tuple[str, ...]] = []
+        kept: list[dict] = []
+
+        for sig, tpl in sig_tuples:
+            is_sub = False
+            for longer_sig in kept_sigs:
+                if self._is_contiguous_subsequence(sig, longer_sig):
+                    is_sub = True
+                    break
+            if not is_sub:
+                kept_sigs.append(sig)
+                kept.append(tpl)
+
+        # Rank remaining by (length desc, support desc, confidence desc)
+        kept.sort(
+            key=lambda t: (
+                len(t.get("steps", [])),
+                t.get("abs_support", 0),
+                t.get("confidence_avg", 0.0),
+            ),
+            reverse=True,
+        )
+
+        logger.debug(
+            "Dedup: %d -> %d (diversity filter) -> %d (rotation dedup) "
+            "-> %d (sub-pattern removal) -> %d (cap)",
+            len(templates),
+            len(filtered),
+            len(grouped),
+            len(kept),
+            min(len(kept), max_output),
+        )
+
+        return kept[:max_output]
+
+    @staticmethod
+    def _is_contiguous_subsequence(
+        short: tuple[str, ...], long: tuple[str, ...]
+    ) -> bool:
+        """Check if *short* appears as a contiguous run inside *long*."""
+        s_len = len(short)
+        l_len = len(long)
+        if s_len >= l_len:
+            return False
+        for start in range(l_len - s_len + 1):
+            if long[start : start + s_len] == short:
+                return True
+        return False
+
+    def _create_mining_windows(
+        self,
+        episodes: list[list[dict]],
+    ) -> list[list[dict]]:
+        """Create overlapping windows from episodes for pattern mining.
+
+        During cold-start (few episodes per app thread, each potentially
+        long), PrefixSpan cannot find patterns because it needs the same
+        subsequence in 2+ input sequences.  Sliding windows split long
+        episodes into multiple shorter sequences, enabling sub-pattern
+        discovery even within a single long episode.
+
+        Short episodes (length <= window_size) are passed through unchanged.
+
+        Parameters
+        ----------
+        episodes:
+            Original episodes (lists of step dicts).
+
+        Returns
+        -------
+        List of episode windows suitable for PrefixSpan mining.
+        """
+        windows: list[list[dict]] = []
+        for ep in episodes:
+            if len(ep) <= self._window_size:
+                windows.append(ep)
+            else:
+                for start in range(
+                    0,
+                    len(ep) - self.min_pattern_length + 1,
+                    self._window_stride,
+                ):
+                    end = min(start + self._window_size, len(ep))
+                    window = ep[start:end]
+                    if len(window) >= self.min_pattern_length:
+                        windows.append(window)
+
+        logger.debug(
+            "Windowing: %d episodes -> %d windows (sizes: %s)",
+            len(episodes),
+            len(windows),
+            [len(w) for w in windows[:10]],
+        )
+        return windows
 
     def _encode_steps(
         self, episodes: list[list[dict]]
@@ -195,6 +442,16 @@ class SOPInducer:
         """
         abs_support = max(2, int(self.min_support * episode_count))
 
+        logger.info(
+            "PrefixSpan mining: %d sequences, abs_support=%d "
+            "(min_support=%.3f × %d), min_length=%d",
+            len(encoded),
+            abs_support,
+            self.min_support,
+            episode_count,
+            self.min_pattern_length,
+        )
+
         # Safety cap: stratified subsample if input is too large
         avg_steps = sum(len(ep) for ep in encoded) / max(len(encoded), 1)
         data_size = episode_count * avg_steps
@@ -213,7 +470,9 @@ class SOPInducer:
 
         # Filter by minimum pattern length and collect up to 1000 patterns
         patterns = []
+        total_raw = 0
         for count, pat in raw:
+            total_raw += 1
             if len(pat) >= self.min_pattern_length:
                 patterns.append((count, pat))
                 if len(patterns) >= 1000:
@@ -221,6 +480,13 @@ class SOPInducer:
 
         # Sort by support count descending, then pattern length descending
         patterns.sort(key=lambda x: (x[0], len(x[1])), reverse=True)
+
+        logger.info(
+            "PrefixSpan results: %d raw patterns, %d after length filter (>= %d steps)",
+            total_raw,
+            len(patterns),
+            self.min_pattern_length,
+        )
 
         return patterns
 
@@ -438,15 +704,30 @@ class SOPInducer:
             name = f"{base_name}_{counter}"
             counter += 1
 
-        # Attempt VLM-assisted classification if available
-        if self._vlm_worker is not None:
+        # Attempt VLM-assisted classification if available.
+        # Track consecutive failures to avoid blocking the pipeline when
+        # the VLM backend is returning empty results.  Each failed VLM call
+        # takes ~30s (Ollama timeout), so we circuit-break after 3 failures.
+        if self._vlm_worker is not None and self._vlm_consecutive_failures < 1:
             try:
                 vlm_result = self._vlm_worker.classify_variable(
                     step_context=base_name,
                     param_name=name,
                     values=str_values[:20],
                 )
-                if vlm_result is not None:
+                if vlm_result is None:
+                    # VLM returned None — either budget exhausted or
+                    # internal error (caught inside classify_variable).
+                    # Count as failure to trigger circuit breaker.
+                    self._vlm_consecutive_failures += 1
+                    if self._vlm_consecutive_failures >= 1:
+                        logger.info(
+                            "VLM variable classification circuit-breaker tripped "
+                            "(%d consecutive failures) — using heuristics for remaining variables",
+                            self._vlm_consecutive_failures,
+                        )
+                else:
+                    self._vlm_consecutive_failures = 0  # Reset on success
                     confidence = vlm_result.get("confidence", 0.0)
                     if confidence >= self._vlm_confidence_threshold:
                         classification = vlm_result.get("classification", "variable")
@@ -496,9 +777,11 @@ class SOPInducer:
                             self._vlm_confidence_threshold,
                         )
             except Exception:
+                self._vlm_consecutive_failures += 1
                 logger.debug(
-                    "VLM classification failed for %s, falling back to heuristics",
+                    "VLM classification failed for %s (consecutive: %d), falling back to heuristics",
                     name,
+                    self._vlm_consecutive_failures,
                     exc_info=True,
                 )
 

@@ -60,7 +60,7 @@ fn test_schema_version() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join("test_ver.db");
     let store = EventStore::open(&db_path).unwrap();
-    assert_eq!(store.schema_version(), 2);
+    assert_eq!(store.schema_version(), 3);
 }
 
 #[test]

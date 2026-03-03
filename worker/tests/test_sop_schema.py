@@ -78,7 +78,7 @@ class TestSopToJsonTopLevel:
     def test_schema_version(self):
         result = sop_to_json(_sample_template())
         assert result["schema_version"] == SOP_SCHEMA_VERSION
-        assert result["schema_version"] == "1.1.0"
+        assert result["schema_version"] == "2.0.0"
 
     def test_slug_and_title(self):
         result = sop_to_json(_sample_template(slug="my_slug", title="My Title"))
@@ -445,9 +445,10 @@ class TestValidateSopJsonSchemaVersion:
         errors = validate_sop_json(data)
         assert not any("Unsupported schema version" in e for e in errors)
 
-    def test_accepted_versions_contains_both(self):
+    def test_accepted_versions_contains_all(self):
         assert "1.0.0" in _ACCEPTED_VERSIONS
         assert "1.1.0" in _ACCEPTED_VERSIONS
+        assert "2.0.0" in _ACCEPTED_VERSIONS
 
 
 class TestValidateSopJsonConfidenceSummary:
@@ -643,3 +644,104 @@ class TestValidateSopJsonEnhancedFields:
         }
         errors = validate_sop_json(data)
         assert errors == []
+
+
+# ---------------------------------------------------------------------------
+# v2 fields (schema 2.0.0)
+# ---------------------------------------------------------------------------
+
+
+class TestSopToJsonV2Fields:
+    """v2-specific fields: source, confidence_breakdown."""
+
+    def test_source_included(self):
+        template = _sample_template()
+        template["source"] = "v2_focus_recording"
+        result = sop_to_json(template)
+        assert result["source"] == "v2_focus_recording"
+
+    def test_source_omitted_when_absent(self):
+        result = sop_to_json(_sample_template())
+        assert "source" not in result
+
+    def test_confidence_breakdown_included(self):
+        template = _sample_template()
+        template["confidence_breakdown"] = {
+            "demo_count": 0.15,
+            "step_consistency": 0.30,
+            "annotation_quality": 0.17,
+            "variable_detection": 0.10,
+            "focus_bonus": 0.10,
+            "reasons": ["demos=1"],
+        }
+        result = sop_to_json(template)
+        assert result["confidence_breakdown"]["demo_count"] == 0.15
+        assert result["confidence_breakdown"]["focus_bonus"] == 0.10
+
+    def test_confidence_breakdown_omitted_when_absent(self):
+        result = sop_to_json(_sample_template())
+        assert "confidence_breakdown" not in result
+
+    def test_empty_confidence_breakdown_omitted(self):
+        template = _sample_template()
+        template["confidence_breakdown"] = {}
+        result = sop_to_json(template)
+        assert "confidence_breakdown" not in result
+
+    def test_v2_version_accepted(self):
+        data = {
+            "schema_version": "2.0.0",
+            "slug": "x",
+            "title": "x",
+            "steps": [],
+        }
+        errors = validate_sop_json(data)
+        assert errors == []
+
+
+class TestValidateSopJsonV2Fields:
+    """Validation of v2-specific fields."""
+
+    def test_valid_source(self):
+        data = {
+            "schema_version": "2.0.0",
+            "slug": "x",
+            "title": "x",
+            "steps": [],
+            "source": "v2_passive_discovery",
+        }
+        errors = validate_sop_json(data)
+        assert not any("source" in e for e in errors)
+
+    def test_invalid_source_type(self):
+        data = {
+            "schema_version": "2.0.0",
+            "slug": "x",
+            "title": "x",
+            "steps": [],
+            "source": 42,
+        }
+        errors = validate_sop_json(data)
+        assert any("source" in e for e in errors)
+
+    def test_valid_confidence_breakdown(self):
+        data = {
+            "schema_version": "2.0.0",
+            "slug": "x",
+            "title": "x",
+            "steps": [],
+            "confidence_breakdown": {"demo_count": 0.15},
+        }
+        errors = validate_sop_json(data)
+        assert not any("confidence_breakdown" in e for e in errors)
+
+    def test_invalid_confidence_breakdown_type(self):
+        data = {
+            "schema_version": "2.0.0",
+            "slug": "x",
+            "title": "x",
+            "steps": [],
+            "confidence_breakdown": "not_a_dict",
+        }
+        errors = validate_sop_json(data)
+        assert any("confidence_breakdown" in e for e in errors)

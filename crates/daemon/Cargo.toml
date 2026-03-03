@@ -28,6 +28,8 @@ rusqlite.workspace = true
 sha2 = "0.10"
 hex = "0.4"
 libc = "0.2"
+# v2: JPEG encoding and image resizing for VLM annotation pipeline
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
 
 [build-dependencies]
 cc = "1"

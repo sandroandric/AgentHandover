@@ -1,7 +1,7 @@
 use core_foundation::base::{CFType, TCFType};
 use core_foundation::string::CFString;
 use std::sync::atomic::{AtomicU32, Ordering};
-use tracing::{debug, error, warn};
+use tracing::{debug, error, info, warn};
 
 /// Tracks consecutive AX API timeouts for degradation visibility.
 static AX_CONSECUTIVE_TIMEOUTS: AtomicU32 = AtomicU32::new(0);
@@ -17,6 +17,44 @@ pub fn check_accessibility_permission() -> bool {
         );
     }
     trusted
+}
+
+/// Request accessibility permission with a system prompt.
+///
+/// Calls `AXIsProcessTrustedWithOptions` with `kAXTrustedCheckOptionPrompt = true`,
+/// which causes macOS to:
+/// 1. Register this binary's current code signature in the TCC database
+/// 2. Open System Settings > Accessibility if permission is not yet granted
+///
+/// This must be called on daemon startup so that rebuilds (which change the
+/// adhoc CDHash) get a fresh TCC entry instead of silently failing.
+pub fn request_accessibility_with_prompt() -> bool {
+    unsafe {
+        use core_foundation::base::TCFType;
+        use core_foundation::boolean::CFBoolean;
+        use core_foundation::dictionary::CFDictionary;
+
+        // Build { kAXTrustedCheckOptionPrompt: true }
+        let key = CFString::wrap_under_get_rule(
+            accessibility_sys::kAXTrustedCheckOptionPrompt,
+        );
+        let value = CFBoolean::true_value();
+        let options = CFDictionary::from_CFType_pairs(&[(key, value)]);
+
+        let trusted = accessibility_sys::AXIsProcessTrustedWithOptions(
+            options.as_concrete_TypeRef(),
+        );
+
+        if trusted {
+            info!("Accessibility permission: granted");
+        } else {
+            warn!(
+                "Accessibility permission: not granted — \
+                 macOS should prompt the user to enable it"
+            );
+        }
+        trusted
+    }
 }
 
 /// Check if the currently focused UI element is a secure text field (password).

@@ -403,6 +403,11 @@ class TestCreateLlmBackend:
         assert result is None
 
     def test_none_vlm_config_defaults_to_local(self):
-        # Should attempt local mode (Ollama) — which will fail in test env
+        # Should attempt local mode (Ollama).  Returns an OllamaBackend if
+        # the ``ollama`` package is installed and the server is reachable,
+        # or None otherwise.
         result = create_llm_backend({"model": ""}, None)
-        assert result is None  # Ollama not available in test env
+        if result is not None:
+            from oc_apprentice_worker.backends.ollama import OllamaBackend
+            assert isinstance(result, OllamaBackend)
+        # Either case is valid — depends on environment

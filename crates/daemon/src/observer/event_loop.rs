@@ -4,7 +4,7 @@ use oc_apprentice_common::event::*;
 use oc_apprentice_common::redaction::Redactor;
 use oc_apprentice_storage::artifact_store::{ArtifactMeta, ArtifactStore};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
@@ -35,6 +35,17 @@ pub struct ObserverConfig {
     pub screenshot_max_per_minute: u32,
     pub poll_interval: Duration,
     pub db_path: PathBuf,
+    /// dHash perceptual hash threshold for screenshot change detection.
+    /// Lower = stricter dedup (fewer screenshots stored).
+    pub dhash_threshold: u32,
+    /// Screenshot format: "jpeg" or "png".
+    pub screenshot_format: String,
+    /// JPEG quality 1-100 (default: 70). Only used when format = "jpeg".
+    pub screenshot_quality: u8,
+    /// Scale factor for VLM screenshots (default: 0.5 = half resolution).
+    pub screenshot_scale: f64,
+    /// Directory for plain JPEG screenshots (VLM annotation pipeline).
+    pub screenshots_dir: PathBuf,
 }
 
 impl Default for ObserverConfig {
@@ -46,6 +57,11 @@ impl Default for ObserverConfig {
             screenshot_max_per_minute: 20,
             poll_interval: Duration::from_millis(500),
             db_path: PathBuf::from("openmimic.db"),
+            dhash_threshold: 10,
+            screenshot_format: "jpeg".to_string(),
+            screenshot_quality: 70,
+            screenshot_scale: 0.5,
+            screenshots_dir: PathBuf::from("/tmp/openmimic-screenshots"),
         }
     }
 }
@@ -70,6 +86,7 @@ pub async fn run_observer_loop(
     let mut last_app_id: Option<String> = None;
     let mut screenshot_count_this_minute: u32 = 0;
     let mut last_minute_reset = Utc::now();
+    let mut last_dhash: u64 = 0;
 
     // Focus recording session tracking
     let state_dir = oc_apprentice_common::status::data_dir();
@@ -244,6 +261,39 @@ pub async fn run_observer_loop(
                 dwell.tick();
 
                 if dwell.is_dwelling() {
+                    let mut captured_result: Option<ScreenshotResult> = None;
+                    let mut should_skip_dhash = false;
+
+                    // Capture screenshot on dwell if enabled and under rate limit
+                    if config.capture_screenshots
+                        && screenshot_count_this_minute < config.screenshot_max_per_minute
+                    {
+                        if let Some(ref store) = artifact_store {
+                            let result = capture_and_store_screenshot(
+                                store,
+                                last_dhash,
+                                config.dhash_threshold,
+                                &config.screenshots_dir,
+                                config.screenshot_scale,
+                                config.screenshot_quality,
+                            ).await;
+
+                            if result.skipped_dhash {
+                                // Screen hasn't changed enough — skip entire event
+                                should_skip_dhash = true;
+                                last_dhash = result.dhash;
+                            } else {
+                                last_dhash = result.dhash;
+                                captured_result = Some(result);
+                            }
+                        }
+                    }
+
+                    if should_skip_dhash {
+                        debug!("Screen unchanged (dHash), skipping DwellSnapshot");
+                        continue;
+                    }
+
                     let mut event = make_event(
                         EventKind::DwellSnapshot,
                         &window,
@@ -253,23 +303,24 @@ pub async fn run_observer_loop(
 
                     let mut dwell_artifacts: Vec<ArtifactMeta> = vec![];
 
-                    // Capture screenshot on dwell if enabled and under rate limit
-                    if config.capture_screenshots
-                        && screenshot_count_this_minute < config.screenshot_max_per_minute
-                    {
-                        if let Some(ref store) = artifact_store {
-                            let result = capture_and_store_screenshot(store).await;
-                            screenshot_count_this_minute += result.artifact_ids.len() as u32;
-                            event.artifact_ids = result.artifact_ids;
-                            dwell_artifacts = result.artifact_metas;
+                    if let Some(result) = captured_result {
+                        screenshot_count_this_minute += result.artifact_ids.len() as u32;
+                        event.artifact_ids = result.artifact_ids;
+                        dwell_artifacts = result.artifact_metas;
 
-                            // Run OCR on captured screenshot pixels (async, off executor)
-                            #[cfg(target_os = "macos")]
-                            if let Some((w, h, pixels)) = result.raw_pixels {
-                                if let Some(ocr_result) = crate::platform::ocr::recognize_text_async(pixels, w, h).await {
-                                    if let Ok(ocr_json) = serde_json::to_value(&ocr_result) {
-                                        event.metadata["ocr"] = ocr_json;
-                                    }
+                        // Store screenshot path for VLM annotation pipeline
+                        if let Some(ref path) = result.screenshot_path {
+                            event.metadata["screenshot_path"] = serde_json::Value::String(
+                                path.to_string_lossy().to_string(),
+                            );
+                        }
+
+                        // Run OCR on captured screenshot pixels (async, off executor)
+                        #[cfg(target_os = "macos")]
+                        if let Some((w, h, pixels)) = result.raw_pixels {
+                            if let Some(ocr_result) = crate::platform::ocr::recognize_text_async(pixels, w, h).await {
+                                if let Ok(ocr_json) = serde_json::to_value(&ocr_result) {
+                                    event.metadata["ocr"] = ocr_json;
                                 }
                             }
                         }
@@ -281,6 +332,38 @@ pub async fn run_observer_loop(
                 }
 
                 if dwell.is_scroll_reading() {
+                    let mut captured_result: Option<ScreenshotResult> = None;
+                    let mut should_skip_dhash = false;
+
+                    // Capture screenshot on scroll-read if enabled and under rate limit
+                    if config.capture_screenshots
+                        && screenshot_count_this_minute < config.screenshot_max_per_minute
+                    {
+                        if let Some(ref store) = artifact_store {
+                            let result = capture_and_store_screenshot(
+                                store,
+                                last_dhash,
+                                config.dhash_threshold,
+                                &config.screenshots_dir,
+                                config.screenshot_scale,
+                                config.screenshot_quality,
+                            ).await;
+
+                            if result.skipped_dhash {
+                                should_skip_dhash = true;
+                                last_dhash = result.dhash;
+                            } else {
+                                last_dhash = result.dhash;
+                                captured_result = Some(result);
+                            }
+                        }
+                    }
+
+                    if should_skip_dhash {
+                        debug!("Screen unchanged (dHash), skipping ScrollReadSnapshot");
+                        continue;
+                    }
+
                     let mut event = make_event(
                         EventKind::ScrollReadSnapshot,
                         &window,
@@ -290,23 +373,24 @@ pub async fn run_observer_loop(
 
                     let mut scroll_artifacts: Vec<ArtifactMeta> = vec![];
 
-                    // Capture screenshot on scroll-read if enabled and under rate limit
-                    if config.capture_screenshots
-                        && screenshot_count_this_minute < config.screenshot_max_per_minute
-                    {
-                        if let Some(ref store) = artifact_store {
-                            let result = capture_and_store_screenshot(store).await;
-                            screenshot_count_this_minute += result.artifact_ids.len() as u32;
-                            event.artifact_ids = result.artifact_ids;
-                            scroll_artifacts = result.artifact_metas;
+                    if let Some(result) = captured_result {
+                        screenshot_count_this_minute += result.artifact_ids.len() as u32;
+                        event.artifact_ids = result.artifact_ids;
+                        scroll_artifacts = result.artifact_metas;
 
-                            // Run OCR on captured screenshot pixels (async, off executor)
-                            #[cfg(target_os = "macos")]
-                            if let Some((w, h, pixels)) = result.raw_pixels {
-                                if let Some(ocr_result) = crate::platform::ocr::recognize_text_async(pixels, w, h).await {
-                                    if let Ok(ocr_json) = serde_json::to_value(&ocr_result) {
-                                        event.metadata["ocr"] = ocr_json;
-                                    }
+                        // Store screenshot path for VLM annotation pipeline
+                        if let Some(ref path) = result.screenshot_path {
+                            event.metadata["screenshot_path"] = serde_json::Value::String(
+                                path.to_string_lossy().to_string(),
+                            );
+                        }
+
+                        // Run OCR on captured screenshot pixels (async, off executor)
+                        #[cfg(target_os = "macos")]
+                        if let Some((w, h, pixels)) = result.raw_pixels {
+                            if let Some(ocr_result) = crate::platform::ocr::recognize_text_async(pixels, w, h).await {
+                                if let Ok(ocr_json) = serde_json::to_value(&ocr_result) {
+                                    event.metadata["ocr"] = ocr_json;
                                 }
                             }
                         }
@@ -395,25 +479,81 @@ struct ScreenshotResult {
     artifact_metas: Vec<ArtifactMeta>,
     /// Raw BGRA pixels + dimensions, available for OCR processing.
     raw_pixels: Option<(usize, usize, Vec<u8>)>,
+    /// Path to the plain JPEG screenshot for VLM annotation pipeline.
+    screenshot_path: Option<PathBuf>,
+    /// Perceptual hash (dHash) of this screenshot.
+    dhash: u64,
+    /// True if this screenshot was skipped due to dHash similarity threshold.
+    skipped_dhash: bool,
 }
 
-/// Capture a screenshot, store it as an artifact, and return raw pixels for OCR.
-/// The returned artifact ID can be used with `ArtifactStore::retrieve()` to read back the artifact.
+/// Capture a screenshot, check dHash for change detection, store as artifact,
+/// and save a plain JPEG for the VLM annotation pipeline.
+///
+/// If the screenshot is too similar to the previous one (hamming distance < threshold),
+/// returns a result with `skipped_dhash = true` — the caller should skip the event.
 #[cfg(target_os = "macos")]
-async fn capture_and_store_screenshot(store: &ArtifactStore) -> ScreenshotResult {
+async fn capture_and_store_screenshot(
+    store: &ArtifactStore,
+    last_dhash: u64,
+    dhash_threshold: u32,
+    screenshots_dir: &Path,
+    screenshot_scale: f64,
+    screenshot_quality: u8,
+) -> ScreenshotResult {
     const MAX_RETRIES: u32 = 2;
 
     for attempt in 0..=MAX_RETRIES {
         match crate::capture::screenshot::capture_main_display() {
             Some((width, height, raw_pixels)) => {
+                // Compute perceptual hash for change detection
+                let dhash = crate::capture::dhash::compute_dhash(&raw_pixels, width, height);
+                let distance = crate::capture::dhash::hamming_distance(dhash, last_dhash);
+
+                if distance < dhash_threshold {
+                    debug!(
+                        dhash = dhash,
+                        distance = distance,
+                        threshold = dhash_threshold,
+                        "Screenshot similar to previous, skipping"
+                    );
+                    return ScreenshotResult {
+                        artifact_ids: vec![],
+                        artifact_metas: vec![],
+                        raw_pixels: None,
+                        screenshot_path: None,
+                        dhash,
+                        skipped_dhash: true,
+                    };
+                }
+
+                // Store encrypted artifact (existing behavior for audit trail)
                 match store.store(&raw_pixels, "screenshot") {
                     Ok(meta) => {
-                        debug!(artifact_id = %meta.artifact_id, "Screenshot captured and stored");
+                        debug!(
+                            artifact_id = %meta.artifact_id,
+                            dhash_distance = distance,
+                            "Screenshot captured and stored"
+                        );
                         let id = meta.artifact_id.clone();
+
+                        // Save plain JPEG for VLM annotation pipeline
+                        let screenshot_path = save_vlm_jpeg(
+                            &raw_pixels,
+                            width,
+                            height,
+                            screenshots_dir,
+                            screenshot_scale,
+                            screenshot_quality,
+                        );
+
                         return ScreenshotResult {
                             artifact_ids: vec![id],
                             artifact_metas: vec![meta],
                             raw_pixels: Some((width, height, raw_pixels)),
+                            screenshot_path,
+                            dhash,
+                            skipped_dhash: false,
                         };
                     }
                     Err(e) => {
@@ -422,6 +562,9 @@ async fn capture_and_store_screenshot(store: &ArtifactStore) -> ScreenshotResult
                             artifact_ids: vec![],
                             artifact_metas: vec![],
                             raw_pixels: None,
+                            screenshot_path: None,
+                            dhash,
+                            skipped_dhash: false,
                         };
                     }
                 }
@@ -440,15 +583,67 @@ async fn capture_and_store_screenshot(store: &ArtifactStore) -> ScreenshotResult
         artifact_ids: vec![],
         artifact_metas: vec![],
         raw_pixels: None,
+        screenshot_path: None,
+        dhash: 0,
+        skipped_dhash: false,
     }
 }
 
 #[cfg(not(target_os = "macos"))]
-async fn capture_and_store_screenshot(_store: &ArtifactStore) -> ScreenshotResult {
+async fn capture_and_store_screenshot(
+    _store: &ArtifactStore,
+    _last_dhash: u64,
+    _dhash_threshold: u32,
+    _screenshots_dir: &Path,
+    _screenshot_scale: f64,
+    _screenshot_quality: u8,
+) -> ScreenshotResult {
     ScreenshotResult {
         artifact_ids: vec![],
         artifact_metas: vec![],
         raw_pixels: None,
+        screenshot_path: None,
+        dhash: 0,
+        skipped_dhash: false,
+    }
+}
+
+/// Save a plain (unencrypted) half-resolution JPEG for the VLM annotation pipeline.
+///
+/// The Python worker's scene annotator reads these directly via the `screenshot_path`
+/// stored in event metadata. Screenshots are deleted after successful VLM annotation.
+fn save_vlm_jpeg(
+    raw_pixels: &[u8],
+    width: usize,
+    height: usize,
+    screenshots_dir: &Path,
+    scale: f64,
+    quality: u8,
+) -> Option<PathBuf> {
+    if let Err(e) = std::fs::create_dir_all(screenshots_dir) {
+        warn!(error = %e, dir = %screenshots_dir.display(), "Failed to create screenshots directory");
+        return None;
+    }
+
+    let filename = format!("{}.jpg", Uuid::new_v4());
+    let path = screenshots_dir.join(&filename);
+
+    match crate::capture::jpeg_converter::save_screenshot_jpeg(
+        raw_pixels,
+        width as u32,
+        height as u32,
+        scale,
+        quality,
+        &path,
+    ) {
+        Ok(size) => {
+            debug!(path = %path.display(), size_bytes = size, "VLM screenshot JPEG saved");
+            Some(path)
+        }
+        Err(e) => {
+            warn!(error = %e, "Failed to save VLM screenshot JPEG");
+            None
+        }
     }
 }
 

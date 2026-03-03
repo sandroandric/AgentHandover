@@ -1,5 +1,14 @@
 """LLM-Enhanced SOP Descriptions.
 
+.. deprecated:: 0.2.0
+    This module is part of the v1 pipeline (post-hoc LLM enhancement of
+    PrefixSpan-induced SOPs).  In the v2 pipeline, ``sop_generator.py``
+    generates descriptions directly during SOP creation — no separate
+    enhancement pass is needed.
+
+    The v1 pipeline remains functional for backward compatibility but
+    will not receive new features.
+
 Uses a VLM/LLM backend (text-only mode) to generate high-level
 ``task_description`` and ``execution_overview`` for SOP templates.
 This gives agents reading the SOPs understanding of *why* a workflow
@@ -301,13 +310,20 @@ def create_llm_backend(
             max_tokens=max_tokens,
         )
     else:
-        # Local mode: try Ollama first with a lighter text model
+        # Local mode: try Ollama first with a lighter text model.
+        # Pick the first available model if no override is specified.
         try:
-            import ollama
-            ollama.Client().list()
+            import ollama as _ollama_mod
+            _client = _ollama_mod.Client()
+            _models = _client.list()
+            if not llm_model:
+                # Auto-detect: use provided model, or first available
+                _model_names = [m.model for m in _models.models] if hasattr(_models, "models") else []
+                llm_model = _model_names[0] if _model_names else "llama3.2:3b"
+                logger.info("LLM auto-detected model: %s", llm_model)
             config = VLMConfig(
                 backend=VLMBackend.OLLAMA,
-                model_name=llm_model or "llama3.2:3b",
+                model_name=llm_model,
                 timeout_seconds=timeout,
                 temperature=temperature,
                 max_tokens=max_tokens,

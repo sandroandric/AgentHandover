@@ -9,6 +9,10 @@ t_scroll_read_seconds = 8
 capture_screenshots = true
 screenshot_max_per_minute = 20
 multi_monitor_mode = "focused_window"
+screenshot_format = "jpeg"       # "jpeg" (half-res, recommended) or "png" (full-res)
+screenshot_quality = 70          # JPEG quality 1-100 (only used for jpeg format)
+screenshot_scale = 0.5           # 0.5 = half resolution (recommended for VLM)
+dhash_threshold = 10             # perceptual hash dedup threshold (lower = stricter)
 
 [privacy]
 enable_inline_secret_redaction = true
@@ -58,6 +62,12 @@ max_compute_minutes_per_day = 20
 # provider = "openai"          # "openai" | "anthropic" | "google"
 # model = "gpt-4o-mini"        # provider-specific model name
 # api_key_env = "OPENAI_API_KEY"  # env var name (NEVER store keys directly!)
+# --- v2 scene annotation pipeline ---
+annotation_model = "qwen3.5:2b"   # model for per-frame annotation (think=False)
+sop_model = "qwen3.5:4b"          # model for SOP generation (think=True)
+annotation_enabled = true          # enable continuous scene annotation pipeline
+stale_skip_count = 3               # skip after N consecutive non-workflow same-app frames
+sliding_window_max_age_sec = 600   # 10 min max age for context window
 
 [llm]
 enhance_sops = true

@@ -276,8 +276,13 @@ class TestTestIdResolution:
 
 
 class TestNoMetadataFallback:
-    def test_no_metadata_fallback(self) -> None:
-        """Event with no target info → no UI anchor."""
+    def test_no_metadata_fallback_with_app_context(self) -> None:
+        """Event with no target info but valid window_json → app_context anchor.
+
+        The ``_try_app_context()`` fallback extracts app_id and window_title
+        from ``window_json`` to build a low-confidence (0.10-0.15) anchor
+        for native app events that have no DOM metadata.
+        """
         event = _make_event(
             kind="FocusChange",
             metadata={},
@@ -286,11 +291,34 @@ class TestNoMetadataFallback:
         translator = SemanticTranslator()
         result = translator.translate_event(event)
 
+        # app_context fallback provides an anchor from window_json
+        assert result.target is not None
+        assert result.target.method == "app_context"
+        assert result.target.confidence_contribution == 0.15
+        assert "com.apple.Safari" in result.target.selector
+        assert result.intent == "navigate"
+
+    def test_no_app_context_no_anchor(self) -> None:
+        """Event with empty window_json → truly no anchor."""
+        event = {
+            "id": str(uuid.uuid4()),
+            "timestamp": "2026-02-16T10:00:00.000Z",
+            "kind_json": json.dumps({"FocusChange": {}}),
+            "window_json": "{}",
+            "metadata_json": json.dumps({}),
+            "display_topology_json": "[]",
+            "primary_display_id": "main",
+            "processed": 0,
+        }
+
+        translator = SemanticTranslator()
+        result = translator.translate_event(event)
+
         assert result.target is None
         assert result.intent == "navigate"
 
     def test_empty_metadata_json(self) -> None:
-        """Event with empty metadata_json string → no anchor, no crash."""
+        """Event with empty metadata_json string + empty window → no anchor, no crash."""
         event = {
             "id": str(uuid.uuid4()),
             "timestamp": "2026-02-16T10:00:00.000Z",
