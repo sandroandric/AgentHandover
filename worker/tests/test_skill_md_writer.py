@@ -514,3 +514,133 @@ class TestSkillMdWriterV2:
         assert "1. **Click" in v1_content
         # v2 uses ### Step N: headings
         assert "### Step 1:" in v2_content
+
+
+# ------------------------------------------------------------------
+# DOM Hints with timeline
+# ------------------------------------------------------------------
+
+
+class TestDomHintsWithTimeline:
+    """Test _collect_dom_hints and _extract_page_interactive_elements with timeline data."""
+
+    def test_hints_from_step_selectors(self) -> None:
+        steps = [
+            {"step": "Click Submit", "selector": "[aria-label='Submit']"},
+            {"step": "Type query", "selector": "#search-input"},
+            {"step": "Navigate", "selector": None},
+        ]
+        hints = SkillMdWriter._collect_dom_hints(steps)
+        assert len(hints) == 2
+        assert "Step 1" in hints[0]
+        assert "Submit" in hints[0]
+        assert "Step 2" in hints[1]
+        assert "#search-input" in hints[1]
+
+    def test_hints_with_timeline_interactive_elements(self) -> None:
+        from oc_apprentice_worker.skill_md_writer import _extract_page_interactive_elements
+
+        timeline = [{
+            "dom_nodes": [
+                {"tag": "button", "text": "Submit", "ariaLabel": "Submit form"},
+                {"tag": "input", "type": "text", "id": "search-box", "role": "textbox"},
+                {"tag": "a", "text": "Home", "id": "nav-home"},
+                {"tag": "div", "text": "Not interactive"},  # Should be excluded
+            ],
+        }]
+        elements = _extract_page_interactive_elements(timeline)
+        assert len(elements) == 3  # button, input, a — not div
+        assert any("Submit form" in e for e in elements)  # aria-label preferred
+        assert any("search-box" in e for e in elements)  # id
+        assert any("nav-home" in e for e in elements)  # id
+
+    def test_hints_empty_when_no_dom(self) -> None:
+        steps: list[dict] = [{"step": "action", "selector": None}]
+        hints = SkillMdWriter._collect_dom_hints(steps, timeline=None)
+        assert hints == []
+
+    def test_combined_step_selectors_and_page_elements(self) -> None:
+        steps = [
+            {"step": "Click Submit", "selector": "[aria-label='Submit']"},
+        ]
+        timeline = [{
+            "dom_nodes": [
+                {"tag": "button", "text": "Reset", "ariaLabel": "Reset form"},
+                {"tag": "input", "type": "email", "id": "email-input", "role": "textbox"},
+            ],
+        }]
+        hints = SkillMdWriter._collect_dom_hints(steps, timeline=timeline)
+        # Should have: step selector + empty line + header + 2 elements
+        assert any("Step 1" in h for h in hints)
+        assert any("Interactive elements" in h for h in hints)
+        assert len(hints) >= 4  # step + empty + header + at least 2 elements
+
+    def test_v2_sop_with_dom_hints_rendered(self, tmp_path: Path) -> None:
+        """Full integration: v2 SOP with _timeline renders DOM Hints section."""
+        writer = SkillMdWriter(tmp_path)
+        sop = {
+            "slug": "test-dom-hints",
+            "title": "Test DOM Hints",
+            "steps": [
+                {
+                    "step": "Click Search",
+                    "target": "https://example.com",
+                    "selector": "#search-btn",
+                    "parameters": {"app": "Chrome", "location": "https://example.com"},
+                    "confidence": 0.9,
+                    "pre_state": {},
+                },
+            ],
+            "variables": [],
+            "confidence_avg": 0.9,
+            "episode_count": 1,
+            "abs_support": 1,
+            "apps_involved": ["Chrome"],
+            "preconditions": [],
+            "task_description": "Test task",
+            "execution_overview": {},
+            "source": "v2_focus_recording",
+            "_timeline": [{
+                "dom_nodes": [
+                    {"tag": "button", "text": "Search", "id": "search-btn"},
+                    {"tag": "input", "type": "text", "ariaLabel": "Search query", "role": "textbox"},
+                ],
+            }],
+        }
+        path = writer.write_sop(sop)
+        content = path.read_text()
+        assert "## DOM Hints (Optional)" in content
+        assert "<details>" in content
+        assert "#search-btn" in content
+
+    def test_page_elements_deduplicates(self) -> None:
+        """Same element appearing in multiple timeline entries is only listed once."""
+        from oc_apprentice_worker.skill_md_writer import _extract_page_interactive_elements
+
+        timeline = [
+            {"dom_nodes": [{"tag": "button", "text": "Save", "id": "save-btn"}]},
+            {"dom_nodes": [{"tag": "button", "text": "Save", "id": "save-btn"}]},
+        ]
+        elements = _extract_page_interactive_elements(timeline)
+        assert elements.count("#save-btn") == 1
+
+    def test_page_elements_capped_at_20(self) -> None:
+        """Interactive elements list is capped at 20."""
+        from oc_apprentice_worker.skill_md_writer import _extract_page_interactive_elements
+
+        nodes = [
+            {"tag": "button", "text": f"Button {i}", "id": f"btn-{i}"}
+            for i in range(30)
+        ]
+        timeline = [{"dom_nodes": nodes}]
+        elements = _extract_page_interactive_elements(timeline)
+        # _extract_page_interactive_elements returns all, cap is in _collect_dom_hints
+        # But we can test that the function works with many elements
+        assert len(elements) == 30  # All unique, no cap in extractor itself
+
+        # Cap is applied in _collect_dom_hints
+        steps: list[dict] = []
+        hints = SkillMdWriter._collect_dom_hints(steps, timeline=timeline)
+        # header + 20 elements = 21 (with possible empty line)
+        page_elem_count = sum(1 for h in hints if h.startswith("`"))
+        assert page_elem_count <= 20

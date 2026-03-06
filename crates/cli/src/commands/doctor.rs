@@ -71,9 +71,8 @@ pub fn run() -> Result<()> {
         );
     }
 
-    // Check 8: Native messaging host manifest
-    let nm_manifest = native_messaging_manifest_path();
-    all_ok &= check("Native messaging host", || nm_manifest.exists());
+    // Check 8: Native messaging host manifest (content validation)
+    all_ok &= check("Native messaging host", check_native_messaging_manifest);
 
     // Check 9: launchd plists installed
     let launch_agents = launch_agents_dir();
@@ -223,4 +222,84 @@ fn free_disk_gb() -> u64 {
     {
         0
     }
+}
+
+fn check_native_messaging_manifest() -> bool {
+    let manifest_path = native_messaging_manifest_path();
+    if !manifest_path.exists() {
+        println!(
+            "    {} Manifest not found at: {}",
+            "→".dimmed(),
+            manifest_path.display()
+        );
+        println!(
+            "    Run {} to install it.",
+            "openmimic setup --extension".cyan()
+        );
+        return false;
+    }
+
+    // Read and parse
+    let content = match std::fs::read_to_string(&manifest_path) {
+        Ok(c) => c,
+        Err(e) => {
+            println!("    {} Cannot read manifest: {}", "→".dimmed(), e);
+            return false;
+        }
+    };
+
+    let parsed: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(e) => {
+            println!("    {} Invalid JSON in manifest: {}", "→".dimmed(), e);
+            return false;
+        }
+    };
+
+    // Verify name
+    let name = parsed.get("name").and_then(|v| v.as_str()).unwrap_or("");
+    if name != "com.openclaw.apprentice" {
+        println!(
+            "    {} Wrong host name: expected 'com.openclaw.apprentice', got '{}'",
+            "→".dimmed(),
+            name
+        );
+        return false;
+    }
+
+    // Verify path points to existing executable
+    let daemon_path_str = parsed.get("path").and_then(|v| v.as_str()).unwrap_or("");
+    if daemon_path_str.is_empty() {
+        println!("    {} Manifest 'path' is empty", "→".dimmed());
+        return false;
+    }
+    let daemon_path = std::path::Path::new(daemon_path_str);
+    if !daemon_path.exists() {
+        println!(
+            "    {} Daemon binary not found at manifest path: {}",
+            "→".dimmed(),
+            daemon_path_str
+        );
+        println!(
+            "    Re-run {} to update.",
+            "openmimic setup --extension".cyan()
+        );
+        return false;
+    }
+
+    // Verify allowed_origins contains expected extension ID
+    let origins = parsed.get("allowed_origins").and_then(|v| v.as_array());
+    let expected_origin = "chrome-extension://knldjmfmopnpolahpmmgbagdohdnhkik/";
+    let has_origin = origins
+        .map(|arr| arr.iter().any(|v| v.as_str() == Some(expected_origin)))
+        .unwrap_or(false);
+    if !has_origin {
+        println!(
+            "    {} allowed_origins missing expected extension ID",
+            "→".dimmed()
+        );
+        return false;
+    }
+
+    true
 }

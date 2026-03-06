@@ -6,6 +6,24 @@ use tracing::{debug, error, info, warn};
 /// Tracks consecutive AX API timeouts for degradation visibility.
 static AX_CONSECUTIVE_TIMEOUTS: AtomicU32 = AtomicU32::new(0);
 
+/// Cache accessibility permission status. Once false, it stays false until the
+/// process is restarted (macOS requires a restart after granting permission).
+/// 0 = unchecked, 1 = granted, 2 = not granted
+static AX_PERMISSION_STATUS: AtomicU32 = AtomicU32::new(0);
+
+/// Check and cache accessibility permission.
+fn has_accessibility_permission() -> bool {
+    match AX_PERMISSION_STATUS.load(Ordering::Relaxed) {
+        1 => true,
+        2 => false,
+        _ => {
+            let granted = check_accessibility_permission();
+            AX_PERMISSION_STATUS.store(if granted { 1 } else { 2 }, Ordering::Relaxed);
+            granted
+        }
+    }
+}
+
 /// Check if the app has macOS Accessibility permission.
 /// Required for reading the AX tree of other applications.
 pub fn check_accessibility_permission() -> bool {
@@ -136,8 +154,18 @@ fn is_secure_field_focused_inner() -> Option<bool> {
 
 /// Async-safe wrapper for is_secure_field_focused that runs in a blocking thread
 /// with a 100ms timeout to prevent AX API deadlocks.
+///
+/// Returns false immediately if Accessibility permission is not granted,
+/// preventing spawn_blocking thread pool exhaustion from hung Mach IPC calls.
 pub async fn is_secure_field_focused_async() -> bool {
     use std::time::Duration;
+
+    // Without Accessibility permission, AX API calls hang on Mach IPC.
+    // Each spawn_blocking call would permanently consume a thread from the pool.
+    // Short-circuit here to avoid pool exhaustion.
+    if !has_accessibility_permission() {
+        return false;
+    }
 
     match tokio::time::timeout(
         Duration::from_millis(100),
@@ -157,19 +185,31 @@ pub async fn is_secure_field_focused_async() -> bool {
         Err(_) => {
             let count = AX_CONSECUTIVE_TIMEOUTS.fetch_add(1, Ordering::Relaxed) + 1;
             if count >= 10 {
-                error!(
-                    consecutive_timeouts = count,
-                    "AX API consistently timing out — capture is likely fully degraded"
-                );
+                // After 10+ consecutive timeouts, the AX API is clearly broken
+                // (system-level Mach IPC hang, not a real secure field). Stop
+                // blocking all captures — return false to allow normal operation.
+                // This is logged as a warning on first transition.
+                if count == 10 {
+                    warn!(
+                        consecutive_timeouts = count,
+                        "AX API consistently timing out — disabling secure field check \
+                         (system issue, not a real password field). Captures will proceed normally."
+                    );
+                }
+                false
             } else if count >= 3 {
                 warn!(
                     consecutive_timeouts = count,
-                    "AX API consistently timing out — capture may be degraded"
+                    "AX API timing out — assuming not secure field"
                 );
+                // After 3 consecutive timeouts, likely a system issue rather
+                // than an actual secure field. Allow captures to proceed.
+                false
+            } else {
+                // First 1-2 timeouts: could be a legitimate secure field.
+                // Err on the side of caution — skip capture.
+                true
             }
-            // On timeout, assume it's a secure field as a safety measure.
-            // Better to skip capture than to leak password data.
-            true
         }
     }
 }

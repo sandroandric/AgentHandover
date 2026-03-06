@@ -398,7 +398,8 @@ class SkillMdWriter(SOPExportAdapter):
             lines.append("")
 
         # DOM Hints (collapsible appendix)
-        dom_hints = self._collect_dom_hints(steps)
+        timeline = sop.get("_timeline")
+        dom_hints = self._collect_dom_hints(steps, timeline=timeline)
         if dom_hints:
             lines.append("## DOM Hints (Optional)")
             lines.append("<details>")
@@ -435,14 +436,30 @@ class SkillMdWriter(SOPExportAdapter):
         return "\n".join(lines)
 
     @staticmethod
-    def _collect_dom_hints(steps: list[dict]) -> list[str]:
-        """Extract any DOM selector hints from step parameters."""
+    def _collect_dom_hints(
+        steps: list[dict],
+        timeline: list[dict] | None = None,
+    ) -> list[str]:
+        """Extract DOM selector hints from step selectors AND timeline DOM nodes."""
         hints: list[str] = []
+
+        # Per-step selectors (from sop_generator)
         for i, step in enumerate(steps, 1):
             selector = step.get("selector")
             if selector:
                 action = step.get("step", step.get("action", "action"))
                 hints.append(f"Step {i} ({action}): `{selector}`")
+
+        # Full-page interactive elements from timeline dom_nodes
+        if timeline:
+            page_elements = _extract_page_interactive_elements(timeline)
+            if page_elements:
+                if hints:
+                    hints.append("")
+                hints.append("**Interactive elements on page:**")
+                for elem in page_elements[:20]:  # Cap at 20 elements
+                    hints.append(f"`{elem}`")
+
         return hints
 
     def _write_index(self, sop_templates: list[dict]) -> Path:
@@ -482,3 +499,60 @@ class SkillMdWriter(SOPExportAdapter):
         slug = re.sub(r"[^\w\s-]", "", slug).strip().lower()
         slug = re.sub(r"[\s_]+", "-", slug)
         return slug[:80] if slug else "unknown"
+
+
+def _extract_page_interactive_elements(timeline: list[dict]) -> list[str]:
+    """Extract a compact list of interactive elements from timeline DOM nodes.
+
+    Collects unique selectors for buttons, links, inputs, and other
+    interactive elements visible during the recording.
+    """
+    seen: set[str] = set()
+    elements: list[str] = []
+
+    for entry in timeline:
+        dom_nodes = entry.get("dom_nodes")
+        if not dom_nodes or not isinstance(dom_nodes, list):
+            continue
+
+        for node in dom_nodes:
+            if not isinstance(node, dict):
+                continue
+
+            tag = node.get("tag", "").lower()
+            role = node.get("role", "").strip()
+            aria = node.get("ariaLabel", node.get("aria-label", "")).strip()
+            test_id = node.get("testId", node.get("data-testid", "")).strip()
+            node_id = node.get("id", "").strip()
+            text = node.get("text", node.get("innerText", "")).strip()
+            node_type = node.get("type", "").strip()
+
+            # Only interactive elements
+            interactive_tags = {"button", "a", "input", "select", "textarea", "label"}
+            interactive_roles = {"button", "link", "textbox", "combobox", "menuitem",
+                                 "tab", "checkbox", "radio", "switch", "searchbox"}
+
+            if tag not in interactive_tags and role not in interactive_roles:
+                continue
+
+            # Build a descriptive selector
+            if aria:
+                selector = f"[aria-label='{aria}']"
+            elif test_id:
+                selector = f"[data-testid='{test_id}']"
+            elif node_id:
+                selector = f"#{node_id}"
+            elif text and len(text) < 50:
+                selector = f"{tag or '*'}:has-text('{text[:40]}')"
+            elif tag and node_type:
+                selector = f"{tag}[type='{node_type}']"
+            elif tag and role:
+                selector = f"{tag}[role='{role}']"
+            else:
+                continue
+
+            if selector not in seen:
+                seen.add(selector)
+                elements.append(selector)
+
+    return elements

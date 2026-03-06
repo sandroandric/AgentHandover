@@ -42,6 +42,12 @@ let reconnectAttempts = 0;
 const MAX_RECONNECT_DELAY = 300_000; // 5 minutes
 const MAX_RECONNECT_ATTEMPTS = 100;
 
+// Unsubscribe handles for native messaging listeners — prevents listener
+// accumulation across reconnect cycles (each initNativeConnection call
+// registers new callbacks; old ones must be cleaned up first).
+let unsubMessage: (() => void) | null = null;
+let unsubDisconnect: (() => void) | null = null;
+
 /**
  * Establish a connection to the daemon.  If the connection drops (e.g. daemon
  * restarts) we schedule a reconnect with exponential backoff and jitter.
@@ -52,18 +58,24 @@ function initNativeConnection(): void {
     return;
   }
 
+  // Clean up previous listeners to prevent accumulation across reconnects
+  unsubMessage?.();
+  unsubDisconnect?.();
+  unsubMessage = null;
+  unsubDisconnect = null;
+
   try {
     connectNativeHost();
 
     // Reset reconnect counter on successful connection
     reconnectAttempts = 0;
 
-    onNativeMessage((message: NativeInboundMessage) => {
+    unsubMessage = onNativeMessage((message: NativeInboundMessage) => {
       console.log('[OpenMimic:bg] Daemon message:', message.type);
       handleDaemonMessage(message);
     });
 
-    onNativeDisconnect(() => {
+    unsubDisconnect = onNativeDisconnect(() => {
       reconnectAttempts++;
       if (reconnectAttempts > MAX_RECONNECT_ATTEMPTS) {
         console.error('[OpenMimic:bg] Max reconnect attempts reached. Giving up.');
@@ -214,6 +226,18 @@ function handleDaemonMessage(message: NativeInboundMessage): void {
         chrome.tabs.sendMessage(targetTab, {
           type: 'request_snapshot',
           payload: message.payload,
+        });
+      } else {
+        // Fallback: query active tab when no specific tabId provided
+        chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+          const activeTab = tabs[0]?.id;
+          if (activeTab) {
+            console.log('[OpenMimic:bg] request_snapshot fallback to active tab', activeTab);
+            chrome.tabs.sendMessage(activeTab, {
+              type: 'request_snapshot',
+              payload: message.payload,
+            });
+          }
         });
       }
       break;

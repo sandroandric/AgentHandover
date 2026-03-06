@@ -295,10 +295,12 @@ def _call_ollama_vlm(
         "model": model,
         "prompt": prompt,
         "stream": False,
+        # think=False must be a top-level parameter, NOT inside options.
+        # Inside options it has no effect and Qwen3.5 models consume all
+        # num_predict tokens on internal reasoning, returning empty content.
+        "think": False,
         "options": {
             "num_predict": num_predict,
-            # think=False: prevent Qwen thinking mode from consuming tokens
-            "think": False,
         },
     }
 

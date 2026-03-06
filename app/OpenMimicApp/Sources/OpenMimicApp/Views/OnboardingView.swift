@@ -380,7 +380,7 @@ struct OnboardingView: View {
                         ProgressView()
                             .progressViewStyle(.circular)
                             .controlSize(.small)
-                        Text("Pulling llava:7b model...")
+                        Text("Pulling required models...")
                             .font(.caption)
                             .foregroundColor(.secondary)
                         if !vlmPullOutput.isEmpty {
@@ -392,7 +392,7 @@ struct OnboardingView: View {
                         }
                     }
                 } else {
-                    Button("Pull Recommended Model (llava:7b)") {
+                    Button("Pull Recommended Models (qwen3.5:2b + 4b)") {
                         pullOllamaModel()
                     }
                     .buttonStyle(.bordered)
@@ -709,47 +709,64 @@ struct OnboardingView: View {
         vlmPullInProgress = true
         vlmPullOutput = "Starting download..."
 
+        let models = [
+            ("qwen3.5:2b", "scene annotation"),
+            ("qwen3.5:4b", "SOP generation"),
+            ("all-minilm:l6-v2", "embeddings"),
+        ]
+
         DispatchQueue.global(qos: .userInitiated).async {
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: ollamaPath)
-            process.arguments = ["pull", "llava:7b"]
+            for (index, (model, purpose)) in models.enumerated() {
+                DispatchQueue.main.async {
+                    vlmPullOutput = "[\(index + 1)/\(models.count)] Pulling \(model) (\(purpose))..."
+                }
 
-            let pipe = Pipe()
-            process.standardOutput = pipe
-            process.standardError = pipe
+                let process = Process()
+                process.executableURL = URL(fileURLWithPath: ollamaPath)
+                process.arguments = ["pull", model]
 
-            do {
-                try process.run()
+                let pipe = Pipe()
+                process.standardOutput = pipe
+                process.standardError = pipe
 
-                // Read output asynchronously
-                pipe.fileHandleForReading.readabilityHandler = { handle in
-                    let data = handle.availableData
-                    if !data.isEmpty, let output = String(data: data, encoding: .utf8) {
-                        let lastLine = output.components(separatedBy: "\n")
-                            .filter { !$0.isEmpty }
-                            .last ?? ""
-                        DispatchQueue.main.async {
-                            vlmPullOutput = String(lastLine.prefix(80))
+                do {
+                    try process.run()
+
+                    // Read output asynchronously
+                    pipe.fileHandleForReading.readabilityHandler = { handle in
+                        let data = handle.availableData
+                        if !data.isEmpty, let output = String(data: data, encoding: .utf8) {
+                            let lastLine = output.components(separatedBy: "\n")
+                                .filter { !$0.isEmpty }
+                                .last ?? ""
+                            DispatchQueue.main.async {
+                                vlmPullOutput = "[\(index + 1)/\(models.count)] \(model): \(String(lastLine.prefix(60)))"
+                            }
                         }
                     }
-                }
 
-                process.waitUntilExit()
-                pipe.fileHandleForReading.readabilityHandler = nil
+                    process.waitUntilExit()
+                    pipe.fileHandleForReading.readabilityHandler = nil
 
-                DispatchQueue.main.async {
-                    vlmPullInProgress = false
-                    if process.terminationStatus == 0 {
-                        vlmPullOutput = "Model downloaded successfully!"
-                    } else {
-                        vlmPullOutput = "Download failed. Make sure Ollama is running."
+                    if process.terminationStatus != 0 {
+                        DispatchQueue.main.async {
+                            vlmPullInProgress = false
+                            vlmPullOutput = "Failed to pull \(model). Make sure Ollama is running."
+                        }
+                        return
                     }
+                } catch {
+                    DispatchQueue.main.async {
+                        vlmPullInProgress = false
+                        vlmPullOutput = "Failed to run ollama: \(error.localizedDescription)"
+                    }
+                    return
                 }
-            } catch {
-                DispatchQueue.main.async {
-                    vlmPullInProgress = false
-                    vlmPullOutput = "Failed to run ollama: \(error.localizedDescription)"
-                }
+            }
+
+            DispatchQueue.main.async {
+                vlmPullInProgress = false
+                vlmPullOutput = "All models downloaded successfully!"
             }
         }
     }

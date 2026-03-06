@@ -74,14 +74,21 @@ class OllamaBackend(VLMInferenceBackend):
         messages.append(user_msg)
 
         def _generate() -> dict:
-            return client.chat(
-                model=self._model_name,
-                messages=messages,
-                options={
-                    "temperature": self._config.temperature,
-                    "num_predict": self._config.max_tokens,
-                },
-            )
+            options: dict[str, Any] = {
+                "temperature": self._config.temperature,
+                "num_predict": self._config.max_tokens,
+            }
+            # 'think' must be a top-level kwarg to client.chat(), NOT inside
+            # 'options'. Putting it in options has no effect and Qwen3.5
+            # models return empty content with all tokens consumed by thinking.
+            kwargs: dict[str, Any] = {
+                "model": self._model_name,
+                "messages": messages,
+                "options": options,
+            }
+            if self._config.think is not None:
+                kwargs["think"] = self._config.think
+            return client.chat(**kwargs)
 
         response = run_with_timeout(_generate, self._config.timeout_seconds)
         raw_text = response["message"]["content"]

@@ -39,7 +39,8 @@ class SOPGeneratorConfig:
     model: str = "qwen3.5:4b"
     ollama_host: str = "http://localhost:11434"
     num_predict: int = 8000
-    timeout: float = 180.0  # 3 minutes for 4B thinking
+    timeout: float = 600.0  # 10 minutes for 4B thinking on large timelines
+    max_timeline_frames: int = 20  # Cap frames sent to SOP gen to keep prompt manageable
 
 
 @dataclass
@@ -336,6 +337,7 @@ def _vlm_sop_to_template(
     mode: str = "focus",
     title_override: str | None = None,
     confidence: float = 0.0,
+    timeline: list[dict] | None = None,
 ) -> dict:
     """Convert the VLM's raw SOP JSON into the internal SOP template format.
 
@@ -346,11 +348,10 @@ def _vlm_sop_to_template(
 
     # Convert VLM steps to internal format
     steps = []
-    for raw_step in vlm_sop.get("steps", []):
+    for step_idx, raw_step in enumerate(vlm_sop.get("steps", [])):
         step = {
             "step": raw_step.get("action", "action"),
             "target": raw_step.get("location", ""),
-            "selector": None,  # v2 SOPs are semantic, not DOM-based
             "parameters": {},
             "confidence": confidence,
             "pre_state": {},
@@ -366,18 +367,34 @@ def _vlm_sop_to_template(
         if raw_step.get("location"):
             step["parameters"]["location"] = raw_step["location"]
 
+        # Try to extract CSS selector from DOM nodes
+        selector = _extract_selector_for_step(raw_step, timeline, step_idx)
+        step["selector"] = selector
+
         steps.append(step)
 
     # Convert VLM variables to internal format
+    # VLM may return variables as dicts or as plain strings
     variables = []
     for raw_var in vlm_sop.get("variables", []):
-        variables.append({
-            "name": raw_var.get("name", "unknown"),
-            "type": "string",
-            "example": raw_var.get("example", ""),
-            "default": "",
-            "description": raw_var.get("description", ""),
-        })
+        if isinstance(raw_var, str):
+            # VLM returned a plain string like "query" instead of a dict
+            variables.append({
+                "name": raw_var,
+                "type": "string",
+                "example": "",
+                "default": "",
+                "description": "",
+            })
+        elif isinstance(raw_var, dict):
+            variables.append({
+                "name": raw_var.get("name", "unknown"),
+                "type": "string",
+                "example": raw_var.get("example", ""),
+                "default": "",
+                "description": raw_var.get("description", ""),
+            })
+        # Skip any other types silently
 
     # Build apps list
     apps_involved = vlm_sop.get("apps_involved", [])
@@ -433,6 +450,9 @@ def _vlm_sop_to_template(
         "source": "v2_focus_recording" if mode == "focus" else "v2_passive_discovery",
     }
 
+    # Internal: used by skill_md_writer for DOM hints
+    template["_timeline"] = timeline
+
     # Compute v2 confidence score
     breakdown = compute_v2_confidence(
         template,
@@ -459,6 +479,105 @@ def _generate_slug(title: str) -> str:
     slug = re.sub(r"[^\w\s-]", "", slug).strip().lower()
     slug = re.sub(r"[\s_]+", "-", slug)
     return slug[:80] if slug else "untitled"
+
+
+def _extract_selector_for_step(
+    raw_step: dict,
+    timeline: list[dict] | None,
+    step_index: int,
+) -> str | None:
+    """Match a VLM step to DOM nodes and extract the best CSS selector.
+
+    Strategy:
+    1. Map step_index to the nearest timeline entry
+    2. If it has dom_nodes, search for elements matching the step's action target
+    3. Priority: aria-label > data-testid > id > role+tag
+    """
+    if not timeline:
+        return None
+
+    # Map step index to timeline entry (steps may be fewer than frames)
+    if step_index < len(timeline):
+        entry = timeline[step_index]
+    elif timeline:
+        entry = timeline[-1]
+    else:
+        return None
+
+    dom_nodes = entry.get("dom_nodes")
+    if not dom_nodes or not isinstance(dom_nodes, list):
+        return None
+
+    # What are we looking for?
+    action = raw_step.get("action", "").lower()
+    location = raw_step.get("location", "").lower()
+    input_val = raw_step.get("input", "")
+
+    # Search DOM nodes for the best match
+    best_selector = None
+    best_score = 0
+
+    for node in dom_nodes:
+        if not isinstance(node, dict):
+            continue
+
+        tag = node.get("tag", "").lower()
+        text = node.get("text", node.get("innerText", "")).strip()
+        aria = node.get("ariaLabel", node.get("aria-label", "")).strip()
+        test_id = node.get("testId", node.get("data-testid", "")).strip()
+        node_id = node.get("id", "").strip()
+        role = node.get("role", "").strip()
+        node_type = node.get("type", "").strip()
+
+        # Score how well this node matches the step
+        score = 0
+
+        # Text match with step action or input
+        if text and action:
+            text_lower = text.lower()
+            if any(word in text_lower for word in action.split() if len(word) > 2):
+                score += 2
+        if text and input_val and input_val.lower() in text.lower():
+            score += 3
+
+        # Interactive elements get a bonus
+        if tag in ("button", "a", "input", "select", "textarea"):
+            score += 1
+        if role in ("button", "link", "textbox", "combobox", "menuitem", "tab"):
+            score += 1
+
+        if score <= 0:
+            continue
+
+        # Build the best selector based on available attributes
+        selector = None
+        selector_score = score
+
+        if aria:
+            selector = f"[aria-label='{aria}']"
+            selector_score += 5
+        elif test_id:
+            selector = f"[data-testid='{test_id}']"
+            selector_score += 4
+        elif node_id:
+            selector = f"#{node_id}"
+            selector_score += 4
+        elif text and len(text) < 50:
+            # Use text content with tag
+            if tag:
+                selector = f"{tag}:has-text('{text[:40]}')"
+            else:
+                selector = f"*:has-text('{text[:40]}')"
+            selector_score += 2
+        elif role and tag:
+            selector = f"{tag}[role='{role}']"
+            selector_score += 1
+
+        if selector and selector_score > best_score:
+            best_selector = selector
+            best_score = selector_score
+
+    return best_selector
 
 
 # ---------------------------------------------------------------------------
@@ -489,9 +608,12 @@ def _call_ollama(
         "model": model,
         "prompt": prompt,
         "stream": False,
+        # think must be a top-level parameter, NOT inside options.
+        # Inside options it has no effect and Qwen3.5 thinking models
+        # may consume all num_predict tokens on reasoning.
+        "think": think,
         "options": {
             "num_predict": num_predict,
-            "think": think,
         },
     }
 
@@ -567,6 +689,32 @@ class SOPGenerator:
                 error="No annotated frames in timeline",
             )
 
+        # Sample frames if timeline is too large for the VLM prompt.
+        # Keep first, last, and evenly spaced frames in between.
+        max_frames = self.config.max_timeline_frames
+        if len(meaningful) > max_frames:
+            logger.info(
+                "Focus timeline has %d frames, sampling to %d",
+                len(meaningful), max_frames,
+            )
+            # Always keep first and last; evenly sample the rest
+            if max_frames <= 2:
+                meaningful = [meaningful[0], meaningful[-1]]
+            else:
+                indices = [0]
+                step = (len(meaningful) - 1) / (max_frames - 1)
+                for i in range(1, max_frames - 1):
+                    indices.append(round(i * step))
+                indices.append(len(meaningful) - 1)
+                # Deduplicate while preserving order
+                seen: set[int] = set()
+                unique_indices = []
+                for idx in indices:
+                    if idx not in seen:
+                        seen.add(idx)
+                        unique_indices.append(idx)
+                meaningful = [meaningful[i] for i in unique_indices]
+
         # Build prompt
         prompt = _build_focus_prompt(title, meaningful)
 
@@ -630,6 +778,7 @@ class SOPGenerator:
             vlm_sop,
             mode="focus",
             title_override=title,
+            timeline=meaningful,
         )
 
         # Enrich confidence with annotation data from the timeline

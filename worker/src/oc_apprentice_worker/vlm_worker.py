@@ -47,6 +47,11 @@ class VLMConfig:
     base_url: str | None = None            # API base URL (None = standard OpenAI)
     # ollama specific
     ollama_host: str | None = None         # Ollama server URL (None = localhost:11434)
+    # ollama think parameter — controls Qwen thinking mode.
+    # False: Qwen3.5 models run without thinking (faster, no token waste).
+    # True: enables reasoning step before response (used by sop_generator).
+    # None: let Ollama/model decide (defaults to thinking for Qwen3.5).
+    think: bool | None = False
     # remote mode fields
     mode: str = "local"                    # "local" or "remote"
     provider: str | None = None            # "openai" | "anthropic" | "google"

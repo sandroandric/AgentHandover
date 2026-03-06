@@ -122,7 +122,7 @@ if [ -n "$WARNINGS" ]; then
     echo -e "$WARNINGS"
     echo ""
     echo "Run 'openmimic doctor' to diagnose issues."
-    exit 1
+    exit 0
 else
     echo "OpenMimic installed successfully."
     echo "Run 'openmimic doctor' to verify the installation."

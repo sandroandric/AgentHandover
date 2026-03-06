@@ -1182,19 +1182,70 @@ def _process_passive_discovery(
             end_time=seg.end_time,
         )
 
-    # Step 4: Generate SOPs for clusters with ≥ min_demonstrations
-    ready_clusters = segmenter.get_sop_ready_clusters(seg_result)
+    # Step 4: Query DB for pending clusters (sop_generated = 0)
+    # This uses persisted state instead of transient in-memory cluster IDs,
+    # so re-segmentation with shuffled cluster IDs won't re-trigger SOPs.
+    import json as _json
 
-    if not ready_clusters:
+    pending_clusters = db.get_sop_pending_clusters()
+
+    if not pending_clusters:
         logger.info(
-            "Passive discovery: no clusters with ≥%d demonstrations yet",
-            segmenter.config.min_demonstrations,
+            "Passive discovery: no clusters with ≥2 pending segments in DB",
         )
         return 0
 
     total_exported = 0
 
-    for task_label, demonstrations in ready_clusters:
+    for cluster_row in pending_clusters:
+        cluster_id = cluster_row["cluster_id"]
+        task_label = cluster_row.get("task_label", "")
+
+        # Get all pending segments for this cluster from DB
+        pending_segs = db.get_cluster_segments(cluster_id)
+        if len(pending_segs) < segmenter.config.min_demonstrations:
+            continue
+
+        # Reconstruct demonstrations (timelines) from DB event IDs
+        demonstrations: list[list[dict]] = []
+        segment_ids: list[str] = []
+        for seg_row in pending_segs:
+            event_ids = _json.loads(seg_row.get("event_ids_json", "[]"))
+            events_for_seg = db.get_events_by_ids(event_ids)
+            timeline: list[dict] = []
+            for ev in events_for_seg:
+                ann_raw = ev.get("scene_annotation_json")
+                if not ann_raw:
+                    continue
+                try:
+                    annotation = (
+                        _json.loads(ann_raw) if isinstance(ann_raw, str)
+                        else ann_raw
+                    )
+                except (_json.JSONDecodeError, TypeError):
+                    continue
+                diff = None
+                diff_raw = ev.get("frame_diff_json")
+                if diff_raw:
+                    try:
+                        diff = (
+                            _json.loads(diff_raw) if isinstance(diff_raw, str)
+                            else diff_raw
+                        )
+                    except (_json.JSONDecodeError, TypeError):
+                        pass
+                timeline.append({
+                    "annotation": annotation,
+                    "diff": diff,
+                    "timestamp": ev.get("timestamp", ""),
+                })
+            if timeline:
+                demonstrations.append(timeline)
+                segment_ids.append(seg_row["segment_id"])
+
+        if len(demonstrations) < segmenter.config.min_demonstrations:
+            continue
+
         logger.info(
             "Passive discovery: generating SOP for '%s' (%d demos)",
             task_label[:60], len(demonstrations),
@@ -1245,17 +1296,9 @@ def _process_passive_discovery(
 
         _save_sop_cache(sop_templates)
 
-        # Mark cluster segments as SOP-generated
-        for seg in seg_result.clusters.get(
-            # Find the cluster_id for this task_label
-            next(
-                (cid for cid, segs in seg_result.clusters.items()
-                 if any(s.task_label == task_label for s in segs)),
-                -1,
-            ),
-            [],
-        ):
-            db.mark_segment_sop_generated(seg.segment_id)
+        # Mark all pending segments in this cluster as SOP-generated
+        for seg_id in segment_ids:
+            db.mark_segment_sop_generated(seg_id)
 
     return total_exported
 

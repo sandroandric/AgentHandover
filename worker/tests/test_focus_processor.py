@@ -691,3 +691,87 @@ class TestProcessFocusSessionsV2:
         assert result == 0
         # Signal should still be cleared to prevent infinite retry
         assert not signal_path.exists()
+
+
+# ---------------------------------------------------------------------------
+# TestFocusProcessorDomNodes
+# ---------------------------------------------------------------------------
+
+class TestFocusProcessorDomNodes:
+    """Test that _collect_timeline includes dom_nodes when available."""
+
+    def test_timeline_includes_dom_nodes_for_browser_events(self) -> None:
+        """When DB has DOM snapshots matching a browser annotation, dom_nodes is populated."""
+
+        # Create mock DB
+        class MockDB:
+            def get_event_by_id(self, eid):
+                if eid == "e1":
+                    return {
+                        "id": "e1",
+                        "timestamp": "2026-03-04T10:00:00Z",
+                        "annotation_status": "completed",
+                        "scene_annotation_json": json.dumps({
+                            "app": "Google Chrome",
+                            "location": "https://example.com/search",
+                        }),
+                        "frame_diff_json": json.dumps({"diff_type": "action"}),
+                    }
+                return None
+
+            def get_dom_snapshots_near_timestamp(self, ts, url, tolerance_sec=5.0):
+                if "example.com" in url:
+                    return [{
+                        "event_id": "dom-1",
+                        "timestamp": ts,
+                        "url": url,
+                        "nodes": [
+                            {"tag": "button", "text": "Search", "id": "search-btn"},
+                        ],
+                    }]
+                return []
+
+        processor = FocusProcessor(
+            annotator=None,  # type: ignore
+            differ=None,  # type: ignore
+            sop_generator=None,  # type: ignore
+        )
+
+        events = [{"id": "e1", "timestamp": "2026-03-04T10:00:00Z"}]
+        timeline = processor._collect_timeline(MockDB(), events)
+
+        assert len(timeline) == 1
+        assert timeline[0]["dom_nodes"] is not None
+        assert len(timeline[0]["dom_nodes"]) == 1
+        assert timeline[0]["dom_nodes"][0]["tag"] == "button"
+
+    def test_timeline_no_dom_for_non_browser_events(self) -> None:
+        """Non-browser events (Finder, VS Code) have dom_nodes = None."""
+
+        class MockDB:
+            def get_event_by_id(self, eid):
+                return {
+                    "id": eid,
+                    "timestamp": "2026-03-04T10:00:00Z",
+                    "annotation_status": "completed",
+                    "scene_annotation_json": json.dumps({
+                        "app": "Finder",
+                        "location": "/Users/test/Documents",
+                    }),
+                    "frame_diff_json": json.dumps({"diff_type": "action"}),
+                }
+
+            def get_dom_snapshots_near_timestamp(self, ts, url, tolerance_sec=5.0):
+                return []  # Should never be called for non-http locations
+
+        processor = FocusProcessor(
+            annotator=None,  # type: ignore
+            differ=None,  # type: ignore
+            sop_generator=None,  # type: ignore
+        )
+
+        events = [{"id": "e1", "timestamp": "2026-03-04T10:00:00Z"}]
+        timeline = processor._collect_timeline(MockDB(), events)
+
+        assert len(timeline) == 1
+        assert timeline[0]["dom_nodes"] is None

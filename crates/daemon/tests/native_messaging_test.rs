@@ -9,7 +9,7 @@
 //!   - Async read/write through NativeMessageServer
 
 use oc_apprentice_daemon::ipc::native_messaging::{
-    decode_frame, encode_frame, NativeMessageServer, MAX_MESSAGE_SIZE,
+    decode_frame, encode_frame, DaemonCommand, NativeMessageServer, MAX_MESSAGE_SIZE,
 };
 use serde_json::json;
 use tokio::sync::mpsc;
@@ -271,9 +271,10 @@ async fn server_run_processes_messages_until_eof() {
     let mut server = NativeMessageServer::new(reader, &mut writer);
 
     let (tx, mut rx) = mpsc::channel(10);
+    let (_dummy_cmd_tx, dummy_cmd_rx) = mpsc::channel::<DaemonCommand>(1);
 
     // Run should process both messages then exit on EOF
-    server.run(tx).await.unwrap();
+    server.run(tx, dummy_cmd_rx).await.unwrap();
 
     // Collect events
     let mut events = Vec::new();
@@ -348,8 +349,9 @@ async fn server_run_skips_malformed_json() {
     let mut server = NativeMessageServer::new(reader, &mut writer);
 
     let (tx, mut rx) = mpsc::channel(10);
+    let (_dummy_cmd_tx, dummy_cmd_rx) = mpsc::channel::<DaemonCommand>(1);
 
-    server.run(tx).await.unwrap();
+    server.run(tx, dummy_cmd_rx).await.unwrap();
 
     let mut events = Vec::new();
     while let Ok(event) = rx.try_recv() {

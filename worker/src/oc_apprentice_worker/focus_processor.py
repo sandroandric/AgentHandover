@@ -277,9 +277,22 @@ class FocusProcessor:
                 except (json.JSONDecodeError, TypeError):
                     pass
 
+            # Try to find a DOM snapshot near this event
+            dom_nodes = None
+            location = annotation.get("location", "")
+            if location and location.startswith("http"):
+                dom_snaps = db.get_dom_snapshots_near_timestamp(  # type: ignore[union-attr]
+                    fresh.get("timestamp", ""),
+                    location,
+                    tolerance_sec=5.0,
+                )
+                if dom_snaps:
+                    dom_nodes = dom_snaps[0].get("nodes")
+
             timeline.append({
                 "annotation": annotation,
                 "diff": diff,
+                "dom_nodes": dom_nodes,
                 "timestamp": fresh.get("timestamp", ""),
                 "app": annotation.get("app", ""),
                 "event_id": event_id,

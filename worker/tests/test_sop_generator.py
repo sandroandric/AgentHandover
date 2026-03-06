@@ -584,9 +584,117 @@ class TestSOPGeneratorConfig:
         cfg = SOPGeneratorConfig()
         assert cfg.model == "qwen3.5:4b"
         assert cfg.num_predict == 8000
-        assert cfg.timeout == 180.0
+        assert cfg.timeout == 600.0
 
     def test_custom(self):
         cfg = SOPGeneratorConfig(model="custom:1b", num_predict=4000)
         assert cfg.model == "custom:1b"
         assert cfg.num_predict == 4000
+
+
+# ------------------------------------------------------------------
+# Selector extraction from DOM nodes
+# ------------------------------------------------------------------
+
+
+class TestExtractSelectorForStep:
+    """Test _extract_selector_for_step with various DOM node shapes."""
+
+    def test_returns_none_without_timeline(self) -> None:
+        from oc_apprentice_worker.sop_generator import _extract_selector_for_step
+
+        result = _extract_selector_for_step(
+            {"action": "Click Submit"}, None, 0
+        )
+        assert result is None
+
+    def test_returns_none_without_dom_nodes(self) -> None:
+        from oc_apprentice_worker.sop_generator import _extract_selector_for_step
+
+        timeline = [{"annotation": {}, "diff": None, "dom_nodes": None}]
+        result = _extract_selector_for_step(
+            {"action": "Click Submit"}, timeline, 0
+        )
+        assert result is None
+
+    def test_extracts_aria_label_selector(self) -> None:
+        from oc_apprentice_worker.sop_generator import _extract_selector_for_step
+
+        timeline = [{
+            "annotation": {},
+            "diff": None,
+            "dom_nodes": [
+                {"tag": "button", "text": "Submit", "ariaLabel": "Submit form", "role": "button"},
+            ],
+        }]
+        result = _extract_selector_for_step(
+            {"action": "Click Submit button"}, timeline, 0
+        )
+        assert result is not None
+        assert "aria-label" in result
+        assert "Submit form" in result
+
+    def test_extracts_testid_selector(self) -> None:
+        from oc_apprentice_worker.sop_generator import _extract_selector_for_step
+
+        timeline = [{
+            "annotation": {},
+            "diff": None,
+            "dom_nodes": [
+                {"tag": "button", "text": "Submit", "testId": "submit-btn"},
+            ],
+        }]
+        result = _extract_selector_for_step(
+            {"action": "Click Submit"}, timeline, 0
+        )
+        assert result is not None
+        assert "data-testid" in result
+        assert "submit-btn" in result
+
+    def test_extracts_id_selector(self) -> None:
+        from oc_apprentice_worker.sop_generator import _extract_selector_for_step
+
+        timeline = [{
+            "annotation": {},
+            "diff": None,
+            "dom_nodes": [
+                {"tag": "input", "text": "Search", "id": "search-input", "role": "textbox"},
+            ],
+        }]
+        result = _extract_selector_for_step(
+            {"action": "Type in Search box"}, timeline, 0
+        )
+        assert result is not None
+        assert result == "#search-input"
+
+    def test_no_match_returns_none(self) -> None:
+        from oc_apprentice_worker.sop_generator import _extract_selector_for_step
+
+        timeline = [{
+            "annotation": {},
+            "diff": None,
+            "dom_nodes": [
+                {"tag": "div", "text": "Just a paragraph with no relevance"},
+            ],
+        }]
+        result = _extract_selector_for_step(
+            {"action": "Click the special hidden element"}, timeline, 0
+        )
+        # div is not interactive, so no score bonus => None
+        assert result is None
+
+    def test_step_index_beyond_timeline_uses_last(self) -> None:
+        from oc_apprentice_worker.sop_generator import _extract_selector_for_step
+
+        timeline = [{
+            "annotation": {},
+            "diff": None,
+            "dom_nodes": [
+                {"tag": "button", "text": "Next", "ariaLabel": "Next page", "role": "button"},
+            ],
+        }]
+        result = _extract_selector_for_step(
+            {"action": "Click Next"}, timeline, 99
+        )
+        assert result is not None
+        assert "Next page" in result

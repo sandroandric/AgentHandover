@@ -284,7 +284,9 @@ def create_llm_backend(
     llm_model = llm_config.get("model", "")
     timeout = float(llm_config.get("timeout_seconds", 60))
     temperature = float(llm_config.get("temperature", 0.3))
-    max_tokens = int(llm_config.get("max_tokens", 800))
+    # 2000 tokens is enough for task_description + execution_overview JSON.
+    # Previous default of 800 was too low (especially if thinking was on).
+    max_tokens = int(llm_config.get("max_tokens", 2000))
 
     if mode == "remote" and provider:
         # Use the same remote provider as VLM but possibly different model
@@ -327,6 +329,10 @@ def create_llm_backend(
                 timeout_seconds=timeout,
                 temperature=temperature,
                 max_tokens=max_tokens,
+                # Disable Qwen thinking mode for text-only SOP enhancement.
+                # Without this, thinking consumes all num_predict tokens
+                # leaving empty content → "Empty input text" error.
+                think=False,
             )
         except Exception:
             logger.info("Ollama not available for LLM — SOP enhancement disabled")

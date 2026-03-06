@@ -61,6 +61,20 @@ class WorkerDB:
     # Query helpers
     # ------------------------------------------------------------------
 
+    def _refresh_read_snapshot(self) -> None:
+        """End any implicit read transaction so the next SELECT sees fresh data.
+
+        In WAL mode, a read-only connection's implicit transaction starts
+        on the first SELECT and holds a snapshot until committed/rolled back.
+        Calling ``rollback()`` on a read-only connection is safe (no-op on
+        data) but resets the snapshot so subsequent reads see writes committed
+        by other connections since the last snapshot.
+        """
+        try:
+            self._conn.rollback()
+        except sqlite3.Error:
+            pass
+
     def _rows_to_dicts(self, rows: list[sqlite3.Row]) -> list[dict]:
         """Convert a list of sqlite3.Row objects to plain dicts."""
         return [dict(row) for row in rows]
@@ -88,6 +102,28 @@ class WorkerDB:
         )
         row = cur.fetchone()
         return dict(row) if row is not None else None
+
+    def get_events_by_ids(self, event_ids: list[str]) -> list[dict]:
+        """Return events matching the given IDs, ordered by timestamp.
+
+        Uses batched ``IN (...)`` queries for efficiency.
+        """
+        if not event_ids:
+            return []
+
+        # SQLite has a variable limit (~999); batch if needed.
+        results: list[dict] = []
+        batch_size = 900
+        for i in range(0, len(event_ids), batch_size):
+            batch = event_ids[i : i + batch_size]
+            placeholders = ",".join("?" for _ in batch)
+            cur = self._conn.execute(
+                f"SELECT * FROM events WHERE id IN ({placeholders}) "
+                "ORDER BY timestamp ASC",
+                batch,
+            )
+            results.extend(self._rows_to_dicts(cur.fetchall()))
+        return results
 
     def get_focus_session_events(self, session_id: str) -> list[dict]:
         """Return all events tagged with the given focus session ID.
@@ -155,7 +191,7 @@ class WorkerDB:
             "WHERE annotation_status = 'completed' "
             "  AND scene_annotation_json IS NOT NULL "
             "  AND timestamp < ? "
-            "  AND timestamp >= datetime(?, '-' || ? || ' seconds') "
+            "  AND timestamp >= strftime('%Y-%m-%dT%H:%M:%fZ', ?, '-' || ? || ' seconds') "
             "ORDER BY timestamp DESC LIMIT ?",
             (before_timestamp, before_timestamp, str(max_age_seconds), limit),
         )
@@ -274,6 +310,115 @@ class WorkerDB:
         )
         row = cur.fetchone()
         return row["cnt"] if row else 0
+
+    # ------------------------------------------------------------------
+    # DOM snapshots (Chrome extension)
+    # ------------------------------------------------------------------
+
+    def get_dom_snapshots_near_timestamp(
+        self,
+        timestamp: str,
+        url: str,
+        tolerance_sec: float = 5.0,
+    ) -> list[dict]:
+        """Find DOM snapshot events near a given timestamp + URL.
+
+        DOM snapshots from the Chrome extension are stored as events with
+        ``metadata_json`` containing a ``nodes`` array.  This method finds
+        events whose ``metadata_json.nodes`` is present and whose timestamp
+        is within *tolerance_sec* of the given *timestamp*, optionally
+        filtered by URL match.
+
+        Returns list of dicts with keys: event_id, timestamp, url, nodes.
+        Ordered by time proximity (closest first).
+        """
+        import json as _json
+
+        cur = self._conn.execute(
+            "SELECT id, timestamp, metadata_json FROM events "
+            "WHERE json_extract(metadata_json, '$.nodes') IS NOT NULL "
+            "  AND timestamp >= strftime('%Y-%m-%dT%H:%M:%fZ', ?, '-' || ? || ' seconds') "
+            "  AND timestamp <= strftime('%Y-%m-%dT%H:%M:%fZ', ?, '+' || ? || ' seconds') "
+            "ORDER BY ABS(julianday(timestamp) - julianday(?)) ASC "
+            "LIMIT 5",
+            (
+                timestamp, str(tolerance_sec),
+                timestamp, str(tolerance_sec),
+                timestamp,
+            ),
+        )
+        results = []
+        for row in cur.fetchall():
+            try:
+                meta = _json.loads(row["metadata_json"])
+            except (ValueError, TypeError):
+                continue
+
+            nodes = meta.get("nodes")
+            if not isinstance(nodes, list):
+                continue
+
+            snap_url = meta.get("url", "")
+            # Filter by URL if provided — match domain or prefix
+            if url and snap_url:
+                # Extract domain for loose matching
+                if not _url_match(url, snap_url):
+                    continue
+
+            results.append({
+                "event_id": row["id"],
+                "timestamp": row["timestamp"],
+                "url": snap_url,
+                "nodes": nodes,
+            })
+
+        return results
+
+    def get_dom_snapshots_for_focus_session(
+        self,
+        session_id: str,
+        tolerance_sec: float = 5.0,
+    ) -> list[dict]:
+        """Find DOM snapshots captured during a focus session.
+
+        Matches DOM snapshot events (events with ``metadata_json.nodes``)
+        to focus session events by time proximity and URL.
+
+        Returns list of {event_id, timestamp, url, nodes, matched_focus_event_id}.
+        """
+        import json as _json
+
+        # Get all focus session events
+        focus_events = self.get_focus_session_annotated_events(session_id)
+        if not focus_events:
+            return []
+
+        results = []
+        seen_snap_ids: set[str] = set()
+
+        for fevent in focus_events:
+            ts = fevent.get("timestamp", "")
+            # Get location from annotation
+            ann_json = fevent.get("scene_annotation_json", "")
+            location = ""
+            if ann_json:
+                try:
+                    ann = _json.loads(ann_json)
+                    location = ann.get("location", "")
+                except (ValueError, TypeError):
+                    pass
+
+            if not location or not location.startswith("http"):
+                continue
+
+            snaps = self.get_dom_snapshots_near_timestamp(ts, location, tolerance_sec)
+            for snap in snaps:
+                if snap["event_id"] not in seen_snap_ids:
+                    seen_snap_ids.add(snap["event_id"])
+                    snap["matched_focus_event_id"] = fevent.get("id", "")
+                    results.append(snap)
+
+        return results
 
     # ------------------------------------------------------------------
     # Episodes
@@ -594,7 +739,7 @@ class WorkerDB:
         try:
             cursor = self._conn.execute(
                 "SELECT steps_json FROM translated_episodes "
-                "WHERE created_at >= datetime('now', ?)",
+                "WHERE created_at >= strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?)",
                 (f"-{max_age_days} days",),
             )
             result: list[list[dict]] = []
@@ -625,7 +770,7 @@ class WorkerDB:
             self._ensure_episode_store_table(write_conn)
             cursor = write_conn.execute(
                 "DELETE FROM translated_episodes "
-                "WHERE created_at < datetime('now', ?)",
+                "WHERE created_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?)",
                 (f"-{max_age_days} days",),
             )
             write_conn.commit()
@@ -694,7 +839,7 @@ class WorkerDB:
                 "SELECT * FROM events "
                 "WHERE annotation_status = 'completed' "
                 "  AND scene_annotation_json IS NOT NULL "
-                "  AND timestamp >= datetime('now', ?) "
+                "  AND timestamp >= strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?) "
                 "ORDER BY timestamp ASC",
                 (f"-{hours} hours",),
             )
@@ -714,7 +859,7 @@ class WorkerDB:
             "SELECT * FROM events "
             "WHERE annotation_status = 'completed' "
             "  AND scene_annotation_json IS NOT NULL "
-            "  AND timestamp >= datetime('now', ?) "
+            "  AND timestamp >= strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?) "
             "  AND json_extract(scene_annotation_json, "
             "    '$.task_context.is_workflow') = 1 "
             "ORDER BY timestamp ASC",
@@ -754,7 +899,8 @@ class WorkerDB:
     ) -> bool:
         """Persist a task segment from the segmenter.
 
-        Uses INSERT OR REPLACE so re-segmentation updates existing entries.
+        Uses INSERT ... ON CONFLICT DO UPDATE to upsert metadata while
+        preserving ``sop_generated`` and ``created_at`` on existing rows.
         """
         import json as _json
 
@@ -767,10 +913,18 @@ class WorkerDB:
             write_conn.execute("PRAGMA busy_timeout = 5000;")
             self._ensure_task_segments_table(write_conn)
             write_conn.execute(
-                "INSERT OR REPLACE INTO task_segments "
+                "INSERT INTO task_segments "
                 "(segment_id, cluster_id, task_label, event_ids_json, "
                 " frame_count, apps_json, start_time, end_time) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(segment_id) DO UPDATE SET "
+                " cluster_id = excluded.cluster_id,"
+                " task_label = excluded.task_label,"
+                " event_ids_json = excluded.event_ids_json,"
+                " frame_count = excluded.frame_count,"
+                " apps_json = excluded.apps_json,"
+                " start_time = excluded.start_time,"
+                " end_time = excluded.end_time",
                 (
                     segment_id,
                     cluster_id,
@@ -808,6 +962,7 @@ class WorkerDB:
             finally:
                 init_conn.close()
 
+        self._refresh_read_snapshot()
         try:
             cur = self._conn.execute(
                 "SELECT * FROM task_segments "
@@ -841,6 +996,37 @@ class WorkerDB:
         finally:
             write_conn.close()
 
+    def get_pending_segments(self) -> list[dict]:
+        """Return all segments where ``sop_generated = 0``.
+
+        Used by passive discovery to determine which segments still need
+        SOP generation, independent of transient in-memory cluster IDs.
+        """
+        import json as _json
+
+        db_path = self._get_writable_path()
+        if db_path:
+            init_conn = sqlite3.connect(db_path)
+            try:
+                init_conn.execute("PRAGMA busy_timeout = 5000;")
+                self._ensure_task_segments_table(init_conn)
+                init_conn.commit()
+            except sqlite3.Error:
+                pass
+            finally:
+                init_conn.close()
+
+        self._refresh_read_snapshot()
+        try:
+            cur = self._conn.execute(
+                "SELECT * FROM task_segments "
+                "WHERE sop_generated = 0 "
+                "ORDER BY start_time ASC",
+            )
+            return self._rows_to_dicts(cur.fetchall())
+        except sqlite3.OperationalError:
+            return []
+
     def get_sop_pending_clusters(self) -> list[dict]:
         """Return cluster IDs that have >= 2 segments without SOPs generated.
 
@@ -859,6 +1045,7 @@ class WorkerDB:
             finally:
                 init_conn.close()
 
+        self._refresh_read_snapshot()
         try:
             cur = self._conn.execute(
                 "SELECT cluster_id, task_label, COUNT(*) AS seg_count "
@@ -891,3 +1078,17 @@ class WorkerDB:
         exc_tb: object,
     ) -> None:
         self.close()
+
+
+def _url_match(url_a: str, url_b: str) -> bool:
+    """Loose URL matching — checks if both URLs share the same domain."""
+    try:
+        from urllib.parse import urlparse
+        domain_a = urlparse(url_a).netloc.lower()
+        domain_b = urlparse(url_b).netloc.lower()
+        if domain_a and domain_b:
+            return domain_a == domain_b
+    except Exception:
+        pass
+    # Fallback: prefix match
+    return url_a[:30] == url_b[:30] if url_a and url_b else False

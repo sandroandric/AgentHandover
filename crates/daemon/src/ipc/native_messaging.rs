@@ -19,6 +19,20 @@ use uuid::Uuid;
 
 use oc_apprentice_common::event::*;
 
+// ---------------------------------------------------------------------------
+// Outbound command channel (internal tasks -> NM server -> extension)
+// ---------------------------------------------------------------------------
+
+/// Commands that can be sent TO the NM server for outbound transmission.
+#[derive(Debug, Clone)]
+pub enum DaemonCommand {
+    /// Send a typed message to the extension.
+    SendMessage {
+        msg_type: DaemonMessageType,
+        payload: serde_json::Value,
+    },
+}
+
 /// Maximum allowed message size per the Chrome Native Messaging spec (1 MB).
 pub const MAX_MESSAGE_SIZE: u32 = 1_048_576;
 
@@ -142,6 +156,10 @@ pub struct NativeMessageServer<R, W> {
     writer: W,
     // u64 overflow is theoretical only (~centuries at realistic rates). No action needed.
     outbound_seq: u64,
+    /// Highest inbound `seq` successfully processed.  Messages with
+    /// `seq <= last_processed_seq` are duplicates (e.g. reconnect replays)
+    /// and are ack'd but not forwarded as events.
+    last_processed_seq: u64,
 }
 
 impl<R, W> NativeMessageServer<R, W>
@@ -155,6 +173,7 @@ where
             reader,
             writer,
             outbound_seq: 0,
+            last_processed_seq: 0,
         }
     }
 
@@ -225,80 +244,140 @@ where
     }
 
     /// Main event loop: read messages, parse them, convert to `Event`s, and
-    /// send through the provided channel.
+    /// send through the provided channel.  Also processes outbound commands
+    /// received via `cmd_rx` (e.g. `request_snapshot` for DOM capture).
     ///
     /// Runs until the reader reaches EOF or an unrecoverable error occurs.
     /// Malformed JSON messages are logged and skipped.
-    pub async fn run(&mut self, event_tx: mpsc::Sender<Event>) -> Result<()> {
+    ///
+    /// # Cancel-safety
+    ///
+    /// `tokio::select!` with `biased` ensures commands are checked first.
+    /// `read_message()` blocks on `read_exact` for the 4-byte header.  If
+    /// cancelled before any bytes arrive, no data is consumed — the message
+    /// stays in the pipe buffer and is read on the next iteration.  Chrome NM
+    /// writes complete framed messages atomically, so the header read either
+    /// completes instantly (all 4 bytes available) or blocks with zero bytes
+    /// consumed.
+    pub async fn run(
+        &mut self,
+        event_tx: mpsc::Sender<Event>,
+        mut cmd_rx: mpsc::Receiver<DaemonCommand>,
+    ) -> Result<()> {
         info!("Native messaging server starting");
 
+        // Track whether the command channel is still open.  Once closed
+        // (all senders dropped — normal when the DOM request task ends),
+        // we stop selecting on it and only read inbound messages.
+        let mut cmd_channel_open = true;
+
         loop {
-            let raw = match self.read_message().await {
-                Ok(v) => v,
-                Err(e) => {
-                    // Check if this is an EOF (normal shutdown)
-                    let msg = format!("{:#}", e);
-                    if msg.contains("EOF")
-                        || msg.contains("UnexpectedEof")
-                        || msg.contains("unexpected eof")
-                    {
-                        info!("Native messaging: stdin closed (extension disconnected)");
-                        break;
+            tokio::select! {
+                biased;
+
+                // Branch 1: Process outbound commands from daemon tasks
+                cmd = cmd_rx.recv(), if cmd_channel_open => {
+                    match cmd {
+                        Some(DaemonCommand::SendMessage { msg_type, payload }) => {
+                            debug!(?msg_type, "Native messaging: sending outbound command");
+                            if let Err(e) = self.send_daemon_message(msg_type, payload).await {
+                                warn!("Failed to send outbound command: {}", e);
+                            }
+                        }
+                        None => {
+                            // Command channel closed — all senders dropped.
+                            // This is normal (e.g. DOM request task ended).
+                            // Continue reading inbound messages from Chrome.
+                            info!("Native messaging: command channel closed, continuing reads");
+                            cmd_channel_open = false;
+                        }
                     }
-                    // For malformed JSON, log and continue
-                    if msg.contains("not valid JSON") || msg.contains("not valid UTF-8") {
-                        warn!("Native messaging: malformed message, skipping: {}", msg);
+                }
+
+                // Branch 2: Read inbound message from extension (existing behavior)
+                msg_result = self.read_message() => {
+                    let raw = match msg_result {
+                        Ok(v) => v,
+                        Err(e) => {
+                            let msg = format!("{:#}", e);
+                            if msg.contains("EOF")
+                                || msg.contains("UnexpectedEof")
+                                || msg.contains("unexpected eof")
+                            {
+                                info!("Native messaging: stdin closed (extension disconnected)");
+                                break;
+                            }
+                            if msg.contains("not valid JSON") || msg.contains("not valid UTF-8") {
+                                warn!("Native messaging: malformed message, skipping: {}", msg);
+                                continue;
+                            }
+                            warn!("Native messaging: read error, skipping: {}", msg);
+                            continue;
+                        }
+                    };
+
+                    debug!("Native messaging: received raw message");
+
+                    let ext_msg: ExtensionMessage = match serde_json::from_value(raw.clone()) {
+                        Ok(m) => m,
+                        Err(e) => {
+                            warn!(
+                                "Native messaging: failed to parse extension message: {}",
+                                e
+                            );
+                            continue;
+                        }
+                    };
+
+                    // Dedup: skip messages already processed (e.g. reconnect replays)
+                    if ext_msg.seq <= self.last_processed_seq {
+                        debug!(
+                            seq = ext_msg.seq,
+                            last = self.last_processed_seq,
+                            "Native messaging: duplicate seq, ack-ing but not forwarding"
+                        );
+                        if let Err(e) = self
+                            .send_daemon_message(
+                                DaemonMessageType::Ack,
+                                serde_json::json!({ "ackSeq": ext_msg.seq }),
+                            )
+                            .await
+                        {
+                            error!("Native messaging: failed to send dup ack: {}", e);
+                        }
                         continue;
                     }
-                    // For other errors (e.g., oversized), log and continue
-                    warn!("Native messaging: read error, skipping: {}", msg);
-                    continue;
-                }
-            };
 
-            debug!("Native messaging: received raw message");
-
-            // Try to parse as a typed ExtensionMessage
-            let ext_msg: ExtensionMessage = match serde_json::from_value(raw.clone()) {
-                Ok(m) => m,
-                Err(e) => {
-                    warn!(
-                        "Native messaging: failed to parse extension message: {}",
-                        e
-                    );
-                    continue;
-                }
-            };
-
-            // Convert to an Event based on message type
-            match convert_to_event(&ext_msg) {
-                Some(event) => {
-                    debug!(
-                        kind = ?event.kind,
-                        "Native messaging: converted to event"
-                    );
-                    if event_tx.send(event).await.is_err() {
-                        info!("Native messaging: event channel closed, shutting down");
-                        break;
+                    match convert_to_event(&ext_msg) {
+                        Some(event) => {
+                            debug!(
+                                kind = ?event.kind,
+                                "Native messaging: converted to event"
+                            );
+                            if event_tx.send(event).await.is_err() {
+                                info!("Native messaging: event channel closed, shutting down");
+                                break;
+                            }
+                            self.last_processed_seq = ext_msg.seq;
+                            if let Err(e) = self
+                                .send_daemon_message(
+                                    DaemonMessageType::Ack,
+                                    serde_json::json!({ "ackSeq": ext_msg.seq }),
+                                )
+                                .await
+                            {
+                                error!("Native messaging: failed to send ack: {}", e);
+                            }
+                        }
+                        None => {
+                            let payload_summary: String = ext_msg.payload.to_string().chars().take(200).collect();
+                            warn!(
+                                msg_type = ?ext_msg.msg_type,
+                                payload_summary,
+                                "Native messaging: message type does not map to an event"
+                            );
+                        }
                     }
-                    // Send acknowledgement
-                    if let Err(e) = self
-                        .send_daemon_message(
-                            DaemonMessageType::Ack,
-                            serde_json::json!({ "ackSeq": ext_msg.seq }),
-                        )
-                        .await
-                    {
-                        error!("Native messaging: failed to send ack: {}", e);
-                    }
-                }
-                None => {
-                    let payload_summary: String = ext_msg.payload.to_string().chars().take(200).collect();
-                    warn!(
-                        msg_type = ?ext_msg.msg_type,
-                        payload_summary,
-                        "Native messaging: message type does not map to an event"
-                    );
                 }
             }
         }
@@ -507,5 +586,227 @@ mod tests {
         };
         let event = convert_to_event(&msg).unwrap();
         assert_eq!(event.kind, EventKind::SecureFieldFocus);
+    }
+
+    #[tokio::test]
+    async fn test_run_processes_outbound_command() {
+        // Reader returns EOF immediately (empty pipe).
+        // Use a duplex stream for the writer so we can inspect output.
+        let reader = tokio::io::empty();
+        let (wr, mut rd) = tokio::io::duplex(4096);
+
+        let (event_tx, _event_rx) = mpsc::channel::<Event>(16);
+        let (cmd_tx, cmd_rx) = mpsc::channel::<DaemonCommand>(16);
+
+        // Send a command before starting the server
+        cmd_tx
+            .send(DaemonCommand::SendMessage {
+                msg_type: DaemonMessageType::RequestSnapshot,
+                payload: serde_json::json!({"tabId": 42, "reason": "focus_recording"}),
+            })
+            .await
+            .unwrap();
+        // Drop sender so command channel closes after the one message
+        drop(cmd_tx);
+
+        let mut server = NativeMessageServer::new(reader, wr);
+        // run() will: process the command (write to writer), then cmd_rx returns None → break
+        let result = server.run(event_tx, cmd_rx).await;
+        assert!(result.is_ok());
+
+        // Read the framed message from the duplex reader
+        let mut len_buf = [0u8; 4];
+        tokio::io::AsyncReadExt::read_exact(&mut rd, &mut len_buf)
+            .await
+            .expect("should read length prefix");
+        let len = u32::from_le_bytes(len_buf) as usize;
+        let mut payload_buf = vec![0u8; len];
+        tokio::io::AsyncReadExt::read_exact(&mut rd, &mut payload_buf)
+            .await
+            .expect("should read payload");
+
+        let written: serde_json::Value =
+            serde_json::from_slice(&payload_buf).expect("should be valid JSON");
+        assert_eq!(written["type"], "request_snapshot");
+        assert_eq!(written["payload"]["tabId"], 42);
+        assert_eq!(written["payload"]["reason"], "focus_recording");
+        assert_eq!(written["seq"], 1);
+        assert!(written["timestamp"].as_str().is_some());
+    }
+
+    #[tokio::test]
+    async fn test_run_interleaves_commands_and_reads() {
+        // Use a duplex stream for the reader: we write the inbound message
+        // into one end and the server reads from the other.
+        let inbound_msg = serde_json::json!({
+            "type": "content_ready",
+            "seq": 1,
+            "timestamp": "2026-01-01T00:00:00Z",
+            "payload": {"url": "https://example.com", "tabId": 10}
+        });
+        let inbound_frame = encode_frame(&inbound_msg).unwrap();
+
+        let (mut reader_wr, reader_rd) = tokio::io::duplex(8192);
+        let (writer_wr, mut writer_rd) = tokio::io::duplex(8192);
+
+        let (event_tx, mut event_rx) = mpsc::channel::<Event>(16);
+        let (cmd_tx, cmd_rx) = mpsc::channel::<DaemonCommand>(16);
+
+        // Send a command that will be processed alongside the inbound read
+        cmd_tx
+            .send(DaemonCommand::SendMessage {
+                msg_type: DaemonMessageType::Ping,
+                payload: serde_json::json!({}),
+            })
+            .await
+            .unwrap();
+        drop(cmd_tx);
+
+        // Write the inbound message into the reader pipe, then close it (EOF)
+        tokio::io::AsyncWriteExt::write_all(&mut reader_wr, &inbound_frame)
+            .await
+            .unwrap();
+        drop(reader_wr); // Close → EOF on the reader side
+
+        let mut server = NativeMessageServer::new(reader_rd, writer_wr);
+        let result = server.run(event_tx, cmd_rx).await;
+        assert!(result.is_ok());
+
+        // Verify inbound message was converted to an event
+        let event = event_rx.try_recv().expect("should have received an event");
+        assert_eq!(event.kind, EventKind::FocusChange);
+
+        // Drop the server/writer so the writer_rd side sees EOF
+        drop(server);
+
+        // Verify outbound messages were written (ping command + ack for content_ready)
+        let mut messages = Vec::new();
+        loop {
+            let mut len_buf = [0u8; 4];
+            match tokio::io::AsyncReadExt::read_exact(&mut writer_rd, &mut len_buf).await {
+                Ok(_) => {
+                    let len = u32::from_le_bytes(len_buf) as usize;
+                    let mut buf = vec![0u8; len];
+                    tokio::io::AsyncReadExt::read_exact(&mut writer_rd, &mut buf)
+                        .await
+                        .unwrap();
+                    let val: serde_json::Value = serde_json::from_slice(&buf).unwrap();
+                    messages.push(val);
+                }
+                Err(_) => break,
+            }
+        }
+
+        // Should have at least a ping and an ack
+        assert!(
+            messages.len() >= 2,
+            "expected at least 2 outbound messages, got {}",
+            messages.len()
+        );
+        let types: Vec<&str> = messages
+            .iter()
+            .filter_map(|m| m["type"].as_str())
+            .collect();
+        assert!(types.contains(&"ping"), "missing ping command: {:?}", types);
+        assert!(types.contains(&"ack"), "missing ack response: {:?}", types);
+    }
+
+    #[tokio::test]
+    async fn test_daemon_command_request_snapshot_format() {
+        // Verify the wire format of a RequestSnapshot command
+        let (wr, mut rd) = tokio::io::duplex(4096);
+        let reader = tokio::io::empty();
+
+        let (event_tx, _event_rx) = mpsc::channel::<Event>(16);
+        let (cmd_tx, cmd_rx) = mpsc::channel::<DaemonCommand>(16);
+
+        cmd_tx
+            .send(DaemonCommand::SendMessage {
+                msg_type: DaemonMessageType::RequestSnapshot,
+                payload: serde_json::json!({
+                    "tabId": 99,
+                    "reason": "focus_recording",
+                }),
+            })
+            .await
+            .unwrap();
+        drop(cmd_tx);
+
+        let mut server = NativeMessageServer::new(reader, wr);
+        server.run(event_tx, cmd_rx).await.unwrap();
+
+        // Parse the framed output
+        let mut len_buf = [0u8; 4];
+        tokio::io::AsyncReadExt::read_exact(&mut rd, &mut len_buf)
+            .await
+            .unwrap();
+        let len = u32::from_le_bytes(len_buf) as usize;
+        let mut buf = vec![0u8; len];
+        tokio::io::AsyncReadExt::read_exact(&mut rd, &mut buf)
+            .await
+            .unwrap();
+
+        let msg: DaemonMessage = serde_json::from_slice(&buf).unwrap();
+        assert_eq!(msg.msg_type, DaemonMessageType::RequestSnapshot);
+        assert_eq!(msg.seq, 1);
+        assert_eq!(msg.payload["tabId"], 99);
+        assert_eq!(msg.payload["reason"], "focus_recording");
+        // Timestamp should be a valid RFC3339 string
+        chrono::DateTime::parse_from_rfc3339(msg.timestamp.as_str())
+            .expect("timestamp should be valid RFC3339");
+    }
+
+    #[tokio::test]
+    async fn test_run_deduplicates_replayed_seq() {
+        // Send two messages with seq 1 and 2, then replay seq 1 again.
+        // Only the first two should produce events; the replayed seq 1
+        // should be ack'd but NOT forwarded.
+        let msg1 = serde_json::json!({
+            "type": "content_ready",
+            "seq": 1,
+            "timestamp": "2026-01-01T00:00:00Z",
+            "payload": {"url": "https://a.com", "tabId": 1}
+        });
+        let msg2 = serde_json::json!({
+            "type": "content_ready",
+            "seq": 2,
+            "timestamp": "2026-01-01T00:00:01Z",
+            "payload": {"url": "https://b.com", "tabId": 2}
+        });
+        // Replay of seq 1 (same seq, simulating reconnect resend)
+        let msg1_replay = serde_json::json!({
+            "type": "content_ready",
+            "seq": 1,
+            "timestamp": "2026-01-01T00:00:00Z",
+            "payload": {"url": "https://a.com", "tabId": 1}
+        });
+
+        let mut input_bytes = Vec::new();
+        input_bytes.extend_from_slice(&encode_frame(&msg1).unwrap());
+        input_bytes.extend_from_slice(&encode_frame(&msg2).unwrap());
+        input_bytes.extend_from_slice(&encode_frame(&msg1_replay).unwrap());
+
+        let reader = tokio::io::BufReader::new(&input_bytes[..]);
+        let mut writer = Vec::new();
+
+        let mut server = NativeMessageServer::new(reader, &mut writer);
+
+        let (tx, mut rx) = mpsc::channel(10);
+        let (_dummy_cmd_tx, dummy_cmd_rx) = mpsc::channel::<DaemonCommand>(1);
+
+        server.run(tx, dummy_cmd_rx).await.unwrap();
+
+        // Collect events — should be exactly 2 (seq 1 and seq 2), not 3
+        let mut events = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            events.push(event);
+        }
+
+        assert_eq!(
+            events.len(),
+            2,
+            "expected 2 events (duplicate seq 1 should be skipped), got {}",
+            events.len()
+        );
     }
 }

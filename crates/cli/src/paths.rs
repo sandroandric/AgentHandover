@@ -114,3 +114,181 @@ pub fn find_venv_python() -> Option<PathBuf> {
     }
     None
 }
+
+/// Find the daemon binary (`oc-apprentice-daemon`) in known install locations.
+///
+/// Search order:
+/// 1. Packaged install: `/usr/local/bin/oc-apprentice-daemon`
+/// 2. Homebrew libexec: `<libexec>/bin/oc-apprentice-daemon`
+/// 3. Cargo build: walk up from current exe to find `target/{release,debug}/oc-apprentice-daemon`
+///
+/// Returns the first path that exists and is executable.
+pub fn find_daemon_binary() -> Option<PathBuf> {
+    // 1. Packaged install
+    let pkg = PathBuf::from("/usr/local/bin/oc-apprentice-daemon");
+    if is_executable(&pkg) {
+        return Some(pkg);
+    }
+
+    // 2. Homebrew libexec
+    if let Some(libexec) = find_homebrew_libexec() {
+        let brew = libexec.join("bin/oc-apprentice-daemon");
+        if is_executable(&brew) {
+            return Some(brew);
+        }
+    }
+
+    // 3. Cargo build: walk up from current exe
+    if let Ok(exe) = std::env::current_exe() {
+        if let Ok(real) = exe.canonicalize() {
+            for ancestor in real.ancestors().take(6) {
+                for profile in &["release", "debug"] {
+                    let candidate =
+                        ancestor.join("target").join(profile).join("oc-apprentice-daemon");
+                    if is_executable(&candidate) {
+                        return Some(candidate);
+                    }
+                }
+                // Also check universal-release (from just build-all)
+                let universal = ancestor.join("target/universal-release/oc-apprentice-daemon");
+                if is_executable(&universal) {
+                    return Some(universal);
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// Return all Native Messaging Hosts directories for supported Chromium browsers.
+///
+/// Supports Chrome, Chromium, Brave, and Edge on macOS and Linux.
+pub fn native_messaging_hosts_dirs() -> Vec<PathBuf> {
+    let home = match std::env::var("HOME") {
+        Ok(h) => h,
+        Err(_) => return vec![],
+    };
+
+    let mut dirs = Vec::new();
+
+    if cfg!(target_os = "macos") {
+        for browser_dir in &[
+            "Google/Chrome/NativeMessagingHosts",
+            "Chromium/NativeMessagingHosts",
+            "BraveSoftware/Brave-Browser/NativeMessagingHosts",
+            "Microsoft Edge/NativeMessagingHosts",
+        ] {
+            dirs.push(
+                PathBuf::from(&home)
+                    .join("Library/Application Support")
+                    .join(browser_dir),
+            );
+        }
+    } else {
+        // Linux
+        for browser_dir in &[
+            ".config/google-chrome/NativeMessagingHosts",
+            ".config/chromium/NativeMessagingHosts",
+            ".config/BraveSoftware/Brave-Browser/NativeMessagingHosts",
+            ".config/microsoft-edge/NativeMessagingHosts",
+        ] {
+            dirs.push(PathBuf::from(&home).join(browser_dir));
+        }
+    }
+
+    dirs
+}
+
+/// Check if a path exists and is executable.
+pub(crate) fn is_executable(path: &std::path::Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = path.metadata() {
+            return meta.permissions().mode() & 0o111 != 0;
+        }
+        false
+    }
+    #[cfg(not(unix))]
+    {
+        path.exists()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_messaging_hosts_dirs_returns_multiple_browsers() {
+        let dirs = native_messaging_hosts_dirs();
+        // Should return at least Chrome dir on any platform
+        assert!(!dirs.is_empty(), "Should return at least one browser dir");
+
+        // Should include Chrome
+        let has_chrome = dirs.iter().any(|d| {
+            d.to_string_lossy().contains("Chrome")
+                || d.to_string_lossy().contains("google-chrome")
+        });
+        assert!(has_chrome, "Should include Chrome directory");
+
+        // All dirs should have the correct suffix
+        for dir in &dirs {
+            let s = dir.to_string_lossy();
+            assert!(
+                s.ends_with("NativeMessagingHosts"),
+                "Dir should end with NativeMessagingHosts: {}",
+                s
+            );
+        }
+    }
+
+    #[test]
+    fn native_messaging_hosts_dirs_supports_cross_browser() {
+        let dirs = native_messaging_hosts_dirs();
+        // Check we have dirs for multiple browsers
+        let dir_strs: Vec<String> = dirs
+            .iter()
+            .map(|d| d.to_string_lossy().to_string())
+            .collect();
+
+        // Should include at least Chrome and one other browser
+        let browsers = ["Chrome", "Chromium", "Brave", "Edge"];
+        let found: Vec<&str> = browsers
+            .iter()
+            .filter(|b| {
+                dir_strs
+                    .iter()
+                    .any(|d| d.contains(*b) || d.contains(&b.to_lowercase()))
+            })
+            .copied()
+            .collect();
+        assert!(
+            found.len() >= 2,
+            "Should support at least 2 browsers, found: {:?}",
+            found
+        );
+    }
+
+    #[test]
+    fn is_executable_returns_false_for_nonexistent() {
+        assert!(!is_executable(std::path::Path::new(
+            "/nonexistent/binary/foo"
+        )));
+    }
+
+    #[test]
+    fn find_daemon_binary_returns_option() {
+        // This may or may not find a binary depending on build state,
+        // but it should not panic.
+        let result = find_daemon_binary();
+        if let Some(ref path) = result {
+            assert!(path.exists(), "Found binary should exist");
+            assert!(
+                path.to_string_lossy().contains("oc-apprentice-daemon"),
+                "Path should contain daemon binary name"
+            );
+        }
+    }
+}

@@ -222,8 +222,11 @@ async fn main() -> Result<()> {
         });
 
         // Run the native messaging server on stdio
+        // Full daemon mode doesn't send outbound commands to Chrome — use a dummy channel
         let mut server = native_messaging::stdio_server();
-        if let Err(e) = server.run(nm_event_tx).await {
+        let (_dummy_cmd_tx, dummy_cmd_rx) =
+            mpsc::channel::<native_messaging::DaemonCommand>(1);
+        if let Err(e) = server.run(nm_event_tx, dummy_cmd_rx).await {
             warn!("Native messaging server exited: {}", e);
         }
 
@@ -551,15 +554,28 @@ async fn run_native_messaging_bridge() -> Result<()> {
 
     // Run native messaging — this blocks until Chrome closes the pipe
     let mut server = native_messaging::stdio_server();
-    let (nm_event_tx, mut nm_event_rx) = mpsc::channel(256);
+    let (nm_event_tx, mut nm_event_rx) = mpsc::channel::<oc_apprentice_common::event::Event>(256);
+
+    // Track the last active Chrome tab ID for outbound DOM snapshot requests.
+    // Updated by the forwarder task from incoming extension messages.
+    let last_active_tab_id = Arc::new(AtomicI64::new(-1));
+
+    // Command channel: DOM request task -> NM server -> Chrome extension
+    let (cmd_tx, cmd_rx) = mpsc::channel::<native_messaging::DaemonCommand>(64);
 
     let forwarder_tx = tx;
+    let forwarder_tab_id = Arc::clone(&last_active_tab_id);
     let forwarder_handle = tokio::spawn(async move {
         let mut message_count: u64 = 0;
         let mut last_heartbeat_write = std::time::Instant::now();
 
         while let Some(event) = nm_event_rx.recv().await {
             message_count += 1;
+
+            // Track last active tab ID for outbound DOM snapshot requests
+            if let Some(tab_id) = event.metadata.get("tabId").and_then(|v| v.as_i64()) {
+                forwarder_tab_id.store(tab_id, Ordering::Relaxed);
+            }
 
             // Write extension heartbeat every 5 seconds (throttled)
             if last_heartbeat_write.elapsed() >= std::time::Duration::from_secs(5) {
@@ -605,13 +621,65 @@ async fn run_native_messaging_bridge() -> Result<()> {
         }
     });
 
-    if let Err(e) = server.run(nm_event_tx).await {
+    // Spawn DOM request task: polls focus signal file every 2s and sends
+    // `request_snapshot` to Chrome when focus recording is active.
+    let dom_tab_id = Arc::clone(&last_active_tab_id);
+    let dom_cmd_tx = cmd_tx.clone();
+    let dom_request_handle = tokio::spawn(async move {
+        let state_dir = oc_apprentice_common::status::data_dir();
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
+
+        loop {
+            interval.tick().await;
+
+            // Only request DOM snapshots during active focus recording
+            let is_focus = oc_apprentice_common::focus_session::read_focus_signal(&state_dir)
+                .map(|s| s.is_recording())
+                .unwrap_or(false);
+
+            if !is_focus {
+                continue;
+            }
+
+            let tab_id = dom_tab_id.load(Ordering::Relaxed);
+            if tab_id < 0 {
+                // No tab seen yet — Chrome hasn't sent any messages
+                continue;
+            }
+
+            let payload = serde_json::json!({
+                "tabId": tab_id,
+                "reason": "focus_recording",
+            });
+
+            if dom_cmd_tx
+                .send(native_messaging::DaemonCommand::SendMessage {
+                    msg_type: native_messaging::DaemonMessageType::RequestSnapshot,
+                    payload,
+                })
+                .await
+                .is_err()
+            {
+                // Channel closed — server is shutting down
+                break;
+            }
+        }
+    });
+
+    // Drop our clone of cmd_tx so the channel can close when dom_request_handle
+    // is aborted (its clone is the only remaining sender).
+    drop(cmd_tx);
+
+    if let Err(e) = server.run(nm_event_tx, cmd_rx).await {
         // Normal: Chrome closed the NM connection
         info!("Native messaging session ended: {}", e);
     }
     // nm_event_tx is now dropped (it was moved into server.run()).
     // This causes nm_event_rx.recv() in the forwarder to return None,
     // so the forwarder loop exits cleanly after draining any buffered items.
+
+    // Abort DOM request task — no more commands needed
+    dom_request_handle.abort();
 
     // Await the forwarder — do NOT abort, so it can flush remaining events
     // from nm_event_rx into the storage writer channel (tx/forwarder_tx).

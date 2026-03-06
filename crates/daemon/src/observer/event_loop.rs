@@ -88,6 +88,21 @@ pub async fn run_observer_loop(
     let mut last_minute_reset = Utc::now();
     let mut last_dhash: u64 = 0;
 
+    // Idle detector: uses CGEventSourceSecondsSinceLastEventType to detect
+    // keyboard/mouse/trackpad activity. We use this to reset the dwell tracker
+    // when the user is actively interacting, so DwellSnapshots fire after each
+    // idle period (not just once after the first AppSwitch).
+    #[cfg(target_os = "macos")]
+    let idle_detector = crate::platform::IdleDetector::new();
+    // Track whether we last saw the user as active, to avoid spamming on_manipulation_input
+    #[cfg(target_os = "macos")]
+    let mut user_was_active = true;
+
+    // Focus recording: capture screenshots aggressively (every ~2s with dHash dedup)
+    // instead of waiting for 3s idle dwell threshold.
+    let focus_capture_interval = Duration::from_secs(2);
+    let mut last_focus_capture = Instant::now();
+
     // Focus recording session tracking
     let state_dir = oc_apprentice_common::status::data_dir();
     let mut active_focus_session_id: Option<String> = None;
@@ -153,10 +168,12 @@ pub async fn run_observer_loop(
                     }
                 }
 
-                // 1. Check for secure field — if focused, skip all capture
+                // 1. Check for secure field — if focused, skip all capture.
+                // Uses the async version with spawn_blocking + 100ms timeout
+                // to prevent AX API deadlocks (Mach IPC hangs).
                 #[cfg(target_os = "macos")]
                 {
-                    if crate::platform::accessibility::is_secure_field_focused() {
+                    if crate::platform::accessibility::is_secure_field_focused_async().await {
                         debug!("Secure field focused — skipping capture");
                         continue;
                     }
@@ -257,7 +274,91 @@ pub async fn run_observer_loop(
                     last_window_title = current_title;
                 }
 
-                // 5. Dwell/scroll-read detection
+                // 5. Detect user activity via HID idle time and reset dwell tracker
+                // This ensures DwellSnapshots fire after EVERY idle period, not just
+                // after an AppSwitch. Without this, dwell_fired stays true forever
+                // when the user stays in one app.
+                #[cfg(target_os = "macos")]
+                {
+                    let idle_secs = idle_detector.seconds_since_last_input();
+                    let is_active = idle_secs < config.t_dwell_seconds as f64;
+                    if is_active && !user_was_active {
+                        // User just became active again after being idle
+                        // Reset dwell tracker so next idle period can fire
+                        dwell.on_manipulation_input();
+                    }
+                    user_was_active = is_active;
+                }
+
+                // 5b. Focus recording: aggressive capture every ~2s regardless of dwell state.
+                // Must run BEFORE dwell detection because dwell's dHash-skip `continue`
+                // would bypass this block entirely.
+                // During focus, we use dHash threshold 0 to capture EVERY frame
+                // (the user explicitly chose to record — every frame matters).
+                if active_focus_session_id.is_some()
+                    && last_focus_capture.elapsed() >= focus_capture_interval
+                    && config.capture_screenshots
+                    && screenshot_count_this_minute < config.screenshot_max_per_minute
+                {
+                    if let Some(ref store) = artifact_store {
+                        // dHash threshold = 0 means always capture (bypass dedup)
+                        let result = capture_and_store_screenshot(
+                            store,
+                            last_dhash,
+                            0, // Focus mode: capture every frame
+                            &config.screenshots_dir,
+                            config.screenshot_scale,
+                            config.screenshot_quality,
+                        ).await;
+
+                        last_focus_capture = Instant::now();
+                        last_dhash = result.dhash;
+
+                        if result.skipped_dhash {
+                            // With threshold=0, this should never happen, but handle gracefully
+                            debug!("Focus capture: screen unchanged (dHash=0), skipping");
+                        } else {
+                            last_dhash = result.dhash;
+
+                            let mut event = make_event(
+                                EventKind::DwellSnapshot,
+                                &window,
+                                &display_topology,
+                                &primary_display_id,
+                            );
+
+                            let mut focus_artifacts: Vec<ArtifactMeta> = vec![];
+
+                            screenshot_count_this_minute += result.artifact_ids.len() as u32;
+                            event.artifact_ids = result.artifact_ids;
+                            focus_artifacts = result.artifact_metas;
+
+                            if let Some(ref path) = result.screenshot_path {
+                                event.metadata["screenshot_path"] = serde_json::Value::String(
+                                    path.to_string_lossy().to_string(),
+                                );
+                            }
+
+                            // Run OCR on focus capture
+                            #[cfg(target_os = "macos")]
+                            if let Some((w, h, pixels)) = result.raw_pixels {
+                                if let Some(ocr_result) = crate::platform::ocr::recognize_text_async(pixels, w, h).await {
+                                    if let Ok(ocr_json) = serde_json::to_value(&ocr_result) {
+                                        event.metadata["ocr"] = ocr_json;
+                                    }
+                                }
+                            }
+
+                            event.metadata["focus_capture"] = serde_json::Value::Bool(true);
+                            tag_focus_session(&mut event, &active_focus_session_id);
+                            redact_event(&mut event, &redactor);
+                            debug!("Focus capture: DwellSnapshot with screenshot");
+                            let _ = tx.send(ObserverMessage::Event { event, artifacts: focus_artifacts }).await;
+                        }
+                    }
+                }
+
+                // 6. Dwell/scroll-read detection (passive mode)
                 dwell.tick();
 
                 if dwell.is_dwelling() {
@@ -400,6 +501,8 @@ pub async fn run_observer_loop(
                     redact_event(&mut event, &redactor);
                     let _ = tx.send(ObserverMessage::Event { event, artifacts: scroll_artifacts }).await;
                 }
+
+                // (Focus capture runs in step 5b above, before dwell detection)
             }
             _ = shutdown_rx.changed() => {
                 info!("Observer loop: shutdown signal received, stopping");

@@ -4,7 +4,7 @@
 default: build-all
 
 # Build everything
-build-all: build-daemon build-cli build-extension
+build-all: build-daemon build-cli build-extension build-worker build-app
     @echo "All builds complete."
 
 # Build daemon (universal binary for macOS)

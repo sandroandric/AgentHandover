@@ -10,6 +10,11 @@ use oc_apprentice_common::{config::AppConfig, pid, status};
 
 use crate::paths;
 
+/// Chrome Native Messaging host name -- must match `crates/daemon/src/ipc/native_messaging.rs:26`
+const NM_HOST_NAME: &str = "com.openclaw.apprentice";
+/// Chrome extension ID derived from the RSA key in `extension/manifest.json`.
+const EXTENSION_ID: &str = "knldjmfmopnpolahpmmgbagdohdnhkik";
+
 /// Load config.toml from the standard OS location; falls back to defaults.
 fn load_config() -> Result<AppConfig> {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
@@ -281,6 +286,103 @@ fn start_service(label: &str) -> bool {
 }
 
 // =============================================================================
+// Native Messaging Host Manifest
+// =============================================================================
+
+/// Install the Native Messaging host manifest for all detected Chromium browsers.
+///
+/// Writes `com.openclaw.apprentice.json` containing the daemon path and
+/// allowed_origins so the extension can connect.
+fn install_native_messaging_manifest() -> Result<bool> {
+    let daemon_path = match paths::find_daemon_binary() {
+        Some(p) => p,
+        None => {
+            println!(
+                "  {} Could not find {} binary",
+                "⚠".yellow(),
+                "oc-apprentice-daemon".bold()
+            );
+            println!(
+                "    Build with: {} or {}",
+                "cargo build --release -p oc-apprentice-daemon".cyan(),
+                "just build-all".cyan()
+            );
+            return Ok(false);
+        }
+    };
+
+    let nm_dirs = paths::native_messaging_hosts_dirs();
+    if nm_dirs.is_empty() {
+        println!("  {} No supported browser directories found", "⚠".yellow());
+        return Ok(false);
+    }
+
+    let manifest = serde_json::json!({
+        "name": NM_HOST_NAME,
+        "description": "OpenMimic Observer Bridge",
+        "path": daemon_path.display().to_string(),
+        "type": "stdio",
+        "allowed_origins": [format!("chrome-extension://{}/", EXTENSION_ID)]
+    });
+    let manifest_str = serde_json::to_string_pretty(&manifest)?;
+    let manifest_filename = format!("{}.json", NM_HOST_NAME);
+
+    let mut installed = 0;
+    for dir in &nm_dirs {
+        // Only install into dirs that exist or whose parent exists
+        // (Chrome creates NativeMessagingHosts/ on first use, but the
+        // parent app support dir must exist to indicate the browser is installed)
+        let parent_exists = dir.parent().map_or(false, |p| p.exists());
+        if !dir.exists() && !parent_exists {
+            continue;
+        }
+
+        if let Err(e) = std::fs::create_dir_all(dir) {
+            println!(
+                "    {} Failed to create {}: {}",
+                "⚠".yellow(),
+                dir.display(),
+                e
+            );
+            continue;
+        }
+
+        let manifest_path = dir.join(&manifest_filename);
+        if let Err(e) = std::fs::write(&manifest_path, &manifest_str) {
+            println!(
+                "    {} Failed to write {}: {}",
+                "⚠".yellow(),
+                manifest_path.display(),
+                e
+            );
+            continue;
+        }
+
+        installed += 1;
+        println!(
+            "  {} NM manifest installed: {}",
+            "✓".green(),
+            manifest_path.display()
+        );
+    }
+
+    if installed == 0 {
+        println!(
+            "  {} No browser NM directories found (is Chrome/Chromium/Brave installed?)",
+            "⚠".yellow()
+        );
+        return Ok(false);
+    }
+
+    println!(
+        "    Daemon path: {}",
+        daemon_path.display().to_string().dimmed()
+    );
+
+    Ok(true)
+}
+
+// =============================================================================
 // Step 3: Chrome Extension
 // =============================================================================
 
@@ -312,6 +414,12 @@ fn step_chrome_extension(check_only: bool) -> Result<()> {
                 );
                 return Ok(());
             }
+
+            // Install NM manifest before loading extension
+            println!();
+            println!("  Installing Native Messaging host manifest...");
+            install_native_messaging_manifest()?;
+            println!();
 
             // Copy path to clipboard
             let path_str = path.display().to_string();

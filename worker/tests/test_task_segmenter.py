@@ -664,16 +664,17 @@ class TestDBPassiveDiscoveryMethods:
         conn, db_path = _make_test_db()
         try:
             from oc_apprentice_worker.db import WorkerDB
-            # Insert annotated events
+            # Insert annotated events using ISO 8601 format to match
+            # the strftime('%Y-%m-%dT%H:%M:%fZ') format used in queries.
             ann = json.dumps({"task_context": {"what_doing": "test", "is_workflow": True}})
             conn.execute(
                 "INSERT INTO events (id, timestamp, annotation_status, scene_annotation_json) "
-                "VALUES (?, datetime('now'), 'completed', ?)",
+                "VALUES (?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 'completed', ?)",
                 ("e1", ann),
             )
             conn.execute(
                 "INSERT INTO events (id, timestamp, annotation_status) "
-                "VALUES (?, datetime('now'), 'pending')",
+                "VALUES (?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 'pending')",
                 ("e2",),
             )
             conn.commit()
@@ -787,6 +788,10 @@ class TestProcessPassiveDiscovery:
             from oc_apprentice_worker.main import _process_passive_discovery
 
             # Insert multiple expense-related annotated events
+            # Use timestamps relative to "now" so the test doesn't
+            # become date-dependent.
+            from datetime import datetime, timedelta, timezone
+            _now = datetime.now(timezone.utc)
             for i in range(4):
                 ann = json.dumps({
                     "app": "Chrome",
@@ -796,12 +801,13 @@ class TestProcessPassiveDiscovery:
                         "is_workflow": True,
                     },
                 })
-                minute = f"{i:02d}"
-                # Two separate time segments (demonstrations)
+                # Two separate time segments (demonstrations):
+                # first 2 events at -2 hours, next 2 at -1 hour
                 if i < 2:
-                    ts = f"2026-03-04T10:{minute}:00Z"
+                    dt = _now - timedelta(hours=2, minutes=-i)
                 else:
-                    ts = f"2026-03-04T14:{minute}:00Z"  # 4 hours later
+                    dt = _now - timedelta(hours=1, minutes=-(i - 2))
+                ts = dt.strftime("%Y-%m-%dT%H:%M:%SZ")
                 conn.execute(
                     "INSERT INTO events "
                     "(id, timestamp, annotation_status, scene_annotation_json) "
@@ -856,6 +862,8 @@ class TestProcessPassiveDiscovery:
             from oc_apprentice_worker.main import _process_passive_discovery
 
             # Insert 2 close events (same demonstration)
+            from datetime import datetime, timedelta, timezone
+            _now = datetime.now(timezone.utc)
             for i in range(2):
                 ann = json.dumps({
                     "app": "Chrome",
@@ -865,11 +873,13 @@ class TestProcessPassiveDiscovery:
                         "is_workflow": True,
                     },
                 })
+                dt = _now - timedelta(hours=1, minutes=-i)
+                ts = dt.strftime("%Y-%m-%dT%H:%M:%SZ")
                 conn.execute(
                     "INSERT INTO events "
                     "(id, timestamp, annotation_status, scene_annotation_json) "
                     "VALUES (?, ?, 'completed', ?)",
-                    (f"e{i}", f"2026-03-04T10:0{i}:00Z", ann),
+                    (f"e{i}", ts, ann),
                 )
             conn.commit()
 
