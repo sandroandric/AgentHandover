@@ -21,6 +21,8 @@ pub struct AppConfig {
     pub openclaw: OpenClawConfig,
     #[serde(default)]
     pub export: ExportConfig,
+    #[serde(default)]
+    pub sop: SopConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -199,6 +201,7 @@ impl Default for AppConfig {
             llm: LlmConfig::default(),
             openclaw: OpenClawConfig::default(),
             export: ExportConfig::default(),
+            sop: SopConfig::default(),
         }
     }
 }
@@ -303,6 +306,20 @@ impl Default for ExportConfig {
             json_export: false,
             generic_output_dir: "sops".into(),
         }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SopConfig {
+    #[serde(default = "default_auto_approve")]
+    pub auto_approve: bool,
+}
+
+fn default_auto_approve() -> bool { true }
+
+impl Default for SopConfig {
+    fn default() -> Self {
+        Self { auto_approve: true }
     }
 }
 

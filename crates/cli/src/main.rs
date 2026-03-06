@@ -126,6 +126,23 @@ enum SopsAction {
     Show { slug: String },
     /// Print the SOPs directory path
     Dir,
+    /// Approve a draft SOP for export
+    Approve {
+        /// SOP slug or ID
+        slug_or_id: String,
+    },
+    /// Reject a draft SOP
+    Reject {
+        /// SOP slug or ID
+        slug_or_id: String,
+    },
+    /// List failed SOP generations
+    Failed,
+    /// Retry a failed SOP generation
+    Retry {
+        /// Failure ID to retry
+        failure_id: String,
+    },
 }
 
 fn main() -> Result<()> {
@@ -149,6 +166,10 @@ fn main() -> Result<()> {
             SopsAction::List => commands::sops::list(),
             SopsAction::Show { slug } => commands::sops::show(&slug),
             SopsAction::Dir => commands::sops::dir(),
+            SopsAction::Approve { slug_or_id } => commands::sops::approve(&slug_or_id),
+            SopsAction::Reject { slug_or_id } => commands::sops::reject(&slug_or_id),
+            SopsAction::Failed => commands::sops::failed(),
+            SopsAction::Retry { failure_id } => commands::sops::retry(&failure_id),
         },
         Commands::Watch => commands::watch::run(),
         Commands::Setup { check, extension, vlm } => commands::setup::run(check, extension, vlm),

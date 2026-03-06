@@ -520,3 +520,208 @@ class TestDomSnapshots:
             )
 
         assert results == []
+
+
+# ------------------------------------------------------------------
+# 9. Generated SOPs
+# ------------------------------------------------------------------
+
+
+class TestGeneratedSops:
+    """Test generated_sops table methods."""
+
+    def test_save_and_get_generated_sop(self, tmp_db_path: Path) -> None:
+        """Save with auto_approve=True and verify status='approved'."""
+        template = {"name": "Deploy App", "steps": [{"action": "click", "target": "button"}]}
+
+        with WorkerDB(tmp_db_path) as db:
+            sop_id = db.save_generated_sop(
+                slug="deploy-app",
+                title="Deploy App",
+                source="focus",
+                sop_template=template,
+                confidence=0.85,
+                source_id="sess-1",
+                auto_approve=True,
+            )
+            sop = db.get_generated_sop(sop_id)
+
+        assert sop is not None
+        assert sop["sop_id"] == sop_id
+        assert sop["slug"] == "deploy-app"
+        assert sop["title"] == "Deploy App"
+        assert sop["source"] == "focus"
+        assert sop["status"] == "approved"
+        assert sop["confidence"] == 0.85
+        assert sop["source_id"] == "sess-1"
+        assert sop["reviewed_at"] is not None
+        assert sop["sop_json"] == template
+
+    def test_save_draft_sop(self, tmp_db_path: Path) -> None:
+        """Save with auto_approve=False and verify status='draft'."""
+        template = {"name": "Draft SOP", "steps": []}
+
+        with WorkerDB(tmp_db_path) as db:
+            sop_id = db.save_generated_sop(
+                slug="draft-sop",
+                title="Draft SOP",
+                source="passive",
+                sop_template=template,
+                auto_approve=False,
+            )
+            sop = db.get_generated_sop(sop_id)
+
+        assert sop is not None
+        assert sop["status"] == "draft"
+        assert sop["reviewed_at"] is None
+
+    def test_get_generated_sops_filter_by_status(self, tmp_db_path: Path) -> None:
+        """Save multiple SOPs and filter by status."""
+        with WorkerDB(tmp_db_path) as db:
+            db.save_generated_sop("a", "A", "focus", {"steps": []}, auto_approve=True)
+            db.save_generated_sop("b", "B", "focus", {"steps": []}, auto_approve=False)
+            db.save_generated_sop("c", "C", "passive", {"steps": []}, auto_approve=True)
+
+            all_sops = db.get_generated_sops()
+            approved = db.get_generated_sops(status="approved")
+            drafts = db.get_generated_sops(status="draft")
+
+        assert len(all_sops) == 3
+        assert len(approved) == 2
+        assert len(drafts) == 1
+        # List view should not include sop_json
+        assert "sop_json" not in all_sops[0]
+
+    def test_get_generated_sop_by_slug(self, tmp_db_path: Path) -> None:
+        """Lookup by slug returns the most recent match."""
+        template_v1 = {"version": 1}
+        template_v2 = {"version": 2}
+
+        with WorkerDB(tmp_db_path) as db:
+            db.save_generated_sop("my-sop", "My SOP v1", "focus", template_v1)
+            db.save_generated_sop("my-sop", "My SOP v2", "focus", template_v2)
+
+            sop = db.get_generated_sop_by_slug("my-sop")
+
+        assert sop is not None
+        assert sop["slug"] == "my-sop"
+        # Most recent should be v2
+        assert sop["sop_json"]["version"] == 2
+
+    def test_update_sop_status_approve(self, tmp_db_path: Path) -> None:
+        """Change a draft SOP to approved."""
+        with WorkerDB(tmp_db_path) as db:
+            sop_id = db.save_generated_sop(
+                "test", "Test", "focus", {"steps": []}, auto_approve=False,
+            )
+            sop_before = db.get_generated_sop(sop_id)
+            assert sop_before is not None
+            assert sop_before["status"] == "draft"
+            assert sop_before["reviewed_at"] is None
+
+            updated = db.update_sop_status(sop_id, "approved")
+            sop_after = db.get_generated_sop(sop_id)
+
+        assert updated is True
+        assert sop_after is not None
+        assert sop_after["status"] == "approved"
+        assert sop_after["reviewed_at"] is not None
+
+    def test_update_sop_status_reject(self, tmp_db_path: Path) -> None:
+        """Change a draft SOP to rejected."""
+        with WorkerDB(tmp_db_path) as db:
+            sop_id = db.save_generated_sop(
+                "test", "Test", "focus", {"steps": []}, auto_approve=False,
+            )
+            updated = db.update_sop_status(sop_id, "rejected")
+            sop = db.get_generated_sop(sop_id)
+
+        assert updated is True
+        assert sop is not None
+        assert sop["status"] == "rejected"
+        assert sop["reviewed_at"] is not None
+
+    def test_get_approved_sops(self, tmp_db_path: Path) -> None:
+        """Only approved SOPs are returned, with parsed sop_json."""
+        with WorkerDB(tmp_db_path) as db:
+            db.save_generated_sop("a", "A", "focus", {"name": "A"}, auto_approve=True)
+            db.save_generated_sop("b", "B", "focus", {"name": "B"}, auto_approve=False)
+            db.save_generated_sop("c", "C", "passive", {"name": "C"}, auto_approve=True)
+
+            approved = db.get_approved_sops()
+
+        assert len(approved) == 2
+        for sop in approved:
+            assert sop["status"] == "approved"
+            assert isinstance(sop["sop_json"], dict)
+
+
+# ------------------------------------------------------------------
+# 10. Failed generations
+# ------------------------------------------------------------------
+
+
+class TestFailedGenerations:
+    """Test failed_generations table methods."""
+
+    def test_record_failed_generation(self, tmp_db_path: Path) -> None:
+        """Save and retrieve a failed generation."""
+        with WorkerDB(tmp_db_path) as db:
+            fid = db.record_failed_generation(
+                source="focus",
+                source_id="sess-1",
+                error="VLM timeout",
+                title="Deploy App",
+            )
+            failures = db.get_failed_generations()
+
+        assert len(failures) == 1
+        assert failures[0]["failure_id"] == fid
+        assert failures[0]["source"] == "focus"
+        assert failures[0]["source_id"] == "sess-1"
+        assert failures[0]["error"] == "VLM timeout"
+        assert failures[0]["title"] == "Deploy App"
+        assert failures[0]["retried"] == 0
+
+    def test_get_failed_generations_excludes_retried(self, tmp_db_path: Path) -> None:
+        """Default query excludes retried failures."""
+        with WorkerDB(tmp_db_path) as db:
+            fid1 = db.record_failed_generation("focus", "s1", "err1")
+            fid2 = db.record_failed_generation("passive", "s2", "err2")
+            db.mark_failure_retried(fid1)
+
+            unretried = db.get_failed_generations()
+            all_failures = db.get_failed_generations(include_retried=True)
+
+        assert len(unretried) == 1
+        assert unretried[0]["failure_id"] == fid2
+        assert len(all_failures) == 2
+
+    def test_mark_failure_retried(self, tmp_db_path: Path) -> None:
+        """Mark a failure as retried and verify."""
+        with WorkerDB(tmp_db_path) as db:
+            fid = db.record_failed_generation("focus", "s1", "err")
+            result = db.mark_failure_retried(fid)
+            failure = db.get_failed_generation(fid)
+
+        assert result is True
+        assert failure is not None
+        assert failure["retried"] == 1
+
+    def test_get_failed_generation_with_context(self, tmp_db_path: Path) -> None:
+        """Context JSON round-trips correctly."""
+        context = {"event_ids": ["e1", "e2"], "task_label": "deploy"}
+
+        with WorkerDB(tmp_db_path) as db:
+            fid = db.record_failed_generation(
+                source="passive",
+                source_id="cluster-5",
+                error="LLM rate limit",
+                context=context,
+            )
+            failure = db.get_failed_generation(fid)
+
+        assert failure is not None
+        assert isinstance(failure["context_json"], dict)
+        assert failure["context_json"]["event_ids"] == ["e1", "e2"]
+        assert failure["context_json"]["task_label"] == "deploy"

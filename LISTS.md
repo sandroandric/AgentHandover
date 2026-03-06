@@ -31,10 +31,10 @@ Compiled 2026-03-06 from external AI audit, verified against codebase.
 | 14 | Passive SOP JSON parse failure has no retry — single malformed VLM response wastes entire inference budget | sop_generator.py:861 | DONE |
 | 15 | Homebrew/source installs don't ship menu bar app — best UX only exists in .pkg path | openmimic.rb:25, build-pkg.sh:69 | DONE |
 | 16 | Extension README native-host install command path is wrong after `cd extension` | extension/README.md:21 | DONE |
-| 17 | Passive discovery should produce draft SOPs for approve/edit/reject, not auto-trusted outputs | Product gap | TODO |
-| 18 | User corrections to SOPs should feed back into future generation | Product gap | TODO |
-| 19 | Failed focus/passive generations need retry/resume UX, not silent log failures | Product gap | TODO |
-| 20 | First-run should be tiered: basic capture, browser-rich capture, vision-rich capture | Product gap | TODO |
+| 17 | Passive discovery should produce draft SOPs for approve/edit/reject, not auto-trusted outputs | Product gap | DONE |
+| 18 | User corrections to SOPs should feed back into future generation | Product gap | ROADMAP |
+| 19 | Failed focus/passive generations need retry/resume UX, not silent log failures | Product gap | DONE |
+| 20 | First-run should be tiered: basic capture, browser-rich capture, vision-rich capture | Product gap | WONTFIX |
 
 ---
 

@@ -9,8 +9,10 @@ for details.
 
 from __future__ import annotations
 
+import json
 import logging
 import sqlite3
+import uuid
 from pathlib import Path
 from typing import Self
 
@@ -1058,6 +1060,386 @@ class WorkerDB:
             return self._rows_to_dicts(cur.fetchall())
         except sqlite3.OperationalError:
             return []
+
+    # ------------------------------------------------------------------
+    # Generated SOPs — track all generated SOPs with review status
+    # ------------------------------------------------------------------
+
+    def _ensure_generated_sops_table(
+        self, write_conn: sqlite3.Connection,
+    ) -> None:
+        """Create the generated_sops table if it doesn't exist."""
+        write_conn.execute(
+            "CREATE TABLE IF NOT EXISTS generated_sops ("
+            "  sop_id TEXT PRIMARY KEY,"
+            "  slug TEXT NOT NULL,"
+            "  title TEXT NOT NULL DEFAULT 'Untitled',"
+            "  source TEXT NOT NULL,"
+            "  status TEXT NOT NULL DEFAULT 'draft',"
+            "  sop_json TEXT NOT NULL,"
+            "  confidence REAL DEFAULT 0.0,"
+            "  source_id TEXT DEFAULT '',"
+            "  created_at TEXT NOT NULL,"
+            "  reviewed_at TEXT DEFAULT NULL"
+            ")"
+        )
+
+    def save_generated_sop(
+        self,
+        slug: str,
+        title: str,
+        source: str,
+        sop_template: dict,
+        confidence: float = 0.0,
+        source_id: str = "",
+        auto_approve: bool = True,
+    ) -> str:
+        """Persist a generated SOP and return its sop_id.
+
+        If *auto_approve* is True, the SOP is immediately set to
+        ``status='approved'`` with ``reviewed_at`` set to now.
+        Otherwise it starts as ``status='draft'``.
+        """
+        sop_id = str(uuid.uuid4())
+        db_path = self._get_writable_path()
+        if not db_path:
+            logger.error("Cannot determine DB path for SOP save")
+            return sop_id
+
+        status = "approved" if auto_approve else "draft"
+        write_conn = sqlite3.connect(db_path)
+        try:
+            write_conn.execute("PRAGMA busy_timeout = 5000;")
+            self._ensure_generated_sops_table(write_conn)
+            if auto_approve:
+                write_conn.execute(
+                    "INSERT INTO generated_sops "
+                    "(sop_id, slug, title, source, status, sop_json, confidence, "
+                    " source_id, created_at, reviewed_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, "
+                    " strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), "
+                    " strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
+                    (sop_id, slug, title, source, status,
+                     json.dumps(sop_template), confidence, source_id),
+                )
+            else:
+                write_conn.execute(
+                    "INSERT INTO generated_sops "
+                    "(sop_id, slug, title, source, status, sop_json, confidence, "
+                    " source_id, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, "
+                    " strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
+                    (sop_id, slug, title, source, status,
+                     json.dumps(sop_template), confidence, source_id),
+                )
+            write_conn.commit()
+        except sqlite3.Error as exc:
+            logger.exception("Failed to save generated SOP: %s", exc)
+        finally:
+            write_conn.close()
+
+        return sop_id
+
+    def get_generated_sops(self, status: str | None = None) -> list[dict]:
+        """Return all SOPs, optionally filtered by status.
+
+        Does NOT include ``sop_json`` in the result (too large for list views).
+        """
+        db_path = self._get_writable_path()
+        if db_path:
+            init_conn = sqlite3.connect(db_path)
+            try:
+                init_conn.execute("PRAGMA busy_timeout = 5000;")
+                self._ensure_generated_sops_table(init_conn)
+                init_conn.commit()
+            except sqlite3.Error:
+                pass
+            finally:
+                init_conn.close()
+
+        self._refresh_read_snapshot()
+        try:
+            if status is not None:
+                cur = self._conn.execute(
+                    "SELECT sop_id, slug, title, source, status, confidence, "
+                    "  source_id, created_at, reviewed_at "
+                    "FROM generated_sops WHERE status = ? "
+                    "ORDER BY created_at DESC",
+                    (status,),
+                )
+            else:
+                cur = self._conn.execute(
+                    "SELECT sop_id, slug, title, source, status, confidence, "
+                    "  source_id, created_at, reviewed_at "
+                    "FROM generated_sops ORDER BY created_at DESC",
+                )
+            return self._rows_to_dicts(cur.fetchall())
+        except sqlite3.OperationalError:
+            return []
+
+    def get_generated_sop(self, sop_id: str) -> dict | None:
+        """Return a single SOP by ID, including ``sop_json`` parsed back to dict."""
+        db_path = self._get_writable_path()
+        if db_path:
+            init_conn = sqlite3.connect(db_path)
+            try:
+                init_conn.execute("PRAGMA busy_timeout = 5000;")
+                self._ensure_generated_sops_table(init_conn)
+                init_conn.commit()
+            except sqlite3.Error:
+                pass
+            finally:
+                init_conn.close()
+
+        self._refresh_read_snapshot()
+        try:
+            cur = self._conn.execute(
+                "SELECT * FROM generated_sops WHERE sop_id = ?",
+                (sop_id,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                return None
+            result = dict(row)
+            try:
+                result["sop_json"] = json.loads(result["sop_json"])
+            except (ValueError, TypeError):
+                pass
+            return result
+        except sqlite3.OperationalError:
+            return None
+
+    def get_generated_sop_by_slug(self, slug: str) -> dict | None:
+        """Return the most recent SOP matching *slug*, including parsed ``sop_json``."""
+        db_path = self._get_writable_path()
+        if db_path:
+            init_conn = sqlite3.connect(db_path)
+            try:
+                init_conn.execute("PRAGMA busy_timeout = 5000;")
+                self._ensure_generated_sops_table(init_conn)
+                init_conn.commit()
+            except sqlite3.Error:
+                pass
+            finally:
+                init_conn.close()
+
+        self._refresh_read_snapshot()
+        try:
+            cur = self._conn.execute(
+                "SELECT * FROM generated_sops WHERE slug = ? "
+                "ORDER BY created_at DESC, rowid DESC LIMIT 1",
+                (slug,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                return None
+            result = dict(row)
+            try:
+                result["sop_json"] = json.loads(result["sop_json"])
+            except (ValueError, TypeError):
+                pass
+            return result
+        except sqlite3.OperationalError:
+            return None
+
+    def update_sop_status(self, sop_id: str, status: str) -> bool:
+        """Update SOP status to 'approved' or 'rejected' and set reviewed_at."""
+        db_path = self._get_writable_path()
+        if not db_path:
+            return False
+
+        write_conn = sqlite3.connect(db_path)
+        try:
+            write_conn.execute("PRAGMA busy_timeout = 5000;")
+            self._ensure_generated_sops_table(write_conn)
+            cursor = write_conn.execute(
+                "UPDATE generated_sops SET status = ?, "
+                "reviewed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
+                "WHERE sop_id = ?",
+                (status, sop_id),
+            )
+            write_conn.commit()
+            return cursor.rowcount > 0
+        except sqlite3.Error as exc:
+            logger.exception("Failed to update SOP status: %s", exc)
+            return False
+        finally:
+            write_conn.close()
+
+    def get_approved_sops(self) -> list[dict]:
+        """Return all approved SOPs, including parsed ``sop_json``."""
+        db_path = self._get_writable_path()
+        if db_path:
+            init_conn = sqlite3.connect(db_path)
+            try:
+                init_conn.execute("PRAGMA busy_timeout = 5000;")
+                self._ensure_generated_sops_table(init_conn)
+                init_conn.commit()
+            except sqlite3.Error:
+                pass
+            finally:
+                init_conn.close()
+
+        self._refresh_read_snapshot()
+        try:
+            cur = self._conn.execute(
+                "SELECT * FROM generated_sops WHERE status = 'approved' "
+                "ORDER BY created_at DESC",
+            )
+            results = []
+            for row in cur.fetchall():
+                d = dict(row)
+                try:
+                    d["sop_json"] = json.loads(d["sop_json"])
+                except (ValueError, TypeError):
+                    pass
+                results.append(d)
+            return results
+        except sqlite3.OperationalError:
+            return []
+
+    # ------------------------------------------------------------------
+    # Failed generations — track failures for retry
+    # ------------------------------------------------------------------
+
+    def _ensure_failed_generations_table(
+        self, write_conn: sqlite3.Connection,
+    ) -> None:
+        """Create the failed_generations table if it doesn't exist."""
+        write_conn.execute(
+            "CREATE TABLE IF NOT EXISTS failed_generations ("
+            "  failure_id TEXT PRIMARY KEY,"
+            "  source TEXT NOT NULL,"
+            "  source_id TEXT NOT NULL,"
+            "  title TEXT DEFAULT '',"
+            "  error TEXT NOT NULL,"
+            "  context_json TEXT DEFAULT '{}',"
+            "  created_at TEXT NOT NULL,"
+            "  retried INTEGER DEFAULT 0"
+            ")"
+        )
+
+    def record_failed_generation(
+        self,
+        source: str,
+        source_id: str,
+        error: str,
+        title: str = "",
+        context: dict | None = None,
+    ) -> str:
+        """Record a generation failure for later retry. Returns failure_id."""
+        failure_id = str(uuid.uuid4())
+        db_path = self._get_writable_path()
+        if not db_path:
+            logger.error("Cannot determine DB path for failure record")
+            return failure_id
+
+        write_conn = sqlite3.connect(db_path)
+        try:
+            write_conn.execute("PRAGMA busy_timeout = 5000;")
+            self._ensure_failed_generations_table(write_conn)
+            write_conn.execute(
+                "INSERT INTO failed_generations "
+                "(failure_id, source, source_id, title, error, context_json, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
+                (failure_id, source, source_id, title, error,
+                 json.dumps(context or {})),
+            )
+            write_conn.commit()
+        except sqlite3.Error as exc:
+            logger.exception("Failed to record generation failure: %s", exc)
+        finally:
+            write_conn.close()
+
+        return failure_id
+
+    def get_failed_generations(self, include_retried: bool = False) -> list[dict]:
+        """Return failed generations, by default only unretried ones.
+
+        Sorted by created_at DESC (newest first).
+        """
+        db_path = self._get_writable_path()
+        if db_path:
+            init_conn = sqlite3.connect(db_path)
+            try:
+                init_conn.execute("PRAGMA busy_timeout = 5000;")
+                self._ensure_failed_generations_table(init_conn)
+                init_conn.commit()
+            except sqlite3.Error:
+                pass
+            finally:
+                init_conn.close()
+
+        self._refresh_read_snapshot()
+        try:
+            if include_retried:
+                cur = self._conn.execute(
+                    "SELECT * FROM failed_generations "
+                    "ORDER BY created_at DESC",
+                )
+            else:
+                cur = self._conn.execute(
+                    "SELECT * FROM failed_generations "
+                    "WHERE retried = 0 ORDER BY created_at DESC",
+                )
+            return self._rows_to_dicts(cur.fetchall())
+        except sqlite3.OperationalError:
+            return []
+
+    def get_failed_generation(self, failure_id: str) -> dict | None:
+        """Return a single failure with parsed context_json."""
+        db_path = self._get_writable_path()
+        if db_path:
+            init_conn = sqlite3.connect(db_path)
+            try:
+                init_conn.execute("PRAGMA busy_timeout = 5000;")
+                self._ensure_failed_generations_table(init_conn)
+                init_conn.commit()
+            except sqlite3.Error:
+                pass
+            finally:
+                init_conn.close()
+
+        self._refresh_read_snapshot()
+        try:
+            cur = self._conn.execute(
+                "SELECT * FROM failed_generations WHERE failure_id = ?",
+                (failure_id,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                return None
+            result = dict(row)
+            try:
+                result["context_json"] = json.loads(result["context_json"])
+            except (ValueError, TypeError):
+                pass
+            return result
+        except sqlite3.OperationalError:
+            return None
+
+    def mark_failure_retried(self, failure_id: str) -> bool:
+        """Mark a failure as retried. Returns True if a row was updated."""
+        db_path = self._get_writable_path()
+        if not db_path:
+            return False
+
+        write_conn = sqlite3.connect(db_path)
+        try:
+            write_conn.execute("PRAGMA busy_timeout = 5000;")
+            self._ensure_failed_generations_table(write_conn)
+            cursor = write_conn.execute(
+                "UPDATE failed_generations SET retried = 1 "
+                "WHERE failure_id = ?",
+                (failure_id,),
+            )
+            write_conn.commit()
+            return cursor.rowcount > 0
+        except sqlite3.Error as exc:
+            logger.exception("Failed to mark failure retried: %s", exc)
+            return False
+        finally:
+            write_conn.close()
 
     # ------------------------------------------------------------------
     # Lifecycle

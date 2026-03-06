@@ -240,6 +240,39 @@ def _read_vlm_v2_config() -> dict:
     }
 
 
+def _read_sop_config() -> dict:
+    """Read the [sop] section from config.toml.
+
+    Returns a dict with defaults for missing fields.
+    """
+    import tomllib
+
+    if _platform.system() == "Darwin":
+        config_path = (
+            Path.home() / "Library" / "Application Support"
+            / "oc-apprentice" / "config.toml"
+        )
+    else:
+        config_path = Path.home() / ".config" / "oc-apprentice" / "config.toml"
+
+    defaults = {
+        "auto_approve": True,
+    }
+
+    if not config_path.is_file():
+        return defaults
+
+    try:
+        with open(config_path, "rb") as f:
+            cfg = tomllib.load(f)
+        sop = cfg.get("sop", {})
+        if "auto_approve" in sop:
+            defaults["auto_approve"] = bool(sop["auto_approve"])
+        return defaults
+    except Exception:
+        return defaults
+
+
 def _check_v2_schema(db: "WorkerDB") -> bool:
     """Check if the database has the v2 annotation columns.
 
@@ -832,6 +865,7 @@ def _process_focus_sessions(
     skill_md_writer: "SOPExportAdapter | None" = None,
     claude_skill_writer: "SOPExportAdapter | None" = None,
     index_generator: "IndexGenerator",
+    sop_auto_approve: bool = True,
 ) -> int:
     """Process completed focus recording sessions.
 
@@ -957,47 +991,87 @@ def _process_focus_sessions(
                     exc_info=True,
                 )
 
-    # Export
+    # Save generated SOPs to DB for review tracking
     exported = 0
     if sop_templates:
-        # Deduplicate against known SOPs
-        from oc_apprentice_worker.sop_dedup import deduplicate_templates
-        sop_templates = deduplicate_templates(sop_templates, _status_dir())
+        for template in sop_templates:
+            slug = template.get("slug", "")
+            try:
+                db.save_generated_sop(
+                    slug=slug,
+                    title=title,
+                    source="focus",
+                    sop_template=template,
+                    confidence=template.get("confidence", 0.0),
+                    source_id=session_id,
+                    auto_approve=sop_auto_approve,
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to save generated SOP to DB for '%s'",
+                    title, exc_info=True,
+                )
 
-        try:
-            paths = openclaw_writer.write_all_sops(sop_templates)
-            exported = len(paths)
-            index_generator.update_index(
-                openclaw_writer.get_sops_dir(), sop_templates
-            )
+        # Only export if auto_approve is enabled
+        if sop_auto_approve:
+            # Deduplicate against known SOPs
+            from oc_apprentice_worker.sop_dedup import deduplicate_templates
+            sop_templates = deduplicate_templates(sop_templates, _status_dir())
+
+            try:
+                paths = openclaw_writer.write_all_sops(sop_templates)
+                exported = len(paths)
+                index_generator.update_index(
+                    openclaw_writer.get_sops_dir(), sop_templates
+                )
+                logger.info(
+                    "Focus session '%s': exported %d SOP(s)", title, exported
+                )
+            except Exception:
+                logger.exception("Focus session SOP export failed")
+
+            # Also export as SKILL.md if writer is configured
+            if skill_md_writer is not None:
+                try:
+                    skill_md_writer.write_all_sops(sop_templates)
+                    logger.info(
+                        "Focus session '%s': SKILL.md export complete", title
+                    )
+                except Exception:
+                    logger.exception("Focus session SKILL.md export failed")
+
+            # Also export as Claude Code skills if writer is configured
+            if claude_skill_writer is not None:
+                try:
+                    claude_skill_writer.write_all_sops(sop_templates)
+                    logger.info(
+                        "Focus session '%s': Claude skill export complete", title
+                    )
+                except Exception:
+                    logger.exception("Focus session Claude skill export failed")
+
+            # Cache focus session SOPs for CLI export trigger
+            _save_sop_cache(sop_templates)
+        else:
             logger.info(
-                "Focus session '%s': exported %d SOP(s)", title, exported
+                "Focus session '%s': SOP(s) saved as draft (auto_approve=False)",
+                title,
+            )
+    elif not sop_templates and sop_inducer is not None:
+        # SOP induction ran but produced no templates — record failure
+        try:
+            db.record_failed_generation(
+                source="focus",
+                source_id=session_id,
+                error="SOP induction produced no templates",
+                title=title,
+                context={"event_count": len(focus_events)},
             )
         except Exception:
-            logger.exception("Focus session SOP export failed")
-
-        # Also export as SKILL.md if writer is configured
-        if skill_md_writer is not None:
-            try:
-                skill_md_writer.write_all_sops(sop_templates)
-                logger.info(
-                    "Focus session '%s': SKILL.md export complete", title
-                )
-            except Exception:
-                logger.exception("Focus session SKILL.md export failed")
-
-        # Also export as Claude Code skills if writer is configured
-        if claude_skill_writer is not None:
-            try:
-                claude_skill_writer.write_all_sops(sop_templates)
-                logger.info(
-                    "Focus session '%s': Claude skill export complete", title
-                )
-            except Exception:
-                logger.exception("Focus session Claude skill export failed")
-
-        # Cache focus session SOPs for CLI export trigger
-        _save_sop_cache(sop_templates)
+            logger.debug(
+                "Failed to record generation failure for '%s'",
+                title, exc_info=True,
+            )
 
     # Clear the signal file so it's not reprocessed
     _clear_focus_signal(signal_path)
@@ -1014,6 +1088,7 @@ def _process_focus_sessions_v2(
     claude_skill_writer: "SOPExportAdapter | None" = None,
     index_generator: "IndexGenerator",
     screenshots_dir: str | Path = "",
+    sop_auto_approve: bool = True,
 ) -> int:
     """Process completed focus recording sessions via v2 VLM pipeline.
 
@@ -1068,44 +1143,83 @@ def _process_focus_sessions_v2(
     exported = 0
     if result.success and result.sop:
         sop_templates = [result.sop]
+        slug = result.sop.get("slug", "")
 
-        # Deduplicate against known SOPs
-        from oc_apprentice_worker.sop_dedup import deduplicate_templates
-        sop_templates = deduplicate_templates(sop_templates, _status_dir())
-
-        # Export via primary writer
+        # Save generated SOP to DB for review tracking
         try:
-            paths = openclaw_writer.write_all_sops(sop_templates)
-            exported = len(paths)
-            index_generator.update_index(
-                openclaw_writer.get_sops_dir(), sop_templates
-            )
-            logger.info(
-                "Focus v2 session '%s': exported %d SOP(s) (%.1fs VLM time)",
-                title, exported, result.inference_time_seconds,
+            db.save_generated_sop(
+                slug=slug,
+                title=title,
+                source="focus",
+                sop_template=result.sop,
+                confidence=result.sop.get("confidence", 0.0),
+                source_id=session_id,
+                auto_approve=sop_auto_approve,
             )
         except Exception:
-            logger.exception("Focus v2 SOP export failed")
+            logger.warning(
+                "Failed to save generated SOP to DB for '%s'",
+                title, exc_info=True,
+            )
 
-        # Also export as SKILL.md
-        if skill_md_writer is not None:
+        # Only export if auto_approve is enabled
+        if sop_auto_approve:
+            # Deduplicate against known SOPs
+            from oc_apprentice_worker.sop_dedup import deduplicate_templates
+            sop_templates = deduplicate_templates(sop_templates, _status_dir())
+
+            # Export via primary writer
             try:
-                skill_md_writer.write_all_sops(sop_templates)
-                logger.info("Focus v2 session '%s': SKILL.md export complete", title)
+                paths = openclaw_writer.write_all_sops(sop_templates)
+                exported = len(paths)
+                index_generator.update_index(
+                    openclaw_writer.get_sops_dir(), sop_templates
+                )
+                logger.info(
+                    "Focus v2 session '%s': exported %d SOP(s) (%.1fs VLM time)",
+                    title, exported, result.inference_time_seconds,
+                )
             except Exception:
-                logger.exception("Focus v2 SKILL.md export failed")
+                logger.exception("Focus v2 SOP export failed")
 
-        # Also export as Claude Code skills
-        if claude_skill_writer is not None:
-            try:
-                claude_skill_writer.write_all_sops(sop_templates)
-                logger.info("Focus v2 session '%s': Claude skill export complete", title)
-            except Exception:
-                logger.exception("Focus v2 Claude skill export failed")
+            # Also export as SKILL.md
+            if skill_md_writer is not None:
+                try:
+                    skill_md_writer.write_all_sops(sop_templates)
+                    logger.info("Focus v2 session '%s': SKILL.md export complete", title)
+                except Exception:
+                    logger.exception("Focus v2 SKILL.md export failed")
 
-        # Cache for CLI export trigger
-        _save_sop_cache(sop_templates)
+            # Also export as Claude Code skills
+            if claude_skill_writer is not None:
+                try:
+                    claude_skill_writer.write_all_sops(sop_templates)
+                    logger.info("Focus v2 session '%s': Claude skill export complete", title)
+                except Exception:
+                    logger.exception("Focus v2 Claude skill export failed")
+
+            # Cache for CLI export trigger
+            _save_sop_cache(sop_templates)
+        else:
+            logger.info(
+                "Focus v2 session '%s': SOP saved as draft (auto_approve=False)",
+                title,
+            )
     else:
+        # Record failure for retry tracking
+        try:
+            db.record_failed_generation(
+                source="focus",
+                source_id=session_id,
+                error=result.error or "Unknown error",
+                title=title,
+                context={"event_count": len(focus_events)},
+            )
+        except Exception:
+            logger.debug(
+                "Failed to record generation failure for '%s'",
+                title, exc_info=True,
+            )
         logger.warning(
             "Focus v2 session '%s' SOP generation failed: %s",
             title, result.error,
@@ -1125,6 +1239,7 @@ def _process_passive_discovery(
     skill_md_writer: "SOPExportAdapter | None" = None,
     claude_skill_writer: "SOPExportAdapter | None" = None,
     index_generator: "IndexGenerator",
+    sop_auto_approve: bool = True,
 ) -> int:
     """Run passive discovery: segment annotations → generate SOPs.
 
@@ -1256,6 +1371,20 @@ def _process_passive_discovery(
         )
 
         if not result.success or not result.sop:
+            # Record failure for retry tracking
+            try:
+                db.record_failed_generation(
+                    source="passive",
+                    source_id=str(cluster_id),
+                    error=result.error or "Unknown error",
+                    title=task_label,
+                    context={"segment_count": len(pending_segs)},
+                )
+            except Exception:
+                logger.debug(
+                    "Failed to record generation failure for '%s'",
+                    task_label[:60], exc_info=True,
+                )
             logger.warning(
                 "Passive SOP generation failed for '%s': %s",
                 task_label[:60], result.error,
@@ -1263,44 +1392,426 @@ def _process_passive_discovery(
             continue
 
         sop_templates = [result.sop]
+        slug = result.sop.get("slug", "")
 
-        # Deduplicate against known SOPs
-        from oc_apprentice_worker.sop_dedup import deduplicate_templates
-        sop_templates = deduplicate_templates(sop_templates, _status_dir())
-
-        # Export
+        # Save generated SOP to DB for review tracking
         try:
-            paths = openclaw_writer.write_all_sops(sop_templates)
-            total_exported += len(paths)
-            index_generator.update_index(
-                openclaw_writer.get_sops_dir(), sop_templates,
-            )
-            logger.info(
-                "Passive SOP '%s': exported %d SOP(s) (%.1fs VLM)",
-                task_label[:60], len(paths), result.inference_time_seconds,
+            db.save_generated_sop(
+                slug=slug,
+                title=task_label,
+                source="passive",
+                sop_template=result.sop,
+                confidence=result.sop.get("confidence", 0.0),
+                source_id=str(cluster_id),
+                auto_approve=sop_auto_approve,
             )
         except Exception:
-            logger.exception("Passive SOP export failed for '%s'", task_label[:60])
+            logger.warning(
+                "Failed to save generated SOP to DB for '%s'",
+                task_label[:60], exc_info=True,
+            )
 
-        if skill_md_writer is not None:
+        # Only export if auto_approve is enabled
+        if sop_auto_approve:
+            # Deduplicate against known SOPs
+            from oc_apprentice_worker.sop_dedup import deduplicate_templates
+            sop_templates = deduplicate_templates(sop_templates, _status_dir())
+
+            # Export
             try:
-                skill_md_writer.write_all_sops(sop_templates)
+                paths = openclaw_writer.write_all_sops(sop_templates)
+                total_exported += len(paths)
+                index_generator.update_index(
+                    openclaw_writer.get_sops_dir(), sop_templates,
+                )
+                logger.info(
+                    "Passive SOP '%s': exported %d SOP(s) (%.1fs VLM)",
+                    task_label[:60], len(paths), result.inference_time_seconds,
+                )
             except Exception:
-                logger.exception("Passive SKILL.md export failed")
+                logger.exception("Passive SOP export failed for '%s'", task_label[:60])
 
-        if claude_skill_writer is not None:
-            try:
-                claude_skill_writer.write_all_sops(sop_templates)
-            except Exception:
-                logger.exception("Passive Claude skill export failed")
+            if skill_md_writer is not None:
+                try:
+                    skill_md_writer.write_all_sops(sop_templates)
+                except Exception:
+                    logger.exception("Passive SKILL.md export failed")
 
-        _save_sop_cache(sop_templates)
+            if claude_skill_writer is not None:
+                try:
+                    claude_skill_writer.write_all_sops(sop_templates)
+                except Exception:
+                    logger.exception("Passive Claude skill export failed")
+
+            _save_sop_cache(sop_templates)
+        else:
+            logger.info(
+                "Passive SOP '%s': saved as draft (auto_approve=False)",
+                task_label[:60],
+            )
 
         # Mark all pending segments in this cluster as SOP-generated
         for seg_id in segment_ids:
             db.mark_segment_sop_generated(seg_id)
 
     return total_exported
+
+
+def _process_retry_triggers(
+    db: "WorkerDB",
+    *,
+    focus_processor: "FocusProcessor | None" = None,
+    sop_generator: "SOPGenerator | None" = None,
+    openclaw_writer: "SOPExportAdapter",
+    skill_md_writer: "SOPExportAdapter | None" = None,
+    claude_skill_writer: "SOPExportAdapter | None" = None,
+    index_generator: "IndexGenerator",
+    screenshots_dir: str | Path = "",
+    sop_auto_approve: bool = True,
+) -> None:
+    """Check for and process a retry-trigger.json file.
+
+    Re-runs SOP generation for a previously failed attempt, then marks
+    the failure as retried in the DB.
+    """
+    state_dir = _status_dir()
+    trigger_path = state_dir / "retry-trigger.json"
+
+    if not trigger_path.is_file():
+        return
+
+    try:
+        with open(trigger_path) as f:
+            trigger = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        logger.debug("Could not read retry-trigger.json", exc_info=True)
+        return
+
+    failure_id = trigger.get("failure_id", "")
+    if not failure_id:
+        logger.warning("retry-trigger.json missing failure_id")
+        _remove_trigger(trigger_path)
+        return
+
+    logger.info("Processing retry trigger for failure_id=%s", failure_id)
+
+    try:
+        failure = db.get_failed_generation(failure_id)
+    except Exception:
+        logger.warning(
+            "Failed to read failure record %s from DB",
+            failure_id, exc_info=True,
+        )
+        _remove_trigger(trigger_path)
+        return
+
+    if failure is None:
+        logger.warning("Retry trigger: failure_id=%s not found in DB", failure_id)
+        _remove_trigger(trigger_path)
+        return
+
+    source = failure.get("source", "")
+    source_id = failure.get("source_id", "")
+    title = failure.get("title", "")
+
+    try:
+        if source == "focus" and focus_processor is not None:
+            # Re-run focus session generation
+            focus_events = db.get_focus_session_events(source_id)
+            if focus_events:
+                result = focus_processor.process_session(
+                    db, source_id, title, focus_events,
+                    screenshots_dir=screenshots_dir,
+                )
+                if result.success and result.sop:
+                    slug = result.sop.get("slug", "")
+                    try:
+                        db.save_generated_sop(
+                            slug=slug,
+                            title=title,
+                            source="focus",
+                            sop_template=result.sop,
+                            confidence=result.sop.get("confidence", 0.0),
+                            source_id=source_id,
+                            auto_approve=sop_auto_approve,
+                        )
+                    except Exception:
+                        logger.warning(
+                            "Retry: failed to save SOP to DB", exc_info=True,
+                        )
+
+                    if sop_auto_approve:
+                        _export_sop_templates(
+                            [result.sop],
+                            openclaw_writer=openclaw_writer,
+                            skill_md_writer=skill_md_writer,
+                            claude_skill_writer=claude_skill_writer,
+                            index_generator=index_generator,
+                        )
+                    logger.info(
+                        "Retry succeeded for focus session '%s'", title,
+                    )
+                else:
+                    logger.warning(
+                        "Retry failed again for focus session '%s': %s",
+                        title, result.error,
+                    )
+            else:
+                logger.warning(
+                    "Retry: no events found for focus session %s", source_id,
+                )
+
+        elif source == "passive" and sop_generator is not None:
+            # Re-run passive generation for the cluster
+            pending_segs = db.get_cluster_segments(int(source_id))
+            if pending_segs:
+                import json as _json
+                demonstrations: list[list[dict]] = []
+                for seg_row in pending_segs:
+                    event_ids = _json.loads(
+                        seg_row.get("event_ids_json", "[]")
+                    )
+                    events_for_seg = db.get_events_by_ids(event_ids)
+                    timeline: list[dict] = []
+                    for ev in events_for_seg:
+                        ann_raw = ev.get("scene_annotation_json")
+                        if not ann_raw:
+                            continue
+                        try:
+                            annotation = (
+                                _json.loads(ann_raw)
+                                if isinstance(ann_raw, str) else ann_raw
+                            )
+                        except (_json.JSONDecodeError, TypeError):
+                            continue
+                        diff = None
+                        diff_raw = ev.get("frame_diff_json")
+                        if diff_raw:
+                            try:
+                                diff = (
+                                    _json.loads(diff_raw)
+                                    if isinstance(diff_raw, str) else diff_raw
+                                )
+                            except (_json.JSONDecodeError, TypeError):
+                                pass
+                        timeline.append({
+                            "annotation": annotation,
+                            "diff": diff,
+                            "timestamp": ev.get("timestamp", ""),
+                        })
+                    if timeline:
+                        demonstrations.append(timeline)
+
+                if demonstrations:
+                    result = sop_generator.generate_from_passive(
+                        demonstrations, task_label=title,
+                    )
+                    if result.success and result.sop:
+                        slug = result.sop.get("slug", "")
+                        try:
+                            db.save_generated_sop(
+                                slug=slug,
+                                title=title,
+                                source="passive",
+                                sop_template=result.sop,
+                                confidence=result.sop.get("confidence", 0.0),
+                                source_id=source_id,
+                                auto_approve=sop_auto_approve,
+                            )
+                        except Exception:
+                            logger.warning(
+                                "Retry: failed to save SOP to DB",
+                                exc_info=True,
+                            )
+
+                        if sop_auto_approve:
+                            _export_sop_templates(
+                                [result.sop],
+                                openclaw_writer=openclaw_writer,
+                                skill_md_writer=skill_md_writer,
+                                claude_skill_writer=claude_skill_writer,
+                                index_generator=index_generator,
+                            )
+                        logger.info(
+                            "Retry succeeded for passive cluster '%s'", title,
+                        )
+                    else:
+                        logger.warning(
+                            "Retry failed again for passive cluster '%s': %s",
+                            title, result.error,
+                        )
+            else:
+                logger.warning(
+                    "Retry: no segments found for cluster %s", source_id,
+                )
+        else:
+            logger.warning(
+                "Retry trigger: unsupported source '%s' or processor unavailable",
+                source,
+            )
+    except Exception:
+        logger.warning("Retry trigger processing failed", exc_info=True)
+
+    # Mark failure as retried regardless of outcome
+    try:
+        db.mark_failure_retried(failure_id)
+    except Exception:
+        logger.debug("Failed to mark failure as retried", exc_info=True)
+
+    _remove_trigger(trigger_path)
+
+
+def _process_approval_triggers(
+    db: "WorkerDB",
+    *,
+    openclaw_writer: "SOPExportAdapter",
+    skill_md_writer: "SOPExportAdapter | None" = None,
+    claude_skill_writer: "SOPExportAdapter | None" = None,
+    index_generator: "IndexGenerator",
+) -> None:
+    """Check for and process an approve-trigger.json file.
+
+    Approves or rejects a draft SOP.  On approval, exports the SOP via
+    all active adapters.
+    """
+    state_dir = _status_dir()
+    trigger_path = state_dir / "approve-trigger.json"
+
+    if not trigger_path.is_file():
+        return
+
+    try:
+        with open(trigger_path) as f:
+            trigger = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        logger.debug("Could not read approve-trigger.json", exc_info=True)
+        return
+
+    sop_id = trigger.get("sop_id", "")
+    action = trigger.get("action", "")
+
+    if not sop_id or action not in ("approve", "reject"):
+        logger.warning(
+            "approve-trigger.json invalid: sop_id=%s action=%s",
+            sop_id, action,
+        )
+        _remove_trigger(trigger_path)
+        return
+
+    logger.info("Processing approval trigger: sop_id=%s action=%s", sop_id, action)
+
+    try:
+        if action == "approve":
+            if db.update_sop_status(sop_id, "approved"):
+                sop_record = db.get_generated_sop(sop_id)
+                if sop_record and sop_record.get("sop_json"):
+                    sop_template = sop_record["sop_json"]
+                    _export_sop_templates(
+                        [sop_template],
+                        openclaw_writer=openclaw_writer,
+                        skill_md_writer=skill_md_writer,
+                        claude_skill_writer=claude_skill_writer,
+                        index_generator=index_generator,
+                    )
+                    logger.info("Approved and exported SOP %s", sop_id)
+                else:
+                    logger.warning(
+                        "Approved SOP %s but could not load template for export",
+                        sop_id,
+                    )
+            else:
+                logger.warning("Failed to approve SOP %s (not found?)", sop_id)
+
+        elif action == "reject":
+            if db.update_sop_status(sop_id, "rejected"):
+                logger.info("Rejected SOP %s", sop_id)
+            else:
+                logger.warning("Failed to reject SOP %s (not found?)", sop_id)
+    except Exception:
+        logger.warning(
+            "Approval trigger processing failed for %s",
+            sop_id, exc_info=True,
+        )
+
+    _remove_trigger(trigger_path)
+
+
+def _process_failed_query_trigger(db: "WorkerDB") -> None:
+    """Check for and process a failed-query-trigger.json file.
+
+    Reads failed generations from the DB and writes the result to
+    failed-query-result.json for the CLI to pick up.
+    """
+    state_dir = _status_dir()
+    trigger_path = state_dir / "failed-query-trigger.json"
+
+    if not trigger_path.is_file():
+        return
+
+    logger.info("Processing failed generations query trigger")
+
+    try:
+        failures = db.get_failed_generations(include_retried=False)
+        result = {
+            "failures": [
+                {
+                    "id": f.get("failure_id", ""),
+                    "sop_slug": f.get("title", "") or f.get("source_id", ""),
+                    "source": f.get("source", ""),
+                    "error": f.get("error", ""),
+                    "created_at": f.get("created_at", ""),
+                }
+                for f in failures
+            ]
+        }
+        result_path = state_dir / "failed-query-result.json"
+        with open(result_path, "w") as f:
+            json.dump(result, f, indent=2)
+        logger.info("Wrote %d failures to result file", len(failures))
+    except Exception:
+        logger.warning("Failed to process failed query trigger", exc_info=True)
+
+    _remove_trigger(trigger_path)
+
+
+def _export_sop_templates(
+    sop_templates: list[dict],
+    *,
+    openclaw_writer: "SOPExportAdapter",
+    skill_md_writer: "SOPExportAdapter | None" = None,
+    claude_skill_writer: "SOPExportAdapter | None" = None,
+    index_generator: "IndexGenerator",
+) -> None:
+    """Export SOP templates via all active adapters.
+
+    Shared helper used by approval triggers and retry triggers to avoid
+    duplicating the multi-adapter export logic.
+    """
+    from oc_apprentice_worker.sop_dedup import deduplicate_templates
+    sop_templates = deduplicate_templates(sop_templates, _status_dir())
+
+    try:
+        paths = openclaw_writer.write_all_sops(sop_templates)
+        index_generator.update_index(
+            openclaw_writer.get_sops_dir(), sop_templates,
+        )
+        logger.info("Exported %d SOP(s) via primary adapter", len(paths))
+    except Exception:
+        logger.exception("SOP export failed (primary adapter)")
+
+    if skill_md_writer is not None:
+        try:
+            skill_md_writer.write_all_sops(sop_templates)
+        except Exception:
+            logger.exception("SKILL.md export failed")
+
+    if claude_skill_writer is not None:
+        try:
+            claude_skill_writer.write_all_sops(sop_templates)
+        except Exception:
+            logger.exception("Claude Code skill export failed")
+
+    _save_sop_cache(sop_templates)
 
 
 def _clear_focus_signal(signal_path: Path) -> None:
@@ -1997,6 +2508,11 @@ def main(argv: list[str] | None = None) -> None:
     else:
         logger.info("v2 scene annotation pipeline disabled by config")
 
+    # Read SOP review config
+    sop_config = _read_sop_config()
+    sop_auto_approve = sop_config["auto_approve"]
+    logger.info("SOP auto_approve: %s", sop_auto_approve)
+
     # Initialize scheduler gate (GAP 5) and deep scanner (GAP 6)
     # Read idle_jobs config from config.toml if available
     _idle_cfg = _read_idle_jobs_config()
@@ -2071,6 +2587,27 @@ def main(argv: list[str] | None = None) -> None:
 
         while not shutdown_flag[0]:
             try:
+                # Process retry and approval triggers first
+                _process_retry_triggers(
+                    db,
+                    focus_processor=focus_processor,
+                    sop_generator=sop_generator,
+                    openclaw_writer=sop_writer,
+                    skill_md_writer=skill_md_writer,
+                    claude_skill_writer=claude_skill_writer,
+                    index_generator=index_generator,
+                    screenshots_dir=screenshots_dir,
+                    sop_auto_approve=sop_auto_approve,
+                )
+                _process_approval_triggers(
+                    db,
+                    openclaw_writer=sop_writer,
+                    skill_md_writer=skill_md_writer,
+                    claude_skill_writer=claude_skill_writer,
+                    index_generator=index_generator,
+                )
+                _process_failed_query_trigger(db)
+
                 # Process any completed focus recording sessions first.
                 # Use v2 VLM pipeline when available (semantic SOPs from
                 # screen annotations), fall back to v1 (episode builder +
@@ -2084,6 +2621,7 @@ def main(argv: list[str] | None = None) -> None:
                         claude_skill_writer=claude_skill_writer,
                         index_generator=index_generator,
                         screenshots_dir=screenshots_dir,
+                        sop_auto_approve=sop_auto_approve,
                     )
                 else:
                     focus_sops = _process_focus_sessions(
@@ -2099,6 +2637,7 @@ def main(argv: list[str] | None = None) -> None:
                         skill_md_writer=skill_md_writer,
                         claude_skill_writer=claude_skill_writer,
                         index_generator=index_generator,
+                        sop_auto_approve=sop_auto_approve,
                     )
                 if focus_sops > 0:
                     total_sops_generated += focus_sops
@@ -2309,6 +2848,7 @@ def main(argv: list[str] | None = None) -> None:
                                 skill_md_writer=skill_md_writer,
                                 claude_skill_writer=claude_skill_writer,
                                 index_generator=index_generator,
+                                sop_auto_approve=sop_auto_approve,
                             )
                             if pd_sops > 0:
                                 total_passive_sops += pd_sops
