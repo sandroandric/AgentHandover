@@ -1119,7 +1119,7 @@ def _process_focus_sessions(
                     title=title,
                     source="focus",
                     sop_template=template,
-                    confidence=template.get("confidence", 0.0),
+                    confidence=template.get("confidence_avg", template.get("confidence", 0.0)),
                     source_id=session_id,
                     auto_approve=sop_auto_approve,
                 )
@@ -1289,7 +1289,7 @@ def _process_focus_sessions_v2(
                 title=title,
                 source="focus",
                 sop_template=result.sop,
-                confidence=result.sop.get("confidence", 0.0),
+                confidence=result.sop.get("confidence_avg", result.sop.get("confidence", 0.0)),
                 source_id=session_id,
                 auto_approve=sop_auto_approve,
             )
@@ -1557,7 +1557,7 @@ def _process_passive_discovery(
                 title=task_label,
                 source="passive",
                 sop_template=result.sop,
-                confidence=result.sop.get("confidence", 0.0),
+                confidence=result.sop.get("confidence_avg", result.sop.get("confidence", 0.0)),
                 source_id=str(cluster_id),
                 auto_approve=sop_auto_approve,
             )
@@ -1699,7 +1699,7 @@ def _process_retry_triggers(
                                 title=title,
                                 source="focus",
                                 sop_template=result.sop,
-                                confidence=result.sop.get("confidence", 0.0),
+                                confidence=result.sop.get("confidence_avg", result.sop.get("confidence", 0.0)),
                                 source_id=source_id,
                                 auto_approve=sop_auto_approve,
                             )
@@ -1794,7 +1794,7 @@ def _process_retry_triggers(
                                     title=title,
                                     source="passive",
                                     sop_template=result.sop,
-                                    confidence=result.sop.get("confidence", 0.0),
+                                    confidence=result.sop.get("confidence_avg", result.sop.get("confidence", 0.0)),
                                     source_id=source_id,
                                     auto_approve=sop_auto_approve,
                                 )
@@ -1867,16 +1867,22 @@ def _process_approval_triggers(
         logger.debug("Could not read approve-trigger.json", exc_info=True)
         return
 
-    sop_id = trigger.get("sop_id", "")
+    sop_id_or_slug = trigger.get("sop_id", "")
     action = trigger.get("action", "")
 
-    if not sop_id or action not in ("approve", "reject"):
+    if not sop_id_or_slug or action not in ("approve", "reject"):
         logger.warning(
             "approve-trigger.json invalid: sop_id=%s action=%s",
-            sop_id, action,
+            sop_id_or_slug, action,
         )
         _remove_trigger(trigger_path)
         return
+
+    # Resolve: try as UUID first, then as slug
+    sop_record = db.get_generated_sop(sop_id_or_slug)
+    if sop_record is None:
+        sop_record = db.get_generated_sop_by_slug(sop_id_or_slug)
+    sop_id = sop_record["sop_id"] if sop_record else sop_id_or_slug
 
     logger.info("Processing approval trigger: sop_id=%s action=%s", sop_id, action)
 

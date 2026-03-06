@@ -20,6 +20,7 @@ provides the core segmentation and stitching logic.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import math
@@ -375,6 +376,18 @@ def _split_into_contiguous_segments(
     return segments
 
 
+def _content_segment_id(frames: list[AnnotatedFrame]) -> str:
+    """Derive a stable segment ID from the event IDs in the segment.
+
+    Uses a SHA-256 hash of sorted event IDs so the identity is independent
+    of transient cluster numbering.  This prevents re-clustering from creating
+    duplicate pending rows in the DB.
+    """
+    event_ids = sorted(f.event_id for f in frames if f.event_id)
+    digest = hashlib.sha256("|".join(event_ids).encode()).hexdigest()[:12]
+    return f"seg-{digest}"
+
+
 def _make_segment(
     frames: list[AnnotatedFrame],
     cluster_id: int,
@@ -397,7 +410,7 @@ def _make_segment(
             seen_apps.add(f.app)
 
     return TaskSegment(
-        segment_id=f"seg-{cluster_id}-{seq}",
+        segment_id=_content_segment_id(frames),
         cluster_id=cluster_id,
         frames=frames,
         task_label=task_label,
@@ -446,10 +459,11 @@ def _stitch_interrupted_workflows(
 
             if gap <= max_gap_seconds:
                 # Merge: combine frames
+                merged_frames = current.frames + next_seg.frames
                 current = TaskSegment(
-                    segment_id=f"seg-{cluster_id}-merged",
+                    segment_id=_content_segment_id(merged_frames),
                     cluster_id=cluster_id,
-                    frames=current.frames + next_seg.frames,
+                    frames=merged_frames,
                     task_label=current.task_label,
                     apps_involved=list(set(current.apps_involved + next_seg.apps_involved)),
                     start_time=current.start_time,
