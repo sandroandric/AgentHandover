@@ -3945,25 +3945,6 @@ def main(argv: list[str] | None = None) -> None:
                                     logger.debug(
                                         "Decision extraction failed", exc_info=True
                                     )
-                                # Seed default constraints if constraints file is empty
-                                try:
-                                    existing_constraints = knowledge_base.get_constraints()
-                                    if not existing_constraints.get("global"):
-                                        knowledge_base.update_constraints({
-                                            "global": {
-                                                "default_trust_level": "observe",
-                                                "require_approval_for_destructive": True,
-                                                "max_autonomous_actions_per_hour": 10,
-                                            },
-                                            "per_procedure": existing_constraints.get(
-                                                "per_procedure", {}
-                                            ),
-                                        })
-                                        logger.info("Default global constraints seeded")
-                                except Exception:
-                                    logger.debug(
-                                        "Constraint seeding failed", exc_info=True
-                                    )
                                 # Phase 4: Session linking + trust evaluation + digest
                                 try:
                                     session_linker.analyze_daily_summaries()
@@ -3978,6 +3959,28 @@ def main(argv: list[str] | None = None) -> None:
                                         )
                                 except Exception:
                                     logger.debug("Trust evaluation failed", exc_info=True)
+                            # Seed default constraints if constraints file is empty.
+                            # Runs on every daily batch (outside the summaries >= 3
+                            # gate) so constraints are available from day one.  The
+                            # inner guard ensures the write happens at most once.
+                            try:
+                                existing_constraints = knowledge_base.get_constraints()
+                                if not existing_constraints.get("global"):
+                                    knowledge_base.update_constraints({
+                                        "global": {
+                                            "default_trust_level": "observe",
+                                            "require_approval_for_destructive": True,
+                                            "max_autonomous_actions_per_hour": 10,
+                                        },
+                                        "per_procedure": existing_constraints.get(
+                                            "per_procedure", {}
+                                        ),
+                                    })
+                                    logger.info("Default global constraints seeded")
+                            except Exception:
+                                logger.debug(
+                                    "Constraint seeding failed", exc_info=True
+                                )
                             # Generate daily digest
                             try:
                                 digest = digest_generator.generate(yesterday_str)
@@ -4001,6 +4004,32 @@ def main(argv: list[str] | None = None) -> None:
                                 "Staleness check: %d/%d procedures need attention",
                                 stale_count, len(reports),
                             )
+                        # Persist staleness status back into procedure JSON
+                        # so the SwiftUI MicroReviewView can read it.
+                        for report in reports:
+                            if report.status != "current":
+                                try:
+                                    proc = knowledge_base.get_procedure(report.slug)
+                                    if proc is not None:
+                                        staleness = proc.get("staleness", {})
+                                        staleness["status"] = report.status
+                                        staleness["signals"] = [
+                                            {
+                                                "type": s.type,
+                                                "detail": s.detail,
+                                                "first_seen": s.first_seen,
+                                            }
+                                            for s in report.signals
+                                        ]
+                                        staleness["recommended_action"] = report.recommended_action
+                                        proc["staleness"] = staleness
+                                        knowledge_base.save_procedure(proc)
+                                except Exception:
+                                    logger.debug(
+                                        "Failed to persist staleness for %s",
+                                        report.slug,
+                                        exc_info=True,
+                                    )
                     except Exception:
                         logger.debug("Staleness check failed", exc_info=True)
                     _last_staleness_check = _now_mono

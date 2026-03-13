@@ -15,8 +15,8 @@ struct SOPDetailView: View {
     private func candidatePaths() -> [URL] {
         let home = FileManager.default.homeDirectoryForCurrentUser
         return [
-            home.appendingPathComponent(".openmimic/sops/\(sop.slug).json"),
-            home.appendingPathComponent(".openclaw/workspace/memory/apprentice/sops/\(sop.slug).json"),
+            home.appendingPathComponent(".openmimic/knowledge/procedures/\(sop.slug).json"),
+            home.appendingPathComponent(".openclaw/workspace/memory/apprentice/sops/sop.\(sop.slug).md"),
             home.appendingPathComponent(".claude/skills/\(sop.slug)/SKILL.md"),
         ]
     }

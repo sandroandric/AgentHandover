@@ -149,12 +149,14 @@ enum ConfigAction {
 
 #[derive(Subcommand)]
 enum SopsAction {
-    /// List all generated SOPs
+    /// List all generated SOPs (exported + drafts)
     List,
-    /// Show a specific SOP by slug
+    /// Show a specific SOP by slug (works for exported and draft SOPs)
     Show { slug: String },
     /// Print the SOPs directory path
     Dir,
+    /// List draft SOPs awaiting review
+    Drafts,
     /// Approve a draft SOP for export
     Approve {
         /// SOP slug or ID
@@ -195,6 +197,7 @@ fn main() -> Result<()> {
             SopsAction::List => commands::sops::list(),
             SopsAction::Show { slug } => commands::sops::show(&slug),
             SopsAction::Dir => commands::sops::dir(),
+            SopsAction::Drafts => commands::sops::drafts(),
             SopsAction::Approve { slug_or_id } => commands::sops::approve(&slug_or_id),
             SopsAction::Reject { slug_or_id } => commands::sops::reject(&slug_or_id),
             SopsAction::Failed => commands::sops::failed(),

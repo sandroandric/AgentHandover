@@ -276,6 +276,18 @@ final class DigestViewModel: ObservableObject {
     @Published var isLoading = false
 
     var dateDisplay: String {
+        // Use the loaded digest's date if available, fall back to today.
+        if let dateStr = digest?.date, !dateStr.isEmpty {
+            let parser = DateFormatter()
+            parser.dateFormat = "yyyy-MM-dd"
+            if let parsed = parser.date(from: dateStr) {
+                let display = DateFormatter()
+                display.dateStyle = .medium
+                return display.string(from: parsed)
+            }
+            // Date string present but unparseable — show it as-is.
+            return dateStr
+        }
         let formatter = DateFormatter()
         formatter.dateStyle = .medium
         return formatter.string(from: Date())
@@ -379,7 +391,7 @@ final class DigestViewModel: ObservableObject {
     ) -> DigestData {
         DigestData(
             date: date,
-            summary: "Activity recorded for today.",
+            summary: "Activity recorded for \(date).",
             activeHours: summary["active_hours"] as? Double ?? 0,
             tasksCompleted: summary["task_count"] as? Int ?? 0,
             proceduresObserved: (summary["procedures_observed"] as? [Any])?.count ?? 0,
