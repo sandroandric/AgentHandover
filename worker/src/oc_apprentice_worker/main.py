@@ -17,7 +17,7 @@ import tempfile
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from oc_apprentice_worker.clipboard_linker import ClipboardLinker
@@ -53,6 +53,7 @@ if _platform.system() == "Darwin":
 else:
     DEFAULT_DB_PATH = Path.home() / ".local" / "share" / "oc-apprentice" / "events.db"
 DEFAULT_SOPS_DIR = Path.home() / ".openclaw" / "workspace" / "memory" / "apprentice"
+KNOWLEDGE_BASE_DIR = Path.home() / ".openmimic" / "knowledge"
 POLL_INTERVAL_SECONDS = 2.0
 VLM_REJECT_THRESHOLD = 0.60
 
@@ -319,6 +320,7 @@ def _process_annotations(
     screenshots_dir: Path,
     *,
     batch_size: int = 5,
+    privacy_checker: "PrivacyZoneChecker | None" = None,
 ) -> dict:
     """Process a batch of unannotated screenshots through the scene annotator.
 
@@ -326,13 +328,34 @@ def _process_annotations(
     """
     unannotated = db.get_unannotated_events(limit=batch_size)
     if not unannotated:
-        return {"annotated": 0, "skipped": 0, "failed": 0}
+        return {"annotated": 0, "skipped": 0, "failed": 0, "blocked": 0}
 
-    stats = {"annotated": 0, "skipped": 0, "failed": 0}
+    stats = {"annotated": 0, "skipped": 0, "failed": 0, "blocked": 0}
 
     for event in unannotated:
         event_id = event.get("id", "unknown")
         timestamp = event.get("timestamp", "")
+
+        # Privacy zone check — skip blocked events, metadata-only for restricted
+        if privacy_checker is not None:
+            from oc_apprentice_worker.privacy_zones import ObservationTier
+            tier = privacy_checker.check_event(event)
+            if tier == ObservationTier.BLOCKED:
+                db.save_annotation(event_id, "", status="privacy_blocked")
+                stats["blocked"] += 1
+                logger.debug("Event %s blocked by privacy zone", event_id[:8])
+                continue
+            if tier == ObservationTier.METADATA_ONLY:
+                # Save minimal metadata annotation (app + timestamp, no content)
+                metadata_annotation = json.dumps({
+                    "privacy_tier": "metadata_only",
+                    "timestamp": timestamp,
+                    "app": event.get("window_json", ""),
+                })
+                db.save_annotation(event_id, metadata_annotation, status="metadata_only")
+                stats["skipped"] += 1
+                logger.debug("Event %s metadata-only by privacy zone", event_id[:8])
+                continue
 
         # Get sliding window context (last N annotations within time window)
         recent = db.get_recent_annotations(
@@ -519,6 +542,15 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Max SOP enhancements per day (default: from config)",
     )
+    parser.add_argument(
+        "--knowledge-dir",
+        type=Path,
+        default=KNOWLEDGE_BASE_DIR,
+        help=(
+            "Path to the knowledge base directory "
+            f"(default: {KNOWLEDGE_BASE_DIR})"
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -527,6 +559,29 @@ def _status_dir() -> Path:
     if _platform.system() == "Darwin":
         return Path.home() / "Library" / "Application Support" / "oc-apprentice"
     return Path.home() / ".local" / "share" / "oc-apprentice"
+
+
+def _atomic_write_result(path: Path, data: dict) -> None:
+    """Atomically write a JSON result file (tmp + fsync + rename).
+
+    Used for trigger result files that the CLI polls for.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(
+        dir=str(path.parent), prefix=".result.", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.rename(tmp_path, str(path))
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
 
 
 def _write_worker_status(
@@ -607,6 +662,85 @@ def _remove_worker_status() -> None:
 _last_sops_index_write: float = 0.0
 
 
+def _derive_tags(sop_tmpl: dict) -> list[str]:
+    """Derive category tags from SOP template data (apps, title, steps)."""
+    tags: list[str] = []
+    apps = [a.lower() for a in sop_tmpl.get("apps_involved", [])]
+    title_lower = sop_tmpl.get("title", "").lower()
+    desc_lower = sop_tmpl.get("task_description", "").lower()
+    combined = title_lower + " " + desc_lower
+
+    # App-based tags
+    browser_apps = {"chrome", "google chrome", "safari", "firefox", "brave", "edge"}
+    dev_apps = {"visual studio code", "vs code", "terminal", "iterm", "xcode"}
+    comm_apps = {"gmail", "google gmail", "slack", "mail", "messages", "outlook"}
+
+    if any(a in browser_apps for a in apps) or "browse" in combined:
+        tags.append("browsing")
+    if any(a in dev_apps for a in apps) or any(
+        w in combined for w in ("commit", "git", "code", "debug", "deploy")
+    ):
+        tags.append("development")
+    if any(a in comm_apps for a in apps) or any(
+        w in combined for w in ("email", "inbox", "message", "send")
+    ):
+        tags.append("communication")
+
+    # Content-based tags
+    if any(w in combined for w in ("spreadsheet", "docs", "document", "write", "edit doc")):
+        tags.append("documentation")
+    if any(w in combined for w in ("domain", "dns", "hosting", "deploy", "server")):
+        tags.append("system")
+    if any(w in combined for w in ("price", "cost", "invoice", "payment", "finance")):
+        tags.append("finance")
+
+    # Deduplicate and cap at 3
+    seen: set[str] = set()
+    unique: list[str] = []
+    for t in tags:
+        if t not in seen:
+            seen.add(t)
+            unique.append(t)
+    return unique[:3]
+
+
+def _derive_short_title(title: str) -> str:
+    """Derive a concise 3-6 word short title from a verbose title.
+
+    Strips common noise prefixes like 'The user is...', 'User is...',
+    then takes the core verb phrase.
+    """
+    import re as _re
+
+    text = title.strip()
+    # Strip common noise prefixes
+    noise_prefixes = [
+        r"^the user is\s+",
+        r"^user is\s+",
+        r"^the user\s+",
+        r"^this (?:sop|workflow|procedure) (?:describes|documents|covers)\s+",
+    ]
+    for pattern in noise_prefixes:
+        text = _re.sub(pattern, "", text, flags=_re.IGNORECASE)
+
+    # Capitalise first letter
+    if text:
+        text = text[0].upper() + text[1:]
+
+    # Take first 6 words, try to cut at a natural break
+    words = text.split()
+    if len(words) <= 6:
+        return text.rstrip(".")
+    short = " ".join(words[:6])
+    # Try to avoid ending mid-phrase — cut at common break words
+    for i in range(min(6, len(words)) - 1, 2, -1):
+        if words[i].lower() in ("and", "or", "by", "for", "to", "in", "on",
+                                  "with", "from", "the", "a", "an", "of"):
+            short = " ".join(words[:i])
+            break
+    return short.rstrip(".,;:")
+
+
 def _write_sops_index(db: WorkerDB, *, force: bool = False) -> None:
     """Atomically write sops-index.json for the SwiftUI app to read.
 
@@ -624,12 +758,44 @@ def _write_sops_index(db: WorkerDB, *, force: bool = False) -> None:
         draft_count = sum(1 for s in all_sops if s.get("status") == "draft")
         approved_count = sum(1 for s in all_sops if s.get("status") == "approved")
 
+        # Load full sop_json for each SOP to extract short_title/tags
+        sop_templates: dict[str, dict] = {}
+        for s in all_sops:
+            sop_id = s.get("sop_id", "")
+            if sop_id:
+                full_record = db.get_generated_sop(sop_id)
+                if full_record and full_record.get("sop_json"):
+                    sop_json = full_record["sop_json"]
+                    if isinstance(sop_json, str):
+                        try:
+                            sop_templates[sop_id] = json.loads(sop_json)
+                        except (json.JSONDecodeError, TypeError):
+                            sop_templates[sop_id] = {}
+                    elif isinstance(sop_json, dict):
+                        sop_templates[sop_id] = sop_json
+
         sop_entries = []
         for s in all_sops:
+            sop_id = s.get("sop_id", "")
+            sop_tmpl = sop_templates.get(sop_id, {})
+
+            title = s.get("title", "Untitled")
+            short_title = sop_tmpl.get("short_title", "")
+            if not short_title:
+                short_title = _derive_short_title(title)
+            tags = sop_tmpl.get("tags", [])
+            if not isinstance(tags, list):
+                tags = []
+            # Derive tags from apps_involved if not set
+            if not tags:
+                tags = _derive_tags(sop_tmpl)
+
             sop_entries.append({
                 "sop_id": s.get("sop_id", ""),
                 "slug": s.get("slug", ""),
-                "title": s.get("title", "Untitled"),
+                "title": title,
+                "short_title": short_title,
+                "tags": tags,
                 "source": s.get("source", ""),
                 "status": s.get("status", "draft"),
                 "confidence": s.get("confidence", 0.0) or 0.0,
@@ -683,6 +849,8 @@ def run_pipeline(
     skill_md_writer: "SOPExportAdapter | None" = None,
     claude_skill_writer: "SOPExportAdapter | None" = None,
     db: "WorkerDB | None" = None,
+    procedure_writer: "ProcedureWriter | None" = None,
+    kb_export_adapter: "KnowledgeBaseExportAdapter | None" = None,
 ) -> dict:
     """Run the full D->E->F pipeline on a batch of events.
 
@@ -941,6 +1109,26 @@ def run_pipeline(
             except Exception:
                 logger.exception("Claude Code skill export failed")
 
+        # Step F5: Write v3 procedures to the knowledge base
+        if procedure_writer is not None:
+            for tpl in sop_templates:
+                try:
+                    procedure_writer.write_procedure(
+                        tpl,
+                        source="sop_pipeline",
+                        source_id=tpl.get("slug", "unknown"),
+                    )
+                except Exception:
+                    logger.debug(
+                        "Failed to write procedure for %s",
+                        tpl.get("slug", "?"), exc_info=True,
+                    )
+        if kb_export_adapter is not None:
+            try:
+                kb_export_adapter.write_all_sops(sop_templates)
+            except Exception:
+                logger.debug("KB export adapter failed", exc_info=True)
+
     return summary
 
 
@@ -959,6 +1147,8 @@ def _process_focus_sessions(
     claude_skill_writer: "SOPExportAdapter | None" = None,
     index_generator: "IndexGenerator",
     sop_auto_approve: bool = True,
+    procedure_writer: "ProcedureWriter | None" = None,
+    kb_export_adapter: "KnowledgeBaseExportAdapter | None" = None,
 ) -> int:
     """Process completed focus recording sessions.
 
@@ -1167,6 +1357,26 @@ def _process_focus_sessions(
                 except Exception:
                     logger.exception("Focus session Claude skill export failed")
 
+            # Write v3 procedures to the knowledge base
+            if procedure_writer is not None:
+                for tpl in sop_templates:
+                    try:
+                        procedure_writer.write_procedure(
+                            tpl,
+                            source="sop_pipeline",
+                            source_id=tpl.get("slug", "unknown"),
+                        )
+                    except Exception:
+                        logger.debug(
+                            "Failed to write procedure for %s",
+                            tpl.get("slug", "?"), exc_info=True,
+                        )
+            if kb_export_adapter is not None:
+                try:
+                    kb_export_adapter.write_all_sops(sop_templates)
+                except Exception:
+                    logger.debug("KB export adapter failed", exc_info=True)
+
             # Cache focus session SOPs for CLI export trigger
             _save_sop_cache(sop_templates)
         else:
@@ -1206,6 +1416,8 @@ def _process_focus_sessions_v2(
     index_generator: "IndexGenerator",
     screenshots_dir: str | Path = "",
     sop_auto_approve: bool = True,
+    procedure_writer: "ProcedureWriter | None" = None,
+    kb_export_adapter: "KnowledgeBaseExportAdapter | None" = None,
 ) -> int:
     """Process completed focus recording sessions via v2 VLM pipeline.
 
@@ -1335,6 +1547,26 @@ def _process_focus_sessions_v2(
                 except Exception:
                     logger.exception("Focus v2 Claude skill export failed")
 
+            # Write v3 procedures to the knowledge base
+            if procedure_writer is not None:
+                for tpl in sop_templates:
+                    try:
+                        procedure_writer.write_procedure(
+                            tpl,
+                            source="sop_pipeline",
+                            source_id=tpl.get("slug", "unknown"),
+                        )
+                    except Exception:
+                        logger.debug(
+                            "Failed to write procedure for %s",
+                            tpl.get("slug", "?"), exc_info=True,
+                        )
+            if kb_export_adapter is not None:
+                try:
+                    kb_export_adapter.write_all_sops(sop_templates)
+                except Exception:
+                    logger.debug("KB export adapter failed", exc_info=True)
+
             # Cache for CLI export trigger
             _save_sop_cache(sop_templates)
         else:
@@ -1377,6 +1609,8 @@ def _process_passive_discovery(
     claude_skill_writer: "SOPExportAdapter | None" = None,
     index_generator: "IndexGenerator",
     sop_auto_approve: bool = True,
+    procedure_writer: "ProcedureWriter | None" = None,
+    kb_export_adapter: "KnowledgeBaseExportAdapter | None" = None,
 ) -> int:
     """Run passive discovery: segment annotations → generate SOPs.
 
@@ -1420,6 +1654,30 @@ def _process_passive_discovery(
         seg_result.embedding_time_seconds,
         seg_result.noise_frames_dropped,
     )
+
+    # Step 2b: Classify and merge interruptions between segments.
+    # Collect all frames from every segment so classify_interruptions
+    # can check what apps were active during gaps.
+    all_frames = [f for seg in seg_result.segments for f in seg.frames]
+    if all_frames:
+        try:
+            seg_result.segments = segmenter.classify_interruptions(
+                seg_result.segments, all_frames,
+            )
+            # Rebuild cluster dict after merging
+            seg_result.clusters = {}
+            for seg in seg_result.segments:
+                seg_result.clusters.setdefault(seg.cluster_id, []).append(seg)
+            logger.debug(
+                "Interruption classification: %d segments after merge",
+                len(seg_result.segments),
+            )
+        except Exception:
+            logger.debug(
+                "Interruption classification failed, continuing with "
+                "original segments",
+                exc_info=True,
+            )
 
     # Step 3: Persist segments to DB
     for seg in seg_result.segments:
@@ -1599,6 +1857,26 @@ def _process_passive_discovery(
                 except Exception:
                     logger.exception("Passive Claude skill export failed")
 
+            # Write v3 procedures to the knowledge base
+            if procedure_writer is not None:
+                for tpl in sop_templates:
+                    try:
+                        procedure_writer.write_procedure(
+                            tpl,
+                            source="sop_pipeline",
+                            source_id=tpl.get("slug", "unknown"),
+                        )
+                    except Exception:
+                        logger.debug(
+                            "Failed to write procedure for %s",
+                            tpl.get("slug", "?"), exc_info=True,
+                        )
+            if kb_export_adapter is not None:
+                try:
+                    kb_export_adapter.write_all_sops(sop_templates)
+                except Exception:
+                    logger.debug("KB export adapter failed", exc_info=True)
+
             _save_sop_cache(sop_templates)
         else:
             logger.info(
@@ -1624,6 +1902,8 @@ def _process_retry_triggers(
     index_generator: "IndexGenerator",
     screenshots_dir: str | Path = "",
     sop_auto_approve: bool = True,
+    procedure_writer: "ProcedureWriter | None" = None,
+    kb_export_adapter: "KnowledgeBaseExportAdapter | None" = None,
 ) -> None:
     """Check for and process a retry-trigger.json file.
 
@@ -1715,6 +1995,8 @@ def _process_retry_triggers(
                                 skill_md_writer=skill_md_writer,
                                 claude_skill_writer=claude_skill_writer,
                                 index_generator=index_generator,
+                                procedure_writer=procedure_writer,
+                                kb_export_adapter=kb_export_adapter,
                             )
                         logger.info(
                             "Retry succeeded for focus session '%s'", title,
@@ -1811,6 +2093,8 @@ def _process_retry_triggers(
                                     skill_md_writer=skill_md_writer,
                                     claude_skill_writer=claude_skill_writer,
                                     index_generator=index_generator,
+                                    procedure_writer=procedure_writer,
+                                    kb_export_adapter=kb_export_adapter,
                                 )
                             logger.info(
                                 "Retry succeeded for passive cluster '%s'", title,
@@ -1848,6 +2132,8 @@ def _process_approval_triggers(
     skill_md_writer: "SOPExportAdapter | None" = None,
     claude_skill_writer: "SOPExportAdapter | None" = None,
     index_generator: "IndexGenerator",
+    procedure_writer: "ProcedureWriter | None" = None,
+    kb_export_adapter: "KnowledgeBaseExportAdapter | None" = None,
 ) -> None:
     """Check for and process an approve-trigger.json file.
 
@@ -1904,6 +2190,8 @@ def _process_approval_triggers(
                             skill_md_writer=skill_md_writer,
                             claude_skill_writer=claude_skill_writer,
                             index_generator=index_generator,
+                            procedure_writer=procedure_writer,
+                            kb_export_adapter=kb_export_adapter,
                         )
                         logger.info("Approved and exported SOP %s", sop_id)
                 else:
@@ -1957,11 +2245,152 @@ def _process_failed_query_trigger(db: "WorkerDB") -> None:
             ]
         }
         result_path = state_dir / "failed-query-result.json"
-        with open(result_path, "w") as f:
-            json.dump(result, f, indent=2)
+        _atomic_write_result(result_path, result)
         logger.info("Wrote %d failures to result file", len(failures))
     except Exception:
         logger.warning("Failed to process failed query trigger", exc_info=True)
+
+    _remove_trigger(trigger_path)
+
+
+def _process_search_trigger(
+    activity_searcher: "ActivitySearcher | None",
+) -> None:
+    """Check for and process a search-query-trigger.json file.
+
+    Runs the query through the ActivitySearcher and writes results
+    to search-query-result.json for the CLI to pick up.
+    """
+    state_dir = _status_dir()
+    trigger_path = state_dir / "search-query-trigger.json"
+
+    if not trigger_path.is_file():
+        return
+
+    logger.info("Processing search query trigger")
+
+    # Remove any stale result file so the CLI cannot read old data
+    result_path = state_dir / "search-query-result.json"
+    result_path.unlink(missing_ok=True)
+
+    try:
+        with open(trigger_path) as f:
+            trigger = json.load(f)
+
+        query = trigger.get("query", "")
+        limit = trigger.get("limit", 20)
+        date = trigger.get("date")
+        app = trigger.get("app")
+
+        if activity_searcher is None:
+            result = {"error": "Activity search not available (v2 schema required)"}
+        elif not query:
+            result = {"error": "Empty search query", "results": []}
+        else:
+            hits = activity_searcher.search(
+                query, limit=limit, date=date, app=app,
+            )
+            result = {
+                "results": [
+                    {
+                        "timestamp": h.timestamp,
+                        "app": h.app,
+                        "location": h.location,
+                        "what_doing": h.what_doing,
+                        "relevance_score": h.relevance_score,
+                        "event_id": h.event_id,
+                    }
+                    for h in hits
+                ]
+            }
+
+        result_path = state_dir / "search-query-result.json"
+        _atomic_write_result(result_path, result)
+        logger.info("Search: %d results written", len(result.get("results", [])))
+    except Exception:
+        logger.warning("Failed to process search trigger", exc_info=True)
+        # Write error result so CLI doesn't hang
+        try:
+            result_path = state_dir / "search-query-result.json"
+            _atomic_write_result(result_path, {"error": "Internal search error"})
+        except Exception:
+            pass
+
+    _remove_trigger(trigger_path)
+
+
+def _process_recall_trigger(
+    activity_searcher: "ActivitySearcher | None",
+) -> None:
+    """Check for and process a recall-query-trigger.json file.
+
+    Runs session recall and writes results to recall-query-result.json.
+    """
+    state_dir = _status_dir()
+    trigger_path = state_dir / "recall-query-trigger.json"
+
+    if not trigger_path.is_file():
+        return
+
+    logger.info("Processing recall query trigger")
+
+    # Remove any stale result file so the CLI cannot read old data
+    result_path = state_dir / "recall-query-result.json"
+    result_path.unlink(missing_ok=True)
+
+    try:
+        with open(trigger_path) as f:
+            trigger = json.load(f)
+
+        date = trigger.get("date")
+        app = trigger.get("app")
+        start_time = trigger.get("start_time")
+        end_time = trigger.get("end_time")
+
+        # Convert HH:MM shorthand to full ISO timestamps.
+        # The searcher expects ISO format (e.g. "2026-03-12T09:30:00")
+        # but the CLI / trigger file may use bare "HH:MM".
+        import re as _re
+        _hhmm_re = _re.compile(r"^\d{2}:\d{2}$")
+        _date_prefix = date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        if start_time and _hhmm_re.match(start_time):
+            start_time = f"{_date_prefix}T{start_time}:00"
+        if end_time and _hhmm_re.match(end_time):
+            end_time = f"{_date_prefix}T{end_time}:00"
+
+        if activity_searcher is None:
+            result = {"error": "Activity search not available (v2 schema required)"}
+        else:
+            timeline = activity_searcher.session_recall(
+                date=date, app=app,
+                start_time=start_time, end_time=end_time,
+            )
+            result = {
+                "date": timeline.date,
+                "total_active_minutes": timeline.total_active_minutes,
+                "apps_used": timeline.apps_used,
+                "entries": [
+                    {
+                        "timestamp": e.timestamp,
+                        "app": e.app,
+                        "location": e.location,
+                        "what_doing": e.what_doing,
+                        "event_id": e.event_id,
+                    }
+                    for e in timeline.entries
+                ],
+            }
+
+        result_path = state_dir / "recall-query-result.json"
+        _atomic_write_result(result_path, result)
+        logger.info("Recall: %d entries written", len(result.get("entries", [])))
+    except Exception:
+        logger.warning("Failed to process recall trigger", exc_info=True)
+        try:
+            result_path = state_dir / "recall-query-result.json"
+            _atomic_write_result(result_path, {"error": "Internal recall error"})
+        except Exception:
+            pass
 
     _remove_trigger(trigger_path)
 
@@ -1973,6 +2402,8 @@ def _export_sop_templates(
     skill_md_writer: "SOPExportAdapter | None" = None,
     claude_skill_writer: "SOPExportAdapter | None" = None,
     index_generator: "IndexGenerator",
+    procedure_writer: "ProcedureWriter | None" = None,
+    kb_export_adapter: "KnowledgeBaseExportAdapter | None" = None,
 ) -> None:
     """Export SOP templates via all active adapters.
 
@@ -2002,6 +2433,28 @@ def _export_sop_templates(
             claude_skill_writer.write_all_sops(sop_templates)
         except Exception:
             logger.exception("Claude Code skill export failed")
+
+    # Write v3 procedures to the knowledge base so downstream consumers
+    # (trust advisor, query API, staleness detector) can find them.
+    if procedure_writer is not None:
+        for tpl in sop_templates:
+            try:
+                procedure_writer.write_procedure(
+                    tpl,
+                    source="sop_pipeline",
+                    source_id=tpl.get("slug", "unknown"),
+                )
+            except Exception:
+                logger.debug(
+                    "Failed to write procedure for %s",
+                    tpl.get("slug", "?"), exc_info=True,
+                )
+
+    if kb_export_adapter is not None:
+        try:
+            kb_export_adapter.write_all_sops(sop_templates)
+        except Exception:
+            logger.debug("KB export adapter failed", exc_info=True)
 
     _save_sop_cache(sop_templates)
 
@@ -2433,6 +2886,44 @@ def main(argv: list[str] | None = None) -> None:
             pass
         return
 
+    # Initialize knowledge base and Phase 2+ modules
+    from oc_apprentice_worker.knowledge_base import KnowledgeBase
+    from oc_apprentice_worker.evidence_tracker import EvidenceTracker
+    from oc_apprentice_worker.procedure_writer import ProcedureWriter
+    from oc_apprentice_worker.knowledge_export_adapter import KnowledgeBaseExportAdapter
+    from oc_apprentice_worker.privacy_zones import PrivacyZoneChecker, PrivacyZoneConfig
+    from oc_apprentice_worker.daily_processor import DailyBatchProcessor
+    from oc_apprentice_worker.staleness_detector import StalenessDetector
+    from oc_apprentice_worker.profile_builder import ProfileBuilder
+    from oc_apprentice_worker.pattern_detector import PatternDetector
+    from oc_apprentice_worker.constraint_manager import ConstraintManager
+    from oc_apprentice_worker.execution_monitor import ExecutionMonitor
+    from oc_apprentice_worker.correction_detector import CorrectionDetector
+    from oc_apprentice_worker.trust_advisor import TrustAdvisor
+    from oc_apprentice_worker.session_linker import SessionLinker
+    from oc_apprentice_worker.daily_digest import DigestGenerator
+
+    knowledge_base = KnowledgeBase(root=args.knowledge_dir)
+    knowledge_base.ensure_structure()
+    evidence_tracker = EvidenceTracker(knowledge_base=knowledge_base)
+    procedure_writer = ProcedureWriter(kb=knowledge_base, evidence=evidence_tracker)
+    kb_export_adapter = KnowledgeBaseExportAdapter(knowledge_base)
+    privacy_checker = PrivacyZoneChecker()
+    daily_processor = DailyBatchProcessor(knowledge_base=knowledge_base)
+    staleness_detector = StalenessDetector(knowledge_base)
+    profile_builder = ProfileBuilder(knowledge_base)
+    pattern_detector = PatternDetector(knowledge_base)
+    constraint_manager = ConstraintManager(knowledge_base)
+
+    # Phase 4: Execution monitoring, correction detection, trust advisor
+    execution_monitor = ExecutionMonitor(knowledge_base)
+    correction_detector = CorrectionDetector(knowledge_base)
+    trust_advisor = TrustAdvisor(knowledge_base)
+    session_linker = SessionLinker(knowledge_base)
+    digest_generator = DigestGenerator(knowledge_base)
+
+    logger.info("Knowledge base initialized: %s", args.knowledge_dir)
+
     # Initialize pipeline components
     episode_builder = EpisodeBuilder()
     clipboard_linker = ClipboardLinker()
@@ -2526,10 +3017,22 @@ def main(argv: list[str] | None = None) -> None:
         if any(vlm_status.values()):
             logger.info("VLM backend(s) detected — attempting initialization")
             try:
-                if vlm_status["mlx_vlm"]:
+                # Check if the configured model name uses Ollama naming
+                # convention (e.g. "qwen3.5:2b") vs HuggingFace repo IDs
+                # (e.g. "mlx-community/llava-1.5-7b-4bit").  Ollama names
+                # contain ":" which is invalid for HuggingFace repo IDs,
+                # so we prefer the Ollama backend when that format is used.
+                config_model_hint = _read_vlm_config_field("model", "")
+                _model_is_ollama_style = ":" in config_model_hint
+
+                if _model_is_ollama_style and vlm_status["ollama"]:
+                    backend_type = VLMBackend.OLLAMA
+                elif vlm_status["mlx_vlm"] and not _model_is_ollama_style:
                     backend_type = VLMBackend.MLX_VLM
                 elif vlm_status["ollama"]:
                     backend_type = VLMBackend.OLLAMA
+                elif vlm_status["mlx_vlm"]:
+                    backend_type = VLMBackend.MLX_VLM
                 elif vlm_status["llama_cpp"]:
                     backend_type = VLMBackend.LLAMA_CPP
                 elif vlm_status.get("openai_compat"):
@@ -2700,6 +3203,41 @@ def main(argv: list[str] | None = None) -> None:
     else:
         logger.info("v2 scene annotation pipeline disabled by config")
 
+    # Initialize activity searcher for CLI search/recall commands
+    activity_searcher = None
+    try:
+        from oc_apprentice_worker.activity_search import ActivitySearcher
+        activity_searcher = ActivitySearcher(db_path=args.db_path)
+        logger.info("Activity searcher initialized")
+    except Exception:
+        logger.debug("Activity searcher not available", exc_info=True)
+
+    # Phase 4: Start query API server (if enabled in config)
+    query_api_server = None
+    try:
+        import tomllib as _tomllib
+        _cfg_path = (
+            Path.home() / "Library" / "Application Support" / "oc-apprentice" / "config.toml"
+            if _platform.system() == "Darwin"
+            else Path.home() / ".config" / "oc-apprentice" / "config.toml"
+        )
+        _knowledge_cfg = {}
+        if _cfg_path.is_file():
+            with open(_cfg_path, "rb") as _cf:
+                _knowledge_cfg = _tomllib.load(_cf).get("knowledge", {})
+        if _knowledge_cfg.get("query_api_enabled", False):
+            from oc_apprentice_worker.query_api import QueryAPIServer
+            _api_port = _knowledge_cfg.get("query_api_port", 9477)
+            query_api_server = QueryAPIServer(
+                knowledge_base=knowledge_base,
+                port=_api_port,
+                activity_searcher=activity_searcher,
+            )
+            query_api_server.start()
+            logger.info("Query API server started on port %d", _api_port)
+    except Exception:
+        logger.debug("Query API server not started", exc_info=True)
+
     # Read SOP review config
     sop_config = _read_sop_config()
     sop_auto_approve = sop_config["auto_approve"]
@@ -2728,6 +3266,10 @@ def main(argv: list[str] | None = None) -> None:
 
     # Episode store cleanup — run once per day
     _last_episode_cleanup = 0.0
+
+    # Daily batch processing — run once per day
+    _last_daily_batch: str = ""  # YYYY-MM-DD of last batch
+    _last_staleness_check = 0.0
 
     # Passive discovery timer — run every 2 hours (7200s)
     _PASSIVE_DISCOVERY_INTERVAL = 7200
@@ -2777,6 +3319,10 @@ def main(argv: list[str] | None = None) -> None:
         max_interval = max(60.0, args.poll_interval * 16)
         consecutive_errors = 0
 
+        # Force-write sops-index.json at startup so the SwiftUI app
+        # immediately sees the latest data (including any new fields).
+        _write_sops_index(db, force=True)
+
         while not shutdown_flag[0]:
             try:
                 # Process retry and approval triggers first
@@ -2790,6 +3336,8 @@ def main(argv: list[str] | None = None) -> None:
                     index_generator=index_generator,
                     screenshots_dir=screenshots_dir,
                     sop_auto_approve=sop_auto_approve,
+                    procedure_writer=procedure_writer,
+                    kb_export_adapter=kb_export_adapter,
                 )
                 _process_approval_triggers(
                     db,
@@ -2797,8 +3345,12 @@ def main(argv: list[str] | None = None) -> None:
                     skill_md_writer=skill_md_writer,
                     claude_skill_writer=claude_skill_writer,
                     index_generator=index_generator,
+                    procedure_writer=procedure_writer,
+                    kb_export_adapter=kb_export_adapter,
                 )
                 _process_failed_query_trigger(db)
+                _process_search_trigger(activity_searcher)
+                _process_recall_trigger(activity_searcher)
 
                 # Process any completed focus recording sessions first.
                 # Use v2 VLM pipeline when available (semantic SOPs from
@@ -2814,6 +3366,8 @@ def main(argv: list[str] | None = None) -> None:
                         index_generator=index_generator,
                         screenshots_dir=screenshots_dir,
                         sop_auto_approve=sop_auto_approve,
+                        procedure_writer=procedure_writer,
+                        kb_export_adapter=kb_export_adapter,
                     )
                 else:
                     focus_sops = _process_focus_sessions(
@@ -2830,6 +3384,8 @@ def main(argv: list[str] | None = None) -> None:
                         claude_skill_writer=claude_skill_writer,
                         index_generator=index_generator,
                         sop_auto_approve=sop_auto_approve,
+                        procedure_writer=procedure_writer,
+                        kb_export_adapter=kb_export_adapter,
                     )
                 if focus_sops > 0:
                     total_sops_generated += focus_sops
@@ -2892,6 +3448,8 @@ def main(argv: list[str] | None = None) -> None:
                         skill_md_writer=skill_md_writer,
                         claude_skill_writer=claude_skill_writer,
                         db=db,
+                        procedure_writer=procedure_writer,
+                        kb_export_adapter=kb_export_adapter,
                     )
                     pipeline_elapsed_ms = int((time.monotonic() - pipeline_start) * 1000)
                     last_pipeline_duration_ms = pipeline_elapsed_ms
@@ -2985,17 +3543,33 @@ def main(argv: list[str] | None = None) -> None:
 
                 if scene_annotator is not None and v2_schema_ok:
                     ann_stats = _process_annotations(
-                        db, scene_annotator, screenshots_dir
+                        db, scene_annotator, screenshots_dir,
+                        privacy_checker=privacy_checker,
                     )
                     total_v2_annotations += ann_stats["annotated"]
 
-                    if ann_stats["annotated"] > 0:
+                    if ann_stats["annotated"] > 0 or ann_stats["blocked"] > 0:
                         logger.info(
-                            "v2 annotation: %d annotated, %d skipped, %d failed",
+                            "v2 annotation: %d annotated, %d skipped, %d failed, %d blocked",
                             ann_stats["annotated"],
                             ann_stats["skipped"],
                             ann_stats["failed"],
+                            ann_stats["blocked"],
                         )
+
+                    # Refresh FTS5 search index so newly annotated events
+                    # appear in search/recall results.
+                    if ann_stats["annotated"] > 0 and activity_searcher is not None:
+                        try:
+                            added = activity_searcher.refresh_index()
+                            if added > 0:
+                                logger.debug(
+                                    "FTS5 index refreshed: %d new entries", added,
+                                )
+                        except Exception:
+                            logger.debug(
+                                "FTS5 index refresh failed", exc_info=True,
+                            )
 
                 if frame_differ is not None and v2_schema_ok:
                     diff_stats = _process_diffs(db, frame_differ)
@@ -3043,6 +3617,8 @@ def main(argv: list[str] | None = None) -> None:
                                 claude_skill_writer=claude_skill_writer,
                                 index_generator=index_generator,
                                 sop_auto_approve=sop_auto_approve,
+                                procedure_writer=procedure_writer,
+                                kb_export_adapter=kb_export_adapter,
                             )
                             if pd_sops > 0:
                                 total_passive_sops += pd_sops
@@ -3098,6 +3674,80 @@ def main(argv: list[str] | None = None) -> None:
                         logger.debug("Episode store cleanup failed", exc_info=True)
                     _last_episode_cleanup = _now_mono
 
+                # --- Phase 2+: Daily batch + staleness (once per day) ---
+                # Process *yesterday* — today is still in progress and would
+                # produce an incomplete summary.  The guard uses today_str so
+                # the batch runs at most once per calendar day.
+                today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+                yesterday_str = (
+                    datetime.now(timezone.utc) - timedelta(days=1)
+                ).strftime("%Y-%m-%d")
+                if today_str != _last_daily_batch:
+                    try:
+                        # Daily batch: aggregate yesterday's (complete) events
+                        day_events = db.get_annotated_events_for_date(yesterday_str)
+                        if day_events:
+                            _daily_summary = daily_processor.process_day(
+                                yesterday_str, day_events
+                            )
+                            logger.info(
+                                "Daily batch: %d tasks, %.1f active hours",
+                                _daily_summary.task_count,
+                                _daily_summary.active_hours,
+                            )
+                            # Update profile + patterns periodically
+                            summaries_count = len(
+                                knowledge_base.list_daily_summaries(limit=5)
+                            )
+                            if summaries_count >= 3:
+                                profile_builder.update_profile()
+                                patterns = pattern_detector.detect_recurrence()
+                                if patterns:
+                                    pattern_detector.update_triggers(patterns)
+                                chains = pattern_detector.detect_chains()
+                                if chains:
+                                    pattern_detector.update_chains(chains)
+                                # Phase 4: Session linking + trust evaluation + digest
+                                try:
+                                    session_linker.analyze_daily_summaries()
+                                except Exception:
+                                    logger.debug("Session linking failed", exc_info=True)
+                                try:
+                                    suggestions = trust_advisor.evaluate_all()
+                                    if suggestions:
+                                        logger.info(
+                                            "Trust advisor: %d new suggestion(s)",
+                                            len(suggestions),
+                                        )
+                                except Exception:
+                                    logger.debug("Trust evaluation failed", exc_info=True)
+                            # Generate daily digest
+                            try:
+                                digest = digest_generator.generate(yesterday_str)
+                                digest_generator.save_digest(digest)
+                                logger.info("Daily digest generated for %s", yesterday_str)
+                            except Exception:
+                                logger.debug("Digest generation failed", exc_info=True)
+                    except Exception:
+                        logger.debug("Daily batch failed", exc_info=True)
+                    _last_daily_batch = today_str
+
+                # Staleness check — once per day (86400s)
+                if _now_mono - _last_staleness_check > 86400:
+                    try:
+                        reports = staleness_detector.check_all()
+                        stale_count = sum(
+                            1 for r in reports if r.status != "current"
+                        )
+                        if stale_count > 0:
+                            logger.info(
+                                "Staleness check: %d/%d procedures need attention",
+                                stale_count, len(reports),
+                            )
+                    except Exception:
+                        logger.debug("Staleness check failed", exc_info=True)
+                    _last_staleness_check = _now_mono
+
             except Exception:
                 consecutive_errors += 1
                 logger.error(
@@ -3114,6 +3764,14 @@ def main(argv: list[str] | None = None) -> None:
                 continue
 
             time.sleep(current_interval)
+
+    # Stop query API server if running
+    if query_api_server is not None:
+        try:
+            query_api_server.stop()
+            logger.info("Query API server stopped")
+        except Exception:
+            pass
 
     # Wait for any in-flight deep scan to finish before exit
     deep_scan_pool.shutdown(wait=True)

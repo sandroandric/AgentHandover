@@ -95,6 +95,35 @@ enum Commands {
         #[arg(long)]
         output: Option<String>,
     },
+    /// Search activity annotations (full-text search)
+    Search {
+        /// Search query (e.g. "domain research", "Stripe dashboard")
+        query: String,
+        /// Filter by date (YYYY-MM-DD)
+        #[arg(long)]
+        date: Option<String>,
+        /// Filter by app name
+        #[arg(long)]
+        app: Option<String>,
+        /// Maximum results to return
+        #[arg(short = 'n', long, default_value = "20")]
+        limit: usize,
+    },
+    /// Recall what you were doing at a given time
+    Recall {
+        /// Date to recall (YYYY-MM-DD, default: today)
+        #[arg(long)]
+        date: Option<String>,
+        /// Filter by app name
+        #[arg(long)]
+        app: Option<String>,
+        /// Start time filter (HH:MM)
+        #[arg(long)]
+        start: Option<String>,
+        /// End time filter (HH:MM)
+        #[arg(long)]
+        end: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -182,5 +211,22 @@ fn main() -> Result<()> {
         Commands::Export { format, sop, output } => {
             commands::export::run(&format, sop.as_deref(), output.as_deref())
         }
+        Commands::Search {
+            query,
+            date,
+            app,
+            limit,
+        } => commands::search::search(&query, date.as_deref(), app.as_deref(), limit),
+        Commands::Recall {
+            date,
+            app,
+            start,
+            end,
+        } => commands::search::recall(
+            date.as_deref(),
+            app.as_deref(),
+            start.as_deref(),
+            end.as_deref(),
+        ),
     }
 }

@@ -699,9 +699,10 @@ class TestLowConfidenceVLMQueue:
             score = scorer.score(translation, {})
 
             # Without ARIA, testid, or role — UI anchor score should be
-            # 0.0 (no anchor resolved). Total confidence should be low.
-            assert score.ui_anchor_score == 0.0, (
-                f"Event {event['id']}: expected 0.0 UI anchor score, got {score.ui_anchor_score}"
+            # at most the app_context fallback (0.15). Total confidence
+            # should be low.
+            assert score.ui_anchor_score <= 0.15, (
+                f"Event {event['id']}: expected <= 0.15 UI anchor score, got {score.ui_anchor_score}"
             )
             assert score.total < 0.60, (
                 f"Event {event['id']}: expected confidence < 0.60, got {score.total}"

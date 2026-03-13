@@ -78,7 +78,7 @@ class TestSopToJsonTopLevel:
     def test_schema_version(self):
         result = sop_to_json(_sample_template())
         assert result["schema_version"] == SOP_SCHEMA_VERSION
-        assert result["schema_version"] == "2.0.0"
+        assert result["schema_version"] == "3.0.0"
 
     def test_slug_and_title(self):
         result = sop_to_json(_sample_template(slug="my_slug", title="My Title"))

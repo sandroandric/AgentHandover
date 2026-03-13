@@ -45,7 +45,22 @@ struct OpenMimicApp: App {
         Window("Workflows", id: "workflows") {
             WorkflowInboxView()
         }
-        .windowResizability(.contentSize)
+        .defaultSize(width: 700, height: 550)
+        .windowResizability(.contentMinSize)
+
+        // Daily digest window
+        Window("Daily Digest", id: "daily-digest") {
+            DailyDigestView()
+        }
+        .defaultSize(width: 560, height: 600)
+        .windowResizability(.contentMinSize)
+
+        // Micro-review window
+        Window("Review Queue", id: "micro-review") {
+            MicroReviewView()
+        }
+        .defaultSize(width: 560, height: 600)
+        .windowResizability(.contentMinSize)
     }
 }
 

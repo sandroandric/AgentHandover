@@ -87,3 +87,50 @@ atomic_writes = true
 adapter = "openclaw"           # "openclaw" or "generic"
 json_export = false            # also write .json alongside .md
 # generic_output_dir = "~/Library/Application Support/oc-apprentice/sops"
+
+# ─── Phase 2+: Knowledge base, trust & privacy zones ───────────────
+
+[knowledge]
+# Root directory for the portable knowledge base.
+# Any AI agent can read this directory to execute your workflows.
+root_dir = "~/.openmimic/knowledge"
+# Time to run daily batch processing (HH:MM, local time)
+daily_batch_time = "23:30"
+# Minimum days of data before pattern detection kicks in
+pattern_detection_min_days = 3
+# Enable the local HTTP query API for agents
+query_api_enabled = false
+query_api_port = 9477
+# Enable knowledge base sync (Phase 5)
+sync_enabled = false
+# sync_remote = ""             # rsync-style remote path or URL
+
+[trust]
+# Default trust level for new procedures:
+#   "observe" | "suggest" | "draft" | "execute_with_approval" | "autonomous"
+default_level = "observe"
+# Minimum observations before a procedure can be promoted beyond "observe"
+min_observations_for_promotion = 3
+# Minimum success rate (0.0–1.0) before suggesting promotion
+min_success_rate_for_suggestion = 0.90
+# Never auto-promote — only suggest (human must approve)
+auto_promote = false
+
+[constraints]
+# Global guardrails applied to ALL procedures
+# max_spend_usd_without_approval = 100
+# blocked_domains = []         # domains agent must never interact with
+# require_confirmation_for = ["email", "payment", "deletion"]
+# max_autonomous_actions_per_hour = 20
+
+[privacy.zones]
+# Apps that are always observed at full fidelity
+# full_observation = ["com.apple.Safari", "com.google.Chrome"]
+# Apps where only metadata (app name, timestamp) is captured — no screenshots
+# metadata_only = ["com.apple.Messages"]
+# Apps that are completely blocked from observation (glob patterns)
+# blocked = ["1Password*", "Bitwarden*", "LastPass*", "KeePassXC*", "Keychain Access"]
+# URL patterns that are always blocked (glob patterns, case-insensitive)
+# blocked_urls = ["*bank*", "*.gov/*", "*payroll*", "*login*password*"]
+# Time windows during which all observation is paused (HH:MM-HH:MM, local time)
+# auto_pause = ["12:00-13:00"]

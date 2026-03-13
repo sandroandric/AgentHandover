@@ -13,10 +13,10 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-SOP_SCHEMA_VERSION = "2.0.0"
+SOP_SCHEMA_VERSION = "3.0.0"
 
 # Accepted schema versions for backward compatibility
-_ACCEPTED_VERSIONS = frozenset(("1.0.0", "1.1.0", "2.0.0"))
+_ACCEPTED_VERSIONS = frozenset(("1.0.0", "1.1.0", "2.0.0", "3.0.0"))
 
 _GENERATOR = "openmimic"
 _GENERATOR_VERSION = "0.1.0"

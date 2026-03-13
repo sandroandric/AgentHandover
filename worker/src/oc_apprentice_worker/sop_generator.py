@@ -82,6 +82,8 @@ TIMELINE ({frame_count} frames):
 Generate a JSON SOP with this exact structure:
 {{
   "title": "<human-readable task name>",
+  "short_title": "<concise 3-6 word label for the task, e.g. 'Check Gmail inbox', 'Deploy to production', 'Search expired domains'>",
+  "tags": ["<1-3 category tags from: communication, development, browsing, documentation, system, finance, design, data, testing, deployment>"],
   "description": "<1-2 sentence description of what this task accomplishes>",
   "outcome": "<single sentence: what the user achieves when this workflow completes successfully>",
   "when_to_use": "<when should someone perform this task>",
@@ -108,7 +110,7 @@ Generate a JSON SOP with this exact structure:
       "validation": "<optional hint for valid values, e.g. 'Must be a valid email format'>"
     }}
   ],
-  "common_errors": ["<potential failure modes and how to recover>"],
+  "common_errors": ["<plain text description of potential failure and how to recover — NOT a dict or object>"],
   "apps_involved": ["<list of applications used>"]
 }}
 
@@ -127,6 +129,12 @@ screen, what changes, what confirms success)
 filepath, password (always sensitive=true), selection (one of a set)
 - Mark sensitive=true for passwords, API keys, tokens, SSNs, credit cards
 - Use type "password" for credentials (these are always sensitive)
+- Ignore any frames where the user is configuring the recording tool \
+(e.g., OpenMimic settings, starting/stopping recording, checking daemon \
+status). Focus only on the actual task being performed.
+- Pay attention to [Clipboard] metadata on frames — it indicates the user \
+copied content. Include copy-paste as explicit steps (e.g., 'Copy the \
+domain name from the website' then 'Paste into the Google Doc').
 
 Respond with ONLY the JSON object."""
 
@@ -140,6 +148,8 @@ variables.
 Generate a JSON SOP with this exact structure:
 {{
   "title": "<human-readable task name>",
+  "short_title": "<concise 3-6 word label for the task, e.g. 'Check Gmail inbox', 'Deploy to production', 'Search expired domains'>",
+  "tags": ["<1-3 category tags from: communication, development, browsing, documentation, system, finance, design, data, testing, deployment>"],
   "description": "<1-2 sentence description>",
   "outcome": "<single sentence: what the user achieves when this workflow completes successfully>",
   "when_to_use": "<when to perform this task>",
@@ -166,7 +176,7 @@ Generate a JSON SOP with this exact structure:
       "validation": "<optional hint for valid values>"
     }}
   ],
-  "common_errors": ["<failure modes>"],
+  "common_errors": ["<plain text description of potential failure and how to recover — NOT a dict or object>"],
   "apps_involved": ["<applications used>"]
 }}
 
@@ -193,6 +203,7 @@ def _format_timeline_entry(
     annotation: dict,
     diff: dict | None,
     timestamp: str,
+    clipboard_context: dict | None = None,
 ) -> str:
     """Format a single timeline entry for the SOP generation prompt."""
     lines = []
@@ -255,6 +266,13 @@ def _format_timeline_entry(
         elif diff_type == "no_change":
             lines.append("  [No visible change]")
 
+    # Clipboard context (attached by FocusProcessor._attach_clipboard_context)
+    if clipboard_context and isinstance(clipboard_context, dict):
+        byte_size = clipboard_context.get("byte_size", 0)
+        content_types = clipboard_context.get("content_types", [])
+        types_str = ", ".join(str(t) for t in content_types) if content_types else "unknown"
+        lines.append(f"  [Clipboard: copied {byte_size} bytes ({types_str})]")
+
     return "\n".join(lines)
 
 
@@ -268,7 +286,11 @@ def _build_focus_prompt(
         annotation = frame.get("annotation", {})
         diff = frame.get("diff")
         timestamp = frame.get("timestamp", "")
-        entries.append(_format_timeline_entry(i, annotation, diff, timestamp))
+        clipboard_ctx = frame.get("clipboard_context")
+        entries.append(_format_timeline_entry(
+            i, annotation, diff, timestamp,
+            clipboard_context=clipboard_ctx,
+        ))
 
     timeline_text = "\n\n".join(entries)
 
@@ -345,8 +367,12 @@ def _build_passive_prompt(
             annotation = frame.get("annotation", {})
             diff = frame.get("diff")
             timestamp = frame.get("timestamp", "")
+            clipboard_ctx = frame.get("clipboard_context")
             entries.append(
-                _format_timeline_entry(i, annotation, diff, timestamp)
+                _format_timeline_entry(
+                    i, annotation, diff, timestamp,
+                    clipboard_context=clipboard_ctx,
+                )
             )
         demo_text = f"--- Demonstration {demo_idx + 1} ({len(timeline)} frames) ---\n"
         demo_text += "\n\n".join(entries)
@@ -529,9 +555,36 @@ def _vlm_sop_to_template(
     if preconditions:
         execution_overview["prerequisites"] = "; ".join(preconditions)
 
+    # Extract short_title and tags from VLM output
+    short_title = vlm_sop.get("short_title", "")
+    if not short_title:
+        # Fallback: derive from title — strip noise prefixes, take core phrase
+        _t = title
+        for pfx in ("The user is ", "User is ", "The user "):
+            if _t.lower().startswith(pfx.lower()):
+                _t = _t[len(pfx):]
+                break
+        if _t:
+            _t = _t[0].upper() + _t[1:]
+        words = _t.split()
+        if len(words) <= 6:
+            short_title = _t.rstrip(".")
+        else:
+            short_title = " ".join(words[:6]).rstrip(".,;:")
+
+    tags = vlm_sop.get("tags", [])
+    if isinstance(tags, str):
+        tags = [t.strip() for t in tags.split(",") if t.strip()]
+    elif not isinstance(tags, list):
+        tags = []
+    # Normalise: lowercase, deduplicate, cap at 3
+    tags = list(dict.fromkeys(t.lower().strip() for t in tags if isinstance(t, str)))[:3]
+
     template = {
         "slug": slug,
         "title": title,
+        "short_title": short_title,
+        "tags": tags,
         "steps": steps,
         "variables": variables,
         "confidence_avg": 0.0,  # Set by compute_v2_confidence below
@@ -676,6 +729,84 @@ def _extract_selector_for_step(
 
 
 # ---------------------------------------------------------------------------
+# Smart sampling for focus sessions
+# ---------------------------------------------------------------------------
+
+def _smart_sample_focus(frames: list[dict], max_frames: int) -> list[dict]:
+    """Priority-based sampling that keeps the most informative frames.
+
+    Scoring per frame:
+    - First / last frame: +100  (always kept)
+    - Has clipboard_context:    +10
+    - diff.diff_type == "action": +5
+    - diff.diff_type == "app_switch": +3
+    - diff.diff_type == "no_change": -2
+    - App name contains "openmimic" or "oc-apprentice": -5
+    - annotation.task_context.what_doing contains "openmimic": -3
+
+    Top N by score are selected, then re-sorted by their original
+    temporal order so the SOP sees a coherent sequence.
+    """
+    if len(frames) <= max_frames:
+        return frames
+
+    scored: list[tuple[float, int, dict]] = []
+
+    for i, frame in enumerate(frames):
+        score: float = 0.0
+
+        # First / last frame bonus
+        if i == 0 or i == len(frames) - 1:
+            score += 100.0
+
+        # Clipboard context
+        if frame.get("clipboard_context"):
+            score += 10.0
+
+        # Diff type scoring
+        diff = frame.get("diff")
+        if isinstance(diff, dict):
+            diff_type = diff.get("diff_type", "")
+            if diff_type == "action":
+                score += 5.0
+            elif diff_type == "app_switch":
+                score += 3.0
+            elif diff_type == "no_change":
+                score -= 2.0
+
+        # Penalise frames from OpenMimic's own UI
+        annotation = frame.get("annotation", {})
+        if isinstance(annotation, dict):
+            app_name = str(annotation.get("app", "")).lower()
+            if "openmimic" in app_name or "oc-apprentice" in app_name:
+                score -= 5.0
+
+            task_ctx = annotation.get("task_context", {})
+            if isinstance(task_ctx, dict):
+                what_doing = str(task_ctx.get("what_doing", "")).lower()
+                if "openmimic" in what_doing:
+                    score -= 3.0
+
+        scored.append((score, i, frame))
+
+    # Sort by score descending; on tie, prefer earlier frame (lower index)
+    scored.sort(key=lambda x: (-x[0], x[1]))
+
+    # Take top N
+    top = scored[:max_frames]
+
+    # Re-sort by original temporal order
+    top.sort(key=lambda x: x[1])
+
+    logger.info(
+        "Smart-sampled %d of %d focus frames (score range: %.1f to %.1f)",
+        max_frames, len(frames), scored[-1][0], scored[0][0],
+    )
+
+    return [frame for _, _, frame in top]
+
+
+# ---------------------------------------------------------------------------
 # Ollama client (reused from scene_annotator)
 # ---------------------------------------------------------------------------
 
@@ -785,30 +916,10 @@ class SOPGenerator:
             )
 
         # Sample frames if timeline is too large for the VLM prompt.
-        # Keep first, last, and evenly spaced frames in between.
+        # Use priority-based smart sampling to keep the most informative frames.
         max_frames = self.config.max_timeline_frames
         if len(meaningful) > max_frames:
-            logger.info(
-                "Focus timeline has %d frames, sampling to %d",
-                len(meaningful), max_frames,
-            )
-            # Always keep first and last; evenly sample the rest
-            if max_frames <= 2:
-                meaningful = [meaningful[0], meaningful[-1]]
-            else:
-                indices = [0]
-                step = (len(meaningful) - 1) / (max_frames - 1)
-                for i in range(1, max_frames - 1):
-                    indices.append(round(i * step))
-                indices.append(len(meaningful) - 1)
-                # Deduplicate while preserving order
-                seen: set[int] = set()
-                unique_indices = []
-                for idx in indices:
-                    if idx not in seen:
-                        seen.add(idx)
-                        unique_indices.append(idx)
-                meaningful = [meaningful[i] for i in unique_indices]
+            meaningful = _smart_sample_focus(meaningful, max_frames)
 
         # Build prompt
         prompt = _build_focus_prompt(title, meaningful)

@@ -288,6 +288,28 @@ struct MenuBarView: View {
             .padding(.horizontal, 16)
             .padding(.vertical, 6)
 
+            // Daily digest
+            Button(action: {
+                openWindow(id: "daily-digest")
+            }) {
+                Label("Daily Digest", systemImage: "calendar.badge.clock")
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .buttonStyle(.plain)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 6)
+
+            // Review queue
+            Button(action: {
+                openWindow(id: "micro-review")
+            }) {
+                Label("Review Queue", systemImage: "checkmark.rectangle.stack")
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .buttonStyle(.plain)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 6)
+
             // Open config
             Button(action: openConfig) {
                 Label("Edit Configuration", systemImage: "gearshape")

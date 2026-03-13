@@ -192,7 +192,7 @@ class TestProcessAnnotations:
         """When there are no pending events, returns zero stats."""
         annotator = SceneAnnotator(AnnotationConfig())
         stats = _process_annotations(v2_db, annotator, tmp_path / "screenshots")
-        assert stats == {"annotated": 0, "skipped": 0, "failed": 0}
+        assert stats == {"annotated": 0, "skipped": 0, "failed": 0, "blocked": 0}
 
     def test_annotates_pending_event(
         self, v2_db: WorkerDB, v2_write_conn: sqlite3.Connection, tmp_path: Path,

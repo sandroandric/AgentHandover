@@ -847,6 +847,25 @@ class WorkerDB:
             )
         return self._rows_to_dicts(cur.fetchall())
 
+    def get_annotated_events_for_date(self, date: str) -> list[dict]:
+        """Return all annotated events for a given date (YYYY-MM-DD).
+
+        Used by the daily batch processor to aggregate a full day's
+        annotated activity into a summary.
+        """
+        self._refresh_read_snapshot()
+        start = f"{date}T00:00:00.000000Z"
+        end = f"{date}T23:59:59.999999Z"
+        cur = self._conn.execute(
+            "SELECT * FROM events "
+            "WHERE annotation_status = 'completed' "
+            "  AND scene_annotation_json IS NOT NULL "
+            "  AND timestamp >= ? AND timestamp <= ? "
+            "ORDER BY timestamp ASC",
+            (start, end),
+        )
+        return self._rows_to_dicts(cur.fetchall())
+
     def get_workflow_annotated_events(
         self,
         *,

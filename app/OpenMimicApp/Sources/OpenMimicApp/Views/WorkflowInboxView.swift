@@ -1,146 +1,184 @@
 import SwiftUI
 
-/// Displays discovered SOPs organized by status: drafts needing review,
-/// recently discovered, high confidence, and all approved.
+/// Displays discovered SOPs in a master-detail layout using NavigationSplitView.
 struct WorkflowInboxView: View {
     @StateObject private var sopManager = SOPIndexManager()
+    @State private var filter: SOPFilter = .all
+    @State private var selectedSOPID: String?
+
+    /// Live lookup: always reflects the latest data from the polling index.
+    private var selectedSOP: SOPEntry? {
+        guard let id = selectedSOPID else { return nil }
+        return sopManager.allSorted.first { $0.id == id }
+    }
+
+    enum SOPFilter: String, CaseIterable {
+        case all = "All"
+        case focus = "Focus"
+        case passive = "Discovered"
+        case drafts = "Drafts"
+    }
 
     var body: some View {
+        NavigationSplitView {
+            sidebar
+        } detail: {
+            detailPane
+        }
+        .frame(minWidth: 600, minHeight: 400)
+        .onAppear { sopManager.startPolling() }
+        .onDisappear { sopManager.stopPolling() }
+    }
+
+    // MARK: - Sidebar
+
+    private var sidebar: some View {
         VStack(alignment: .leading, spacing: 0) {
-            // Header
+            headerBar
+            Divider()
+
+            if sopManager.index == nil {
+                emptyState
+            } else if filteredSOPs.isEmpty {
+                noMatchState
+            } else {
+                sopList
+            }
+        }
+        .navigationSplitViewColumnWidth(min: 240, ideal: 280, max: 400)
+    }
+
+    // MARK: - Detail pane
+
+    private var detailPane: some View {
+        Group {
+            if let sop = selectedSOP {
+                SOPDetailView(sop: sop, sopManager: sopManager)
+            } else {
+                VStack(spacing: 12) {
+                    Image(systemName: "doc.text.magnifyingglass")
+                        .font(.system(size: 40))
+                        .foregroundColor(.secondary.opacity(0.4))
+                    Text("Select a workflow")
+                        .font(.title3)
+                        .foregroundColor(.secondary)
+                    Text("Choose a workflow from the sidebar to view its details.")
+                        .font(.caption)
+                        .foregroundColor(.secondary.opacity(0.7))
+                        .multilineTextAlignment(.center)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+    }
+
+    // MARK: - Header
+
+    private var headerBar: some View {
+        VStack(spacing: 10) {
             HStack {
                 Text("Workflows")
                     .font(.title2)
                     .bold()
                 Spacer()
                 if let index = sopManager.index {
-                    Text("\(index.approved_count) approved")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-            }
-            .padding()
-
-            Divider()
-
-            if sopManager.index == nil {
-                VStack(spacing: 8) {
-                    Image(systemName: "tray")
-                        .font(.largeTitle)
-                        .foregroundColor(.secondary)
-                    Text("No workflows yet")
-                        .foregroundColor(.secondary)
-                    Text("OpenMimic will discover workflows as you work.")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .padding()
-            } else {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 16) {
-                        // Drafts needing review
-                        if !sopManager.drafts.isEmpty {
-                            SOPSection(
-                                title: "Needs Review",
-                                icon: "doc.badge.clock",
-                                color: .orange,
-                                sops: sopManager.drafts
+                    HStack(spacing: 12) {
+                        StatPill(
+                            count: index.approved_count,
+                            label: "approved",
+                            color: .secondary
+                        )
+                        if index.draft_count > 0 {
+                            StatPill(
+                                count: index.draft_count,
+                                label: "drafts",
+                                color: .secondary
                             )
-                        }
-
-                        // Recent
-                        if !sopManager.recent.isEmpty {
-                            SOPSection(
-                                title: "Recently Discovered",
-                                icon: "sparkles",
-                                color: .blue,
-                                sops: sopManager.recent
-                            )
-                        }
-
-                        // High confidence
-                        if !sopManager.highConfidence.isEmpty {
-                            SOPSection(
-                                title: "High Confidence",
-                                icon: "checkmark.seal",
-                                color: .green,
-                                sops: sopManager.highConfidence
-                            )
-                        }
-
-                        // All approved
-                        if !sopManager.approved.isEmpty {
-                            SOPSection(
-                                title: "All Approved",
-                                icon: "checkmark.circle",
-                                color: .green,
-                                sops: sopManager.approved
-                            )
-                        }
-
-                        // Failed count
-                        if let index = sopManager.index, index.failed_count > 0 {
-                            HStack {
-                                Image(systemName: "exclamationmark.triangle")
-                                    .foregroundColor(.red)
-                                Text("\(index.failed_count) failed generation(s)")
-                                    .font(.caption)
-                                    .foregroundColor(.red)
-                                Spacer()
-                                Text("Run: openmimic sops failed")
-                                    .font(.caption2)
-                                    .foregroundColor(.secondary)
-                            }
-                            .padding(.horizontal)
                         }
                     }
-                    .padding(.vertical, 8)
                 }
+            }
+
+            // Filter tabs
+            HStack(spacing: 2) {
+                ForEach(SOPFilter.allCases, id: \.self) { tab in
+                    Button(action: { withAnimation(.easeInOut(duration: 0.15)) { filter = tab } }) {
+                        Text(tab.rawValue)
+                            .font(.caption)
+                            .fontWeight(filter == tab ? .semibold : .regular)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 5)
+                            .background(filter == tab ? Color.accentColor.opacity(0.12) : Color.clear)
+                            .foregroundColor(filter == tab ? .accentColor : .secondary)
+                            .cornerRadius(6)
+                    }
+                    .buttonStyle(.plain)
+                }
+                Spacer()
             }
         }
-        .frame(width: 360, height: 480)
-        .onAppear { sopManager.startPolling() }
-        .onDisappear { sopManager.stopPolling() }
+        .padding(.horizontal, 16)
+        .padding(.top, 14)
+        .padding(.bottom, 8)
     }
-}
 
-// MARK: - Section
+    // MARK: - List
 
-struct SOPSection: View {
-    let title: String
-    let icon: String
-    let color: Color
-    let sops: [SOPEntry]
-
-    @State private var isExpanded = true
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Button(action: { withAnimation { isExpanded.toggle() } }) {
-                HStack {
-                    Image(systemName: icon)
-                        .foregroundColor(color)
-                    Text(title)
-                        .font(.headline)
-                        .foregroundColor(.primary)
-                    Text("(\(sops.count))")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                    Spacer()
-                    Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
+    private var sopList: some View {
+        ScrollView {
+            LazyVStack(spacing: 1) {
+                ForEach(filteredSOPs) { sop in
+                    SOPRow(sop: sop, isSelected: selectedSOPID == sop.id)
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            selectedSOPID = sop.id
+                        }
                 }
             }
-            .buttonStyle(.plain)
-            .padding(.horizontal)
+            .padding(.vertical, 4)
+        }
+    }
 
-            if isExpanded {
-                ForEach(sops) { sop in
-                    SOPRow(sop: sop)
-                }
-            }
+    // MARK: - Empty states
+
+    private var emptyState: some View {
+        VStack(spacing: 10) {
+            Image(systemName: "tray")
+                .font(.system(size: 36))
+                .foregroundColor(.secondary.opacity(0.5))
+            Text("No workflows yet")
+                .font(.headline)
+                .foregroundColor(.secondary)
+            Text("OpenMimic discovers workflows as you work.\nUse Record Workflow for instant capture.")
+                .font(.caption)
+                .foregroundColor(.secondary.opacity(0.7))
+                .multilineTextAlignment(.center)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding()
+    }
+
+    private var noMatchState: some View {
+        VStack(spacing: 8) {
+            Image(systemName: "line.3.horizontal.decrease.circle")
+                .font(.title2)
+                .foregroundColor(.secondary.opacity(0.5))
+            Text("No \(filter.rawValue.lowercased()) workflows")
+                .font(.subheadline)
+                .foregroundColor(.secondary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding()
+    }
+
+    // MARK: - Filtering
+
+    private var filteredSOPs: [SOPEntry] {
+        switch filter {
+        case .all: return sopManager.allSorted
+        case .focus: return sopManager.allSorted.filter { $0.source == "focus" }
+        case .passive: return sopManager.allSorted.filter { $0.source == "passive" }
+        case .drafts: return sopManager.drafts
         }
     }
 }
@@ -149,57 +187,118 @@ struct SOPSection: View {
 
 struct SOPRow: View {
     let sop: SOPEntry
+    let isSelected: Bool
+
+    @State private var isHovered = false
 
     var body: some View {
-        HStack {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(sop.title)
-                    .font(.body)
-                    .lineLimit(1)
-                HStack(spacing: 6) {
-                    StatusBadge(status: sop.status)
-                    Text(sop.source)
-                        .font(.caption2)
+        VStack(alignment: .leading, spacing: 4) {
+            // Title
+            Text(sop.displayTitle)
+                .font(.system(size: 13, weight: .medium))
+                .lineLimit(1)
+                .foregroundColor(.primary)
+
+            // Tags + metadata row
+            HStack(spacing: 6) {
+                // Tags
+                ForEach(sop.displayTags, id: \.self) { tag in
+                    Text(tag)
+                        .font(.system(size: 9, weight: .medium))
                         .foregroundColor(.secondary)
-                    if sop.confidence > 0 {
-                        Text(String(format: "%.0f%%", sop.confidence * 100))
-                            .font(.caption2)
-                            .foregroundColor(sop.confidence >= 0.8 ? .green : .orange)
-                    }
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 2)
+                        .background(Color.primary.opacity(0.05))
+                        .cornerRadius(3)
                 }
+
+                if !sop.displayTags.isEmpty {
+                    Text("·")
+                        .font(.system(size: 9))
+                        .foregroundColor(.secondary.opacity(0.4))
+                }
+
+                Text(sop.sourceLabel)
+                    .font(.system(size: 10))
+                    .foregroundColor(.secondary.opacity(0.6))
+
+                Spacer()
+
+                Text(sop.relativeTime)
+                    .font(.system(size: 10))
+                    .foregroundColor(.secondary.opacity(0.5))
             }
-            Spacer()
         }
-        .padding(.horizontal)
-        .padding(.vertical, 4)
-        .background(Color.primary.opacity(0.03))
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
+        .background(
+            isSelected
+                ? Color.accentColor.opacity(0.12)
+                : (isHovered ? Color.primary.opacity(0.03) : Color.clear)
+        )
         .cornerRadius(6)
-        .padding(.horizontal, 8)
+        .padding(.horizontal, 6)
+        .onHover { isHovered = $0 }
     }
 }
 
-// MARK: - Badge
+// MARK: - Confidence bar
+
+struct ConfidenceBar: View {
+    let value: Double
+
+    var body: some View {
+        GeometryReader { _ in
+            ZStack(alignment: .leading) {
+                RoundedRectangle(cornerRadius: 2)
+                    .fill(Color.primary.opacity(0.08))
+                RoundedRectangle(cornerRadius: 2)
+                    .fill(Color.primary.opacity(value >= 0.8 ? 0.4 : 0.2))
+                    .frame(width: CGFloat(value) * 30)
+            }
+        }
+        .frame(width: 30, height: 4)
+    }
+}
+
+// MARK: - Status Badge
 
 struct StatusBadge: View {
     let status: String
 
     var body: some View {
         Text(status.capitalized)
-            .font(.caption2)
-            .fontWeight(.medium)
+            .font(.system(size: 9, weight: .semibold))
             .padding(.horizontal, 6)
-            .padding(.vertical, 2)
-            .background(backgroundColor.opacity(0.15))
+            .padding(.vertical, 3)
+            .background(backgroundColor.opacity(0.12))
             .foregroundColor(backgroundColor)
             .cornerRadius(4)
     }
 
     private var backgroundColor: Color {
-        switch status {
-        case "approved": return .green
-        case "draft": return .orange
-        case "rejected": return .red
-        default: return .gray
+        .secondary
+    }
+}
+
+// MARK: - Stat Pill (header)
+
+struct StatPill: View {
+    let count: Int
+    let label: String
+    let color: Color
+
+    var body: some View {
+        HStack(spacing: 3) {
+            Text("\(count)")
+                .font(.system(size: 11, weight: .bold, design: .rounded))
+            Text(label)
+                .font(.system(size: 10))
         }
+        .foregroundColor(color)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 3)
+        .background(color.opacity(0.1))
+        .cornerRadius(10)
     }
 }

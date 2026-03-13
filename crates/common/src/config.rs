@@ -23,6 +23,12 @@ pub struct AppConfig {
     pub export: ExportConfig,
     #[serde(default)]
     pub sop: SopConfig,
+    #[serde(default)]
+    pub knowledge: KnowledgeConfig,
+    #[serde(default)]
+    pub trust: TrustConfig,
+    #[serde(default)]
+    pub constraints: ConstraintsConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -52,6 +58,8 @@ pub struct PrivacyConfig {
     pub enable_clipboard_preview: bool,
     pub clipboard_preview_max_chars: usize,
     pub secure_field_drop: bool,
+    #[serde(default)]
+    pub zones: PrivacyZonesConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -202,6 +210,9 @@ impl Default for AppConfig {
             openclaw: OpenClawConfig::default(),
             export: ExportConfig::default(),
             sop: SopConfig::default(),
+            knowledge: KnowledgeConfig::default(),
+            trust: TrustConfig::default(),
+            constraints: ConstraintsConfig::default(),
         }
     }
 }
@@ -229,6 +240,7 @@ impl Default for PrivacyConfig {
             enable_clipboard_preview: false,
             clipboard_preview_max_chars: 200,
             secure_field_drop: true,
+            zones: PrivacyZonesConfig::default(),
         }
     }
 }
@@ -320,6 +332,143 @@ fn default_auto_approve() -> bool { true }
 impl Default for SopConfig {
     fn default() -> Self {
         Self { auto_approve: true }
+    }
+}
+
+// --- Phase 2+: Knowledge base, trust, constraints, privacy zones ---
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KnowledgeConfig {
+    /// Root directory for the portable knowledge base.
+    #[serde(default = "default_knowledge_root_dir")]
+    pub root_dir: String,
+    /// Time to run daily batch processing (HH:MM, local time).
+    #[serde(default = "default_daily_batch_time")]
+    pub daily_batch_time: String,
+    /// Minimum days of data before pattern detection kicks in.
+    #[serde(default = "default_pattern_detection_min_days")]
+    pub pattern_detection_min_days: u32,
+    /// Enable the local HTTP query API for agents.
+    #[serde(default)]
+    pub query_api_enabled: bool,
+    /// Port for the query API HTTP server.
+    #[serde(default = "default_query_api_port")]
+    pub query_api_port: u16,
+    /// Enable knowledge base sync (Phase 5).
+    #[serde(default)]
+    pub sync_enabled: bool,
+    /// Sync remote path (rsync-style) or URL.
+    #[serde(default)]
+    pub sync_remote: String,
+}
+
+fn default_knowledge_root_dir() -> String { "~/.openmimic/knowledge".to_string() }
+fn default_daily_batch_time() -> String { "23:30".to_string() }
+fn default_pattern_detection_min_days() -> u32 { 3 }
+fn default_query_api_port() -> u16 { 9477 }
+
+impl Default for KnowledgeConfig {
+    fn default() -> Self {
+        Self {
+            root_dir: default_knowledge_root_dir(),
+            daily_batch_time: default_daily_batch_time(),
+            pattern_detection_min_days: default_pattern_detection_min_days(),
+            query_api_enabled: false,
+            query_api_port: default_query_api_port(),
+            sync_enabled: false,
+            sync_remote: String::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrustConfig {
+    /// Default trust level for new procedures.
+    #[serde(default = "default_trust_level")]
+    pub default_level: String,
+    /// Minimum observations before a procedure can be promoted beyond "observe".
+    #[serde(default = "default_min_observations")]
+    pub min_observations_for_promotion: u32,
+    /// Minimum success rate (0.0–1.0) before suggesting promotion.
+    #[serde(default = "default_min_success_rate")]
+    pub min_success_rate_for_suggestion: f64,
+    /// Never auto-promote — only suggest (human must approve).
+    #[serde(default)]
+    pub auto_promote: bool,
+}
+
+fn default_trust_level() -> String { "observe".to_string() }
+fn default_min_observations() -> u32 { 3 }
+fn default_min_success_rate() -> f64 { 0.90 }
+
+impl Default for TrustConfig {
+    fn default() -> Self {
+        Self {
+            default_level: default_trust_level(),
+            min_observations_for_promotion: default_min_observations(),
+            min_success_rate_for_suggestion: default_min_success_rate(),
+            auto_promote: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConstraintsConfig {
+    /// Max spend (USD) without human approval.
+    #[serde(default)]
+    pub max_spend_usd_without_approval: Option<f64>,
+    /// Domains agent must never interact with.
+    #[serde(default)]
+    pub blocked_domains: Vec<String>,
+    /// Action types that always require confirmation.
+    #[serde(default)]
+    pub require_confirmation_for: Vec<String>,
+    /// Maximum autonomous actions per hour.
+    #[serde(default = "default_max_autonomous_actions")]
+    pub max_autonomous_actions_per_hour: u32,
+}
+
+fn default_max_autonomous_actions() -> u32 { 20 }
+
+impl Default for ConstraintsConfig {
+    fn default() -> Self {
+        Self {
+            max_spend_usd_without_approval: None,
+            blocked_domains: Vec::new(),
+            require_confirmation_for: Vec::new(),
+            max_autonomous_actions_per_hour: default_max_autonomous_actions(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PrivacyZonesConfig {
+    /// Apps observed at full fidelity (bundle IDs or names).
+    #[serde(default)]
+    pub full_observation: Vec<String>,
+    /// Apps where only metadata is captured.
+    #[serde(default)]
+    pub metadata_only: Vec<String>,
+    /// Apps completely blocked from observation (glob patterns).
+    #[serde(default)]
+    pub blocked: Vec<String>,
+    /// URL patterns always blocked (glob patterns).
+    #[serde(default)]
+    pub blocked_urls: Vec<String>,
+    /// Time windows during which all observation is paused (HH:MM-HH:MM).
+    #[serde(default)]
+    pub auto_pause: Vec<String>,
+}
+
+impl Default for PrivacyZonesConfig {
+    fn default() -> Self {
+        Self {
+            full_observation: Vec::new(),
+            metadata_only: Vec::new(),
+            blocked: Vec::new(),
+            blocked_urls: Vec::new(),
+            auto_pause: Vec::new(),
+        }
     }
 }
 
