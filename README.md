@@ -18,9 +18,9 @@
 
 ---
 
-> *You spend hours teaching Claude Code how to deploy, telling OpenClaw how to file expenses, writing SOPs that are outdated before the ink dries. What if your agents could just watch you do it once — and learn?*
+Every time you hand a task to an AI agent, you end up explaining the same steps you already know how to do. Open this app, go to this URL, fill in these fields, click submit, verify it worked. You do it every day without thinking — but your agent needs a manual.
 
-OpenMimic is a local, privacy-first apprentice that silently observes your macOS workflows, learns repeatable patterns, and produces semantic procedure files that AI agents like Claude Code and OpenClaw can execute — without you writing a single instruction.
+OpenMimic writes that manual by watching you work. It runs locally on your Mac, observes your screen, and turns your real workflows into step-by-step procedures that agents like Claude Code and OpenClaw can follow.
 
 You keep working. OpenMimic watches, learns, and writes the manual.
 
