@@ -250,16 +250,32 @@ class ActivityClassifier:
             "is_workflow", False,
         )
 
-        # Track app usage for session-level learning
-        if app:
-            app_key = app.lower()
-            self._session_app_counts[app_key] = (
-                self._session_app_counts.get(app_key, 0) + 1
-            )
-            self._session_total += 1
+        # App tracking happens after Stage 1 (below) so we only count
+        # apps seen in work-like contexts, not noise apps.
 
         # Stage 1 — keyword + URL heuristics
         result = self._stage_heuristic(what_doing, location, app, is_workflow)
+
+        # Track app usage AFTER heuristic — only count apps that appear
+        # in work-like contexts, not noise apps like YouTube
+        if app:
+            app_key = app.lower()
+            self._session_total += 1
+            if result.activity_type in (
+                ActivityType.WORK, ActivityType.RESEARCH,
+                ActivityType.SETUP, ActivityType.COMMUNICATION,
+            ):
+                self._session_app_counts[app_key] = (
+                    self._session_app_counts.get(app_key, 0) + 1
+                )
+            # Rolling window: keep only the last 200 observations
+            if self._session_total > 200:
+                # Decay all counts by half to keep the window fresh
+                self._session_app_counts = {
+                    k: v // 2 for k, v in self._session_app_counts.items()
+                    if v // 2 > 0
+                }
+                self._session_total = sum(self._session_app_counts.values())
 
         # Stage 2 — prior blending
         if result.confidence < 0.9:
@@ -393,20 +409,22 @@ class ActivityClassifier:
     ) -> ClassificationResult:
         """Adjust classification using session-learned app frequency.
 
-        After ~10 observations in the current session, the apps that
-        appear most frequently are likely work apps.  This gives us a
-        useful prior even before the multi-day profile builds.
+        After ~10 work-classified observations, apps that account for a
+        significant share of work activity are treated as primary work apps.
+        Only apps already seen in work/research/setup/communication contexts
+        are tracked — noise apps (YouTube, Reddit) are excluded from counts.
         """
-        if not app or self._session_total < 10:
+        work_total = sum(self._session_app_counts.values())
+        if not app or work_total < 10:
             return current
 
         app_key = app.lower()
         app_count = self._session_app_counts.get(app_key, 0)
-        app_ratio = app_count / self._session_total
+        app_ratio = app_count / work_total if work_total > 0 else 0.0
 
-        # If this app accounts for >15% of observations, it's likely
-        # a primary work app — override ambiguous entertainment/personal
-        is_frequent = app_ratio >= 0.15
+        # If this app accounts for >10% of work-classified observations,
+        # it's a known work app — override ambiguous classifications
+        is_frequent = app_ratio >= 0.10
 
         if is_frequent and current.activity_type in (
             ActivityType.ENTERTAINMENT,
