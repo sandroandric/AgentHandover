@@ -54,6 +54,14 @@ just build-all
 cp resources/launchd/com.openmimic.daemon.plist ~/Library/LaunchAgents/
 cp resources/launchd/com.openmimic.worker.plist ~/Library/LaunchAgents/
 
+# Update binary paths to point at your source build
+sed -i '' "s|/usr/local/bin/oc-apprentice-daemon|$(pwd)/target/release/oc-apprentice-daemon|" \
+    ~/Library/LaunchAgents/com.openmimic.daemon.plist
+sed -i '' "s|/usr/local/lib/openmimic/venv/bin/python|$(pwd)/worker/.venv/bin/python|" \
+    ~/Library/LaunchAgents/com.openmimic.worker.plist
+sed -i '' "s|/usr/local/lib/openmimic|$(pwd)/worker|" \
+    ~/Library/LaunchAgents/com.openmimic.worker.plist
+
 # Run tests
 just test-all
 ```

@@ -477,6 +477,7 @@ final class MicroReviewViewModel: ObservableObject {
                 filename: "drift-reviewed-trigger.json",
                 payload: [
                     "procedure_slug": card.slug,
+                    "drift_type": card.metadata["driftType"] ?? "",
                     "action": "acknowledged",
                     "requested_at": now,
                 ]
@@ -487,6 +488,7 @@ final class MicroReviewViewModel: ObservableObject {
                 filename: "drift-reviewed-trigger.json",
                 payload: [
                     "procedure_slug": card.slug,
+                    "drift_type": card.metadata["driftType"] ?? "",
                     "action": "revert",
                     "requested_at": now,
                 ]
@@ -497,6 +499,7 @@ final class MicroReviewViewModel: ObservableObject {
                 filename: "drift-reviewed-trigger.json",
                 payload: [
                     "procedure_slug": card.slug,
+                    "drift_type": card.metadata["driftType"] ?? "",
                     "action": "dismiss",
                     "requested_at": now,
                 ]
@@ -619,6 +622,26 @@ final class MicroReviewViewModel: ObservableObject {
 
         // Load stale procedures, lifecycle upgrade candidates, merge candidates, drift alerts
         let proceduresDir = kbDir.appendingPathComponent("procedures")
+
+        // Load dismissed upgrades from curation decisions (once, before the loop)
+        let curationDecisionsPath = kbDir.appendingPathComponent(
+            "observations/curation_decisions.json"
+        )
+        var dismissedUpgradeSlugs: Set<String> = []
+        if let curationData = try? Data(contentsOf: curationDecisionsPath),
+           let curationJSON = try? JSONSerialization.jsonObject(with: curationData)
+               as? [String: Any] {
+            if let dismissedDrift = curationJSON["dismissed_drift"] as? [[String: Any]] {
+                for entry in dismissedDrift {
+                    if entry["drift_type"] as? String
+                        == "__lifecycle_upgrade_dismissed__",
+                       let dSlug = entry["slug"] as? String {
+                        dismissedUpgradeSlugs.insert(dSlug)
+                    }
+                }
+            }
+        }
+
         if let files = try? FileManager.default.contentsOfDirectory(
             at: proceduresDir, includingPropertiesForKeys: nil
         ) {
@@ -663,7 +686,7 @@ final class MicroReviewViewModel: ObservableObject {
                     suggestUpgrade = true; nextState = "reviewed"
                 }
 
-                if suggestUpgrade {
+                if suggestUpgrade && !dismissedUpgradeSlugs.contains(slug) {
                     cards.append(ReviewCardData(
                         id: "upgrade-\(slug)",
                         type: .lifecycleUpgrade,
@@ -720,7 +743,8 @@ final class MicroReviewViewModel: ObservableObject {
                         outcome: nil,
                         evidenceText: "\(driftType.capitalized): \(detail)",
                         stepsPreview: [],
-                        slug: slug
+                        slug: slug,
+                        metadata: ["driftType": driftType]
                     ))
                 }
             }

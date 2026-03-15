@@ -238,9 +238,18 @@ class ProcedureCurator:
         procedures = self._kb.list_procedures()
         candidates: list[UpgradeCandidate] = []
 
+        # Filter out dismissed lifecycle upgrades
+        dismissed_upgrade_slugs: set[str] = set()
+        for d in self._dismissed_drift:
+            if d.get("drift_type") == "__lifecycle_upgrade_dismissed__":
+                dismissed_upgrade_slugs.add(d.get("slug", ""))
+
         for proc in procedures:
             slug = proc.get("id", proc.get("slug", ""))
             if not slug:
+                continue
+
+            if slug in dismissed_upgrade_slugs:
                 continue
 
             lifecycle_str = proc.get("lifecycle_state", "observed")
