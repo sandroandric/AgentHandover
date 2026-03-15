@@ -194,6 +194,9 @@ class ActivityClassifier:
         result = classifier.classify(annotation)
     """
 
+    # Default working hours assumption for day-1 classification
+    _DEFAULT_WORKING_HOURS = {"typical_start": "08:00", "typical_end": "19:00"}
+
     def __init__(
         self,
         profile: dict | None = None,
@@ -201,6 +204,10 @@ class ActivityClassifier:
     ) -> None:
         self._profile = profile
         self._policy = policy
+        # Session-level app frequency tracker — learns from current session
+        # even before the multi-day profile exists
+        self._session_app_counts: dict[str, int] = {}
+        self._session_total: int = 0
 
     # ------------------------------------------------------------------
     # Public API
@@ -243,13 +250,25 @@ class ActivityClassifier:
             "is_workflow", False,
         )
 
+        # Track app usage for session-level learning
+        if app:
+            app_key = app.lower()
+            self._session_app_counts[app_key] = (
+                self._session_app_counts.get(app_key, 0) + 1
+            )
+            self._session_total += 1
+
         # Stage 1 — keyword + URL heuristics
         result = self._stage_heuristic(what_doing, location, app, is_workflow)
 
-        # Stage 2 — prior blending (only when profile exists and
-        # confidence is below 0.9)
-        if self._profile is not None and result.confidence < 0.9:
-            result = self._stage_prior(result, app, event_context)
+        # Stage 2 — prior blending
+        if result.confidence < 0.9:
+            if self._profile is not None:
+                # Full profile available (after 3+ daily summaries)
+                result = self._stage_prior(result, app, event_context)
+            elif self._session_total >= 10:
+                # No profile yet — use session-learned priors from day 1
+                result = self._stage_session_prior(result, app, event_context)
 
         # Infer learnability from activity type (before policy override)
         result.learnability = _LEARNABILITY_MAP.get(
@@ -363,7 +382,76 @@ class ActivityClassifier:
         )
 
     # ------------------------------------------------------------------
-    # Stage 2 — prior blending
+    # Stage 2a — session-level prior (day 1, before profile exists)
+    # ------------------------------------------------------------------
+
+    def _stage_session_prior(
+        self,
+        current: ClassificationResult,
+        app: str,
+        event_context: dict | None,
+    ) -> ClassificationResult:
+        """Adjust classification using session-learned app frequency.
+
+        After ~10 observations in the current session, the apps that
+        appear most frequently are likely work apps.  This gives us a
+        useful prior even before the multi-day profile builds.
+        """
+        if not app or self._session_total < 10:
+            return current
+
+        app_key = app.lower()
+        app_count = self._session_app_counts.get(app_key, 0)
+        app_ratio = app_count / self._session_total
+
+        # If this app accounts for >15% of observations, it's likely
+        # a primary work app — override ambiguous entertainment/personal
+        is_frequent = app_ratio >= 0.15
+
+        if is_frequent and current.activity_type in (
+            ActivityType.ENTERTAINMENT,
+            ActivityType.PERSONAL_ADMIN,
+        ) and current.confidence <= 0.8:
+            return ClassificationResult(
+                activity_type=ActivityType.WORK,
+                learnability=current.learnability,
+                confidence=0.7,
+                source="prior",
+                reasoning=(
+                    f"Session prior: '{app}' is {app_ratio:.0%} of observations, "
+                    f"likely a work app (was {current.activity_type.value})"
+                ),
+            )
+
+        # Apply default working hours assumption
+        if event_context and current.activity_type == ActivityType.WORK:
+            timestamp_str = event_context.get("timestamp", "")
+            if timestamp_str:
+                try:
+                    ts = datetime.fromisoformat(
+                        timestamp_str.replace("Z", "+00:00")
+                    )
+                    event_time = ts.strftime("%H:%M")
+                    start = self._DEFAULT_WORKING_HOURS["typical_start"]
+                    end = self._DEFAULT_WORKING_HOURS["typical_end"]
+                    if event_time < start or event_time > end:
+                        return ClassificationResult(
+                            activity_type=current.activity_type,
+                            learnability=current.learnability,
+                            confidence=max(current.confidence - 0.1, 0.0),
+                            source="prior",
+                            reasoning=(
+                                f"Outside default working hours ({start}-{end}), "
+                                f"confidence reduced"
+                            ),
+                        )
+                except (ValueError, TypeError):
+                    pass
+
+        return current
+
+    # ------------------------------------------------------------------
+    # Stage 2b — profile-based prior (after 3+ daily summaries)
     # ------------------------------------------------------------------
 
     def _stage_prior(
