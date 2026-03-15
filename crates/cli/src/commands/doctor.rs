@@ -4,149 +4,279 @@ use colored::Colorize;
 
 use crate::paths;
 
+/// Detect which install channel produced this OpenMimic installation.
+fn detect_install_channel() -> &'static str {
+    // Check for pkg install
+    if std::path::Path::new("/usr/local/bin/oc-apprentice-daemon").exists()
+        && std::path::Path::new("/usr/local/lib/openmimic").exists()
+    {
+        return "pkg";
+    }
+    // Check for Homebrew
+    if let Ok(output) = std::process::Command::new("brew")
+        .args(["--prefix", "openmimic"])
+        .output()
+    {
+        if output.status.success() {
+            return "homebrew";
+        }
+    }
+    // Check for source build (look for Cargo.toml in ancestor dirs)
+    let mut dir = std::env::current_dir().unwrap_or_default();
+    for _ in 0..5 {
+        if dir.join("Cargo.toml").exists() && dir.join("worker").exists() {
+            return "source";
+        }
+        if !dir.pop() {
+            break;
+        }
+    }
+    "unknown"
+}
+
+/// Print a channel-aware install/repair hint.
+fn print_install_hint(channel: &str) {
+    match channel {
+        "pkg" => eprintln!("  Fix: Re-run the .pkg installer to repair."),
+        "homebrew" => eprintln!("  Fix: brew reinstall openmimic"),
+        "source" => eprintln!("  Fix: just build-all"),
+        _ => eprintln!("  Fix: Re-install OpenMimic (.pkg recommended)."),
+    }
+}
+
+/// Counters for the three check result states.
+struct CheckCounts {
+    passes: u32,
+    skips: u32,
+    failures: u32,
+}
+
+impl CheckCounts {
+    fn new() -> Self {
+        Self {
+            passes: 0,
+            skips: 0,
+            failures: 0,
+        }
+    }
+
+    fn record_pass(&mut self) {
+        self.passes += 1;
+    }
+
+    fn record_skip(&mut self) {
+        self.skips += 1;
+    }
+
+    fn record_fail(&mut self) {
+        self.failures += 1;
+    }
+}
+
 pub fn run() -> Result<()> {
     println!("{}", "OpenMimic Doctor".bold());
     println!("{}", "=".repeat(50));
     println!();
 
-    let mut all_ok = true;
+    let channel = detect_install_channel();
+    let mut counts = CheckCounts::new();
 
     // Check 1: Daemon binary exists
-    all_ok &= check("Daemon binary", || {
-        std::path::Path::new("/usr/local/bin/oc-apprentice-daemon").exists()
-            || which("oc-apprentice-daemon")
-    });
+    // Search pkg path, PATH, and source build directories.
+    let daemon_found = std::path::Path::new("/usr/local/bin/oc-apprentice-daemon").exists()
+        || which("oc-apprentice-daemon")
+        || source_build_daemon_exists();
+    if daemon_found {
+        check_pass(&mut counts, "Daemon binary");
+    } else {
+        check_fail(&mut counts, "Daemon binary");
+        print_install_hint(channel);
+    }
 
     // Check 2: CLI binary (we're running it, so it exists)
-    check("CLI binary", || true);
+    check_pass(&mut counts, "CLI binary");
 
     // Check 3: Data directory exists
     let data_dir = oc_apprentice_common::status::status_dir();
-    all_ok &= check("Data directory", || data_dir.exists());
+    if data_dir.exists() {
+        check_pass(&mut counts, "Data directory");
+    } else {
+        check_fail(&mut counts, "Data directory");
+    }
 
-    // Check 4: Config file exists
+    // Check 4: Config file exists (optional — defaults are fine)
     let config_path = data_dir.join("config.toml");
-    check_optional("Config file", || config_path.exists(), "Using defaults");
+    if config_path.exists() {
+        check_pass(&mut counts, "Config file");
+    } else {
+        check_skip(&mut counts, "Config file", "Using defaults");
+    }
 
     // Check 5: Accessibility permission
     #[cfg(target_os = "macos")]
     {
-        all_ok &= check("Accessibility permission", accessibility_sys_check);
+        if accessibility_sys_check() {
+            check_pass(&mut counts, "Accessibility permission");
+        } else {
+            check_fail(&mut counts, "Accessibility permission");
+        }
     }
 
-    // Check 6: Screen Recording permission
+    // Check 6: Screen Recording permission (optional)
     #[cfg(target_os = "macos")]
     {
-        check_optional(
-            "Screen Recording permission",
-            screen_recording_check,
-            "Screenshots disabled",
-        );
+        if screen_recording_check() {
+            check_pass(&mut counts, "Screen Recording permission");
+        } else {
+            check_skip(
+                &mut counts,
+                "Screen Recording permission",
+                "Screenshots disabled",
+            );
+        }
     }
 
     // Check 7: Database exists and is writable
-    // On fresh installs the daemon hasn't created the DB yet — advisory, not fatal.
     let db_path = data_dir.join("events.db");
     let daemon_pid_exists = data_dir.join("daemon.pid").exists();
+    let db_ok = db_path.exists()
+        && std::fs::OpenOptions::new()
+            .write(true)
+            .open(&db_path)
+            .is_ok();
     if daemon_pid_exists {
         // Daemon has started at least once — DB should exist
-        all_ok &= check("Database", || {
-            db_path.exists()
-                && std::fs::OpenOptions::new()
-                    .write(true)
-                    .open(&db_path)
-                    .is_ok()
-        });
+        if db_ok {
+            check_pass(&mut counts, "Database");
+        } else {
+            check_fail(&mut counts, "Database");
+        }
     } else {
         // Fresh install — daemon never ran, DB expected to not exist
-        check_optional(
-            "Database",
-            || {
-                db_path.exists()
-                    && std::fs::OpenOptions::new()
-                        .write(true)
-                        .open(&db_path)
-                        .is_ok()
-            },
-            "Run 'openmimic start' to create database",
-        );
+        if db_ok {
+            check_pass(&mut counts, "Database");
+        } else {
+            check_skip(
+                &mut counts,
+                "Database",
+                "Run 'openmimic start' to create database",
+            );
+        }
     }
 
     // Check 8: Native messaging host manifest (content validation)
-    all_ok &= check("Native messaging host", check_native_messaging_manifest);
+    if check_native_messaging_manifest() {
+        check_pass(&mut counts, "Native messaging host");
+    } else {
+        check_fail(&mut counts, "Native messaging host");
+    }
 
     // Check 9: launchd plists installed
     let launch_agents = launch_agents_dir();
-    all_ok &= check("Daemon launchd plist", || {
-        launch_agents.join("com.openmimic.daemon.plist").exists()
-    });
-    all_ok &= check("Worker launchd plist", || {
-        launch_agents.join("com.openmimic.worker.plist").exists()
-    });
+    if launch_agents.join("com.openmimic.daemon.plist").exists() {
+        check_pass(&mut counts, "Daemon launchd plist");
+    } else {
+        check_fail(&mut counts, "Daemon launchd plist");
+        print_install_hint(channel);
+    }
+    if launch_agents.join("com.openmimic.worker.plist").exists() {
+        check_pass(&mut counts, "Worker launchd plist");
+    } else {
+        check_fail(&mut counts, "Worker launchd plist");
+        print_install_hint(channel);
+    }
 
-    // Check 10: Heartbeat freshness (advisory — does not block overall result)
+    // Check 10: Heartbeat freshness (advisory — does not affect counts)
     check_heartbeat_freshness("Daemon", "daemon-status.json");
     check_heartbeat_freshness("Worker", "worker-status.json");
 
     // Check 11: Disk space
-    all_ok &= check("Disk space (>1GB free)", || free_disk_gb() > 1);
-
-    // Check 12: Python virtual environment
-    // Check pkg path, Homebrew libexec (resolved from binary), and known opt paths.
-    check_optional(
-        "Python virtual environment",
-        || paths::find_venv_python().is_some(),
-        "Run installer or: brew install --HEAD openmimic",
-    );
-
-    // Check 13: Chrome extension
-    // Homebrew installs dist contents flat into libexec/extension/ (no dist subdir).
-    // Pkg installer uses /usr/local/lib/openmimic/extension/dist/.
-    check_optional(
-        "Chrome extension",
-        || paths::find_any_extension_path().is_some(),
-        "Build with: cd extension && npm run build",
-    );
-
-    // Check 14: Worker process alive
-    check_optional(
-        "Worker process",
-        || oc_apprentice_common::pid::check_pid_file("worker").is_some(),
-        "Start with: openmimic start",
-    );
-
-    println!();
-    if all_ok {
-        println!("{}", "All checks passed!".green().bold());
+    if free_disk_gb() > 1 {
+        check_pass(&mut counts, "Disk space (>1GB free)");
     } else {
+        check_fail(&mut counts, "Disk space (>1GB free)");
+    }
+
+    // Check 12: Python virtual environment (optional — not present in source builds)
+    if paths::find_venv_python().is_some() {
+        check_pass(&mut counts, "Python virtual environment");
+    } else {
+        let hint = match channel {
+            "pkg" => "Re-run .pkg installer to repair",
+            "homebrew" => "brew reinstall openmimic",
+            "source" => "venv not found — expected for source builds",
+            _ => "Re-install OpenMimic (.pkg recommended)",
+        };
+        check_skip(&mut counts, "Python virtual environment", hint);
+    }
+
+    // Check 13: Chrome extension (optional — not all users need it)
+    if paths::find_any_extension_path().is_some() {
+        check_pass(&mut counts, "Chrome extension");
+    } else {
+        let hint = match channel {
+            "pkg" => "Re-run .pkg installer to repair",
+            "homebrew" => "brew reinstall openmimic",
+            "source" => "cd extension && npm run build",
+            _ => "Re-install OpenMimic (.pkg recommended)",
+        };
+        check_skip(&mut counts, "Chrome extension", hint);
+    }
+
+    // Check 14: Worker process alive (optional — may not be started yet)
+    if oc_apprentice_common::pid::check_pid_file("worker").is_some() {
+        check_pass(&mut counts, "Worker process");
+    } else {
+        check_skip(
+            &mut counts,
+            "Worker process",
+            "Start with: openmimic start",
+        );
+    }
+
+    // Summary
+    println!();
+    println!(
+        "Results: {} passed, {} skipped, {} failed",
+        counts.passes, counts.skips, counts.failures
+    );
+    if counts.failures > 0 {
         println!(
             "{}",
             "Some checks failed. See above for details."
                 .yellow()
                 .bold()
         );
+    } else if counts.skips > 0 {
+        println!(
+            "{}",
+            format!(
+                "All required checks passed ({} optional check(s) skipped)",
+                counts.skips
+            )
+            .green()
+            .bold()
+        );
+    } else {
+        println!("{}", "All checks passed!".green().bold());
     }
 
     Ok(())
 }
 
-fn check(name: &str, test: impl FnOnce() -> bool) -> bool {
-    let result = test();
-    if result {
-        println!("  {} {}", "pass".green(), name);
-    } else {
-        println!("  {} {}", "FAIL".red(), name);
-    }
-    result
+fn check_pass(counts: &mut CheckCounts, name: &str) {
+    counts.record_pass();
+    println!("  {} {}", "pass".green(), name);
 }
 
-fn check_optional(name: &str, test: impl FnOnce() -> bool, fallback_msg: &str) {
-    let result = test();
-    if result {
-        println!("  {} {}", "pass".green(), name);
-    } else {
-        println!("  {} {} ({})", "skip".yellow(), name, fallback_msg);
-    }
+fn check_fail(counts: &mut CheckCounts, name: &str) {
+    counts.record_fail();
+    println!("  {} {}", "FAIL".red(), name);
+}
+
+fn check_skip(counts: &mut CheckCounts, name: &str, reason: &str) {
+    counts.record_skip();
+    println!("  {} {} ({})", "SKIP".yellow(), name, reason);
 }
 
 /// Advisory heartbeat freshness check for a service status file.
@@ -162,10 +292,11 @@ fn check_heartbeat_freshness(service_name: &str, status_filename: &str) {
     let path = status_dir.join(status_filename);
 
     if !path.exists() {
-        check_optional(
-            &label,
-            || false,
-            "No status file yet (service may not have started)",
+        println!(
+            "  {} {} ({})",
+            "info".dimmed(),
+            label,
+            "No status file yet (service may not have started)"
         );
         return;
     }
@@ -173,7 +304,7 @@ fn check_heartbeat_freshness(service_name: &str, status_filename: &str) {
     let content = match std::fs::read_to_string(&path) {
         Ok(c) => c,
         Err(_) => {
-            check_optional(&label, || false, "Cannot read status file");
+            println!("  {} {} ({})", "info".dimmed(), label, "Cannot read status file");
             return;
         }
     };
@@ -181,7 +312,7 @@ fn check_heartbeat_freshness(service_name: &str, status_filename: &str) {
     let parsed: serde_json::Value = match serde_json::from_str(&content) {
         Ok(v) => v,
         Err(_) => {
-            check_optional(&label, || false, "Invalid JSON in status file");
+            println!("  {} {} ({})", "info".dimmed(), label, "Invalid JSON in status file");
             return;
         }
     };
@@ -189,7 +320,12 @@ fn check_heartbeat_freshness(service_name: &str, status_filename: &str) {
     let heartbeat_str = match parsed.get("heartbeat").and_then(|v| v.as_str()) {
         Some(s) => s.to_string(),
         None => {
-            check_optional(&label, || false, "No heartbeat field in status file");
+            println!(
+                "  {} {} ({})",
+                "info".dimmed(),
+                label,
+                "No heartbeat field in status file"
+            );
             return;
         }
     };
@@ -197,7 +333,12 @@ fn check_heartbeat_freshness(service_name: &str, status_filename: &str) {
     let heartbeat = match chrono::DateTime::parse_from_rfc3339(&heartbeat_str) {
         Ok(dt) => dt.with_timezone(&Utc),
         Err(_) => {
-            check_optional(&label, || false, "Cannot parse heartbeat timestamp");
+            println!(
+                "  {} {} ({})",
+                "info".dimmed(),
+                label,
+                "Cannot parse heartbeat timestamp"
+            );
             return;
         }
     };
@@ -224,6 +365,21 @@ fn which(binary: &str) -> bool {
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
+}
+
+/// Check common source build output directories for the daemon binary.
+fn source_build_daemon_exists() -> bool {
+    let source_paths = [
+        "target/release/oc-apprentice-daemon",
+        "target/debug/oc-apprentice-daemon",
+        "target/universal-release/oc-apprentice-daemon",
+    ];
+    for sp in &source_paths {
+        if std::path::Path::new(sp).exists() {
+            return true;
+        }
+    }
+    false
 }
 
 // Path resolution functions (find_homebrew_libexec, find_venv_python,

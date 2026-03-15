@@ -15,6 +15,36 @@ const NM_HOST_NAME: &str = "com.openclaw.apprentice";
 /// Chrome extension ID derived from the RSA key in `extension/manifest.json`.
 const EXTENSION_ID: &str = "knldjmfmopnpolahpmmgbagdohdnhkik";
 
+/// Detect which install channel produced this OpenMimic installation.
+fn detect_install_channel() -> &'static str {
+    // Check for pkg install
+    if std::path::Path::new("/usr/local/bin/oc-apprentice-daemon").exists()
+        && std::path::Path::new("/usr/local/lib/openmimic").exists()
+    {
+        return "pkg";
+    }
+    // Check for Homebrew
+    if let Ok(output) = std::process::Command::new("brew")
+        .args(["--prefix", "openmimic"])
+        .output()
+    {
+        if output.status.success() {
+            return "homebrew";
+        }
+    }
+    // Check for source build (look for Cargo.toml in ancestor dirs)
+    let mut dir = std::env::current_dir().unwrap_or_default();
+    for _ in 0..5 {
+        if dir.join("Cargo.toml").exists() && dir.join("worker").exists() {
+            return "source";
+        }
+        if !dir.pop() {
+            break;
+        }
+    }
+    "unknown"
+}
+
 /// Load config.toml from the standard OS location; falls back to defaults.
 fn load_config() -> Result<AppConfig> {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
@@ -244,10 +274,16 @@ fn start_service(label: &str) -> bool {
             "⚠".yellow(),
             plist_path
         );
-        println!(
-            "    Run {} to install plists.",
-            "brew install --HEAD openmimic".cyan()
-        );
+        let channel = detect_install_channel();
+        match channel {
+            "pkg" => println!("    Re-run the .pkg installer to repair."),
+            "homebrew" => println!("    Run {} to install plists.", "brew reinstall openmimic".cyan()),
+            "source" => println!(
+                "    Run: {} and copy plists to ~/Library/LaunchAgents/",
+                "just build-all".cyan()
+            ),
+            _ => println!("    Re-install OpenMimic ({} recommended).", ".pkg".cyan()),
+        }
         return false;
     }
 
@@ -493,10 +529,16 @@ fn step_chrome_extension(check_only: bool) -> Result<()> {
                 "✗".red(),
                 "not found".red()
             );
-            println!("    Install via: brew install --HEAD openmimic");
-            println!(
-                "    Or build from source: cd extension && npm install && npm run build"
-            );
+            let channel = detect_install_channel();
+            match channel {
+                "pkg" => println!("    Re-run the .pkg installer to repair."),
+                "homebrew" => println!("    Run: {}", "brew reinstall openmimic".cyan()),
+                "source" => println!(
+                    "    Build from source: {}",
+                    "cd extension && npm install && npm run build".cyan()
+                ),
+                _ => println!("    Re-install OpenMimic ({} recommended).", ".pkg".cyan()),
+            }
         }
     }
 

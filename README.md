@@ -22,49 +22,55 @@ openmimic focus stop
 
 OpenMimic continuously captures screenshots, annotates them with a local vision model, and detects repeated workflows automatically. When the same task appears in 2+ demonstrations, a SOP is generated without any user action.
 
-## Installation
+## Install
 
-### Option A: .pkg Installer (Recommended)
+### Recommended: macOS Installer (.pkg)
 
-Download the latest `.pkg` from [Releases](https://github.com/sandroandric/OpenMimic/releases) and run it. The installer sets up everything automatically.
+Download the latest `.pkg` from [Releases](https://github.com/sandroandric/OpenMimic/releases) and double-click to install.
 
-### Option B: Homebrew
+This installs the daemon, worker, CLI (`openmimic`), and Chrome extension to standard system paths. No additional setup required beyond granting permissions.
+
+After install:
+```bash
+openmimic doctor    # Verify everything is set up
+openmimic start all # Start observing
+```
+
+### Developer Install
+
+<details>
+<summary>Homebrew (for developers)</summary>
 
 ```bash
 brew tap sandroandric/openmimic
 brew install --HEAD openmimic
 ```
 
-### Option C: Build from Source
+</details>
+
+<details>
+<summary>Build from source (for contributors)</summary>
+
+Requires: Rust toolchain, Node.js 18+, Python 3.11+
 
 ```bash
 git clone https://github.com/sandroandric/OpenMimic.git
 cd OpenMimic
+just build-all          # Builds daemon, CLI, worker venv, extension, app
+./scripts/setup.sh      # Install native messaging host + VLM setup
 
-# Install just (task runner)
-brew install just
-
-# Build everything
-just build-all
-
-# Install Chrome native messaging host (required for extension connection)
-./scripts/setup.sh
-
-# Install launchd service plists (required for `openmimic start all`)
+# Install launchd services (update paths for your source build):
 cp resources/launchd/com.openmimic.daemon.plist ~/Library/LaunchAgents/
 cp resources/launchd/com.openmimic.worker.plist ~/Library/LaunchAgents/
-
-# Update binary paths to point at your source build
 sed -i '' "s|/usr/local/bin/oc-apprentice-daemon|$(pwd)/target/release/oc-apprentice-daemon|" \
     ~/Library/LaunchAgents/com.openmimic.daemon.plist
 sed -i '' "s|/usr/local/lib/openmimic/venv/bin/python|$(pwd)/worker/.venv/bin/python|" \
     ~/Library/LaunchAgents/com.openmimic.worker.plist
 sed -i '' "s|/usr/local/lib/openmimic|$(pwd)/worker|" \
     ~/Library/LaunchAgents/com.openmimic.worker.plist
-
-# Run tests
-just test-all
 ```
+
+</details>
 
 ## First Run
 
