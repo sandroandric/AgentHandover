@@ -21,10 +21,12 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-PROCEDURE_SCHEMA_VERSION = "3.0.0"
+PROCEDURE_SCHEMA_VERSION = "3.1.0"
 
 # All accepted versions for backward compatibility
-_ACCEPTED_VERSIONS = frozenset(("1.0.0", "1.1.0", "2.0.0", "3.0.0"))
+_ACCEPTED_VERSIONS = frozenset(("1.0.0", "1.1.0", "2.0.0", "3.0.0", "3.1.0"))
+
+_WORKER_VERSION = "0.2.0"
 
 # Required top-level fields in a v3 procedure
 _REQUIRED_FIELDS = (
@@ -45,6 +47,13 @@ _V3_SECTIONS = {
     "evidence": dict,
     "constraints": dict,
     "recurrence": dict,
+    "chain": dict,
+    "lifecycle_state": lambda: "observed",
+    "lifecycle_history": list,
+    "compiled_outputs": dict,
+    "variant_family": lambda: None,
+    "variants": list,
+    "parameters_extracted": list,
 }
 
 
@@ -144,7 +153,10 @@ def sop_to_procedure(sop_template: dict) -> dict:
 
         # v3 extended sections
         "inputs": inputs,
-        "outputs": [],
+        "outputs": [
+            {"name": sc.get("name", f"output_{i}"), "type": sc.get("type", "boolean"), "description": sc.get("description", "")}
+            for i, sc in enumerate(sop_template.get("success_criteria", []))
+        ] if sop_template.get("success_criteria") else [],
         "environment": {
             "required_apps": sop_template.get("apps_involved", []),
             "accounts": [],
@@ -175,6 +187,22 @@ def sop_to_procedure(sop_template: dict) -> dict:
             "avg_duration_minutes": None,
             "observations": 0,
         },
+        "chain": {
+            "depends_on": [],      # slugs this procedure requires to run first
+            "followed_by": [],     # slugs commonly executed after this one
+            "co_occurrence_count": 0,
+            "can_compose": False,  # True if this can be part of a macro procedure
+        },
+
+        # Lifecycle (Phase 3)
+        "lifecycle_state": "observed",
+        "lifecycle_history": [],
+        "compiled_outputs": {},
+
+        # Phase 4: variant family
+        "variant_family": sop_template.get("variant_family", None),
+        "variants": sop_template.get("variants", []),
+        "parameters_extracted": sop_template.get("parameters_extracted", []),
 
         # Metadata
         "preconditions": sop_template.get("preconditions", []),
@@ -183,7 +211,7 @@ def sop_to_procedure(sop_template: dict) -> dict:
         "generated_at": now_iso,
         "metadata": {
             "generator": "openmimic",
-            "generator_version": "0.1.0",
+            "generator_version": _WORKER_VERSION,
             "schema_version": PROCEDURE_SCHEMA_VERSION,
         },
     }
@@ -322,6 +350,49 @@ def validate_procedure(data: dict) -> list[str]:
         if not isinstance(data["recurrence"], dict):
             errors.append("Field 'recurrence' must be a dict")
 
+    # Chain must be a dict
+    if "chain" in data:
+        if not isinstance(data["chain"], dict):
+            errors.append("Field 'chain' must be a dict")
+        else:
+            chain = data["chain"]
+            for list_key in ("depends_on", "followed_by"):
+                if list_key in chain and not isinstance(chain[list_key], list):
+                    errors.append(f"chain.{list_key} must be a list")
+
+    # Lifecycle state
+    _VALID_LIFECYCLE_STATES = (
+        "observed", "draft", "reviewed", "verified",
+        "agent_ready", "stale", "archived",
+    )
+    if "lifecycle_state" in data:
+        if data["lifecycle_state"] not in _VALID_LIFECYCLE_STATES:
+            errors.append(
+                f"Invalid lifecycle_state: {data['lifecycle_state']!r} "
+                f"(expected one of {_VALID_LIFECYCLE_STATES})"
+            )
+
+    # Lifecycle history
+    if "lifecycle_history" in data:
+        if not isinstance(data["lifecycle_history"], list):
+            errors.append("Field 'lifecycle_history' must be a list")
+
+    # Compiled outputs
+    if "compiled_outputs" in data:
+        if not isinstance(data["compiled_outputs"], dict):
+            errors.append("Field 'compiled_outputs' must be a dict")
+
+    # Variant family
+    if "variant_family" in data:
+        if data["variant_family"] is not None and not isinstance(data["variant_family"], str):
+            errors.append("variant_family must be a string or null")
+    if "variants" in data:
+        if not isinstance(data["variants"], list):
+            errors.append("Field 'variants' must be a list")
+    if "parameters_extracted" in data:
+        if not isinstance(data["parameters_extracted"], list):
+            errors.append("Field 'parameters_extracted' must be a list")
+
     # List fields
     for list_field in (
         "apps_involved", "preconditions", "postconditions",
@@ -443,6 +514,18 @@ def upgrade_v2_to_v3(sop_json: dict) -> dict:
             "avg_duration_minutes": None,
             "observations": 0,
         },
+        "chain": {
+            "depends_on": [],      # slugs this procedure requires to run first
+            "followed_by": [],     # slugs commonly executed after this one
+            "co_occurrence_count": 0,
+            "can_compose": False,  # True if this can be part of a macro procedure
+        },
+        "lifecycle_state": "observed",
+        "lifecycle_history": [],
+        "compiled_outputs": {},
+        "variant_family": sop_json.get("variant_family", None),
+        "variants": sop_json.get("variants", []),
+        "parameters_extracted": sop_json.get("parameters_extracted", []),
         "preconditions": sop_json.get("preconditions", []),
         "postconditions": sop_json.get("postconditions", []),
         "exceptions_seen": sop_json.get("exceptions_seen", []),
@@ -450,7 +533,7 @@ def upgrade_v2_to_v3(sop_json: dict) -> dict:
         "upgraded_at": now_iso,
         "metadata": {
             "generator": "openmimic",
-            "generator_version": "0.1.0",
+            "generator_version": _WORKER_VERSION,
             "schema_version": PROCEDURE_SCHEMA_VERSION,
             "upgraded_from": sop_json.get("schema_version", "unknown"),
         },

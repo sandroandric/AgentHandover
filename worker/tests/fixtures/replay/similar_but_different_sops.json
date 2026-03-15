@@ -1,0 +1,293 @@
+{
+  "description": "Two pre-built SOPs that operate on the same domain (github.com) and same app (Chrome) but represent distinct workflows: PR review vs issue triage. Tests deduplication logic to ensure similar-looking procedures are NOT incorrectly merged.",
+  "events": [],
+  "procedures": [
+    {
+      "schema_version": "3.0.0",
+      "id": "github-pr-review",
+      "title": "Review Pull Request on GitHub",
+      "short_title": "PR Review",
+      "description": "Open a pull request, review the code changes, leave comments, and approve or request changes.",
+      "tags": ["github", "code-review", "pull-request"],
+      "confidence_avg": 0.88,
+      "confidence_summary": "high",
+      "episode_count": 4,
+      "evidence_window": "last_30_days",
+      "apps_involved": ["Chrome"],
+      "source": "v2_passive_discovery",
+      "steps": [
+        {
+          "step_id": "step_1",
+          "index": 0,
+          "action": "open",
+          "target": "Pull request page",
+          "app": "Chrome",
+          "location": "https://github.com/{{org}}/{{repo}}/pull/{{pr_number}}",
+          "input": "",
+          "verify": "PR diff is visible",
+          "selector": null,
+          "parameters": {"app": "Chrome", "verify": "PR diff is visible"},
+          "confidence": 0.92,
+          "on_failure": {"strategy": "retry", "max_retries": 2, "delay_seconds": 3}
+        },
+        {
+          "step_id": "step_2",
+          "index": 1,
+          "action": "review",
+          "target": "Files changed tab",
+          "app": "Chrome",
+          "location": "https://github.com/{{org}}/{{repo}}/pull/{{pr_number}}/files",
+          "input": "",
+          "verify": "File diffs are displayed",
+          "selector": null,
+          "parameters": {"app": "Chrome", "verify": "File diffs are displayed"},
+          "confidence": 0.90,
+          "on_failure": {"strategy": "abort", "max_retries": 0, "delay_seconds": 0}
+        },
+        {
+          "step_id": "step_3",
+          "index": 2,
+          "action": "comment",
+          "target": "Inline comment box",
+          "app": "Chrome",
+          "location": "https://github.com/{{org}}/{{repo}}/pull/{{pr_number}}/files",
+          "input": "{{review_comment}}",
+          "verify": "Comment is posted",
+          "selector": null,
+          "parameters": {"app": "Chrome", "input": "{{review_comment}}", "verify": "Comment is posted"},
+          "confidence": 0.85,
+          "on_failure": {"strategy": "retry", "max_retries": 1, "delay_seconds": 2}
+        },
+        {
+          "step_id": "step_4",
+          "index": 3,
+          "action": "approve",
+          "target": "Review submit button",
+          "app": "Chrome",
+          "location": "https://github.com/{{org}}/{{repo}}/pull/{{pr_number}}",
+          "input": "",
+          "verify": "Review is submitted as approved",
+          "selector": null,
+          "parameters": {"app": "Chrome", "verify": "Review is submitted as approved"},
+          "confidence": 0.87,
+          "on_failure": {"strategy": "abort", "max_retries": 0, "delay_seconds": 0}
+        }
+      ],
+      "inputs": [
+        {"name": "org", "type": "string", "required": true, "default": null, "description": "GitHub organization name"},
+        {"name": "repo", "type": "string", "required": true, "default": null, "description": "Repository name"},
+        {"name": "pr_number", "type": "integer", "required": true, "default": null, "description": "Pull request number"},
+        {"name": "review_comment", "type": "string", "required": false, "default": "LGTM", "description": "Review comment text"}
+      ],
+      "outputs": [
+        {"name": "review_status", "type": "string", "description": "Final review status (approved/changes_requested)"}
+      ],
+      "environment": {
+        "required_apps": ["Chrome"],
+        "accounts": [{"service": "github", "required": true}],
+        "setup_actions": []
+      },
+      "branches": [],
+      "expected_outcomes": [
+        {"type": "state_change", "description": "PR review status updated"}
+      ],
+      "staleness": {
+        "last_observed": "2026-03-12T10:00:00Z",
+        "last_confirmed": null,
+        "drift_signals": [],
+        "confidence_trend": [0.85, 0.87, 0.88]
+      },
+      "evidence": {
+        "observations": [],
+        "step_evidence": [],
+        "contradictions": [],
+        "total_observations": 4
+      },
+      "constraints": {
+        "trust_level": "draft",
+        "guardrails": ["Do not force-merge PRs", "Do not dismiss other reviews"]
+      },
+      "recurrence": {
+        "pattern": "on_demand",
+        "day": null,
+        "time": null,
+        "avg_duration_minutes": 10,
+        "observations": 4
+      },
+      "chain": {
+        "depends_on": [],
+        "followed_by": ["github-merge-pr"],
+        "co_occurrence_count": 3,
+        "can_compose": true
+      },
+      "preconditions": ["Must have repository access", "PR must exist and be open"],
+      "postconditions": ["Review is submitted"],
+      "exceptions_seen": [],
+      "generated_at": "2026-03-12T10:00:00Z",
+      "metadata": {
+        "generator": "openmimic",
+        "generator_version": "0.1.0",
+        "schema_version": "3.0.0"
+      }
+    },
+    {
+      "schema_version": "3.0.0",
+      "id": "github-issue-triage",
+      "title": "Triage GitHub Issues",
+      "short_title": "Issue Triage",
+      "description": "Open the issues list, select an issue, apply labels, assign to a team member, and close or prioritize.",
+      "tags": ["github", "issue-management", "triage"],
+      "confidence_avg": 0.86,
+      "confidence_summary": "high",
+      "episode_count": 6,
+      "evidence_window": "last_30_days",
+      "apps_involved": ["Chrome"],
+      "source": "v2_passive_discovery",
+      "steps": [
+        {
+          "step_id": "step_1",
+          "index": 0,
+          "action": "open",
+          "target": "Issues list page",
+          "app": "Chrome",
+          "location": "https://github.com/{{org}}/{{repo}}/issues",
+          "input": "",
+          "verify": "Issues list is visible",
+          "selector": null,
+          "parameters": {"app": "Chrome", "verify": "Issues list is visible"},
+          "confidence": 0.92,
+          "on_failure": {"strategy": "retry", "max_retries": 2, "delay_seconds": 3}
+        },
+        {
+          "step_id": "step_2",
+          "index": 1,
+          "action": "select",
+          "target": "Issue from list",
+          "app": "Chrome",
+          "location": "https://github.com/{{org}}/{{repo}}/issues/{{issue_number}}",
+          "input": "",
+          "verify": "Issue details page loads",
+          "selector": null,
+          "parameters": {"app": "Chrome", "verify": "Issue details page loads"},
+          "confidence": 0.90,
+          "on_failure": {"strategy": "abort", "max_retries": 0, "delay_seconds": 0}
+        },
+        {
+          "step_id": "step_3",
+          "index": 2,
+          "action": "label",
+          "target": "Labels sidebar",
+          "app": "Chrome",
+          "location": "https://github.com/{{org}}/{{repo}}/issues/{{issue_number}}",
+          "input": "{{label_name}}",
+          "verify": "Label applied to issue",
+          "selector": null,
+          "parameters": {"app": "Chrome", "input": "{{label_name}}", "verify": "Label applied to issue"},
+          "confidence": 0.85,
+          "on_failure": {"strategy": "retry", "max_retries": 1, "delay_seconds": 2}
+        },
+        {
+          "step_id": "step_4",
+          "index": 3,
+          "action": "assign",
+          "target": "Assignees sidebar",
+          "app": "Chrome",
+          "location": "https://github.com/{{org}}/{{repo}}/issues/{{issue_number}}",
+          "input": "{{assignee_username}}",
+          "verify": "Assignee is set",
+          "selector": null,
+          "parameters": {"app": "Chrome", "input": "{{assignee_username}}", "verify": "Assignee is set"},
+          "confidence": 0.84,
+          "on_failure": {"strategy": "retry", "max_retries": 1, "delay_seconds": 2}
+        },
+        {
+          "step_id": "step_5",
+          "index": 4,
+          "action": "close",
+          "target": "Close issue button",
+          "app": "Chrome",
+          "location": "https://github.com/{{org}}/{{repo}}/issues/{{issue_number}}",
+          "input": "",
+          "verify": "Issue status changed to closed",
+          "selector": null,
+          "parameters": {"app": "Chrome", "verify": "Issue status changed to closed"},
+          "confidence": 0.82,
+          "on_failure": {"strategy": "abort", "max_retries": 0, "delay_seconds": 0}
+        }
+      ],
+      "inputs": [
+        {"name": "org", "type": "string", "required": true, "default": null, "description": "GitHub organization name"},
+        {"name": "repo", "type": "string", "required": true, "default": null, "description": "Repository name"},
+        {"name": "issue_number", "type": "integer", "required": true, "default": null, "description": "Issue number to triage"},
+        {"name": "label_name", "type": "string", "required": true, "default": null, "description": "Label to apply (e.g. bug, enhancement)"},
+        {"name": "assignee_username", "type": "string", "required": false, "default": null, "description": "GitHub username to assign"}
+      ],
+      "outputs": [
+        {"name": "issue_status", "type": "string", "description": "Final issue status (open/closed)"},
+        {"name": "labels_applied", "type": "list", "description": "Labels applied to the issue"}
+      ],
+      "environment": {
+        "required_apps": ["Chrome"],
+        "accounts": [{"service": "github", "required": true}],
+        "setup_actions": []
+      },
+      "branches": [
+        {
+          "condition": "Issue is a duplicate",
+          "action": "Label as duplicate and close without assigning",
+          "skip_steps": ["step_4"]
+        }
+      ],
+      "expected_outcomes": [
+        {"type": "state_change", "description": "Issue is labeled and assigned or closed"}
+      ],
+      "staleness": {
+        "last_observed": "2026-03-12T11:00:00Z",
+        "last_confirmed": null,
+        "drift_signals": [],
+        "confidence_trend": [0.82, 0.85, 0.86]
+      },
+      "evidence": {
+        "observations": [],
+        "step_evidence": [],
+        "contradictions": [],
+        "total_observations": 6
+      },
+      "constraints": {
+        "trust_level": "draft",
+        "guardrails": ["Do not close issues without a label", "Do not reassign issues from other triagers"]
+      },
+      "recurrence": {
+        "pattern": "weekly",
+        "day": "Monday",
+        "time": "10:00",
+        "avg_duration_minutes": 20,
+        "observations": 6
+      },
+      "chain": {
+        "depends_on": [],
+        "followed_by": [],
+        "co_occurrence_count": 0,
+        "can_compose": false
+      },
+      "preconditions": ["Must have triage permissions on the repository"],
+      "postconditions": ["All selected issues are labeled and assigned"],
+      "exceptions_seen": [],
+      "generated_at": "2026-03-12T11:00:00Z",
+      "metadata": {
+        "generator": "openmimic",
+        "generator_version": "0.1.0",
+        "schema_version": "3.0.0"
+      }
+    }
+  ],
+  "ground_truth": {
+    "dedup_families": [
+      {
+        "member_slugs": ["github-pr-review", "github-issue-triage"],
+        "should_merge": false,
+        "reason": "Both use Chrome on github.com but have entirely different step verbs (review/comment/approve vs select/label/assign/close) and serve different workflow purposes"
+      }
+    ]
+  }
+}

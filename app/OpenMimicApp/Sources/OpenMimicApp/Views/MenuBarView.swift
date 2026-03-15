@@ -106,6 +106,23 @@ struct MenuBarView: View {
             StatRow(label: "Events Today", value: "\(appState.eventsToday)")
             StatRow(label: "SOPs Generated", value: "\(appState.sopsGenerated)")
 
+            // Agent-ready count
+            if appState.sopAgentReadyCount > 0 {
+                HStack(spacing: 4) {
+                    Image(systemName: "checkmark.shield")
+                        .font(.system(size: 10))
+                        .foregroundColor(.green)
+                    Text("\(appState.sopAgentReadyCount)")
+                        .font(.caption)
+                        .fontWeight(.semibold)
+                        .foregroundColor(.green)
+                    Text("Agent Ready")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    Spacer()
+                }
+            }
+
             // VLM queue status (only shown when VLM is available)
             if appState.workerStatus?.vlm_available == true {
                 let pending = appState.vlmQueuePending

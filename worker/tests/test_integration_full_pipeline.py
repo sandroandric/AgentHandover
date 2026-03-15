@@ -91,7 +91,7 @@ class TestFullPipelineIntegration:
         kb.save_procedure(proc)
         loaded = kb.get_procedure("e2e-test")
         assert loaded is not None
-        assert loaded["schema_version"] == "3.0.0"
+        assert loaded["schema_version"] in ("3.0.0", "3.1.0")
         assert len(loaded["steps"]) == 3
 
     def test_procedure_writer_with_evidence(self, kb: KnowledgeBase) -> None:

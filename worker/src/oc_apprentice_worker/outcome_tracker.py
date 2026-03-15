@@ -77,6 +77,69 @@ class OutcomeTracker:
 
         return outcomes
 
+    def detect_outcomes_with_evidence(
+        self, task_events_list: list[list[dict]],
+    ) -> list:
+        """Detect outcomes with evidence-based confidence.
+
+        Runs detect_outcomes() on each observation separately,
+        then computes confidence as observations_with_outcome / total.
+        """
+        if not task_events_list:
+            return []
+
+        # Run detection on each observation
+        all_outcomes: dict[str, list[bool]] = {}
+        for events in task_events_list:
+            detected = self.detect_outcomes(events)
+            for o in detected:
+                all_outcomes.setdefault(o.type, []).append(True)
+
+        # Compute evidence-weighted confidence
+        total = len(task_events_list)
+        results = []
+        for outcome_type, occurrences in all_outcomes.items():
+            confidence = len(occurrences) / total
+            # Find a representative outcome for description etc.
+            for events in task_events_list:
+                for o in self.detect_outcomes(events):
+                    if o.type == outcome_type:
+                        results.append(DetectedOutcome(
+                            type=o.type,
+                            description=o.description,
+                            confidence=round(confidence, 4),
+                            verification=o.verification,
+                        ))
+                        break
+                else:
+                    continue
+                break
+        return results
+
+    def detect_postconditions(self, task_events: list[dict]) -> list[dict]:
+        """Examine last 2-3 frames to determine expected post-state."""
+        if not task_events:
+            return []
+        last_frames = task_events[-3:] if len(task_events) >= 3 else task_events
+        postconditions = []
+        for event in last_frames:
+            ann = event.get("scene_annotation_json", {})
+            if isinstance(ann, str):
+                try:
+                    ann = json.loads(ann)
+                except (json.JSONDecodeError, TypeError):
+                    continue
+            vc = ann.get("visual_context", {})
+            location = vc.get("location", "")
+            app = vc.get("active_app", "")
+            if location:
+                postconditions.append({"type": "url_state", "expected": location, "app": app})
+            tc = ann.get("task_context", {})
+            what_doing = tc.get("what_doing", "")
+            if what_doing:
+                postconditions.append({"type": "task_completed", "expected": what_doing, "app": app})
+        return postconditions
+
     def _check_clipboard_transfer(
         self, events: list[dict]
     ) -> DetectedOutcome | None:

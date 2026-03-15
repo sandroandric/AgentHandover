@@ -103,6 +103,7 @@ final class AppState: ObservableObject {
     @Published var sopDraftCount: Int = 0
     @Published var sopApprovedCount: Int = 0
     @Published var sopTotalCount: Int = 0
+    @Published var sopAgentReadyCount: Int = 0
 
     // Focus Recording
     @Published var focusSessionActive = false
@@ -255,12 +256,14 @@ final class AppState: ObservableObject {
             sopDraftCount = 0
             sopApprovedCount = 0
             sopTotalCount = 0
+            sopAgentReadyCount = 0
             return
         }
         sopDraftCount = json["draft_count"] as? Int ?? 0
         sopApprovedCount = json["approved_count"] as? Int ?? 0
         if let sops = json["sops"] as? [[String: Any]] {
             sopTotalCount = sops.count
+            sopAgentReadyCount = sops.filter { ($0["lifecycle_state"] as? String) == "agent_ready" }.count
         }
     }
 

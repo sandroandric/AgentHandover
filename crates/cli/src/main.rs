@@ -167,6 +167,13 @@ enum SopsAction {
         /// SOP slug or ID
         slug_or_id: String,
     },
+    /// Promote a procedure's lifecycle state (e.g., draft → reviewed → verified → agent_ready)
+    Promote {
+        /// Procedure slug
+        slug: String,
+        /// Target lifecycle state: draft, reviewed, verified, agent_ready
+        to_state: String,
+    },
     /// List failed SOP generations
     Failed,
     /// Retry a failed SOP generation
@@ -200,6 +207,7 @@ fn main() -> Result<()> {
             SopsAction::Drafts => commands::sops::drafts(),
             SopsAction::Approve { slug_or_id } => commands::sops::approve(&slug_or_id),
             SopsAction::Reject { slug_or_id } => commands::sops::reject(&slug_or_id),
+            SopsAction::Promote { slug, to_state } => commands::sops::promote(&slug, &to_state),
             SopsAction::Failed => commands::sops::failed(),
             SopsAction::Retry { failure_id } => commands::sops::retry(&failure_id),
         },

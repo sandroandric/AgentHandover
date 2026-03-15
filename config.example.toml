@@ -104,8 +104,8 @@ root_dir = "~/.openmimic/knowledge"
 daily_batch_time = "23:30"
 # Minimum days of data before pattern detection kicks in
 pattern_detection_min_days = 3
-# Enable the local HTTP query API for agents
-query_api_enabled = false
+# Enable the local HTTP query API for agents (default: true)
+query_api_enabled = true
 query_api_port = 9477
 # Enable knowledge base sync (Phase 5)
 sync_enabled = false
@@ -140,3 +140,18 @@ auto_promote = false
 # blocked_urls = ["*bank*", "*.gov/*", "*payroll*", "*login*password*"]
 # Time windows during which all observation is paused (HH:MM-HH:MM, local time)
 # auto_pause = ["12:00-13:00"]
+
+# ---- Feature Toggles ----
+# Enable/disable Phase 3-6 features independently.
+# All default to true. Set to false to disable.
+[features]
+# 8-class activity taxonomy (Phase 1)
+activity_classification = true
+# Task continuity graph across interruptions (Phase 2)
+continuity_tracking = true
+# 7-state procedure lifecycle state machine (Phase 3)
+lifecycle_management = true
+# Curation queue with merge/upgrade/drift detection (Phase 5)
+curation = true
+# Runtime environment validation via pgrep (Phase 6)
+runtime_validation = true

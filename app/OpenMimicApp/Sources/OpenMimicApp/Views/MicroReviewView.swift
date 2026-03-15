@@ -177,7 +177,8 @@ struct ReviewCard: View {
 
                 Spacer()
 
-                if card.type == .trustSuggestion {
+                if card.type == .trustSuggestion || card.type == .lifecycleUpgrade
+                    || card.type == .mergeCandidate || card.type == .driftAlert {
                     Button(action: { onAction(.dismiss) }) {
                         Text("Later")
                             .font(.system(size: 11))
@@ -244,6 +245,9 @@ enum ReviewCardType: Sendable {
     case draftProcedure
     case trustSuggestion
     case staleAlert
+    case lifecycleUpgrade  // "Ready to promote to next lifecycle stage"
+    case mergeCandidate    // "These procedures may be duplicates"
+    case driftAlert        // "Procedure behavior has changed"
 }
 
 enum ReviewAction: Sendable {
@@ -265,12 +269,32 @@ struct ReviewCardData: Identifiable, Sendable {
     let evidenceText: String
     let stepsPreview: [String]
     let slug: String
+    let metadata: [String: String]
+
+    /// Backward-compatible initializer without metadata.
+    init(
+        id: String, type: ReviewCardType, title: String,
+        recurrence: String, duration: String, observations: Int,
+        confidence: Double, variables: [String], outcome: String?,
+        evidenceText: String, stepsPreview: [String], slug: String,
+        metadata: [String: String] = [:]
+    ) {
+        self.id = id; self.type = type; self.title = title
+        self.recurrence = recurrence; self.duration = duration
+        self.observations = observations; self.confidence = confidence
+        self.variables = variables; self.outcome = outcome
+        self.evidenceText = evidenceText; self.stepsPreview = stepsPreview
+        self.slug = slug; self.metadata = metadata
+    }
 
     var typeLabel: String {
         switch type {
         case .draftProcedure: return "Draft"
         case .trustSuggestion: return "Promote"
         case .staleAlert: return "Stale"
+        case .lifecycleUpgrade: return "Upgrade"
+        case .mergeCandidate: return "Merge"
+        case .driftAlert: return "Drift"
         }
     }
 
@@ -279,6 +303,9 @@ struct ReviewCardData: Identifiable, Sendable {
         case .draftProcedure: return "doc.badge.gearshape"
         case .trustSuggestion: return "arrow.up.circle"
         case .staleAlert: return "exclamationmark.triangle"
+        case .lifecycleUpgrade: return "arrow.up.square"
+        case .mergeCandidate: return "arrow.triangle.merge"
+        case .driftAlert: return "waveform.path.ecg"
         }
     }
 
@@ -287,6 +314,9 @@ struct ReviewCardData: Identifiable, Sendable {
         case .draftProcedure: return .blue
         case .trustSuggestion: return .green
         case .staleAlert: return .orange
+        case .lifecycleUpgrade: return .cyan
+        case .mergeCandidate: return .purple
+        case .driftAlert: return .red
         }
     }
 }
@@ -386,6 +416,65 @@ final class MicroReviewViewModel: ObservableObject {
                     "requested_at": now,
                 ]
             )
+
+        // Lifecycle upgrade cards -> lifecycle-promote-trigger.json
+        case (.lifecycleUpgrade, .approve):
+            let nextState = card.metadata["nextState"] ?? "draft"
+            success = writeTrigger(
+                dir: stateDir,
+                filename: "lifecycle-promote-trigger.json",
+                payload: [
+                    "procedure_slug": card.slug,
+                    "to_state": nextState,
+                    "actor": "human",
+                    "reason": "Promoted via MicroReview",
+                    "requested_at": now,
+                ]
+            )
+        case (.lifecycleUpgrade, .reject),
+             (.lifecycleUpgrade, .dismiss):
+            // Reject/dismiss just removes from queue
+            success = true
+
+        // Merge candidate cards -> merge-trigger.json
+        case (.mergeCandidate, .approve):
+            success = writeTrigger(
+                dir: stateDir,
+                filename: "merge-trigger.json",
+                payload: [
+                    "procedure_slug": card.slug,
+                    "action": "merge",
+                    "merge_target": card.metadata["mergeTarget"] ?? "",
+                    "requested_at": now,
+                ]
+            )
+        case (.mergeCandidate, .reject),
+             (.mergeCandidate, .dismiss):
+            success = true
+
+        // Drift alert cards -> drift-reviewed-trigger.json
+        case (.driftAlert, .approve):
+            success = writeTrigger(
+                dir: stateDir,
+                filename: "drift-reviewed-trigger.json",
+                payload: [
+                    "procedure_slug": card.slug,
+                    "action": "acknowledged",
+                    "requested_at": now,
+                ]
+            )
+        case (.driftAlert, .reject):
+            success = writeTrigger(
+                dir: stateDir,
+                filename: "drift-reviewed-trigger.json",
+                payload: [
+                    "procedure_slug": card.slug,
+                    "action": "revert",
+                    "requested_at": now,
+                ]
+            )
+        case (.driftAlert, .dismiss):
+            success = true
 
         // Dismiss only applies to trust suggestions; ignore for other types
         default:
@@ -502,34 +591,112 @@ final class MicroReviewViewModel: ObservableObject {
             }
         }
 
-        // Load stale procedures
+        // Load stale procedures, lifecycle upgrade candidates, merge candidates, drift alerts
         let proceduresDir = kbDir.appendingPathComponent("procedures")
         if let files = try? FileManager.default.contentsOfDirectory(
             at: proceduresDir, includingPropertiesForKeys: nil
         ) {
             for file in files where file.pathExtension == "json" {
                 guard let data = try? Data(contentsOf: file),
-                      let proc = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                      let staleness = proc["staleness"] as? [String: Any],
-                      let status = staleness["status"] as? String,
-                      status != "current" else { continue }
+                      let proc = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+                else { continue }
 
                 let slug = proc["id"] as? String ?? file.deletingPathExtension().lastPathComponent
+                let procTitle = proc["title"] as? String ?? slug
 
-                cards.append(ReviewCardData(
-                    id: UUID().uuidString,
-                    type: .staleAlert,
-                    title: "Review: \(slug)",
-                    recurrence: "—",
-                    duration: "—",
-                    observations: 0,
-                    confidence: 0,
-                    variables: [],
-                    outcome: nil,
-                    evidenceText: "Status: \(status)",
-                    stepsPreview: [],
-                    slug: slug
-                ))
+                // Stale procedures
+                if let staleness = proc["staleness"] as? [String: Any],
+                   let stalenessStatus = staleness["status"] as? String,
+                   stalenessStatus != "current" {
+                    cards.append(ReviewCardData(
+                        id: UUID().uuidString,
+                        type: .staleAlert,
+                        title: "Review: \(slug)",
+                        recurrence: "—",
+                        duration: "—",
+                        observations: 0,
+                        confidence: 0,
+                        variables: [],
+                        outcome: nil,
+                        evidenceText: "Status: \(stalenessStatus)",
+                        stepsPreview: [],
+                        slug: slug
+                    ))
+                }
+
+                // Lifecycle upgrade candidates
+                let lifecycle = proc["lifecycle_state"] as? String ?? "observed"
+                let confidenceAvg = proc["confidence_avg"] as? Double ?? proc["confidence"] as? Double ?? 0.0
+                let episodes = proc["episode_count"] as? Int ?? 0
+
+                var suggestUpgrade = false
+                var nextState = ""
+                if lifecycle == "observed" && episodes >= 3 && confidenceAvg >= 0.65 {
+                    suggestUpgrade = true; nextState = "draft"
+                } else if lifecycle == "draft" && episodes >= 5 && confidenceAvg >= 0.75 {
+                    suggestUpgrade = true; nextState = "reviewed"
+                }
+
+                if suggestUpgrade {
+                    cards.append(ReviewCardData(
+                        id: "upgrade-\(slug)",
+                        type: .lifecycleUpgrade,
+                        title: "Upgrade: \(procTitle)",
+                        recurrence: "—",
+                        duration: "—",
+                        observations: episodes,
+                        confidence: confidenceAvg,
+                        variables: [],
+                        outcome: nil,
+                        evidenceText: "Eligible for promotion to \(nextState): \(episodes) observations, \(Int(confidenceAvg * 100))% confidence",
+                        stepsPreview: [],
+                        slug: slug,
+                        metadata: ["nextState": nextState]
+                    ))
+                }
+
+                // Merge candidates
+                if let mergeInfo = proc["merge_candidate"] as? [String: Any],
+                   let mergeTarget = mergeInfo["target_slug"] as? String,
+                   !(mergeInfo["dismissed"] as? Bool ?? false) {
+                    let similarity = mergeInfo["similarity"] as? Double ?? 0.0
+                    cards.append(ReviewCardData(
+                        id: "merge-\(slug)",
+                        type: .mergeCandidate,
+                        title: "Merge: \(procTitle)",
+                        recurrence: "—",
+                        duration: "—",
+                        observations: episodes,
+                        confidence: similarity,
+                        variables: [],
+                        outcome: nil,
+                        evidenceText: "May be duplicate of \(mergeTarget) (\(Int(similarity * 100))% similar)",
+                        stepsPreview: [],
+                        slug: slug,
+                        metadata: ["mergeTarget": mergeTarget]
+                    ))
+                }
+
+                // Drift alerts
+                if let driftInfo = proc["drift_alert"] as? [String: Any],
+                   !(driftInfo["acknowledged"] as? Bool ?? false) {
+                    let driftType = driftInfo["type"] as? String ?? "behavioral"
+                    let detail = driftInfo["detail"] as? String ?? "Procedure behavior has changed"
+                    cards.append(ReviewCardData(
+                        id: "drift-\(slug)",
+                        type: .driftAlert,
+                        title: "Drift: \(procTitle)",
+                        recurrence: "—",
+                        duration: "—",
+                        observations: episodes,
+                        confidence: confidenceAvg,
+                        variables: [],
+                        outcome: nil,
+                        evidenceText: "\(driftType.capitalized): \(detail)",
+                        stepsPreview: [],
+                        slug: slug
+                    ))
+                }
             }
         }
 

@@ -29,9 +29,11 @@ class ProcedureWriter:
         self,
         kb: KnowledgeBase,
         evidence: EvidenceTracker,
+        lifecycle_manager=None,
     ) -> None:
         self._kb = kb
         self._evidence = evidence
+        self._lifecycle = lifecycle_manager
 
     def write_procedure(
         self,
@@ -60,6 +62,9 @@ class ProcedureWriter:
         # Convert to v3 procedure
         procedure = sop_to_procedure(sop_template)
 
+        # Enrich environment from observation data
+        self._enrich_environment(procedure, sop_template)
+
         # Validate
         errors = validate_procedure(procedure)
         if errors:
@@ -84,6 +89,21 @@ class ProcedureWriter:
                 event_count=event_count,
             ),
         )
+
+        # Auto-transition: observed -> draft on SOP generation
+        if self._lifecycle is not None:
+            try:
+                from oc_apprentice_worker.lifecycle_manager import ProcedureLifecycle
+                current = self._lifecycle.get_state(slug)
+                if current == ProcedureLifecycle.OBSERVED:
+                    self._lifecycle.transition(
+                        slug, ProcedureLifecycle.DRAFT,
+                        trigger="sop_generated",
+                        actor="system",
+                        reason=f"SOP generated from {source} session {source_id}",
+                    )
+            except Exception:
+                logger.debug("Lifecycle transition failed for %s", slug, exc_info=True)
 
         logger.info(
             "Wrote procedure '%s' from %s session %s",
@@ -114,6 +134,9 @@ class ProcedureWriter:
         new_template.setdefault("source", source)
         new_proc = sop_to_procedure(new_template)
 
+        # Enrich environment
+        self._enrich_environment(new_proc, new_template)
+
         if existing is not None:
             # Preserve accumulated data from the existing procedure
             new_proc["evidence"] = existing.get("evidence", new_proc["evidence"])
@@ -142,6 +165,11 @@ class ProcedureWriter:
             new_proc["branches"] = existing.get("branches", [])
             new_proc["expected_outcomes"] = existing.get("expected_outcomes", [])
 
+            # Preserve lifecycle state and history
+            new_proc["lifecycle_state"] = existing.get("lifecycle_state", "observed")
+            new_proc["lifecycle_history"] = existing.get("lifecycle_history", [])
+            new_proc["compiled_outputs"] = existing.get("compiled_outputs", {})
+
         # Save
         path = self._kb.save_procedure(new_proc)
 
@@ -160,3 +188,133 @@ class ProcedureWriter:
 
         logger.info("Updated procedure '%s'", slug)
         return path
+
+    # ------------------------------------------------------------------
+    # Environment enrichment
+    # ------------------------------------------------------------------
+
+    def _enrich_environment(self, procedure: dict, sop_template: dict) -> None:
+        """Enrich the procedure's environment field from observation data.
+
+        Extracts:
+        - required_apps from steps' app fields and apps_involved
+        - URL patterns from steps' location fields
+        - Account hints from URL patterns (e.g., github.com -> github account)
+        """
+        env = procedure.setdefault("environment", {
+            "required_apps": [],
+            "accounts": [],
+            "setup_actions": [],
+        })
+
+        # Collect apps from steps
+        apps = set(env.get("required_apps", []))
+        urls: set[str] = set()
+
+        for step in sop_template.get("steps", []):
+            app = step.get("app", "") or step.get("parameters", {}).get("app", "")
+            if app:
+                apps.add(app)
+            location = step.get("location", "") or step.get("target", "")
+            if location and ("http://" in location or "https://" in location):
+                urls.add(location)
+
+        for app in sop_template.get("apps_involved", []):
+            apps.add(app)
+
+        env["required_apps"] = sorted(apps)
+
+        # Extract account hints from URLs
+        accounts: list[dict] = env.get("accounts", [])
+        existing_services = {a.get("service") for a in accounts}
+
+        _SERVICE_PATTERNS = {
+            "github.com": "github",
+            "gitlab.com": "gitlab",
+            "slack.com": "slack",
+            "notion.so": "notion",
+            "figma.com": "figma",
+            "stripe.com": "stripe",
+            "aws.amazon.com": "aws",
+            "console.cloud.google.com": "gcp",
+            "portal.azure.com": "azure",
+            "trello.com": "trello",
+            "jira": "jira",
+            "linear.app": "linear",
+        }
+
+        for url in urls:
+            for pattern, service in _SERVICE_PATTERNS.items():
+                if pattern in url and service not in existing_services:
+                    account: dict = {"service": service, "identity": "", "url_pattern": url}
+                    # Detect environment (prod/staging/test) from URL
+                    url_lower = url.lower()
+                    if "staging" in url_lower or "stg" in url_lower:
+                        account["environment"] = "staging"
+                    elif "test" in url_lower or "sandbox" in url_lower:
+                        account["environment"] = "test"
+                    elif "localhost" in url_lower or "127.0.0.1" in url_lower:
+                        account["environment"] = "local"
+                    else:
+                        account["environment"] = "production"
+                    accounts.append(account)
+                    existing_services.add(service)
+
+        env["accounts"] = accounts
+
+    # ------------------------------------------------------------------
+    # Cross-procedure composition
+    # ------------------------------------------------------------------
+
+    def enrich_chains(self, slug: str) -> None:
+        """Detect and enrich chain relationships for a procedure.
+
+        Scans daily summaries for co-occurrence patterns (procedure A
+        commonly followed by procedure B) and updates the chain field.
+        """
+        proc = self._kb.get_procedure(slug)
+        if proc is None:
+            return
+
+        chain = proc.get("chain", {
+            "depends_on": [],
+            "followed_by": [],
+            "co_occurrence_count": 0,
+            "can_compose": False,
+        })
+
+        # Scan recent daily summaries for task sequences
+        dates = self._kb.list_daily_summaries(limit=14)
+        sequence_counts: dict[str, int] = {}
+
+        for date_str in dates:
+            summary = self._kb.get_daily_summary(date_str)
+            if summary is None:
+                continue
+
+            # Look for procedures_observed list in daily summary
+            observed = summary.get("procedures_observed", [])
+            if slug not in observed:
+                continue
+
+            # Find what comes after this slug
+            try:
+                idx = observed.index(slug)
+                if idx + 1 < len(observed):
+                    next_slug = observed[idx + 1]
+                    sequence_counts[next_slug] = sequence_counts.get(next_slug, 0) + 1
+            except (ValueError, IndexError):
+                pass
+
+        # Update followed_by with procedures that co-occur at least twice
+        followed_by = []
+        for next_slug, count in sorted(sequence_counts.items(), key=lambda x: -x[1]):
+            if count >= 2:
+                followed_by.append(next_slug)
+
+        chain["followed_by"] = followed_by
+        chain["co_occurrence_count"] = sum(sequence_counts.values())
+        chain["can_compose"] = len(followed_by) > 0
+
+        proc["chain"] = chain
+        self._kb.save_procedure(proc)

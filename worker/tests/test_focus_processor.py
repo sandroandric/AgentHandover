@@ -736,7 +736,7 @@ class TestProcessFocusSessionsV2:
 
         assert result == 1
         assert mock_processor.process_session.call_count == 1
-        assert mock_writer.write_all_sops.call_count == 1
+        assert mock_writer.write_sop.call_count == 1
         assert mock_index.update_index.call_count == 1
         # Signal file should be removed
         assert not signal_path.exists()

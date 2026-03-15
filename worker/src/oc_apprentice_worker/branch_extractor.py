@@ -31,8 +31,9 @@ class ExtractedBranch:
 class BranchExtractor:
     """Extract conditional branches from multi-observation comparison."""
 
-    def __init__(self, kb: KnowledgeBase) -> None:
+    def __init__(self, kb: KnowledgeBase, variant_detector=None) -> None:
         self._kb = kb
+        self._variant_detector = variant_detector
 
     def extract_branches(
         self,
@@ -97,6 +98,13 @@ class BranchExtractor:
         if not demos:
             return []
 
+        if self._variant_detector is not None and len(demos) >= 2:
+            try:
+                return self._semantic_align_demonstrations(demos)
+            except Exception:
+                logger.debug("Semantic alignment failed, falling back to positional", exc_info=True)
+        # Existing positional alignment continues as fallback...
+
         max_len = max(len(d) for d in demos)
 
         aligned: list[list[dict | None]] = []
@@ -110,6 +118,37 @@ class BranchExtractor:
             aligned.append(column)
 
         return aligned
+
+    def _semantic_align_demonstrations(self, demos):
+        """Align demos using VariantDetector's semantic alignment."""
+        reference = demos[0]
+        max_len = max(len(d) for d in demos)
+        columns = []
+        for pos in range(max_len):
+            column = []
+            for demo in demos:
+                if pos < len(demo):
+                    column.append(demo[pos])
+                else:
+                    column.append(None)
+            columns.append(column)
+
+        # Use semantic alignment for the first pair to improve column mapping
+        if len(demos) >= 2:
+            aligned = self._variant_detector.semantic_align(reference, demos[1])
+            # Rebuild columns from alignment
+            new_columns = []
+            for astep in aligned:
+                col = [astep.step_a]
+                if len(demos) > 1:
+                    col.append(astep.step_b)
+                for demo in demos[2:]:
+                    # For remaining demos, use positional fallback
+                    col.append(demo[astep.position] if astep.position < len(demo) else None)
+                new_columns.append(col)
+            columns = new_columns
+
+        return columns
 
     # ------------------------------------------------------------------
     # Divergence detection
@@ -199,6 +238,15 @@ class BranchExtractor:
         """
         if entry is None:
             return "unknown"
+
+        # Check for precondition hints in the entry
+        if isinstance(entry, dict):
+            pre = entry.get("pre_state", "")
+            if pre:
+                return f"when {pre}"
+            verify = entry.get("verify", "")
+            if verify and "error" not in verify.lower():
+                return f"after verifying: {verify}"
 
         # Check if there's a distinguishing input.
         if entry.get("input"):

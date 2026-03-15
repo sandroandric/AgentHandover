@@ -246,6 +246,9 @@ struct DigestHighlightData: Sendable {
         case "stale_alert": return "exclamationmark.triangle"
         case "pattern_detected": return "chart.line.uptrend.xyaxis"
         case "milestone": return "star"
+        case "lifecycle_upgrade": return "arrow.up.square"
+        case "merge_candidate": return "arrow.triangle.merge"
+        case "drift_alert": return "waveform.path.ecg"
         default: return "info.circle"
         }
     }
@@ -257,6 +260,9 @@ struct DigestHighlightData: Sendable {
         case "stale_alert": return .orange
         case "pattern_detected": return .purple
         case "milestone": return .yellow
+        case "lifecycle_upgrade": return .cyan
+        case "merge_candidate": return .purple
+        case "drift_alert": return .red
         default: return .secondary
         }
     }

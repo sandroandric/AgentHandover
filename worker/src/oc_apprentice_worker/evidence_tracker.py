@@ -116,6 +116,7 @@ class EvidenceTracker:
         self,
         slug: str,
         demos: list[list[dict]],
+        embeddings: dict[str, list[float]] | None = None,
     ) -> list[StepEvidence]:
         """Compute per-step evidence from multiple demonstrations.
 
@@ -154,7 +155,9 @@ class EvidenceTracker:
                     continue
                 observed += 1
                 demo_action = demo[step_idx].get("action", "")
-                if _actions_match(ref_action, demo_action):
+                emb_a = embeddings.get(ref_action) if embeddings else None
+                emb_b = embeddings.get(demo_action) if embeddings else None
+                if _actions_match(ref_action, demo_action, embedding_a=emb_a, embedding_b=emb_b):
                     consistent += 1
                 else:
                     contradictions.append({
@@ -209,10 +212,15 @@ class EvidenceTracker:
         self._kb.save_procedure(proc)
 
 
-def _actions_match(a: str, b: str) -> bool:
-    """Check if two action strings are semantically equivalent.
-
-    For now, uses normalized string comparison.  Future versions may
-    use embedding similarity.
-    """
+def _actions_match(
+    a: str,
+    b: str,
+    embedding_a: list[float] | None = None,
+    embedding_b: list[float] | None = None,
+    threshold: float = 0.60,
+) -> bool:
+    """Check if two action strings are semantically equivalent."""
+    if embedding_a and embedding_b:
+        from oc_apprentice_worker.task_segmenter import _cosine_similarity
+        return _cosine_similarity(embedding_a, embedding_b) >= threshold
     return a.strip().lower() == b.strip().lower()

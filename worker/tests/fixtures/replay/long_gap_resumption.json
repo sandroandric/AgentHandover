@@ -1,0 +1,217 @@
+{
+  "description": "Sprint planning session split across a 2-hour gap. Events 1-7 are morning sprint planning (09:00-09:30), then a 2-hour gap with no events, then events 8-15 resume sprint planning (11:30-12:00). Tests that the segmenter creates 2 separate segments despite identical embeddings and task context, because the gap exceeds the 30-minute stitching threshold. Both segments belong to the same cluster family.",
+  "events": [
+    {
+      "id": "evt-001",
+      "timestamp": "2026-03-10T09:00:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Planning sprint tasks", "is_workflow": true, "likely_next": "Review backlog"},
+        "visual_context": {"active_app": "Chrome", "location": "https://linear.app/team/sprints/current"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "Linear - Current Sprint"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.85, 0.15, 0.00, 0.00]
+    },
+    {
+      "id": "evt-002",
+      "timestamp": "2026-03-10T09:04:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Planning sprint tasks", "is_workflow": true, "likely_next": "Prioritize stories"},
+        "visual_context": {"active_app": "Chrome", "location": "https://linear.app/team/backlog"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "Linear - Backlog"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.86, 0.14, 0.00, 0.00]
+    },
+    {
+      "id": "evt-003",
+      "timestamp": "2026-03-10T09:08:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Planning sprint tasks", "is_workflow": true, "likely_next": "Estimate story points"},
+        "visual_context": {"active_app": "Chrome", "location": "https://linear.app/team/backlog"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "Linear - Backlog Prioritization"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.84, 0.16, 0.00, 0.00]
+    },
+    {
+      "id": "evt-004",
+      "timestamp": "2026-03-10T09:12:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Planning sprint tasks", "is_workflow": true, "likely_next": "Assign tasks"},
+        "visual_context": {"active_app": "Chrome", "location": "https://linear.app/team/issue/TEAM-301"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "Linear - TEAM-301 Estimation"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.85, 0.15, 0.00, 0.00]
+    },
+    {
+      "id": "evt-005",
+      "timestamp": "2026-03-10T09:17:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Planning sprint tasks", "is_workflow": true, "likely_next": "Move to sprint"},
+        "visual_context": {"active_app": "Chrome", "location": "https://linear.app/team/issue/TEAM-302"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "Linear - TEAM-302 Assignment"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.86, 0.14, 0.00, 0.00]
+    },
+    {
+      "id": "evt-006",
+      "timestamp": "2026-03-10T09:22:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Planning sprint tasks", "is_workflow": true, "likely_next": "Review sprint capacity"},
+        "visual_context": {"active_app": "Chrome", "location": "https://linear.app/team/sprints/current"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "Linear - Sprint Board"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.84, 0.16, 0.00, 0.00]
+    },
+    {
+      "id": "evt-007",
+      "timestamp": "2026-03-10T09:30:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Planning sprint tasks", "is_workflow": true, "likely_next": "Take a break"},
+        "visual_context": {"active_app": "Chrome", "location": "https://linear.app/team/sprints/current"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "Linear - Sprint Capacity"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.85, 0.15, 0.00, 0.00]
+    },
+    {
+      "id": "evt-008",
+      "timestamp": "2026-03-10T11:30:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Planning sprint tasks", "is_workflow": true, "likely_next": "Continue reviewing backlog"},
+        "visual_context": {"active_app": "Chrome", "location": "https://linear.app/team/sprints/current"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "Linear - Current Sprint"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.85, 0.15, 0.00, 0.00]
+    },
+    {
+      "id": "evt-009",
+      "timestamp": "2026-03-10T11:34:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Planning sprint tasks", "is_workflow": true, "likely_next": "Add remaining stories"},
+        "visual_context": {"active_app": "Chrome", "location": "https://linear.app/team/backlog"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "Linear - Backlog"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.86, 0.14, 0.00, 0.00]
+    },
+    {
+      "id": "evt-010",
+      "timestamp": "2026-03-10T11:38:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Planning sprint tasks", "is_workflow": true, "likely_next": "Estimate new stories"},
+        "visual_context": {"active_app": "Chrome", "location": "https://linear.app/team/issue/TEAM-303"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "Linear - TEAM-303"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.84, 0.16, 0.00, 0.00]
+    },
+    {
+      "id": "evt-011",
+      "timestamp": "2026-03-10T11:42:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Planning sprint tasks", "is_workflow": true, "likely_next": "Assign remaining tasks"},
+        "visual_context": {"active_app": "Chrome", "location": "https://linear.app/team/issue/TEAM-304"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "Linear - TEAM-304"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.85, 0.15, 0.00, 0.00]
+    },
+    {
+      "id": "evt-012",
+      "timestamp": "2026-03-10T11:46:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Planning sprint tasks", "is_workflow": true, "likely_next": "Move stories to sprint"},
+        "visual_context": {"active_app": "Chrome", "location": "https://linear.app/team/issue/TEAM-305"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "Linear - TEAM-305 Assignment"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.86, 0.14, 0.00, 0.00]
+    },
+    {
+      "id": "evt-013",
+      "timestamp": "2026-03-10T11:50:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Planning sprint tasks", "is_workflow": true, "likely_next": "Review final sprint scope"},
+        "visual_context": {"active_app": "Chrome", "location": "https://linear.app/team/sprints/current"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "Linear - Sprint Board Updated"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.84, 0.16, 0.00, 0.00]
+    },
+    {
+      "id": "evt-014",
+      "timestamp": "2026-03-10T11:55:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Planning sprint tasks", "is_workflow": true, "likely_next": "Finalize sprint"},
+        "visual_context": {"active_app": "Chrome", "location": "https://linear.app/team/sprints/current"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "Linear - Sprint Scope Review"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.85, 0.15, 0.00, 0.00]
+    },
+    {
+      "id": "evt-015",
+      "timestamp": "2026-03-10T12:00:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Planning sprint tasks", "is_workflow": true, "likely_next": "Start working on tasks"},
+        "visual_context": {"active_app": "Chrome", "location": "https://linear.app/team/sprints/current"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "Linear - Sprint Finalized"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.86, 0.14, 0.00, 0.00]
+    }
+  ],
+  "ground_truth": {
+    "segments": [
+      {
+        "segment_id": "seg-sprint-morning",
+        "event_ids": ["evt-001", "evt-002", "evt-003", "evt-004", "evt-005", "evt-006", "evt-007"],
+        "cluster_family": "sprint-planning",
+        "label": "Morning sprint planning session (09:00-09:30)"
+      },
+      {
+        "segment_id": "seg-sprint-afternoon",
+        "event_ids": ["evt-008", "evt-009", "evt-010", "evt-011", "evt-012", "evt-013", "evt-014", "evt-015"],
+        "cluster_family": "sprint-planning",
+        "label": "Resumed sprint planning session (11:30-12:00)",
+        "note": "Same cluster family as morning session but NOT stitched because 2-hour gap exceeds 30-minute stitching threshold"
+      }
+    ]
+  }
+}

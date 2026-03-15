@@ -10,6 +10,7 @@ Checks procedures for signs of staleness:
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
@@ -41,6 +42,7 @@ class StalenessReport:
     signals: list[StalenessSignal] = field(default_factory=list)
     confidence_trend: list[float] = field(default_factory=list)
     recommended_action: str = "none"  # "none", "review", "re-observe", "archive"
+    freshness_score: float = 1.0
 
 
 class StalenessDetector:
@@ -153,23 +155,94 @@ class StalenessDetector:
             ))
 
         # Determine status and recommended action
-        status, action = self._assess(signals, last_observed, now)
+        last_confirmed = staleness.get("last_confirmed")
+        status, action = self._assess(signals, last_observed, last_confirmed, now)
 
-        return StalenessReport(
+        report = StalenessReport(
             slug=slug,
             status=status,
             signals=signals,
             confidence_trend=confidence_trend,
             recommended_action=action,
         )
+        report.freshness_score = self.compute_freshness_score(proc)
+        return report
+
+    def compute_freshness_score(self, proc: dict) -> float:
+        """Compute freshness score 0.0-1.0 for a procedure.
+
+        Components:
+        - age_factor: exponential decay from last_observed (half-life 30 days)
+        - confirm_bonus: +0.1 if confirmed within 7 days
+        - confidence_penalty: -0.1 if confidence_trend declining
+        - contradiction_penalty: -0.05 per contradiction
+        """
+        now = datetime.now(timezone.utc)
+        staleness = proc.get("staleness", {})
+        evidence = proc.get("evidence", {})
+
+        # Age factor: exponential decay, half-life 30 days
+        score = 1.0
+        last_observed = staleness.get("last_observed")
+        if last_observed:
+            try:
+                lo_dt = datetime.fromisoformat(
+                    last_observed.replace("Z", "+00:00")
+                )
+                days_old = (now - lo_dt).days
+                half_life = 30.0
+                score = math.exp(-0.693 * days_old / half_life)  # ln(2) ~ 0.693
+            except (ValueError, TypeError):
+                score = 0.5  # unknown age
+        else:
+            score = 0.5  # no observation timestamp
+
+        # Confirmation bonus
+        last_confirmed = staleness.get("last_confirmed")
+        if last_confirmed:
+            try:
+                lc_dt = datetime.fromisoformat(
+                    last_confirmed.replace("Z", "+00:00")
+                )
+                confirm_days = (now - lc_dt).days
+                if confirm_days <= 7:
+                    score = min(1.0, score + 0.1)
+            except (ValueError, TypeError):
+                pass
+
+        # Confidence trend penalty
+        trend = staleness.get("confidence_trend", [])
+        if len(trend) >= 3:
+            recent = trend[-3:]
+            if recent[0] - recent[-1] >= 0.10:
+                score = max(0.0, score - 0.1)
+
+        # Contradiction penalty
+        contradictions = evidence.get("contradictions", [])
+        if contradictions:
+            penalty = len(contradictions) * 0.05
+            score = max(0.0, score - penalty)
+
+        return round(score, 4)
 
     def _assess(
         self,
         signals: list[StalenessSignal],
         last_observed: str | None,
+        last_confirmed: str | None,
         now: datetime,
     ) -> tuple[str, str]:
         """Determine status and recommended action from signals."""
+        # If recently confirmed by human review, consider current
+        if last_confirmed:
+            try:
+                lc_dt = datetime.fromisoformat(last_confirmed.replace("Z", "+00:00"))
+                confirm_days = (now - lc_dt).days
+                if confirm_days <= 7:
+                    return "current", "none"
+            except (ValueError, TypeError):
+                pass
+
         if not signals:
             return "current", "none"
 
@@ -197,3 +270,65 @@ class StalenessDetector:
             return "needs_review", "review"
 
         return "current", "none"
+
+
+def procedure_freshness(proc: dict) -> float:
+    """Compute freshness score for a procedure without instantiating StalenessDetector.
+
+    Standalone function usable by other modules (e.g. query_api) that don't
+    have a StalenessDetector instance. Uses the same logic as
+    StalenessDetector.compute_freshness_score.
+
+    Args:
+        proc: Procedure dict with optional ``staleness`` and ``evidence`` keys.
+
+    Returns:
+        Float 0.0-1.0 representing procedure freshness.
+    """
+    now = datetime.now(timezone.utc)
+    staleness = proc.get("staleness", {})
+    evidence = proc.get("evidence", {})
+
+    # Age factor: exponential decay, half-life 30 days
+    score = 1.0
+    last_observed = staleness.get("last_observed")
+    if last_observed:
+        try:
+            lo_dt = datetime.fromisoformat(
+                last_observed.replace("Z", "+00:00")
+            )
+            days_old = (now - lo_dt).days
+            half_life = 30.0
+            score = math.exp(-0.693 * days_old / half_life)  # ln(2) ~ 0.693
+        except (ValueError, TypeError):
+            score = 0.5  # unknown age
+    else:
+        score = 0.5  # no observation timestamp
+
+    # Confirmation bonus
+    last_confirmed = staleness.get("last_confirmed")
+    if last_confirmed:
+        try:
+            lc_dt = datetime.fromisoformat(
+                last_confirmed.replace("Z", "+00:00")
+            )
+            confirm_days = (now - lc_dt).days
+            if confirm_days <= 7:
+                score = min(1.0, score + 0.1)
+        except (ValueError, TypeError):
+            pass
+
+    # Confidence trend penalty
+    trend = staleness.get("confidence_trend", [])
+    if len(trend) >= 3:
+        recent = trend[-3:]
+        if recent[0] - recent[-1] >= 0.10:
+            score = max(0.0, score - 0.1)
+
+    # Contradiction penalty
+    contradictions = evidence.get("contradictions", [])
+    if contradictions:
+        penalty = len(contradictions) * 0.05
+        score = max(0.0, score - penalty)
+
+    return round(score, 4)

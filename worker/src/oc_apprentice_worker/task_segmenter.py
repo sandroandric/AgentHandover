@@ -101,6 +101,8 @@ class AnnotatedFrame:
     diff: dict | None = None
     what_doing: str = ""
     is_workflow: bool = False
+    activity_type: str = ""      # 8-class taxonomy (empty = legacy event)
+    learnability: str = ""       # learning relevance (empty = legacy event)
     app: str = ""
     location: str = ""
     embedding: list[float] = field(default_factory=list)
@@ -129,6 +131,9 @@ class AnnotatedFrame:
         if isinstance(is_workflow, str):
             is_workflow = is_workflow.lower() in ("true", "yes", "1")
 
+        activity_type = tc.get("activity_type", "") if isinstance(tc, dict) else ""
+        learnability = tc.get("learnability", "") if isinstance(tc, dict) else ""
+
         # Parse frame diff
         diff = None
         diff_json = event.get("frame_diff_json")
@@ -145,6 +150,8 @@ class AnnotatedFrame:
             diff=diff,
             what_doing=what_doing,
             is_workflow=bool(is_workflow),
+            activity_type=activity_type,
+            learnability=learnability,
             app=annotation.get("app", ""),
             location=annotation.get("location", ""),
         )
@@ -201,6 +208,7 @@ class SegmentationResult:
     noise_frames_dropped: int = 0
     total_frames_processed: int = 0
     embedding_time_seconds: float = 0.0
+    spans: list | None = None  # ContinuitySpan list, populated by ContinuityTracker
 
 
 # ---------------------------------------------------------------------------
@@ -276,6 +284,24 @@ def _cosine_similarity(a: list[float], b: list[float]) -> float:
         return 0.0
 
     return dot / (norm_a * norm_b)
+
+
+# ---------------------------------------------------------------------------
+# Noise classification
+# ---------------------------------------------------------------------------
+
+def _is_noise_frame(frame: AnnotatedFrame) -> bool:
+    """Check if a frame is noise.
+
+    Uses activity_type/learnability when available (Phase 1+),
+    falls back to is_workflow for legacy events.
+    """
+    if frame.activity_type:
+        return (
+            frame.activity_type in ("entertainment", "dead_time")
+            or frame.learnability == "ignore"
+        )
+    return not frame.is_workflow
 
 
 # ---------------------------------------------------------------------------
@@ -586,8 +612,8 @@ class TaskSegmenter:
             cluster_frames = [frames[i] for i in frame_indices]
 
             # Check noise: all non-workflow?
-            wf_count = sum(1 for f in cluster_frames if f.is_workflow)
-            if wf_count == 0:
+            noise_count = sum(1 for f in cluster_frames if _is_noise_frame(f))
+            if noise_count == len(cluster_frames):
                 # Pure noise cluster
                 result.noise_frames_dropped += len(cluster_frames)
                 # Still create segments for stitching reference
@@ -1033,8 +1059,8 @@ class TaskSegmenter:
 
         cluster_id = 0
         for app, app_frames in by_app.items():
-            wf_count = sum(1 for f in app_frames if f.is_workflow)
-            if wf_count == 0:
+            noise_count = sum(1 for f in app_frames if _is_noise_frame(f))
+            if noise_count == len(app_frames):
                 result.noise_frames_dropped += len(app_frames)
                 continue
 

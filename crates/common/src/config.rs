@@ -373,7 +373,7 @@ impl Default for KnowledgeConfig {
             root_dir: default_knowledge_root_dir(),
             daily_batch_time: default_daily_batch_time(),
             pattern_detection_min_days: default_pattern_detection_min_days(),
-            query_api_enabled: false,
+            query_api_enabled: true,
             query_api_port: default_query_api_port(),
             sync_enabled: false,
             sync_remote: String::new(),

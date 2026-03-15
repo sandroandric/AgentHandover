@@ -87,8 +87,14 @@ def sample_procedure() -> dict:
         "title": "Check Expired Domains",
         "confidence": 0.87,
         "confidence_avg": 0.87,
-        "last_observed": "2026-03-10T12:00:00Z",
-        "updated_at": "2026-03-10T12:00:00Z",
+        "generated_at": "2026-03-10T12:00:00Z",
+        "staleness": {
+            "last_observed": "2026-03-10T12:00:00Z",
+            "last_confirmed": None,
+            "drift_signals": [],
+            "confidence_trend": [0.87],
+        },
+        "constraints": {"trust_level": "observe", "guardrails": []},
         "steps": [
             {"step": "Open browser", "action": "launch", "target": "Chrome"},
         ],
@@ -257,7 +263,9 @@ class TestProceduresEndpoint:
         )
         assert proc["title"] == "Check Expired Domains"
         assert proc["confidence"] == 0.87
-        assert proc["last_observed"] is not None
+        assert proc["last_observed"] == "2026-03-10T12:00:00Z"
+        assert proc["trust_level"] == "observe"
+        assert "freshness_score" in proc
 
     def test_get_procedure_by_slug(self, port: int) -> None:
         status, body = _get(port, "/procedures/check-expired-domains")

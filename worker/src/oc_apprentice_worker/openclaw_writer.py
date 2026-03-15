@@ -80,6 +80,121 @@ class OpenClawWriter(SOPExportAdapter):
         self.ensure_directory_structure()
         return self.exporter.export_sop(sop_template)
 
+    def write_procedure(self, procedure: dict) -> Path:
+        """Write a v3 procedure with enriched OpenClaw content.
+
+        Includes v3 fields: environment, constraints, expected_outcomes,
+        staleness, evidence summary, chain metadata.
+        """
+        from oc_apprentice_worker.export_adapter import procedure_to_sop_template
+
+        self.ensure_directory_structure()
+
+        # Render base SOP markdown
+        sop_template = procedure_to_sop_template(procedure)
+        md_content = self.formatter.format_sop(sop_template)
+
+        # Append v3-only sections
+        extra_lines: list[str] = []
+
+        # Environment section
+        env = procedure.get("environment", {})
+        if env.get("required_apps") or env.get("accounts") or env.get("setup_actions"):
+            extra_lines.append("## Environment")
+            for app in env.get("required_apps", []):
+                extra_lines.append(f"- Required app: {app}")
+            for acct in env.get("accounts", []):
+                svc = acct.get("service", "unknown")
+                identity = acct.get("identity", "")
+                extra_lines.append(f"- Account: {svc}" + (f" ({identity})" if identity else ""))
+            for action in env.get("setup_actions", []):
+                extra_lines.append(f"- Setup: {action}")
+            extra_lines.append("")
+
+        # Constraints section
+        constraints = procedure.get("constraints", {})
+        trust_level = constraints.get("trust_level", "")
+        guardrails = constraints.get("guardrails", [])
+        if trust_level or guardrails:
+            extra_lines.append("## Constraints")
+            if trust_level:
+                extra_lines.append(f"- Trust level: {trust_level}")
+            for g in guardrails:
+                extra_lines.append(f"- {g}")
+            extra_lines.append("")
+
+        # Expected Outcomes section
+        outcomes = procedure.get("expected_outcomes", [])
+        if outcomes:
+            extra_lines.append("## Expected Outcomes")
+            for o in outcomes:
+                if isinstance(o, dict):
+                    desc = o.get("description", o.get("type", ""))
+                    extra_lines.append(f"- {desc}")
+                else:
+                    extra_lines.append(f"- {o}")
+            extra_lines.append("")
+
+        # Staleness section
+        staleness = procedure.get("staleness", {})
+        last_observed = staleness.get("last_observed")
+        last_confirmed = staleness.get("last_confirmed")
+        if last_observed or last_confirmed:
+            extra_lines.append("## Staleness")
+            if last_observed:
+                extra_lines.append(f"- Last observed: {last_observed}")
+            if last_confirmed:
+                extra_lines.append(f"- Last confirmed: {last_confirmed}")
+            drift = staleness.get("drift_signals", [])
+            if drift:
+                extra_lines.append(f"- Drift signals: {len(drift)}")
+            extra_lines.append("")
+
+        # Evidence summary
+        evidence = procedure.get("evidence", {})
+        total_obs = evidence.get("total_observations", 0)
+        contradictions = evidence.get("contradictions", [])
+        if total_obs or contradictions:
+            extra_lines.append("## Evidence")
+            extra_lines.append(f"- Total observations: {total_obs}")
+            if contradictions:
+                extra_lines.append(f"- Contradictions: {len(contradictions)}")
+            extra_lines.append("")
+
+        # Chain metadata
+        chain = procedure.get("chain", {})
+        depends_on = chain.get("depends_on", [])
+        followed_by = chain.get("followed_by", [])
+        if depends_on or followed_by:
+            extra_lines.append("## Chain")
+            if depends_on:
+                extra_lines.append(f"- Depends on: {', '.join(depends_on)}")
+            if followed_by:
+                extra_lines.append(f"- Followed by: {', '.join(followed_by)}")
+            extra_lines.append("")
+
+        if extra_lines:
+            md_content += "\n" + "\n".join(extra_lines)
+
+        # Write using atomic writer + versioner
+        slug = sop_template.get("slug", "unknown")
+        filepath = self.sops_dir / f"sop.{slug}.md"
+
+        # Archive previous version if it exists
+        if filepath.exists():
+            self.versioner.archive_sop(filepath)
+
+        AtomicWriter.write(filepath, md_content)
+
+        # Also write v3 JSON sidecar for machine consumption
+        json_path = self.sops_dir / f"sop.{slug}.v3.json"
+        AtomicWriter.write(
+            json_path,
+            json.dumps(procedure, indent=2, default=str),
+        )
+
+        return filepath
+
     def write_all_sops(self, sop_templates: list[dict]) -> list[Path]:
         """Write multiple SOPs and update the index.
 

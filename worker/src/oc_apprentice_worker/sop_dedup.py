@@ -51,6 +51,7 @@ def compute_fingerprint(sop: dict) -> dict:
         "apps": sorted(apps),
         "domains": sorted(domains),
         "action_verbs": sorted(action_verbs),
+        "variant_family": sop.get("variant_family"),
     }
 
 
@@ -292,7 +293,7 @@ def find_matching_sop(
 # ------------------------------------------------------------------
 
 
-def merge_sops(existing: dict, new_sop: dict) -> dict:
+def merge_sops(existing: dict, new_sop: dict, evidence_normalizer=None) -> dict:
     """Merge a new SOP into an existing one.
 
     Strategy:
@@ -309,6 +310,13 @@ def merge_sops(existing: dict, new_sop: dict) -> dict:
     - ``source``: keep existing
     - ``_timeline``: keep latest (most recent recording)
     """
+    if evidence_normalizer is not None:
+        try:
+            return evidence_normalizer.merge_with_evidence(existing, new_sop.get("steps", []))
+        except Exception:
+            logger.debug("Evidence-based merge failed, using default", exc_info=True)
+    # ... existing logic continues as fallback ...
+
     merged = dict(existing)  # Shallow copy
 
     # Accumulate episode count
@@ -374,6 +382,71 @@ def merge_sops(existing: dict, new_sop: dict) -> dict:
     )
 
     return merged
+
+
+_FAMILY_THRESHOLD = 0.60
+
+
+def detect_procedure_family(
+    sops: list[dict],
+    threshold: float = _FAMILY_THRESHOLD,
+) -> list[dict]:
+    """Group SOPs with similarity > threshold (but < merge threshold) into variant families.
+
+    Returns list of family dicts: {"family_id", "canonical_slug", "variant_slugs", "shared_apps"}
+    """
+    if len(sops) < 2:
+        return []
+
+    # Compute all fingerprints
+    fps = [(sop.get("slug", f"sop-{i}"), compute_fingerprint(sop)) for i, sop in enumerate(sops)]
+
+    # Build adjacency list for family grouping
+    edges: dict[str, set[str]] = {slug: set() for slug, _ in fps}
+    for i, (slug_a, fp_a) in enumerate(fps):
+        for j, (slug_b, fp_b) in enumerate(fps):
+            if i >= j:
+                continue
+            sim = fingerprint_similarity(fp_a, fp_b)
+            if sim >= threshold and sim < 0.70:  # family range: [0.60, 0.70)
+                edges[slug_a].add(slug_b)
+                edges[slug_b].add(slug_a)
+
+    # BFS to find connected components
+    visited: set[str] = set()
+    families: list[dict] = []
+
+    for slug, _ in fps:
+        if slug in visited or not edges[slug]:
+            continue
+        component: list[str] = []
+        queue = [slug]
+        while queue:
+            current = queue.pop(0)
+            if current in visited:
+                continue
+            visited.add(current)
+            component.append(current)
+            for neighbor in edges[current]:
+                if neighbor not in visited:
+                    queue.append(neighbor)
+
+        if len(component) >= 2:
+            # Find canonical: highest episode_count
+            sop_map = {s.get("slug", ""): s for s in sops}
+            canonical = max(component, key=lambda s: sop_map.get(s, {}).get("episode_count", 0))
+            variants = [s for s in component if s != canonical]
+            shared = set(sop_map.get(canonical, {}).get("apps_involved", []))
+            for v in variants:
+                shared &= set(sop_map.get(v, {}).get("apps_involved", []))
+            families.append({
+                "family_id": f"family-{canonical}",
+                "canonical_slug": canonical,
+                "variant_slugs": variants,
+                "shared_apps": sorted(shared),
+            })
+
+    return families
 
 
 def _merge_variables(

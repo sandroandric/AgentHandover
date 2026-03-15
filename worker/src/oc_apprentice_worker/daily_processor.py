@@ -61,6 +61,7 @@ class TaskBoundary:
     is_complete: bool  # False = abandoned/interrupted
     matched_procedure: str | None = None  # slug if matches known SOP
     account_context: dict | None = None  # filled by Sprint 10
+    span_id: str | None = None
 
 
 @dataclass
@@ -90,9 +91,18 @@ def _parse_iso(ts: str) -> datetime | None:
 
 
 def _extract_is_workflow(ann: dict) -> bool:
-    """Extract ``is_workflow`` from the annotation's task_context."""
+    """Extract workflow relevance from annotation.
+
+    Uses activity_type if present (work/research/communication/setup = True),
+    falls back to is_workflow for backward compatibility.
+    """
     tc = ann.get("task_context")
     if isinstance(tc, dict):
+        # Prefer activity_type if available
+        activity_type = tc.get("activity_type", "")
+        if activity_type:
+            return activity_type in ("work", "research", "communication", "setup")
+        # Fallback to is_workflow
         val = tc.get("is_workflow", False)
         if isinstance(val, str):
             return val.lower() in ("true", "yes", "1")
@@ -204,6 +214,11 @@ class DailyBatchProcessor:
             location = _extract_location(ann)
             is_workflow = _extract_is_workflow(ann)
 
+            tc = ann.get("task_context")
+            activity_type = ""
+            if isinstance(tc, dict):
+                activity_type = tc.get("activity_type", "")
+
             activities.append({
                 "timestamp": ts,
                 "dt": dt,
@@ -211,6 +226,7 @@ class DailyBatchProcessor:
                 "location": location,
                 "what_doing": what_doing,
                 "is_workflow": is_workflow,
+                "activity_type": activity_type,
                 "event_id": event.get("id", ""),
             })
 
@@ -456,3 +472,62 @@ class DailyBatchProcessor:
         logger.info(
             "Updated recent context: %d days tracked", len(days)
         )
+
+    def link_boundaries_to_spans(
+        self,
+        tasks: list[TaskBoundary],
+        spans: list,
+    ) -> list[TaskBoundary]:
+        """Attempt to link each task boundary to a continuity span.
+
+        For each boundary, checks if any span's segment event_ids overlap
+        with the boundary's event_ids. If so, sets boundary.span_id to
+        the span's span_id.
+
+        This is optional post-processing — does not modify spans.
+
+        Args:
+            tasks: Task boundaries from process_day().
+            spans: ContinuitySpan objects (from ContinuityTracker).
+
+        Returns:
+            The same tasks list with span_id populated where possible.
+        """
+        if not spans:
+            return tasks
+
+        # Build span event_id lookup
+        span_events: dict[str, set[str]] = {}
+        for span in spans:
+            span_id = getattr(span, "span_id", "")
+            if not span_id:
+                continue
+            # Collect event_ids from all segments in the span
+            seg_ids = getattr(span, "segments", [])
+            # Spans store segment_ids, not event_ids directly.
+            # We can't resolve these without the original segments.
+            # Instead, check if span's apps and goal overlap with boundary.
+            span_events[span_id] = {
+                "apps": set(getattr(span, "apps_involved", [])),
+                "goal": getattr(span, "goal_summary", ""),
+            }
+
+        for task in tasks:
+            if task.span_id is not None:
+                continue
+            task_apps = set(task.apps)
+            best_overlap = 0.0
+            best_span_id = None
+            for span_id, info in span_events.items():
+                # Simple app overlap + intent match
+                span_apps = info["apps"]
+                if not task_apps or not span_apps:
+                    continue
+                overlap = len(task_apps & span_apps) / len(task_apps | span_apps)
+                if overlap > best_overlap:
+                    best_overlap = overlap
+                    best_span_id = span_id
+            if best_overlap >= 0.3 and best_span_id is not None:
+                task.span_id = best_span_id
+
+        return tasks

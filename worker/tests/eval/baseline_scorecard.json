@@ -1,0 +1,250 @@
+{
+  "classification_f1": 0.75,
+  "classification_precision": 0.75,
+  "classification_recall": 0.75,
+  "activity_type_f1": 1.0,
+  "segmentation_ari": 0.0,
+  "segmentation_purity": 1.0,
+  "boundary_f1": 0.0,
+  "boundary_jaccard": 0.0,
+  "false_merge_rate": 0.0,
+  "missed_merge_rate": 0.0,
+  "false_ready_rate": 0.0,
+  "false_block_rate": 0.0,
+  "readiness_accuracy": 1.0,
+  "export_parity": 1.0,
+  "recurrence_precision": 1.0,
+  "recurrence_recall": 1.0,
+  "continuity_span_f1": 1.0,
+  "continuity_false_merge_rate": 0.0,
+  "scenario_count": 9,
+  "per_scenario": [
+    {
+      "scenario_id": "cross_app_research_workflow",
+      "classification": null,
+      "segmentation": {
+        "ari": 0.0,
+        "purity": 1.0,
+        "noise_drop_accuracy": 1.0
+      },
+      "task_boundaries": {
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1": 0.0,
+        "jaccard": 0.0
+      },
+      "dedup": null,
+      "readiness": null,
+      "export_parity": null,
+      "recurrence": null,
+      "continuity": null
+    },
+    {
+      "scenario_id": "entertainment_detour",
+      "classification": {
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0,
+        "accuracy": 1.0,
+        "activity_type_f1": 1.0,
+        "per_class": {
+          "entertainment": {
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0
+          },
+          "work": {
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0
+          }
+        }
+      },
+      "segmentation": null,
+      "task_boundaries": null,
+      "dedup": null,
+      "readiness": null,
+      "export_parity": null,
+      "recurrence": null,
+      "continuity": null
+    },
+    {
+      "scenario_id": "interruption_resume_workflow",
+      "classification": {
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0,
+        "accuracy": 1.0,
+        "activity_type_f1": 1.0,
+        "per_class": {
+          "communication": {
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0
+          },
+          "entertainment": {
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0
+          },
+          "work": {
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0
+          }
+        }
+      },
+      "segmentation": null,
+      "task_boundaries": null,
+      "dedup": null,
+      "readiness": null,
+      "export_parity": null,
+      "recurrence": null,
+      "continuity": {
+        "span_precision": 1.0,
+        "span_recall": 1.0,
+        "span_f1": 1.0,
+        "false_merge_rate": 0.0
+      }
+    },
+    {
+      "scenario_id": "long_gap_resumption",
+      "classification": null,
+      "segmentation": {
+        "ari": 0.0,
+        "purity": 1.0,
+        "noise_drop_accuracy": 1.0
+      },
+      "task_boundaries": null,
+      "dedup": null,
+      "readiness": null,
+      "export_parity": null,
+      "recurrence": null,
+      "continuity": null
+    },
+    {
+      "scenario_id": "morning_expense_interruptions",
+      "classification": {
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1": 0.0,
+        "accuracy": 0.12,
+        "activity_type_f1": 1.0,
+        "per_class": {
+          "communication": {
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0
+          },
+          "entertainment": {
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0
+          },
+          "personal_admin": {
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0
+          }
+        }
+      },
+      "segmentation": {
+        "ari": 0.0,
+        "purity": 1.0,
+        "noise_drop_accuracy": 1.0
+      },
+      "task_boundaries": {
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1": 0.0,
+        "jaccard": 0.0
+      },
+      "dedup": null,
+      "readiness": null,
+      "export_parity": null,
+      "recurrence": null,
+      "continuity": null
+    },
+    {
+      "scenario_id": "multi_day_recurring_standup",
+      "classification": null,
+      "segmentation": null,
+      "task_boundaries": {
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1": 0.0,
+        "jaccard": 0.0
+      },
+      "dedup": null,
+      "readiness": null,
+      "export_parity": null,
+      "recurrence": {
+        "precision": 1.0,
+        "recall": 1.0
+      },
+      "continuity": null
+    },
+    {
+      "scenario_id": "noise_heavy_browsing_session",
+      "classification": {
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0,
+        "accuracy": 1.0,
+        "activity_type_f1": 1.0,
+        "per_class": {
+          "entertainment": {
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0
+          },
+          "work": {
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0
+          }
+        }
+      },
+      "segmentation": null,
+      "task_boundaries": null,
+      "dedup": null,
+      "readiness": null,
+      "export_parity": null,
+      "recurrence": null,
+      "continuity": null
+    },
+    {
+      "scenario_id": "similar_but_different_sops",
+      "classification": null,
+      "segmentation": null,
+      "task_boundaries": null,
+      "dedup": {
+        "false_merge_rate": 0.0,
+        "missed_merge_rate": 0.0
+      },
+      "readiness": null,
+      "export_parity": {
+        "field_coverage_parity": 1.0
+      },
+      "recurrence": null,
+      "continuity": null
+    },
+    {
+      "scenario_id": "stale_and_draft_procedures",
+      "classification": null,
+      "segmentation": null,
+      "task_boundaries": null,
+      "dedup": null,
+      "readiness": {
+        "false_ready_rate": 0.0,
+        "false_block_rate": 0.0,
+        "accuracy": 1.0
+      },
+      "export_parity": {
+        "field_coverage_parity": 1.0
+      },
+      "recurrence": null,
+      "continuity": null
+    }
+  ]
+}

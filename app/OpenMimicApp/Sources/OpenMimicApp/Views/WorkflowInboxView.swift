@@ -17,6 +17,7 @@ struct WorkflowInboxView: View {
         case focus = "Focus"
         case passive = "Discovered"
         case drafts = "Drafts"
+        case agentReady = "Agent Ready"
     }
 
     var body: some View {
@@ -179,6 +180,7 @@ struct WorkflowInboxView: View {
         case .focus: return sopManager.allSorted.filter { $0.source == "focus" }
         case .passive: return sopManager.allSorted.filter { $0.source == "passive" }
         case .drafts: return sopManager.drafts
+        case .agentReady: return sopManager.allSorted.filter { $0.lifecycleState == "agent_ready" }
         }
     }
 }
@@ -221,6 +223,15 @@ struct SOPRow: View {
                 Text(sop.sourceLabel)
                     .font(.system(size: 10))
                     .foregroundColor(.secondary.opacity(0.6))
+
+                // Lifecycle state pill
+                Text(sop.lifecycleLabel)
+                    .font(.caption2)
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 1)
+                    .background(sop.lifecycleColor.opacity(0.12))
+                    .foregroundColor(sop.lifecycleColor)
+                    .clipShape(Capsule())
 
                 Spacer()
 

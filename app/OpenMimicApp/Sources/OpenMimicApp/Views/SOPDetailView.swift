@@ -85,6 +85,16 @@ struct SOPDetailView: View {
             HStack(spacing: 10) {
                 StatusBadge(status: sop.status)
 
+                // Lifecycle state badge
+                Text(sop.lifecycleLabel)
+                    .font(.caption2)
+                    .fontWeight(.semibold)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(sop.lifecycleColor.opacity(0.15))
+                    .foregroundColor(sop.lifecycleColor)
+                    .clipShape(Capsule())
+
                 if sop.confidence > 0 {
                     Text(String(format: "%.0f%%", sop.confidence * 100))
                         .font(.system(size: 11))
@@ -125,6 +135,19 @@ struct SOPDetailView: View {
             .buttonStyle(.bordered)
             .controlSize(.small)
             .disabled(sop.status == "approved")
+
+            // Promote lifecycle button
+            if sop.canPromote, let nextState = sop.nextLifecycleState {
+                Button(action: {
+                    sopManager.promoteProcedure(sop, toState: nextState)
+                }) {
+                    Label("Promote to \(SOPEntry.lifecycleLabelFor(nextState))", systemImage: "arrow.up.circle")
+                        .font(.system(size: 12, weight: .medium))
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.blue)
+                .controlSize(.small)
+            }
 
             Button(action: {
                 sopManager.rejectSOP(sop)

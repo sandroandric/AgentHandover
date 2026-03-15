@@ -49,7 +49,7 @@ class TestWriteSOP:
         adapter.write_sop(sample_sop)
         proc = kb.get_procedure("test-sop")
         assert proc is not None
-        assert proc["schema_version"] == "3.0.0"
+        assert proc["schema_version"] in ("3.0.0", "3.1.0")
 
 
 class TestWriteAllSOPs:

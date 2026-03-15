@@ -847,7 +847,7 @@ class TestProcessPassiveDiscovery:
 
             assert sops >= 1
             mock_sop_gen.generate_from_passive.assert_called_once()
-            mock_writer.write_all_sops.assert_called()
+            mock_writer.write_sop.assert_called()
             db.close()
         finally:
             conn.close()

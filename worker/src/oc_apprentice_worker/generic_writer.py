@@ -55,6 +55,76 @@ class GenericWriter(SOPExportAdapter):
 
         return md_path
 
+    def write_procedure(self, procedure: dict) -> Path:
+        """Write a v3 procedure as .md (with v3 sections) + .json.
+
+        The JSON output contains the full v3 procedure dict for machine
+        consumption.  The markdown includes appended v3 sections
+        (environment, constraints, expected outcomes).
+        """
+        from oc_apprentice_worker.export_adapter import procedure_to_sop_template
+
+        self._ensure_dirs()
+        slug = procedure.get("id", procedure.get("slug", "unknown"))
+
+        # Render base SOP markdown
+        sop_template = procedure_to_sop_template(procedure)
+        md_content = self.formatter.format_sop(sop_template)
+
+        # Append v3-only sections
+        extra_lines: list[str] = []
+
+        env = procedure.get("environment", {})
+        if env.get("required_apps") or env.get("accounts") or env.get("setup_actions"):
+            extra_lines.append("## Environment")
+            for app in env.get("required_apps", []):
+                extra_lines.append(f"- Required app: {app}")
+            for acct in env.get("accounts", []):
+                svc = acct.get("service", "unknown")
+                identity = acct.get("identity", "")
+                extra_lines.append(f"- Account: {svc}" + (f" ({identity})" if identity else ""))
+            for action in env.get("setup_actions", []):
+                extra_lines.append(f"- Setup: {action}")
+            extra_lines.append("")
+
+        constraints = procedure.get("constraints", {})
+        trust_level = constraints.get("trust_level", "")
+        guardrails = constraints.get("guardrails", [])
+        if trust_level or guardrails:
+            extra_lines.append("## Constraints")
+            if trust_level:
+                extra_lines.append(f"- Trust level: {trust_level}")
+            for g in guardrails:
+                extra_lines.append(f"- {g}")
+            extra_lines.append("")
+
+        outcomes = procedure.get("expected_outcomes", [])
+        if outcomes:
+            extra_lines.append("## Expected Outcomes")
+            for o in outcomes:
+                if isinstance(o, dict):
+                    desc = o.get("description", o.get("type", ""))
+                    extra_lines.append(f"- {desc}")
+                else:
+                    extra_lines.append(f"- {o}")
+            extra_lines.append("")
+
+        if extra_lines:
+            md_content += "\n" + "\n".join(extra_lines)
+
+        md_path = self.sops_dir_path / f"sop.{slug}.md"
+        AtomicWriter.write(md_path, md_content)
+
+        # Write full v3 procedure JSON (primary machine-readable output)
+        if self.json_export:
+            json_path = self.sops_dir_path / f"sop.{slug}.v3.json"
+            AtomicWriter.write(
+                json_path,
+                json.dumps(procedure, indent=2, default=str),
+            )
+
+        return md_path
+
     def write_all_sops(self, sop_templates: list[dict]) -> list[Path]:
         """Write multiple SOPs and return paths to all written files."""
         return [self.write_sop(t) for t in sop_templates]

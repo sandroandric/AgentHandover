@@ -57,7 +57,7 @@ KNOWLEDGE_BASE_DIR = Path.home() / ".openmimic" / "knowledge"
 POLL_INTERVAL_SECONDS = 2.0
 VLM_REJECT_THRESHOLD = 0.60
 
-_WORKER_VERSION = "0.1.0"
+_WORKER_VERSION = "0.2.0"
 _DB_RETRY_MAX_SECONDS = 120
 _DB_RETRY_POLL_SECONDS = 5
 _IDLE_LOG_INTERVAL_SECONDS = 300  # 5 minutes
@@ -86,6 +86,43 @@ def _lint_and_log(sop_template: dict, label: str) -> bool:
             sop_template.get("title", "?"), len(result.errors),
         )
     return result.valid
+
+
+def _export_via_adapter(
+    adapter: "SOPExportAdapter",
+    sop_templates: list[dict],
+    procedure_writer: "ProcedureWriter | None",
+) -> list[Path]:
+    """Export SOPs via *adapter*, preferring v3 procedure rendering.
+
+    For each template, if a v3 procedure exists in the knowledge base
+    (i.e. ``procedure_writer`` already saved it), the adapter's
+    ``write_procedure()`` is used for richer output.  Falls back to
+    ``write_sop()`` when no v3 procedure is available or when the v3
+    path raises.
+
+    Returns the list of written file paths.
+    """
+    kb = procedure_writer._kb if procedure_writer is not None else None
+    paths: list[Path] = []
+    for template in sop_templates:
+        slug = template.get("slug", "unknown")
+        proc = kb.get_procedure(slug) if kb is not None else None
+        try:
+            if proc is not None:
+                paths.append(adapter.write_procedure(proc))
+            else:
+                paths.append(adapter.write_sop(template))
+        except Exception:
+            # Fall back to SOP template rendering
+            try:
+                paths.append(adapter.write_sop(template))
+            except Exception:
+                logger.warning(
+                    "Export failed for %s via %s",
+                    slug, type(adapter).__name__, exc_info=True,
+                )
+    return paths
 
 
 def _read_vlm_config_field(field: str, default: str = "") -> str:
@@ -300,6 +337,46 @@ def _read_sop_config() -> dict:
         return defaults
 
 
+def _config_path() -> str | None:
+    """Return the path to config.toml, or None if it does not exist."""
+    if _platform.system() == "Darwin":
+        p = (
+            Path.home() / "Library" / "Application Support"
+            / "oc-apprentice" / "config.toml"
+        )
+    else:
+        p = Path.home() / ".config" / "oc-apprentice" / "config.toml"
+    return str(p) if p.is_file() else None
+
+
+def _read_feature_flags() -> dict:
+    """Read [features] section from config.toml.
+
+    Returns dict of feature flags with all defaulting to True.
+    """
+    defaults = {
+        "activity_classification": True,
+        "continuity_tracking": True,
+        "lifecycle_management": True,
+        "curation": True,
+        "runtime_validation": True,
+    }
+    config_file = _config_path()
+    if config_file is None or not Path(config_file).exists():
+        return defaults
+    try:
+        import tomllib
+        with open(config_file, "rb") as f:
+            cfg = tomllib.load(f)
+        features = cfg.get("features", {})
+        for key in defaults:
+            if key in features:
+                defaults[key] = bool(features[key])
+    except Exception:
+        pass
+    return defaults
+
+
 def _check_v2_schema(db: "WorkerDB") -> bool:
     """Check if the database has the v2 annotation columns.
 
@@ -321,6 +398,7 @@ def _process_annotations(
     *,
     batch_size: int = 5,
     privacy_checker: "PrivacyZoneChecker | None" = None,
+    activity_classifier: "ActivityClassifier | None" = None,
 ) -> dict:
     """Process a batch of unannotated screenshots through the scene annotator.
 
@@ -373,6 +451,21 @@ def _process_annotations(
 
         # Save result to DB
         if result.status == "completed" and result.annotation:
+            # Enrich with activity classification (Phase 1)
+            if activity_classifier is not None:
+                try:
+                    cls_result = activity_classifier.classify(
+                        result.annotation, event_context=event,
+                    )
+                    tc = result.annotation.setdefault("task_context", {})
+                    tc["activity_type"] = cls_result.activity_type.value
+                    tc["learnability"] = cls_result.learnability.value
+                    tc["classification_confidence"] = cls_result.confidence
+                    tc["classification_source"] = cls_result.source
+                    tc["classification_reasoning"] = cls_result.reasoning
+                except Exception:
+                    logger.debug("Activity classification failed", exc_info=True)
+
             db.save_annotation(
                 event_id,
                 json.dumps(result.annotation),
@@ -741,7 +834,12 @@ def _derive_short_title(title: str) -> str:
     return short.rstrip(".,;:")
 
 
-def _write_sops_index(db: WorkerDB, *, force: bool = False) -> None:
+def _write_sops_index(
+    db: WorkerDB,
+    knowledge_base: "KnowledgeBase | None" = None,
+    *,
+    force: bool = False,
+) -> None:
     """Atomically write sops-index.json for the SwiftUI app to read.
 
     Throttled to at most once every 5 seconds unless *force* is True.
@@ -790,9 +888,19 @@ def _write_sops_index(db: WorkerDB, *, force: bool = False) -> None:
             if not tags:
                 tags = _derive_tags(sop_tmpl)
 
+            # Look up lifecycle_state from KB procedure
+            slug = s.get("slug", "")
+            lifecycle_state = "observed"
+            try:
+                kb_proc = knowledge_base.get_procedure(slug) if slug else None
+                if kb_proc is not None:
+                    lifecycle_state = kb_proc.get("lifecycle_state", "observed")
+            except Exception:
+                pass
+
             sop_entries.append({
                 "sop_id": s.get("sop_id", ""),
-                "slug": s.get("slug", ""),
+                "slug": slug,
                 "title": title,
                 "short_title": short_title,
                 "tags": tags,
@@ -801,6 +909,7 @@ def _write_sops_index(db: WorkerDB, *, force: bool = False) -> None:
                 "confidence": s.get("confidence", 0.0) or 0.0,
                 "created_at": s.get("created_at", ""),
                 "reviewed_at": s.get("reviewed_at"),
+                "lifecycle_state": lifecycle_state,
             })
 
         index = {
@@ -1076,40 +1185,11 @@ def run_pipeline(
         from oc_apprentice_worker.sop_dedup import deduplicate_templates
         sop_templates = deduplicate_templates(sop_templates, _status_dir())
 
-        try:
-            paths = openclaw_writer.write_all_sops(sop_templates)
-            summary["sops_exported"] = len(paths)
-
-            # Update index with all SOP templates
-            index_generator.update_index(
-                openclaw_writer.get_sops_dir(), sop_templates
-            )
-            logger.info("Exported %d SOPs", len(paths))
-        except Exception:
-            logger.exception("SOP export failed")
-
         # Cache SOP templates for CLI export trigger re-export
         _save_sop_cache(sop_templates)
 
-        # Step F3: Also export as SKILL.md if skill_md_writer is configured
-        if skill_md_writer is not None:
-            try:
-                skill_paths = skill_md_writer.write_all_sops(sop_templates)
-                summary["skills_exported"] = len(skill_paths)
-                logger.info("Exported %d SKILL.md files", len(skill_paths))
-            except Exception:
-                logger.exception("SKILL.md export failed")
-
-        # Step F4: Also export as Claude Code skills if configured
-        if claude_skill_writer is not None:
-            try:
-                cs_paths = claude_skill_writer.write_all_sops(sop_templates)
-                summary["claude_skills_exported"] = len(cs_paths)
-                logger.info("Exported %d Claude Code skill(s)", len(cs_paths))
-            except Exception:
-                logger.exception("Claude Code skill export failed")
-
-        # Step F5: Write v3 procedures to the knowledge base
+        # Step F3: Write v3 procedures to the knowledge base first so
+        # all adapters (including OpenClaw) can use the richer v3 format.
         if procedure_writer is not None:
             for tpl in sop_templates:
                 try:
@@ -1123,6 +1203,44 @@ def run_pipeline(
                         "Failed to write procedure for %s",
                         tpl.get("slug", "?"), exc_info=True,
                     )
+
+        # Step F4: Export via OpenClaw (uses v3 procedure from KB when available)
+        try:
+            paths = _export_via_adapter(
+                openclaw_writer, sop_templates, procedure_writer,
+            )
+            summary["sops_exported"] = len(paths)
+            index_generator.update_index(
+                openclaw_writer.get_sops_dir(), sop_templates
+            )
+            logger.info("Exported %d SOPs", len(paths))
+        except Exception:
+            logger.exception("SOP export failed")
+
+        # Step F5: Also export as SKILL.md if skill_md_writer is configured
+        # (uses v3 procedure from KB when available)
+        if skill_md_writer is not None:
+            try:
+                skill_paths = _export_via_adapter(
+                    skill_md_writer, sop_templates, procedure_writer,
+                )
+                summary["skills_exported"] = len(skill_paths)
+                logger.info("Exported %d SKILL.md files", len(skill_paths))
+            except Exception:
+                logger.exception("SKILL.md export failed")
+
+        # Step F5: Also export as Claude Code skills if configured
+        # (uses v3 procedure from KB when available)
+        if claude_skill_writer is not None:
+            try:
+                cs_paths = _export_via_adapter(
+                    claude_skill_writer, sop_templates, procedure_writer,
+                )
+                summary["claude_skills_exported"] = len(cs_paths)
+                logger.info("Exported %d Claude Code skill(s)", len(cs_paths))
+            except Exception:
+                logger.exception("Claude Code skill export failed")
+
         if kb_export_adapter is not None:
             try:
                 kb_export_adapter.write_all_sops(sop_templates)
@@ -1325,39 +1443,8 @@ def _process_focus_sessions(
             from oc_apprentice_worker.sop_dedup import deduplicate_templates
             sop_templates = deduplicate_templates(sop_templates, _status_dir())
 
-            try:
-                paths = openclaw_writer.write_all_sops(sop_templates)
-                exported = len(paths)
-                index_generator.update_index(
-                    openclaw_writer.get_sops_dir(), sop_templates
-                )
-                logger.info(
-                    "Focus session '%s': exported %d SOP(s)", title, exported
-                )
-            except Exception:
-                logger.exception("Focus session SOP export failed")
-
-            # Also export as SKILL.md if writer is configured
-            if skill_md_writer is not None:
-                try:
-                    skill_md_writer.write_all_sops(sop_templates)
-                    logger.info(
-                        "Focus session '%s': SKILL.md export complete", title
-                    )
-                except Exception:
-                    logger.exception("Focus session SKILL.md export failed")
-
-            # Also export as Claude Code skills if writer is configured
-            if claude_skill_writer is not None:
-                try:
-                    claude_skill_writer.write_all_sops(sop_templates)
-                    logger.info(
-                        "Focus session '%s': Claude skill export complete", title
-                    )
-                except Exception:
-                    logger.exception("Focus session Claude skill export failed")
-
-            # Write v3 procedures to the knowledge base
+            # Write v3 procedures to the knowledge base first so
+            # all adapters (including OpenClaw) can use the richer v3 format.
             if procedure_writer is not None:
                 for tpl in sop_templates:
                     try:
@@ -1371,6 +1458,48 @@ def _process_focus_sessions(
                             "Failed to write procedure for %s",
                             tpl.get("slug", "?"), exc_info=True,
                         )
+
+            # Export via OpenClaw (uses v3 procedure from KB when available)
+            try:
+                paths = _export_via_adapter(
+                    openclaw_writer, sop_templates, procedure_writer,
+                )
+                exported = len(paths)
+                index_generator.update_index(
+                    openclaw_writer.get_sops_dir(), sop_templates
+                )
+                logger.info(
+                    "Focus session '%s': exported %d SOP(s)", title, exported
+                )
+            except Exception:
+                logger.exception("Focus session SOP export failed")
+
+            # Also export as SKILL.md if writer is configured
+            # (uses v3 procedure from KB when available)
+            if skill_md_writer is not None:
+                try:
+                    _export_via_adapter(
+                        skill_md_writer, sop_templates, procedure_writer,
+                    )
+                    logger.info(
+                        "Focus session '%s': SKILL.md export complete", title
+                    )
+                except Exception:
+                    logger.exception("Focus session SKILL.md export failed")
+
+            # Also export as Claude Code skills if writer is configured
+            # (uses v3 procedure from KB when available)
+            if claude_skill_writer is not None:
+                try:
+                    _export_via_adapter(
+                        claude_skill_writer, sop_templates, procedure_writer,
+                    )
+                    logger.info(
+                        "Focus session '%s': Claude skill export complete", title
+                    )
+                except Exception:
+                    logger.exception("Focus session Claude skill export failed")
+
             if kb_export_adapter is not None:
                 try:
                     kb_export_adapter.write_all_sops(sop_templates)
@@ -1517,37 +1646,8 @@ def _process_focus_sessions_v2(
             from oc_apprentice_worker.sop_dedup import deduplicate_templates
             sop_templates = deduplicate_templates(sop_templates, _status_dir())
 
-            # Export via primary writer
-            try:
-                paths = openclaw_writer.write_all_sops(sop_templates)
-                exported = len(paths)
-                index_generator.update_index(
-                    openclaw_writer.get_sops_dir(), sop_templates
-                )
-                logger.info(
-                    "Focus v2 session '%s': exported %d SOP(s) (%.1fs VLM time)",
-                    title, exported, result.inference_time_seconds,
-                )
-            except Exception:
-                logger.exception("Focus v2 SOP export failed")
-
-            # Also export as SKILL.md
-            if skill_md_writer is not None:
-                try:
-                    skill_md_writer.write_all_sops(sop_templates)
-                    logger.info("Focus v2 session '%s': SKILL.md export complete", title)
-                except Exception:
-                    logger.exception("Focus v2 SKILL.md export failed")
-
-            # Also export as Claude Code skills
-            if claude_skill_writer is not None:
-                try:
-                    claude_skill_writer.write_all_sops(sop_templates)
-                    logger.info("Focus v2 session '%s': Claude skill export complete", title)
-                except Exception:
-                    logger.exception("Focus v2 Claude skill export failed")
-
-            # Write v3 procedures to the knowledge base
+            # Write v3 procedures to the knowledge base first so
+            # all adapters (including OpenClaw) can use the richer v3 format.
             if procedure_writer is not None:
                 for tpl in sop_templates:
                     try:
@@ -1561,6 +1661,43 @@ def _process_focus_sessions_v2(
                             "Failed to write procedure for %s",
                             tpl.get("slug", "?"), exc_info=True,
                         )
+
+            # Export via OpenClaw (uses v3 procedure from KB when available)
+            try:
+                paths = _export_via_adapter(
+                    openclaw_writer, sop_templates, procedure_writer,
+                )
+                exported = len(paths)
+                index_generator.update_index(
+                    openclaw_writer.get_sops_dir(), sop_templates
+                )
+                logger.info(
+                    "Focus v2 session '%s': exported %d SOP(s) (%.1fs VLM time)",
+                    title, exported, result.inference_time_seconds,
+                )
+            except Exception:
+                logger.exception("Focus v2 SOP export failed")
+
+            # Also export as SKILL.md (uses v3 procedure when available)
+            if skill_md_writer is not None:
+                try:
+                    _export_via_adapter(
+                        skill_md_writer, sop_templates, procedure_writer,
+                    )
+                    logger.info("Focus v2 session '%s': SKILL.md export complete", title)
+                except Exception:
+                    logger.exception("Focus v2 SKILL.md export failed")
+
+            # Also export as Claude Code skills (uses v3 procedure when available)
+            if claude_skill_writer is not None:
+                try:
+                    _export_via_adapter(
+                        claude_skill_writer, sop_templates, procedure_writer,
+                    )
+                    logger.info("Focus v2 session '%s': Claude skill export complete", title)
+                except Exception:
+                    logger.exception("Focus v2 Claude skill export failed")
+
             if kb_export_adapter is not None:
                 try:
                     kb_export_adapter.write_all_sops(sop_templates)
@@ -1611,6 +1748,7 @@ def _process_passive_discovery(
     sop_auto_approve: bool = True,
     procedure_writer: "ProcedureWriter | None" = None,
     kb_export_adapter: "KnowledgeBaseExportAdapter | None" = None,
+    continuity_tracker: "ContinuityTracker | None" = None,
 ) -> int:
     """Run passive discovery: segment annotations → generate SOPs.
 
@@ -1678,6 +1816,15 @@ def _process_passive_discovery(
                 "original segments",
                 exc_info=True,
             )
+
+    # Build continuity graph
+    if continuity_tracker is not None:
+        try:
+            spans = continuity_tracker.build_graph(seg_result.segments)
+            seg_result.spans = spans
+            continuity_tracker.save_spans(spans)
+        except Exception:
+            logger.debug("Continuity tracking failed", exc_info=True)
 
     # Step 3: Persist segments to DB
     for seg in seg_result.segments:
@@ -1831,33 +1978,8 @@ def _process_passive_discovery(
             from oc_apprentice_worker.sop_dedup import deduplicate_templates
             sop_templates = deduplicate_templates(sop_templates, _status_dir())
 
-            # Export
-            try:
-                paths = openclaw_writer.write_all_sops(sop_templates)
-                total_exported += len(paths)
-                index_generator.update_index(
-                    openclaw_writer.get_sops_dir(), sop_templates,
-                )
-                logger.info(
-                    "Passive SOP '%s': exported %d SOP(s) (%.1fs VLM)",
-                    task_label[:60], len(paths), result.inference_time_seconds,
-                )
-            except Exception:
-                logger.exception("Passive SOP export failed for '%s'", task_label[:60])
-
-            if skill_md_writer is not None:
-                try:
-                    skill_md_writer.write_all_sops(sop_templates)
-                except Exception:
-                    logger.exception("Passive SKILL.md export failed")
-
-            if claude_skill_writer is not None:
-                try:
-                    claude_skill_writer.write_all_sops(sop_templates)
-                except Exception:
-                    logger.exception("Passive Claude skill export failed")
-
-            # Write v3 procedures to the knowledge base
+            # Write v3 procedures to the knowledge base first so
+            # all adapters (including OpenClaw) can use the richer v3 format.
             if procedure_writer is not None:
                 for tpl in sop_templates:
                     try:
@@ -1871,6 +1993,41 @@ def _process_passive_discovery(
                             "Failed to write procedure for %s",
                             tpl.get("slug", "?"), exc_info=True,
                         )
+
+            # Export via OpenClaw (uses v3 procedure from KB when available)
+            try:
+                paths = _export_via_adapter(
+                    openclaw_writer, sop_templates, procedure_writer,
+                )
+                total_exported += len(paths)
+                index_generator.update_index(
+                    openclaw_writer.get_sops_dir(), sop_templates,
+                )
+                logger.info(
+                    "Passive SOP '%s': exported %d SOP(s) (%.1fs VLM)",
+                    task_label[:60], len(paths), result.inference_time_seconds,
+                )
+            except Exception:
+                logger.exception("Passive SOP export failed for '%s'", task_label[:60])
+
+            # Export via SKILL.md (uses v3 procedure when available)
+            if skill_md_writer is not None:
+                try:
+                    _export_via_adapter(
+                        skill_md_writer, sop_templates, procedure_writer,
+                    )
+                except Exception:
+                    logger.exception("Passive SKILL.md export failed")
+
+            # Export via Claude Code skills (uses v3 procedure when available)
+            if claude_skill_writer is not None:
+                try:
+                    _export_via_adapter(
+                        claude_skill_writer, sop_templates, procedure_writer,
+                    )
+                except Exception:
+                    logger.exception("Passive Claude skill export failed")
+
             if kb_export_adapter is not None:
                 try:
                     kb_export_adapter.write_all_sops(sop_templates)
@@ -2590,6 +2747,220 @@ def _process_staleness_reviewed_trigger(
     _remove_trigger(trigger_path)
 
 
+def _process_lifecycle_promote_trigger(
+    *,
+    lifecycle_manager: "LifecycleManager",
+) -> None:
+    """Process a lifecycle-promote-trigger.json written by the CLI.
+
+    The CLI ``openmimic sops promote <slug> <state>`` writes a trigger file
+    requesting a lifecycle transition.  The worker validates and applies it.
+    """
+    state_dir = _status_dir()
+    trigger_path = state_dir / "lifecycle-promote-trigger.json"
+
+    if not trigger_path.is_file():
+        return
+
+    try:
+        with open(trigger_path) as f:
+            trigger = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        logger.debug("Could not read lifecycle-promote-trigger.json", exc_info=True)
+        _remove_trigger(trigger_path)
+        return
+
+    slug = trigger.get("procedure_slug", "")
+    to_state = trigger.get("to_state", "")
+    actor = trigger.get("actor", "human")
+    reason = trigger.get("reason", "")
+
+    if not slug or not to_state:
+        logger.warning("Lifecycle promote trigger missing slug or to_state")
+        _remove_trigger(trigger_path)
+        return
+
+    logger.info(
+        "Processing lifecycle promote trigger: %s → %s",
+        slug, to_state,
+    )
+
+    try:
+        from oc_apprentice_worker.lifecycle_manager import ProcedureLifecycle
+        target = ProcedureLifecycle(to_state)
+        lifecycle_manager.transition(
+            slug, target,
+            trigger="cli_promote",
+            actor=actor,
+            reason=reason,
+        )
+        logger.info("Lifecycle promoted: %s → %s", slug, to_state)
+    except ValueError:
+        logger.warning("Invalid lifecycle state: %s", to_state)
+    except Exception:
+        logger.warning(
+            "Lifecycle promote failed for %s → %s",
+            slug, to_state, exc_info=True,
+        )
+
+    _remove_trigger(trigger_path)
+
+
+def _process_execution_start_trigger(
+    status_dir: Path, execution_monitor, knowledge_base,
+) -> None:
+    """Handle execution-start.json trigger from agent."""
+    trigger_path = status_dir / "execution-start.json"
+    if not trigger_path.is_file():
+        return
+    try:
+        with open(trigger_path) as f:
+            data = json.load(f)
+        trigger_path.unlink(missing_ok=True)
+
+        slug = data.get("slug", "")
+        agent_id = data.get("agent_id", "unknown")
+        if not slug:
+            logger.warning("execution-start trigger missing slug")
+            return
+
+        execution_id = execution_monitor.start_execution(slug, agent_id)
+
+        result_path = status_dir / "execution-start-result.json"
+        _atomic_write_result(result_path, {
+            "execution_id": execution_id,
+            "slug": slug,
+            "status": "started",
+        })
+        logger.info("Started execution monitoring: %s for %s", execution_id, slug)
+    except Exception:
+        logger.debug("Error processing execution-start trigger", exc_info=True)
+
+
+def _process_execution_step_trigger(
+    status_dir: Path, execution_monitor,
+) -> None:
+    """Handle execution-step.json trigger from agent."""
+    trigger_path = status_dir / "execution-step.json"
+    if not trigger_path.is_file():
+        return
+    try:
+        with open(trigger_path) as f:
+            data = json.load(f)
+        trigger_path.unlink(missing_ok=True)
+
+        execution_id = data.get("execution_id", "")
+        step_id = data.get("step_id", "")
+        actual_action = data.get("actual_action", "")
+
+        if not execution_id or not step_id:
+            logger.warning("execution-step trigger missing execution_id or step_id")
+            return
+
+        execution_monitor.record_step(execution_id, step_id, actual_action)
+        logger.debug("Recorded execution step: %s/%s", execution_id, step_id)
+    except Exception:
+        logger.debug("Error processing execution-step trigger", exc_info=True)
+
+
+def _process_execution_complete_trigger(
+    status_dir: Path, execution_monitor, knowledge_base,
+) -> None:
+    """Handle execution-complete.json trigger from agent."""
+    trigger_path = status_dir / "execution-complete.json"
+    if not trigger_path.is_file():
+        return
+    try:
+        with open(trigger_path) as f:
+            data = json.load(f)
+        trigger_path.unlink(missing_ok=True)
+
+        execution_id = data.get("execution_id", "")
+        status = data.get("status", "completed")  # "completed" or "failed"
+        error = data.get("error")
+        outcomes = data.get("outcomes", [])
+
+        if not execution_id:
+            logger.warning("execution-complete trigger missing execution_id")
+            return
+
+        if status == "failed" and error:
+            record = execution_monitor.fail_execution(execution_id, error)
+        elif status == "aborted":
+            record = execution_monitor.abort_execution(execution_id)
+        else:
+            record = execution_monitor.complete_execution(execution_id, outcomes)
+
+        result_path = status_dir / "execution-complete-result.json"
+        _atomic_write_result(result_path, {
+            "execution_id": execution_id,
+            "status": record.status.value,
+            "completed_at": record.completed_at,
+        })
+
+        # --- Execution-learning feedback ---
+        # Feed execution outcome back into procedure quality.
+        try:
+            slug = data.get("slug", "")
+            if not slug:
+                # Try to get slug from the execution record
+                slug = record.procedure_slug
+            if slug:
+                proc = knowledge_base.get_procedure(slug)
+                if proc is not None:
+                    staleness = proc.setdefault("staleness", {})
+                    evidence = proc.setdefault("evidence", {})
+                    now_iso = datetime.now(timezone.utc).isoformat()
+
+                    if record.status.value == "completed":
+                        # Success: mark as freshly confirmed
+                        staleness["last_confirmed"] = now_iso
+                        # Increment observation count
+                        evidence["total_observations"] = evidence.get("total_observations", 0) + 1
+                        # Clear stale status if it was set
+                        if staleness.get("status") in ("needs_review", "stale"):
+                            staleness["status"] = "current"
+                            staleness["recommended_action"] = "none"
+
+                    elif record.status.value == "deviated":
+                        # Deviation: add drift signal
+                        drift_signals = staleness.setdefault("drift_signals", [])
+                        drift_signals.append({
+                            "type": "execution_deviation",
+                            "detail": f"Agent execution deviated: {len(record.deviations)} step(s)",
+                            "first_seen": now_iso,
+                        })
+                        # Add to contradictions
+                        contradictions = evidence.setdefault("contradictions", [])
+                        for dev in record.deviations:
+                            contradictions.append({
+                                "type": "execution_deviation",
+                                "detail": dev.get("detail", ""),
+                                "date": now_iso,
+                            })
+
+                    elif record.status.value == "failed":
+                        # Failure: add failure signal
+                        drift_signals = staleness.setdefault("drift_signals", [])
+                        drift_signals.append({
+                            "type": "execution_failure",
+                            "detail": f"Agent execution failed: {record.error or 'unknown'}",
+                            "first_seen": now_iso,
+                        })
+
+                    knowledge_base.save_procedure(proc)
+        except Exception:
+            logger.debug("Failed to update procedure from execution feedback", exc_info=True)
+
+        logger.info(
+            "Execution %s completed: %s", execution_id, record.status.value
+        )
+    except KeyError as exc:
+        logger.warning("execution-complete trigger error: %s", exc)
+    except Exception:
+        logger.debug("Error processing execution-complete trigger", exc_info=True)
+
+
 def _export_sop_templates(
     sop_templates: list[dict],
     *,
@@ -2608,29 +2979,8 @@ def _export_sop_templates(
     from oc_apprentice_worker.sop_dedup import deduplicate_templates
     sop_templates = deduplicate_templates(sop_templates, _status_dir())
 
-    try:
-        paths = openclaw_writer.write_all_sops(sop_templates)
-        index_generator.update_index(
-            openclaw_writer.get_sops_dir(), sop_templates,
-        )
-        logger.info("Exported %d SOP(s) via primary adapter", len(paths))
-    except Exception:
-        logger.exception("SOP export failed (primary adapter)")
-
-    if skill_md_writer is not None:
-        try:
-            skill_md_writer.write_all_sops(sop_templates)
-        except Exception:
-            logger.exception("SKILL.md export failed")
-
-    if claude_skill_writer is not None:
-        try:
-            claude_skill_writer.write_all_sops(sop_templates)
-        except Exception:
-            logger.exception("Claude Code skill export failed")
-
-    # Write v3 procedures to the knowledge base so downstream consumers
-    # (trust advisor, query API, staleness detector) can find them.
+    # Write v3 procedures to the knowledge base first so all adapters
+    # (including OpenClaw) can use the richer v3 format.
     if procedure_writer is not None:
         for tpl in sop_templates:
             try:
@@ -2644,6 +2994,36 @@ def _export_sop_templates(
                     "Failed to write procedure for %s",
                     tpl.get("slug", "?"), exc_info=True,
                 )
+
+    # Export via OpenClaw (uses v3 procedure from KB when available)
+    try:
+        paths = _export_via_adapter(
+            openclaw_writer, sop_templates, procedure_writer,
+        )
+        index_generator.update_index(
+            openclaw_writer.get_sops_dir(), sop_templates,
+        )
+        logger.info("Exported %d SOP(s) via primary adapter", len(paths))
+    except Exception:
+        logger.exception("SOP export failed (primary adapter)")
+
+    # Export via SKILL.md (uses v3 procedure when available)
+    if skill_md_writer is not None:
+        try:
+            _export_via_adapter(
+                skill_md_writer, sop_templates, procedure_writer,
+            )
+        except Exception:
+            logger.exception("SKILL.md export failed")
+
+    # Export via Claude Code skills (uses v3 procedure when available)
+    if claude_skill_writer is not None:
+        try:
+            _export_via_adapter(
+                claude_skill_writer, sop_templates, procedure_writer,
+            )
+        except Exception:
+            logger.exception("Claude Code skill export failed")
 
     if kb_export_adapter is not None:
         try:
@@ -2696,13 +3076,15 @@ def _check_export_trigger(
     *,
     openclaw_writer: "SOPExportAdapter",
     sops_dir: Path,
+    procedure_writer: "ProcedureWriter | None" = None,
 ) -> None:
     """Check for and process an export-trigger.json file written by the CLI.
 
     The CLI ``openmimic export`` writes a trigger file requesting re-export of
     existing SOPs in a specific format (skill-md, generic, openclaw).  The
-    worker picks it up here, creates the appropriate writer, runs the re-export,
-    and removes the trigger.
+    worker picks it up here, creates the appropriate writer, runs the re-export
+    via ``_export_via_adapter()`` for v3-aware rendering, and removes the
+    trigger.
     """
     state_dir = _status_dir()
     trigger_path = state_dir / "export-trigger.json"
@@ -2754,23 +3136,22 @@ def _check_export_trigger(
         try:
             from oc_apprentice_worker.skill_md_writer import SkillMdWriter
             writer = SkillMdWriter(workspace_dir=workspace_dir)
-            writer.write_all_sops(sop_templates)
-            exported += len(sop_templates)
-            logger.info("Export trigger: wrote %d SKILL.md file(s)", len(sop_templates))
+            paths = _export_via_adapter(writer, sop_templates, procedure_writer)
+            exported += len(paths)
+            logger.info("Export trigger: wrote %d SKILL.md file(s)", len(paths))
         except Exception:
             logger.exception("Export trigger: SKILL.md write failed")
 
     if fmt in ("openclaw", "all"):
         try:
             if output_dir:
-                # Respect output_dir: create a new writer pointing there
                 from oc_apprentice_worker.openclaw_writer import OpenClawWriter
                 oc_writer = OpenClawWriter(workspace_dir=Path(output_dir))
             else:
                 oc_writer = openclaw_writer
-            oc_writer.write_all_sops(sop_templates)
-            exported += len(sop_templates)
-            logger.info("Export trigger: wrote %d OpenClaw file(s)", len(sop_templates))
+            paths = _export_via_adapter(oc_writer, sop_templates, procedure_writer)
+            exported += len(paths)
+            logger.info("Export trigger: wrote %d OpenClaw file(s)", len(paths))
         except Exception:
             logger.exception("Export trigger: OpenClaw write failed")
 
@@ -2779,9 +3160,9 @@ def _check_export_trigger(
             from oc_apprentice_worker.generic_writer import GenericWriter
             out = Path(output_dir) if output_dir else sops_dir
             writer = GenericWriter(output_dir=out, json_export=True)
-            writer.write_all_sops(sop_templates)
-            exported += len(sop_templates)
-            logger.info("Export trigger: wrote %d generic file(s)", len(sop_templates))
+            paths = _export_via_adapter(writer, sop_templates, procedure_writer)
+            exported += len(paths)
+            logger.info("Export trigger: wrote %d generic file(s)", len(paths))
         except Exception:
             logger.exception("Export trigger: generic write failed")
 
@@ -2790,9 +3171,9 @@ def _check_export_trigger(
             from oc_apprentice_worker.claude_skill_writer import ClaudeSkillWriter
             skills_dir = Path(output_dir) / "skills" if output_dir else None
             writer = ClaudeSkillWriter(skills_dir=skills_dir)
-            writer.write_all_sops(sop_templates)
-            exported += len(sop_templates)
-            logger.info("Export trigger: wrote %d Claude Code skill(s)", len(sop_templates))
+            paths = _export_via_adapter(writer, sop_templates, procedure_writer)
+            exported += len(paths)
+            logger.info("Export trigger: wrote %d Claude Code skill(s)", len(paths))
         except Exception:
             logger.exception("Export trigger: Claude Code skill write failed")
 
@@ -3088,6 +3469,8 @@ def main(argv: list[str] | None = None) -> None:
     from oc_apprentice_worker.knowledge_export_adapter import KnowledgeBaseExportAdapter
     from oc_apprentice_worker.privacy_zones import PrivacyZoneChecker, PrivacyZoneConfig
     from oc_apprentice_worker.daily_processor import DailyBatchProcessor
+    from oc_apprentice_worker.user_policy import UserPolicy
+    from oc_apprentice_worker.activity_classifier import ActivityClassifier
     from oc_apprentice_worker.staleness_detector import StalenessDetector
     from oc_apprentice_worker.profile_builder import ProfileBuilder
     from oc_apprentice_worker.pattern_detector import PatternDetector
@@ -3098,26 +3481,97 @@ def main(argv: list[str] | None = None) -> None:
     from oc_apprentice_worker.trust_advisor import TrustAdvisor
     from oc_apprentice_worker.session_linker import SessionLinker
     from oc_apprentice_worker.daily_digest import DigestGenerator
+    from oc_apprentice_worker.procedure_matcher import ProcedureMatcher
+    from oc_apprentice_worker.continuity_tracker import ContinuityTracker
+    from oc_apprentice_worker.lifecycle_manager import LifecycleManager
+    from oc_apprentice_worker.procedure_curator import ProcedureCurator
+    from oc_apprentice_worker.runtime_validator import RuntimeValidator
+    from oc_apprentice_worker.escalation_handler import EscalationHandler
+    from oc_apprentice_worker.config_validator import ConfigValidator
+    from oc_apprentice_worker.ops_telemetry import OpsTelemetry, PipelineMetrics
 
     knowledge_base = KnowledgeBase(root=args.knowledge_dir)
     knowledge_base.ensure_structure()
+
+    # Config validation
+    try:
+        config_validator = ConfigValidator()
+        config_file = (
+            Path.home() / "Library" / "Application Support" / "oc-apprentice" / "config.toml"
+            if _platform.system() == "Darwin"
+            else Path.home() / ".config" / "oc-apprentice" / "config.toml"
+        )
+        if config_file.is_file():
+            import tomllib
+            with open(config_file, "rb") as f:
+                raw_config = tomllib.load(f)
+            issues = config_validator.validate(raw_config)
+            for issue in issues:
+                log_fn = logger.error if issue.severity == "error" else logger.warning
+                log_fn("Config [%s.%s]: %s", issue.section, issue.key, issue.message)
+    except Exception:
+        logger.debug("Config validation skipped", exc_info=True)
+
+    ops_telemetry = OpsTelemetry(knowledge_base)
+
+    feature_flags = _read_feature_flags()
+    logger.info("Feature flags: %s", {k: v for k, v in feature_flags.items() if not v} or "all enabled")
+
     evidence_tracker = EvidenceTracker(knowledge_base=knowledge_base)
-    procedure_writer = ProcedureWriter(kb=knowledge_base, evidence=evidence_tracker)
+    lifecycle_manager = LifecycleManager(knowledge_base)
+    procedure_writer = ProcedureWriter(kb=knowledge_base, evidence=evidence_tracker, lifecycle_manager=lifecycle_manager)
     kb_export_adapter = KnowledgeBaseExportAdapter(knowledge_base)
     privacy_checker = PrivacyZoneChecker()
     daily_processor = DailyBatchProcessor(knowledge_base=knowledge_base)
     staleness_detector = StalenessDetector(knowledge_base)
     profile_builder = ProfileBuilder(knowledge_base)
+    activity_classifier = None
+    if feature_flags["activity_classification"]:
+        user_policy = UserPolicy(knowledge_base)
+        activity_classifier = ActivityClassifier(
+            profile=knowledge_base.get_profile(),
+            policy=user_policy,
+        )
     pattern_detector = PatternDetector(knowledge_base)
     constraint_manager = ConstraintManager(knowledge_base)
     decision_extractor = DecisionExtractor(knowledge_base)
 
     # Phase 4: Execution monitoring, correction detection, trust advisor
-    execution_monitor = ExecutionMonitor(knowledge_base)
+    runtime_validator = None
+    escalation_handler = None
+    if feature_flags["runtime_validation"]:
+        runtime_validator = RuntimeValidator(knowledge_base)
+        escalation_handler = EscalationHandler(kb=knowledge_base, lifecycle_manager=lifecycle_manager)
+    execution_monitor = ExecutionMonitor(knowledge_base, escalation_handler=escalation_handler)
     correction_detector = CorrectionDetector(knowledge_base)
     trust_advisor = TrustAdvisor(knowledge_base)
     session_linker = SessionLinker(knowledge_base)
     digest_generator = DigestGenerator(knowledge_base)
+    continuity_tracker = None
+    if feature_flags["continuity_tracking"]:
+        procedure_matcher_obj = ProcedureMatcher(kb=knowledge_base)
+        continuity_tracker = ContinuityTracker(
+            kb=knowledge_base,
+            matcher=procedure_matcher_obj,
+        )
+
+    # Phase 4: Variant detection and evidence normalization
+    from oc_apprentice_worker.variant_detector import VariantDetector
+    from oc_apprentice_worker.evidence_normalizer import EvidenceNormalizer
+
+    variant_detector = VariantDetector()
+    evidence_normalizer = EvidenceNormalizer(variant_detector=variant_detector)
+
+    # Phase 5: Curation orchestrator
+    procedure_curator = None
+    if feature_flags["curation"]:
+        procedure_curator = ProcedureCurator(
+            kb=knowledge_base,
+            staleness_detector=staleness_detector,
+            trust_advisor=trust_advisor,
+            lifecycle_manager=lifecycle_manager,
+            evidence_normalizer=evidence_normalizer,
+        )
 
     logger.info("Knowledge base initialized: %s", args.knowledge_dir)
 
@@ -3409,6 +3863,16 @@ def main(argv: list[str] | None = None) -> None:
     except Exception:
         logger.debug("Activity searcher not available", exc_info=True)
 
+    # Phase 3: Bundle compiler
+    from oc_apprentice_worker.bundle_compiler import BundleCompiler
+    bundle_adapters: dict[str, SOPExportAdapter] = {}
+    if sop_writer is not None:
+        bundle_adapters["openclaw"] = sop_writer
+    if skill_md_writer is not None:
+        bundle_adapters["skill_md"] = skill_md_writer
+    if claude_skill_writer is not None:
+        bundle_adapters["claude_skill"] = claude_skill_writer
+
     # Phase 4: Start query API server (if enabled in config)
     query_api_server = None
     try:
@@ -3422,13 +3886,27 @@ def main(argv: list[str] | None = None) -> None:
         if _cfg_path.is_file():
             with open(_cfg_path, "rb") as _cf:
                 _knowledge_cfg = _tomllib.load(_cf).get("knowledge", {})
-        if _knowledge_cfg.get("query_api_enabled", False):
+        if _knowledge_cfg.get("query_api_enabled", True):
             from oc_apprentice_worker.query_api import QueryAPIServer
+            from oc_apprentice_worker.procedure_verifier import ProcedureVerifier
+            procedure_verifier = ProcedureVerifier(knowledge_base, runtime_validator=runtime_validator)
+            bundle_compiler = BundleCompiler(
+                kb=knowledge_base,
+                lifecycle=lifecycle_manager,
+                verifier=procedure_verifier,
+                adapters=bundle_adapters,
+            )
             _api_port = _knowledge_cfg.get("query_api_port", 9477)
             query_api_server = QueryAPIServer(
                 knowledge_base=knowledge_base,
                 port=_api_port,
                 activity_searcher=activity_searcher,
+                execution_monitor=execution_monitor,
+                procedure_verifier=procedure_verifier,
+                bundle_compiler=bundle_compiler,
+                procedure_curator=procedure_curator,
+                runtime_validator=runtime_validator,
+                ops_telemetry=ops_telemetry,
             )
             query_api_server.start()
             logger.info("Query API server started on port %d", _api_port)
@@ -3518,7 +3996,7 @@ def main(argv: list[str] | None = None) -> None:
 
         # Force-write sops-index.json at startup so the SwiftUI app
         # immediately sees the latest data (including any new fields).
-        _write_sops_index(db, force=True)
+        _write_sops_index(db, knowledge_base, force=True)
 
         while not shutdown_flag[0]:
             try:
@@ -3552,6 +4030,21 @@ def main(argv: list[str] | None = None) -> None:
                 _process_trust_dismiss_trigger(trust_advisor)
                 _process_staleness_reviewed_trigger(
                     staleness_detector, knowledge_base
+                )
+                _process_lifecycle_promote_trigger(
+                    lifecycle_manager=lifecycle_manager,
+                )
+
+                # Execution feedback triggers
+                _exec_status_dir = _status_dir()
+                _process_execution_start_trigger(
+                    _exec_status_dir, execution_monitor, knowledge_base,
+                )
+                _process_execution_step_trigger(
+                    _exec_status_dir, execution_monitor,
+                )
+                _process_execution_complete_trigger(
+                    _exec_status_dir, execution_monitor, knowledge_base,
                 )
 
                 # Process any completed focus recording sessions first.
@@ -3594,12 +4087,13 @@ def main(argv: list[str] | None = None) -> None:
                     logger.info(
                         "Focus recording: generated %d SOP(s)!", focus_sops
                     )
-                    _write_sops_index(db)
+                    _write_sops_index(db, knowledge_base)
 
                 # Check for CLI-requested export triggers
                 _check_export_trigger(
                     openclaw_writer=sop_writer,
                     sops_dir=args.sops_dir,
+                    procedure_writer=procedure_writer,
                 )
 
                 unprocessed = db.get_unprocessed_events(limit=100)
@@ -3667,7 +4161,7 @@ def main(argv: list[str] | None = None) -> None:
                             "Generated %d new SOP(s)!",
                             summary["sops_exported"],
                         )
-                        _write_sops_index(db)
+                        _write_sops_index(db, knowledge_base)
                     else:
                         logger.info(
                             "Processed %d events into %d episodes. "
@@ -3747,6 +4241,7 @@ def main(argv: list[str] | None = None) -> None:
                     ann_stats = _process_annotations(
                         db, scene_annotator, screenshots_dir,
                         privacy_checker=privacy_checker,
+                        activity_classifier=activity_classifier,
                     )
                     total_v2_annotations += ann_stats["annotated"]
 
@@ -3758,6 +4253,15 @@ def main(argv: list[str] | None = None) -> None:
                             ann_stats["failed"],
                             ann_stats["blocked"],
                         )
+
+                    if ops_telemetry is not None and ann_stats["annotated"] > 0:
+                        try:
+                            ops_telemetry.record_batch(PipelineMetrics(
+                                annotation_count=ann_stats["annotated"],
+                                classification_count=ann_stats["annotated"],
+                            ))
+                        except Exception:
+                            pass
 
                     # Refresh FTS5 search index so newly annotated events
                     # appear in search/recall results.
@@ -3821,6 +4325,7 @@ def main(argv: list[str] | None = None) -> None:
                                 sop_auto_approve=sop_auto_approve,
                                 procedure_writer=procedure_writer,
                                 kb_export_adapter=kb_export_adapter,
+                                continuity_tracker=continuity_tracker,
                             )
                             if pd_sops > 0:
                                 total_passive_sops += pd_sops
@@ -3829,7 +4334,7 @@ def main(argv: list[str] | None = None) -> None:
                                     "Passive discovery: generated %d SOP(s)!",
                                     pd_sops,
                                 )
-                                _write_sops_index(db)
+                                _write_sops_index(db, knowledge_base)
                         except Exception:
                             logger.warning(
                                 "Passive discovery failed",
@@ -3865,7 +4370,7 @@ def main(argv: list[str] | None = None) -> None:
                 )
 
                 # Refresh sops-index.json (throttled to every 5s)
-                _write_sops_index(db)
+                _write_sops_index(db, knowledge_base)
 
                 # Episode store cleanup — once per day (86400s)
                 _now_mono = time.monotonic()
@@ -3903,6 +4408,12 @@ def main(argv: list[str] | None = None) -> None:
                             )
                             if summaries_count >= 3:
                                 profile_builder.update_profile()
+                                # Refresh activity classifier with updated profile
+                                if activity_classifier is not None:
+                                    try:
+                                        activity_classifier._profile = knowledge_base.get_profile()
+                                    except Exception:
+                                        logger.debug("Failed to refresh classifier profile", exc_info=True)
                                 patterns = pattern_detector.detect_recurrence()
                                 if patterns:
                                     pattern_detector.update_triggers(patterns)
@@ -4007,31 +4518,55 @@ def main(argv: list[str] | None = None) -> None:
                         # Persist staleness status back into procedure JSON
                         # so the SwiftUI MicroReviewView can read it.
                         for report in reports:
-                            if report.status != "current":
-                                try:
-                                    proc = knowledge_base.get_procedure(report.slug)
-                                    if proc is not None:
-                                        staleness = proc.get("staleness", {})
-                                        staleness["status"] = report.status
-                                        staleness["signals"] = [
-                                            {
-                                                "type": s.type,
-                                                "detail": s.detail,
-                                                "first_seen": s.first_seen,
-                                            }
-                                            for s in report.signals
-                                        ]
-                                        staleness["recommended_action"] = report.recommended_action
-                                        proc["staleness"] = staleness
-                                        knowledge_base.save_procedure(proc)
-                                except Exception:
-                                    logger.debug(
-                                        "Failed to persist staleness for %s",
-                                        report.slug,
-                                        exc_info=True,
-                                    )
+                            try:
+                                proc = knowledge_base.get_procedure(report.slug)
+                                if proc is not None:
+                                    staleness = proc.get("staleness", {})
+                                    staleness["status"] = report.status
+                                    staleness["signals"] = [
+                                        {
+                                            "type": s.type,
+                                            "detail": s.detail,
+                                            "first_seen": s.first_seen,
+                                        }
+                                        for s in report.signals
+                                    ]
+                                    staleness["recommended_action"] = report.recommended_action
+                                    proc["staleness"] = staleness
+                                    knowledge_base.save_procedure(proc)
+                            except Exception:
+                                logger.debug(
+                                    "Failed to persist staleness for %s",
+                                    report.slug,
+                                    exc_info=True,
+                                )
                     except Exception:
                         logger.debug("Staleness check failed", exc_info=True)
+
+                    # Lifecycle: auto-demote stale procedures
+                    if feature_flags["lifecycle_management"]:
+                        try:
+                            transitions = lifecycle_manager.apply_auto_transitions()
+                            if transitions:
+                                logger.info("Lifecycle: %d auto-transition(s)", len(transitions))
+                        except Exception:
+                            logger.debug("Lifecycle auto-transitions failed", exc_info=True)
+
+                    # Phase 5: Curation queue refresh
+                    try:
+                        curation_summary = procedure_curator.curate()
+                        if curation_summary.total_queue_items > 0:
+                            logger.info(
+                                "Curation: %d item(s) (%d merges, %d upgrades, %d stale, %d drift)",
+                                curation_summary.total_queue_items,
+                                curation_summary.merge_candidates,
+                                curation_summary.upgrade_candidates,
+                                curation_summary.stale_procedures,
+                                curation_summary.drift_reports,
+                            )
+                    except Exception:
+                        logger.debug("Curation batch failed", exc_info=True)
+
                     _last_staleness_check = _now_mono
 
             except Exception:

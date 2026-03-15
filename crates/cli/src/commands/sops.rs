@@ -13,6 +13,7 @@ const APPROVE_TRIGGER_FILE: &str = "approve-trigger.json";
 const FAILED_TRIGGER_FILE: &str = "failed-query-trigger.json";
 const FAILED_RESULT_FILE: &str = "failed-query-result.json";
 const RETRY_TRIGGER_FILE: &str = "retry-trigger.json";
+const PROMOTE_TRIGGER_FILE: &str = "lifecycle-promote-trigger.json";
 
 fn sops_dir() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
@@ -299,6 +300,37 @@ pub fn reject(slug_or_id: &str) -> Result<()> {
     write_trigger(APPROVE_TRIGGER_FILE, &trigger)?;
 
     println!("{} Rejection queued for '{}'", "✓".green(), slug_or_id.bold());
+
+    Ok(())
+}
+
+pub fn promote(slug: &str, to_state: &str) -> Result<()> {
+    let valid_states = ["draft", "reviewed", "verified", "agent_ready"];
+    if !valid_states.contains(&to_state) {
+        bail!(
+            "Invalid lifecycle state: '{}'. Must be one of: {}",
+            to_state,
+            valid_states.join(", ")
+        );
+    }
+
+    let trigger = serde_json::json!({
+        "procedure_slug": slug,
+        "to_state": to_state,
+        "actor": "human",
+        "reason": format!("Promoted via CLI: openmimic sops promote {} {}", slug, to_state),
+        "requested_at": chrono::Utc::now().to_rfc3339(),
+    });
+
+    write_trigger(PROMOTE_TRIGGER_FILE, &trigger)?;
+
+    println!(
+        "{} Lifecycle promotion queued: '{}' → {}",
+        "✓".green(),
+        slug.bold(),
+        to_state.bold()
+    );
+    println!("The worker will apply this on its next cycle.");
 
     Ok(())
 }

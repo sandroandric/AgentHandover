@@ -1,5 +1,6 @@
 import Foundation
 import Combine
+import SwiftUI
 
 /// A single SOP entry from the worker's sops-index.json file.
 struct SOPEntry: Identifiable, Codable, Hashable {
@@ -13,8 +14,30 @@ struct SOPEntry: Identifiable, Codable, Hashable {
     let confidence: Double
     let created_at: String
     let reviewed_at: String?
+    var lifecycleState: String    // "observed", "draft", "reviewed", "verified", "agent_ready", "stale", "archived"
 
     var id: String { sop_id }
+
+    enum CodingKeys: String, CodingKey {
+        case sop_id, slug, title, short_title, tags, source, status
+        case confidence, created_at, reviewed_at
+        case lifecycleState = "lifecycle_state"
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        sop_id = try container.decode(String.self, forKey: .sop_id)
+        slug = try container.decode(String.self, forKey: .slug)
+        title = try container.decode(String.self, forKey: .title)
+        short_title = try container.decodeIfPresent(String.self, forKey: .short_title)
+        tags = try container.decodeIfPresent([String].self, forKey: .tags)
+        source = try container.decode(String.self, forKey: .source)
+        status = try container.decode(String.self, forKey: .status)
+        confidence = try container.decode(Double.self, forKey: .confidence)
+        created_at = try container.decode(String.self, forKey: .created_at)
+        reviewed_at = try container.decodeIfPresent(String.self, forKey: .reviewed_at)
+        lifecycleState = try container.decodeIfPresent(String.self, forKey: .lifecycleState) ?? "observed"
+    }
 
     /// Short display title: use short_title from worker, fallback to cleaned title.
     var displayTitle: String {
@@ -86,6 +109,62 @@ struct SOPEntry: Identifiable, Codable, Hashable {
         let fmt = DateFormatter()
         fmt.dateFormat = "MMM d"
         return fmt.string(from: date)
+    }
+
+    // MARK: - Lifecycle
+
+    var lifecycleLabel: String {
+        switch lifecycleState {
+        case "agent_ready": return "Agent Ready"
+        case "verified": return "Verified"
+        case "reviewed": return "Reviewed"
+        case "draft": return "Draft"
+        case "observed": return "Observed"
+        case "stale": return "Stale"
+        case "archived": return "Archived"
+        default: return lifecycleState.capitalized
+        }
+    }
+
+    var lifecycleColor: Color {
+        switch lifecycleState {
+        case "agent_ready": return .green
+        case "verified": return .blue
+        case "reviewed": return .cyan
+        case "draft": return .yellow
+        case "observed": return .gray
+        case "stale": return .orange
+        case "archived": return .secondary
+        default: return .secondary
+        }
+    }
+
+    var canPromote: Bool {
+        // Can promote if not already at highest or terminal states
+        return ["observed", "draft", "reviewed", "verified"].contains(lifecycleState)
+    }
+
+    var nextLifecycleState: String? {
+        switch lifecycleState {
+        case "observed": return "draft"
+        case "draft": return "reviewed"
+        case "reviewed": return "verified"
+        case "verified": return "agent_ready"
+        default: return nil
+        }
+    }
+
+    static func lifecycleLabelFor(_ state: String) -> String {
+        switch state {
+        case "agent_ready": return "Agent Ready"
+        case "verified": return "Verified"
+        case "reviewed": return "Reviewed"
+        case "draft": return "Draft"
+        case "observed": return "Observed"
+        case "stale": return "Stale"
+        case "archived": return "Archived"
+        default: return state.capitalized
+        }
     }
 }
 
@@ -159,50 +238,76 @@ final class SOPIndexManager: ObservableObject {
 
     // MARK: - Approve / Reject
 
-    private var triggerPath: URL {
+    private var triggerDir: URL {
         FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Application Support/oc-apprentice/approve-trigger.json")
+            .appendingPathComponent("Library/Application Support/oc-apprentice")
     }
 
     /// Write an approval trigger file for the worker to pick up.
     func approveSOP(_ sop: SOPEntry) {
-        writeTrigger(sop: sop, action: "approve")
+        let fmt = ISO8601DateFormatter()
+        fmt.formatOptions = [.withInternetDateTime]
+        let payload: [String: Any] = [
+            "sop_id": sop.slug,
+            "action": "approve",
+            "requested_at": fmt.string(from: Date())
+        ]
+        writeTrigger(payload, filename: "approve-trigger.json")
     }
 
     /// Write a rejection trigger file for the worker to pick up.
     func rejectSOP(_ sop: SOPEntry) {
-        writeTrigger(sop: sop, action: "reject")
-    }
-
-    private func writeTrigger(sop: SOPEntry, action: String) {
         let fmt = ISO8601DateFormatter()
         fmt.formatOptions = [.withInternetDateTime]
-        let payload: [String: String] = [
+        let payload: [String: Any] = [
             "sop_id": sop.slug,
-            "action": action,
+            "action": "reject",
             "requested_at": fmt.string(from: Date())
         ]
+        writeTrigger(payload, filename: "approve-trigger.json")
+    }
 
+    /// Promote a procedure to the next lifecycle state via trigger file.
+    func promoteProcedure(_ sop: SOPEntry, toState: String) {
+        let trigger: [String: Any] = [
+            "procedure_slug": sop.slug,
+            "to_state": toState,
+            "actor": "human",
+            "reason": "Promoted via OpenMimic app",
+            "requested_at": ISO8601DateFormatter().string(from: Date())
+        ]
+        writeTrigger(trigger, filename: "lifecycle-promote-trigger.json")
+
+        // Refresh after a short delay
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+            self?.loadIndex()
+        }
+    }
+
+    /// Atomic trigger file writer. Writes payload as JSON to a named file
+    /// inside the oc-apprentice state directory using tmp+rename.
+    func writeTrigger(_ payload: [String: Any], filename: String) {
         guard let data = try? JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys]) else {
             return
         }
 
+        let dir = triggerDir
         // Ensure parent directory exists
-        let dir = triggerPath.deletingLastPathComponent()
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
 
-        // Atomic write: write to .tmp, then rename
-        let tmpPath = triggerPath.appendingPathExtension("tmp")
+        let target = dir.appendingPathComponent(filename)
+        let tmp = dir.appendingPathComponent(".\(filename).tmp")
+
         do {
-            try data.write(to: tmpPath, options: .atomic)
-            // Rename .tmp → final path (atomic on same filesystem)
-            if FileManager.default.fileExists(atPath: triggerPath.path) {
-                try FileManager.default.removeItem(at: triggerPath)
+            try data.write(to: tmp, options: .atomic)
+            // Rename .tmp -> final path (atomic on same filesystem)
+            if FileManager.default.fileExists(atPath: target.path) {
+                try FileManager.default.removeItem(at: target)
             }
-            try FileManager.default.moveItem(at: tmpPath, to: triggerPath)
+            try FileManager.default.moveItem(at: tmp, to: target)
         } catch {
             // Clean up tmp file if rename failed
-            try? FileManager.default.removeItem(at: tmpPath)
+            try? FileManager.default.removeItem(at: tmp)
             return
         }
 

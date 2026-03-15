@@ -46,6 +46,7 @@ class LinkedTask:
     span_days: int
     status: str  # "active", "completed", "stale"
     matched_procedure: str | None = None
+    span_id: str | None = None
 
 
 class SessionLinker:
@@ -231,7 +232,16 @@ class SessionLinker:
     # ------------------------------------------------------------------
 
     def _find_matching_link(self, task: dict) -> LinkedTask | None:
-        """Find an existing link that matches this task by intent or procedure."""
+        """Find an existing link that matches this task by intent, procedure, or span_id."""
+        # Prefer span_id match first (continuity graph linkage)
+        task_span_id = task.get("span_id")
+        if task_span_id:
+            for link in self._links:
+                if link.status == "completed":
+                    continue
+                if link.span_id == task_span_id:
+                    return link
+
         for link in self._links:
             if link.status == "completed":
                 continue
@@ -301,6 +311,7 @@ class SessionLinker:
                     span_days=item["span_days"],
                     status=item.get("status", "active"),
                     matched_procedure=item.get("matched_procedure"),
+                    span_id=item.get("span_id"),
                 )
             )
 
@@ -318,6 +329,7 @@ class SessionLinker:
                     "span_days": link.span_days,
                     "status": link.status,
                     "matched_procedure": link.matched_procedure,
+                    "span_id": link.span_id,
                 }
                 for link in self._links
             ],

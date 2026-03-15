@@ -54,6 +54,7 @@ class ExecutionRecord:
     outcomes: list[dict] = field(default_factory=list)
     deviations: list[dict] = field(default_factory=list)
     error: str | None = None
+    metadata: dict | None = None
 
 
 def _record_to_dict(record: ExecutionRecord) -> dict:
@@ -89,6 +90,7 @@ def _dict_to_record(d: dict) -> ExecutionRecord:
         outcomes=d.get("outcomes", []),
         deviations=d.get("deviations", []),
         error=d.get("error"),
+        metadata=d.get("metadata"),
     )
 
 
@@ -98,8 +100,9 @@ _EXECUTIONS_FILE = "executions.json"
 class ExecutionMonitor:
     """Monitors agent execution of procedures and tracks outcomes."""
 
-    def __init__(self, knowledge_base) -> None:
+    def __init__(self, knowledge_base, escalation_handler=None) -> None:
         self._kb = knowledge_base
+        self._escalation = escalation_handler
         self._active_executions: dict[str, ExecutionRecord] = {}
         self._history: list[ExecutionRecord] = []
         self._load_history()
@@ -182,7 +185,7 @@ class ExecutionMonitor:
         # Check for deviation: expected vs actual
         if (
             step.expected_action != "(dynamic)"
-            and step.expected_action.lower() != actual_action.lower()
+            and not self._actions_equivalent(step.expected_action, actual_action)
         ):
             step.status = ExecutionStatus.DEVIATED
             detail = (
@@ -248,6 +251,21 @@ class ExecutionMonitor:
         if record.deviations:
             record.status = ExecutionStatus.DEVIATED
 
+        if self._escalation is not None and record.status == ExecutionStatus.DEVIATED:
+            try:
+                dev_detail = "; ".join(d.get("detail", "") for d in record.deviations[:3])
+                esc_result = self._escalation.handle_deviation(
+                    record.procedure_slug, execution_id, dev_detail,
+                )
+                record.metadata = record.metadata or {}
+                record.metadata["escalation"] = {
+                    "decision": esc_result.decision.value,
+                    "reason": esc_result.reason,
+                    "demoted": esc_result.demoted,
+                }
+            except Exception:
+                logger.debug("Escalation check failed", exc_info=True)
+
         self._finalize(execution_id, record)
         return record
 
@@ -263,6 +281,21 @@ class ExecutionMonitor:
         record.status = ExecutionStatus.FAILED
         record.completed_at = now
         record.error = error
+
+        # Escalation check
+        if self._escalation is not None:
+            try:
+                esc_result = self._escalation.handle_failure(
+                    record.procedure_slug, execution_id, error,
+                )
+                record.metadata = record.metadata or {}
+                record.metadata["escalation"] = {
+                    "decision": esc_result.decision.value,
+                    "reason": esc_result.reason,
+                    "demoted": esc_result.demoted,
+                }
+            except Exception:
+                logger.debug("Escalation check failed", exc_info=True)
 
         self._finalize(execution_id, record)
         return record
@@ -355,6 +388,14 @@ class ExecutionMonitor:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _actions_equivalent(self, expected: str, actual: str) -> bool:
+        """Check if two action strings are equivalent.
+
+        Uses case-insensitive string comparison (existing behavior).
+        Can be extended to use embedding-based similarity in the future.
+        """
+        return expected.strip().lower() == actual.strip().lower()
 
     def _find_step(
         self, record: ExecutionRecord, step_id: str

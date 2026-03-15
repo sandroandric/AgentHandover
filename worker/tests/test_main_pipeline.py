@@ -533,7 +533,7 @@ class TestCheckExportTrigger:
 
         writer = MagicMock()
         main_mod._check_export_trigger(openclaw_writer=writer, sops_dir=tmp_path / "sops")
-        writer.write_all_sops.assert_not_called()
+        writer.write_sop.assert_not_called()
 
     def test_skill_md_export(self, tmp_path: Path, monkeypatch):
         from oc_apprentice_worker import main as main_mod
@@ -551,7 +551,7 @@ class TestCheckExportTrigger:
         # Trigger should be consumed
         assert not (tmp_path / "export-trigger.json").exists()
         # OpenClaw writer should NOT have been called (format is skill-md only)
-        writer.write_all_sops.assert_not_called()
+        writer.write_sop.assert_not_called()
         # SKILL.md files should exist
         skills_dir = sops_dir.parent.parent / "skills"
         assert skills_dir.exists()
@@ -567,7 +567,7 @@ class TestCheckExportTrigger:
         writer = MagicMock()
         main_mod._check_export_trigger(openclaw_writer=writer, sops_dir=tmp_path / "sops")
 
-        writer.write_all_sops.assert_called_once()
+        writer.write_sop.assert_called_once()
         assert not (tmp_path / "export-trigger.json").exists()
 
     def test_generic_export(self, tmp_path: Path, monkeypatch):
@@ -584,7 +584,7 @@ class TestCheckExportTrigger:
         main_mod._check_export_trigger(openclaw_writer=writer, sops_dir=sops_dir)
 
         # OpenClaw writer NOT called
-        writer.write_all_sops.assert_not_called()
+        writer.write_sop.assert_not_called()
         # Trigger consumed
         assert not (tmp_path / "export-trigger.json").exists()
         # GenericWriter writes to output_dir/sops/sop.<slug>.md
@@ -620,9 +620,10 @@ class TestCheckExportTrigger:
         writer = MagicMock()
         main_mod._check_export_trigger(openclaw_writer=writer, sops_dir=tmp_path / "sops")
 
-        args = writer.write_all_sops.call_args[0][0]
-        assert len(args) == 1
-        assert args[0]["slug"] == "wanted"
+        # _export_via_adapter calls write_sop per template; only "wanted" passes filter
+        writer.write_sop.assert_called_once()
+        sop_arg = writer.write_sop.call_args[0][0]
+        assert sop_arg["slug"] == "wanted"
 
     def test_empty_cache_warns_and_removes_trigger(self, tmp_path: Path, monkeypatch):
         from oc_apprentice_worker import main as main_mod
@@ -633,7 +634,7 @@ class TestCheckExportTrigger:
         writer = MagicMock()
         main_mod._check_export_trigger(openclaw_writer=writer, sops_dir=tmp_path / "sops")
 
-        writer.write_all_sops.assert_not_called()
+        writer.write_sop.assert_not_called()
         # Trigger should still be removed to avoid infinite loop
         assert not (tmp_path / "export-trigger.json").exists()
 
@@ -655,7 +656,7 @@ class TestCheckExportTrigger:
 
         # Default writer should NOT be called because output_dir triggers
         # creation of a fresh OpenClawWriter.
-        default_writer.write_all_sops.assert_not_called()
+        default_writer.write_sop.assert_not_called()
         # The custom writer should have written to custom_output/memory/apprentice/sops/
         assert (custom_output / "memory" / "apprentice" / "sops").exists()
         assert not (tmp_path / "export-trigger.json").exists()
@@ -674,7 +675,7 @@ class TestCheckExportTrigger:
         main_mod._check_export_trigger(openclaw_writer=writer, sops_dir=sops_dir)
 
         # OpenClaw writer called (no output_dir → uses default writer)
-        writer.write_all_sops.assert_called_once()
+        writer.write_sop.assert_called_once()
         # SKILL.md created
         assert (sops_dir.parent.parent / "skills").exists()
         # Generic created (GenericWriter nests under sops/ subdirectory)
