@@ -11,8 +11,8 @@
 <p align="center">
   <a href="#install">Install</a> &middot;
   <a href="#how-it-works">How It Works</a> &middot;
+  <a href="#why-not-just-screen-recording">Why Not Just Screen Recording</a> &middot;
   <a href="#usage">Usage</a> &middot;
-  <a href="#architecture">Architecture</a> &middot;
   <a href="#privacy">Privacy</a>
 </p>
 
@@ -27,18 +27,124 @@ You keep working. OpenMimic watches, learns, and writes the manual.
 ```
 You work normally on your laptop
         ↓
-OpenMimic silently observes (screenshots + VLM annotation)
+OpenMimic silently observes (screenshots + vision model)
         ↓
-Repeated workflows are detected automatically
+It understands what you're doing, not just what's on screen
         ↓
-Semantic procedures generated (steps, variables, verification)
+Repeated workflows are detected and merged automatically
         ↓
-Human reviews and approves in the menu bar app
+You review and approve in the menu bar app
         ↓
-Agent-ready SKILL.md files exported to OpenClaw / Claude Code
+Agent-ready procedure files exported to OpenClaw / Claude Code
 ```
 
-**No macros. No DOM scripting.** OpenMimic captures *intent* — what you're doing and why — not pixel coordinates or CSS selectors. The output is a human-readable procedure that any AI agent can follow.
+**No macros. No DOM scripting. No manual documentation.** OpenMimic captures *intent* — what you're doing and why — not pixel coordinates or CSS selectors. The output is a human-readable procedure that any AI agent can follow.
+
+## Why Not Just Screen Recording?
+
+Screen recording gives you pixels. OpenMimic gives you *understanding*.
+
+| | Screen recording | OpenMimic |
+|---|---|---|
+| **What it captures** | Raw video frames | Structured intent: "User is filing an expense report in Chrome on Expensify" |
+| **What it knows** | Nothing — just pixels | App context, task purpose, step sequence, form fields, verification criteria |
+| **How it handles noise** | Records everything equally | Classifies activity into 8 types (work, research, communication, entertainment...) and filters noise automatically |
+| **How it handles interruptions** | Breaks the recording | Tracks task continuity across interruptions — if you pause for Slack and come back, it reconnects the workflow |
+| **What happens with repetition** | You get multiple identical recordings | Demonstrations are semantically aligned and merged into one canonical procedure with typed variables and confidence scores |
+| **What the output looks like** | A video file | A structured SKILL.md with steps, inputs, outputs, preconditions, verification criteria, and failure recovery |
+| **Can an agent use it?** | No | Yes — with lifecycle gates, readiness checks, and execution monitoring |
+
+The intelligence comes from a **local vision-language model** that looks at each screenshot and answers: *What app is this? What is the user doing? Is this a repeatable workflow or just browsing?* That structured understanding is what makes the difference between "a recording" and "a learned procedure."
+
+## How It Works
+
+### The observation pipeline
+
+OpenMimic runs four layers of intelligence on every screen capture:
+
+**Layer 1: See** — A local vision model (running on your machine, not in the cloud) looks at each screenshot and produces a structured annotation: what app is open, what URL, what the user is doing, what they'll likely do next, and whether this looks like a repeatable workflow.
+
+**Layer 2: Classify** — An 8-class activity classifier separates signal from noise. Your expense filing is "work." Your Reddit scrolling is "entertainment." Your Slack reply is "communication." Only workflow-relevant activity feeds into learning. You can override any classification with policy rules (e.g., "always ignore YouTube", "always track VS Code").
+
+**Layer 3: Connect** — A continuity tracker links related work across interruptions, app switches, and time gaps. If you start a PR review, get pulled into a Slack thread, and come back 20 minutes later, OpenMimic knows it's the same task. It builds confidence-ranked spans, not hard IDs — when uncertain, it keeps segments separate rather than falsely merging.
+
+**Layer 4: Learn** — When the same workflow appears in 2+ demonstrations, the system aligns steps semantically (not positionally), extracts parameters that vary across demonstrations (e.g., the domain name you searched), detects branches and variants, and produces a canonical procedure with evidence-weighted confidence.
+
+### Screenshots are temporary
+
+Screenshots are captured as half-resolution JPEGs (~270 KB each), deduplicated via perceptual hashing (70% of frames are duplicates and get dropped immediately), and **deleted the moment the vision model finishes annotating them**. Only the structured JSON annotation (~500 bytes) is kept. Your screen content never accumulates on disk.
+
+### Two observation modes
+
+**Focus Recording** — Click Record in the menu bar, name the task, perform it, click Stop. One demonstration → one SKILL.md in ~60 seconds.
+
+```bash
+openmimic focus start "File expense report"
+# ... do the workflow ...
+openmimic focus stop
+```
+
+**Passive Discovery** — Just work normally. When the same task appears in 2+ demonstrations (detected by embedding similarity), a procedure is generated automatically. No user action required.
+
+### Any vision model, not just Qwen
+
+OpenMimic defaults to local Qwen models via Ollama because they're free, fast, and private. But you can use **any of 6 supported backends**:
+
+| Backend | How to use | Best for |
+|---------|-----------|----------|
+| **Ollama** (default) | `ollama pull qwen3.5:2b` | Local, free, private |
+| **MLX** | Apple Silicon native | Fastest on Mac |
+| **llama.cpp** | CPU/GPU flexible | Cross-platform local |
+| **OpenAI** | `mode = "remote"` in config | Highest quality (GPT-4o) |
+| **Anthropic** | `mode = "remote"` in config | Claude vision |
+| **Google** | `mode = "remote"` in config | Gemini vision |
+
+Switch models by editing `annotation_model` and `sop_model` in config, or run `openmimic setup --vlm` for guided setup. Remote APIs require explicit opt-in and show a privacy warning.
+
+### Review and approve
+
+Generated procedures appear as drafts in the menu bar app. You review, approve, and promote them through a lifecycle:
+
+```
+Observed → Draft → Reviewed → Verified → Agent Ready
+```
+
+Each promotion requires your approval. No procedure reaches agents without your sign-off. The system suggests promotions based on evidence (observation count, confidence, execution success rate) but never auto-promotes.
+
+The menu bar app surfaces:
+- **Draft SOPs** to approve or reject
+- **Trust suggestions** — earned enough evidence for higher agent permissions
+- **Lifecycle upgrades** — ready for promotion based on observation evidence
+- **Merge candidates** — similar procedures that might be duplicates
+- **Drift alerts** — procedures whose observed behavior has changed
+- **Stale alerts** — procedures not seen recently
+
+### Agent-ready export
+
+Approved procedures are compiled into target-specific formats from a single canonical source:
+
+| Format | Location | Used by |
+|--------|----------|---------|
+| **SKILL.md** | `~/.openclaw/workspace/memory/apprentice/sops/` | OpenClaw agents |
+| **Claude Code Skill** | `~/.claude/skills/<slug>/SKILL.md` | Claude Code (`/skill-name`) |
+| **v3 Procedure JSON** | `~/.openmimic/knowledge/procedures/` | Any agent via Query API |
+
+Agents query `GET /ready` on port 9477 to discover executable procedures, or `GET /bundle/<slug>` for a fully resolved handoff package with readiness checks, preflight validation, and execution stats.
+
+### What makes a procedure "agent ready"?
+
+Not just generation — a procedure must pass multiple gates:
+
+| Gate | What it checks | Who decides |
+|------|---------------|-------------|
+| **Lifecycle** | Has the human reviewed and promoted it through observed → draft → reviewed → verified → agent_ready? | Human |
+| **Trust level** | Is the agent authorized to execute (not just observe or draft)? | Human (via trust suggestions) |
+| **Freshness** | Has the procedure been observed recently? Stale procedures auto-demote. | System |
+| **Preflight** | Are required apps running? Any blocked domains? Steps present? | System |
+| **Evidence** | How many observations? Any contradictions? What's the confidence? | System |
+| **Execution history** | Has it succeeded when agents tried it before? 3+ failures → auto-demotion. | System |
+
+All six must pass. A procedure with lifecycle=agent_ready but low freshness won't execute. A fresh procedure with trust=observe won't execute either. The system is designed to be **truthful about readiness** — it will never tell an agent a procedure is ready when it isn't.
 
 ## Install
 
@@ -96,7 +202,7 @@ Fix any `FAIL` items. Usually:
 - **Accessibility** — System Settings → Privacy & Security → Accessibility → add `oc-apprentice-daemon`
 - **Screen Recording** — same location
 
-**2. Pull VLM models** (~6 GB)
+**2. Pull VLM models** (~6 GB for default local models)
 
 ```bash
 ollama pull qwen3.5:2b         # Scene annotation
@@ -104,68 +210,11 @@ ollama pull qwen3.5:4b         # SOP generation
 ollama pull all-minilm:l6-v2   # Task embeddings
 ```
 
-Or: `openmimic setup --vlm` for guided setup.
+Or: `openmimic setup --vlm` for guided setup (includes cloud API option).
 
-**3. Load Chrome extension** (optional, for richer SOPs)
+**3. Load Chrome extension** (optional — enriches SOPs with DOM context)
 
 Open `chrome://extensions` → Enable Developer Mode → Load unpacked → select the extension directory shown by `openmimic doctor`.
-
-## How It Works
-
-OpenMimic has two observation modes:
-
-### Focus Recording — learn from one demonstration
-
-Click **Record Workflow** in the menu bar, name it, perform the task, click **Stop**. A SKILL.md is generated in ~60 seconds.
-
-```bash
-openmimic focus start "File expense report"
-# ... do the workflow ...
-openmimic focus stop
-```
-
-### Passive Discovery — learn from repeated behavior
-
-Just work normally. OpenMimic runs in the background:
-
-| Stage | What happens | Speed |
-|-------|-------------|-------|
-| **Capture** | Screenshots deduplicated via perceptual hash (70% reduction) | Real-time |
-| **Annotate** | Local VLM describes what's on screen and what you're doing | ~12s/frame |
-| **Classify** | 8-class activity taxonomy separates work from noise | Instant |
-| **Segment** | Embedding similarity clusters related work into tasks | Batch |
-| **Generate** | SOP produced when same task seen 2+ times | ~72s |
-| **Deduplicate** | Fingerprint matching prevents duplicate SOPs | Instant |
-
-### Review and approve
-
-Generated procedures appear as drafts in the menu bar app. You review, approve, and promote them through a lifecycle:
-
-```
-Observed → Draft → Reviewed → Verified → Agent Ready
-```
-
-Each promotion requires human approval. No procedure reaches agents without your sign-off.
-
-The menu bar app shows:
-- **Draft SOPs** to approve or reject
-- **Trust suggestions** — system recommends when a procedure has earned enough evidence for higher trust
-- **Stale alerts** — procedures that haven't been observed recently
-- **Merge candidates** — similar procedures that might be duplicates
-- **Drift alerts** — procedures whose observed behavior has changed
-- **Lifecycle upgrades** — procedures ready for promotion based on evidence
-
-### Agent-ready export
-
-Approved procedures are exported as:
-
-| Format | Location | Used by |
-|--------|----------|---------|
-| **SKILL.md** | `~/.openclaw/workspace/memory/apprentice/sops/` | OpenClaw agents |
-| **Claude Code Skill** | `~/.claude/skills/<slug>/SKILL.md` | Claude Code (`/skill-name`) |
-| **v3 Procedure JSON** | `~/.openmimic/knowledge/procedures/` | Any agent via Query API |
-
-Agents query `GET /ready` on port 9477 to discover executable procedures, or `GET /bundle/<slug>` for a fully resolved handoff package with readiness assessment, preflight checks, and compiled outputs.
 
 ## Usage
 
@@ -187,24 +236,24 @@ Agents query `GET /ready` on port 9477 to discover executable procedures, or `GE
 | `openmimic export --format claude-skill` | Re-export as Claude Code skills |
 | `openmimic logs worker -f` | Follow worker logs |
 
-### Query API (for agents)
+### Query API (for agent developers)
 
 The worker runs a local HTTP API on port 9477:
 
 ```bash
-# List all procedures
-curl http://localhost:9477/procedures
-
-# Get agent-ready procedures
+# Discover agent-ready procedures
 curl http://localhost:9477/ready
 
-# Get a full handoff bundle
+# Get a full handoff bundle for execution
 curl http://localhost:9477/bundle/file-expense-report
 
-# Browse the curation queue
+# List all procedures (any lifecycle state)
+curl http://localhost:9477/procedures
+
+# Browse curation queue
 curl http://localhost:9477/curation/queue
 
-# Promote a procedure via API
+# Promote via API
 curl -X POST http://localhost:9477/curation/promote \
   -H 'Content-Type: application/json' \
   -d '{"slug": "file-expense-report", "to_state": "agent_ready"}'
@@ -235,7 +284,7 @@ Chrome Extension ──→ Daemon (Rust) ──SQLite WAL──→ Worker (Pytho
 | Component | Language | Role |
 |-----------|----------|------|
 | **Daemon** | Rust | Always-on observer — screenshots, OS events, clipboard, dHash dedup |
-| **Worker** | Python | Pipeline — annotation, classification, segmentation, SOP generation, lifecycle, curation |
+| **Worker** | Python | Pipeline — VLM annotation, classification, segmentation, SOP generation, lifecycle, curation |
 | **Extension** | TypeScript | Chrome MV3 — DOM snapshots, click intent, dwell/scroll tracking |
 | **CLI** | Rust | Service management, focus recording, SOP approval, lifecycle promotion |
 | **App** | SwiftUI | Menu bar — status, focus recording, review queue, daily digest |
@@ -246,37 +295,29 @@ OpenMimic uses ~39% of GPU time per work hour. 37 minutes of headroom remain for
 
 | Stage | Time per hour | Notes |
 |-------|---------------|-------|
-| Scene annotation | 15.6 min | qwen3.5:2b, ~75 frames after stale-skip |
+| Scene annotation | 15.6 min | ~75 frames after dedup and stale-skip |
 | Frame diffs | 4.5 min | Consecutive frame comparison |
 | Task segmentation | 0.8 min | CPU only (embeddings) |
-| SOP generation | 2.4 min | qwen3.5:4b thinking mode |
-
-### Local models
-
-| Model | Size | Purpose |
-|-------|------|---------|
-| `qwen3.5:2b` | 2.7 GB | Scene annotation + frame diff |
-| `qwen3.5:4b` | 3.4 GB | SOP generation (thinking mode) |
-| `all-minilm:l6-v2` | 45 MB | Task embedding for clustering |
+| SOP generation | 2.4 min | Thinking mode for higher quality |
 
 ## Privacy
 
 OpenMimic is designed to never leave your machine:
 
-- **Local-first.** All VLM inference runs locally via Ollama. Cloud APIs (OpenAI, Anthropic, Google) are opt-in with explicit consent.
-- **Screenshots deleted after annotation.** Raw JPEGs (~270 KB) are deleted immediately after VLM annotation. Only structured JSON (~500 bytes) is kept.
+- **Local-first.** All VLM inference runs locally via Ollama by default. Cloud APIs are opt-in with explicit consent and a privacy warning.
+- **Screenshots are temporary.** Raw JPEGs are deleted immediately after the vision model annotates them. Only the structured annotation (~500 bytes) is kept — never the screenshot itself.
 - **Auto-redaction.** API keys, tokens, passwords, and credit card numbers are detected and scrubbed before storage.
-- **Secure field exclusion.** Password inputs are dropped entirely — never captured, never stored.
+- **Secure field exclusion.** Password and credit card inputs are dropped entirely — never captured, never stored.
 - **Encryption at rest.** Artifacts use zstd compression + XChaCha20-Poly1305.
 - **Configurable retention.** Raw events pruned after 14 days, episodes after 90 days.
-- **No telemetry.** Pipeline metrics are local-only JSON files. Nothing phones home.
+- **No telemetry.** Pipeline metrics are local-only JSON files. Nothing phones home. Ever.
 
 ## Configuration
 
 Config lives at `~/Library/Application Support/oc-apprentice/config.toml`.
 
 <details>
-<summary>Configuration reference</summary>
+<summary>Full configuration reference</summary>
 
 ### Observer
 
@@ -291,8 +332,10 @@ Config lives at `~/Library/Application Support/oc-apprentice/config.toml`.
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `annotation_model` | qwen3.5:2b | Scene annotation model |
+| `annotation_model` | qwen3.5:2b | Any Ollama model name, or cloud model ID |
 | `sop_model` | qwen3.5:4b | SOP generation model |
+| `mode` | local | `local` (Ollama) or `remote` (cloud API) |
+| `provider` | — | For remote: `openai`, `anthropic`, or `google` |
 | `max_jobs_per_day` | 50 | VLM inference budget |
 | `max_compute_minutes_per_day` | 20 | GPU time budget |
 
@@ -301,10 +344,10 @@ Config lives at `~/Library/Application Support/oc-apprentice/config.toml`.
 | Key | Default | Description |
 |-----|---------|-------------|
 | `activity_classification` | true | 8-class activity taxonomy |
-| `continuity_tracking` | true | Task span continuity graph |
+| `continuity_tracking` | true | Task continuity across interruptions |
 | `lifecycle_management` | true | 7-state procedure lifecycle |
 | `curation` | true | Merge/upgrade/drift detection |
-| `runtime_validation` | true | App-running checks via pgrep |
+| `runtime_validation` | true | Pre-execution app-running checks |
 
 ### Privacy
 
