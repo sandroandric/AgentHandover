@@ -4254,6 +4254,9 @@ def main(argv: list[str] | None = None) -> None:
                     procedure_curator=procedure_curator,
                 )
 
+                # Refresh curation queue after any curation action so UI reflects changes
+                _write_curation_queue(procedure_curator, force=True)
+
                 # Execution feedback triggers
                 _exec_status_dir = _status_dir()
                 _process_execution_start_trigger(

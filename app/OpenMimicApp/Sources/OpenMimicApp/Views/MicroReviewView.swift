@@ -704,9 +704,18 @@ final class MicroReviewViewModel: ObservableObject {
                     ))
                 }
 
-                // Drift alerts — from staleness.drift_signals in procedure JSON (real data)
+                // Drift alerts — from staleness.drift_signals AND staleness.signals
                 let staleness = proc["staleness"] as? [String: Any] ?? [:]
-                let driftSignals = staleness["drift_signals"] as? [[String: Any]] ?? []
+                var driftSignals = staleness["drift_signals"] as? [[String: Any]] ?? []
+                // Also include staleness-generated signals (confidence_drift, etc.)
+                let stalenessSignals = staleness["signals"] as? [[String: Any]] ?? []
+                for sig in stalenessSignals {
+                    // Avoid duplicates by checking type
+                    let sigType = sig["type"] as? String ?? ""
+                    if !sigType.isEmpty && !driftSignals.contains(where: { ($0["type"] as? String) == sigType }) {
+                        driftSignals.append(sig)
+                    }
+                }
                 for signal in driftSignals {
                     let driftType = signal["type"] as? String ?? "behavioral"
                     let detail = signal["detail"] as? String ?? "Procedure behavior has changed"

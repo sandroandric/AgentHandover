@@ -22,9 +22,14 @@ else
     echo
 fi
 
-# Step 2: VLM setup
+# Step 2: VLM setup (use worker venv if available)
 echo "Step 2/2: VLM setup..."
-python -m oc_apprentice_worker.setup_vlm "$@"
+WORKER_VENV="$SCRIPT_DIR/../worker/.venv/bin/python"
+if [ -x "$WORKER_VENV" ]; then
+    "$WORKER_VENV" -m oc_apprentice_worker.setup_vlm "$@"
+else
+    python3 -m oc_apprentice_worker.setup_vlm "$@"
+fi
 
 echo
 echo "=== Setup complete ==="
