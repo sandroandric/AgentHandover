@@ -116,6 +116,12 @@ else
     echo "Then load in Chrome: chrome://extensions -> Load unpacked -> extension/dist"
 fi
 
+# Launch the menu bar app (as the real user, not root)
+if [ -d "/Applications/AgentHandover.app" ]; then
+    sudo -u "${CONSOLE_USER}" open /Applications/AgentHandover.app 2>/dev/null || true
+    echo "AgentHandover app launched — check your menu bar."
+fi
+
 echo ""
 if [ -n "$WARNINGS" ]; then
     echo "AgentHandover installed with warnings:"
@@ -125,6 +131,5 @@ if [ -n "$WARNINGS" ]; then
     exit 0
 else
     echo "AgentHandover installed successfully."
-    echo "Run 'agenthandover doctor' to verify the installation."
     exit 0
 fi
