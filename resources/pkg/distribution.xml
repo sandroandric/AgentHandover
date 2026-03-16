@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <installer-gui-script minSpecVersion="2">
-    <title>OpenMimic</title>
+    <title>AgentHandover</title>
     <welcome file="welcome.html"/>
     <conclusion file="conclusion.html"/>
     <options customize="never" require-scripts="false"/>
@@ -8,12 +8,12 @@
     <domains enable_localSystem="true" enable_currentUserHome="false"/>
     <choices-outline>
         <line choice="default">
-            <line choice="com.openmimic.pkg"/>
+            <line choice="com.agenthandover.pkg"/>
         </line>
     </choices-outline>
     <choice id="default"/>
-    <choice id="com.openmimic.pkg" visible="false">
-        <pkg-ref id="com.openmimic.pkg"/>
+    <choice id="com.agenthandover.pkg" visible="false">
+        <pkg-ref id="com.agenthandover.pkg"/>
     </choice>
-    <pkg-ref id="com.openmimic.pkg" version="0.1.0" onConclusion="none">openmimic-component.pkg</pkg-ref>
+    <pkg-ref id="com.agenthandover.pkg" version="0.1.0" onConclusion="none">agenthandover-component.pkg</pkg-ref>
 </installer-gui-script>

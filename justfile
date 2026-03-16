@@ -7,39 +7,57 @@ default: build-all
 build-all: build-daemon build-cli build-extension build-worker build-app
     @echo "All builds complete."
 
-# Build daemon (universal binary for macOS)
+# Build daemon (native target, or universal if both targets available)
 build-daemon:
     #!/usr/bin/env bash
     set -euo pipefail
     source ~/.cargo/env 2>/dev/null || true
-    echo "Building daemon for aarch64..."
-    cargo build --release -p agenthandover-daemon --target aarch64-apple-darwin
-    echo "Building daemon for x86_64..."
-    cargo build --release -p agenthandover-daemon --target x86_64-apple-darwin
-    echo "Creating universal binary..."
-    mkdir -p target/universal-release
-    lipo -create \
-        target/aarch64-apple-darwin/release/agenthandover-daemon \
-        target/x86_64-apple-darwin/release/agenthandover-daemon \
-        -output target/universal-release/agenthandover-daemon
-    echo "Universal daemon binary: target/universal-release/agenthandover-daemon"
+    TARGETS=$(rustup target list --installed | grep apple-darwin || true)
+    HAS_ARM=$(echo "$TARGETS" | grep -c aarch64 || true)
+    HAS_X86=$(echo "$TARGETS" | grep -c x86_64 || true)
+    if [ "$HAS_ARM" -gt 0 ] && [ "$HAS_X86" -gt 0 ]; then
+        echo "Building universal daemon..."
+        cargo build --release -p agenthandover-daemon --target aarch64-apple-darwin
+        cargo build --release -p agenthandover-daemon --target x86_64-apple-darwin
+        mkdir -p target/universal-release
+        lipo -create \
+            target/aarch64-apple-darwin/release/agenthandover-daemon \
+            target/x86_64-apple-darwin/release/agenthandover-daemon \
+            -output target/universal-release/agenthandover-daemon
+        echo "Universal daemon binary: target/universal-release/agenthandover-daemon"
+    else
+        echo "Building daemon for native target..."
+        cargo build --release -p agenthandover-daemon
+        mkdir -p target/universal-release
+        cp target/release/agenthandover-daemon target/universal-release/
+        echo "Native daemon binary: target/universal-release/agenthandover-daemon"
+    fi
 
-# Build CLI (universal binary for macOS)
+# Build CLI (native target, or universal if both targets available)
 build-cli:
     #!/usr/bin/env bash
     set -euo pipefail
     source ~/.cargo/env 2>/dev/null || true
-    echo "Building CLI for aarch64..."
-    cargo build --release -p agenthandover-cli --target aarch64-apple-darwin
-    echo "Building CLI for x86_64..."
-    cargo build --release -p agenthandover-cli --target x86_64-apple-darwin
-    echo "Creating universal binary..."
-    mkdir -p target/universal-release
-    lipo -create \
-        target/aarch64-apple-darwin/release/agenthandover \
-        target/x86_64-apple-darwin/release/agenthandover \
-        -output target/universal-release/agenthandover
-    echo "Universal CLI binary: target/universal-release/agenthandover"
+    TARGETS=$(rustup target list --installed | grep apple-darwin || true)
+    HAS_ARM=$(echo "$TARGETS" | grep -c aarch64 || true)
+    HAS_X86=$(echo "$TARGETS" | grep -c x86_64 || true)
+    if [ "$HAS_ARM" -gt 0 ] && [ "$HAS_X86" -gt 0 ]; then
+        echo "Building universal CLI..."
+        cargo build --release -p agenthandover-cli --target aarch64-apple-darwin
+        cargo build --release -p agenthandover-cli --target x86_64-apple-darwin
+        mkdir -p target/universal-release
+        lipo -create \
+            target/aarch64-apple-darwin/release/agenthandover \
+            target/x86_64-apple-darwin/release/agenthandover \
+            -output target/universal-release/agenthandover
+        echo "Universal CLI binary: target/universal-release/agenthandover"
+    else
+        echo "Building CLI for native target..."
+        cargo build --release -p agenthandover-cli
+        mkdir -p target/universal-release
+        cp target/release/agenthandover target/universal-release/
+        echo "Native CLI binary: target/universal-release/agenthandover"
+    fi
 
 # Build worker (Python venv + install)
 build-worker:
