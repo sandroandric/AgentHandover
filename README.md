@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/sandroandric/AgentHandover/main/resources/icon.png" width="120" alt="AgentHandover icon" />
+  <img src="resources/favicon.png" width="140" alt="AgentHandover — briefcase with binoculars" />
 </p>
 
 <h1 align="center">AgentHandover</h1>
