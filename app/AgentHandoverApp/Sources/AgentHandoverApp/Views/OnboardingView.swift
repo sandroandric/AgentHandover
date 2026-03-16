@@ -94,10 +94,22 @@ struct OnboardingView: View {
                 Spacer()
 
                 if currentStep < totalSteps - 1 {
-                    Button("Next") {
-                        withAnimation { currentStep += 1 }
+                    let vlmStep = 4
+                    let vlmBlocked = currentStep == vlmStep && !appState.vlmAvailable && !remoteConsentGiven
+
+                    VStack(spacing: 2) {
+                        Button("Next") {
+                            withAnimation { currentStep += 1 }
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(vlmBlocked)
+
+                        if vlmBlocked {
+                            Text("Set up an AI model above to continue")
+                                .font(.caption2)
+                                .foregroundColor(.orange)
+                        }
                     }
-                    .buttonStyle(.borderedProminent)
                 } else {
                     VStack(spacing: 4) {
                         Button("Start Observing") {
@@ -328,29 +340,30 @@ struct OnboardingView: View {
         }
     }
 
-    // MARK: - Step 4: VLM Setup (Optional)
+    // MARK: - Step 4: VLM Setup (Required)
 
     private var vlmSetupStep: some View {
         VStack(spacing: 16) {
-            Image(systemName: "eye.trianglebadge.exclamationmark")
+            Image(systemName: "brain.head.profile")
                 .font(.system(size: 48))
-                .foregroundColor(.accentColor)
+                .foregroundColor(.orange)
 
-            Text("VLM Setup")
+            Text("AI Model Setup")
                 .font(.title2)
                 .fontWeight(.semibold)
 
             HStack(spacing: 4) {
-                Text("Optional")
+                Text("Required")
                     .font(.caption)
+                    .fontWeight(.semibold)
                     .padding(.horizontal, 8)
                     .padding(.vertical, 2)
                     .background(
                         RoundedRectangle(cornerRadius: 4)
-                            .fill(Color.blue.opacity(0.1))
+                            .fill(Color.orange.opacity(0.15))
                     )
-                    .foregroundColor(.blue)
-                Text("— enables visual understanding of native app UI")
+                    .foregroundColor(.orange)
+                Text("— this is the brain that understands your screen")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
