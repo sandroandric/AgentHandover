@@ -9,7 +9,7 @@
     <array>
         <string>/usr/local/lib/agenthandover/venv/bin/python</string>
         <string>-m</string>
-        <string>oc_apprentice_worker</string>
+        <string>agenthandover_worker</string>
     </array>
 
     <key>RunAtLoad</key>

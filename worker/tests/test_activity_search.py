@@ -451,7 +451,7 @@ class TestSearchBasic:
     ) -> None:
         _insert_annotated_event(
             write_conn,
-            location="https://github.com/openmimic",
+            location="https://github.com/agenthandover",
             what_doing="Reviewing PRs",
         )
 

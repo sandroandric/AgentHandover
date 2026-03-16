@@ -31,26 +31,26 @@ import yaml
 WORKER_SRC = Path(__file__).resolve().parent.parent.parent / "worker" / "src"
 sys.path.insert(0, str(WORKER_SRC))
 
-from oc_apprentice_worker.clipboard_linker import ClipboardLinker
-from oc_apprentice_worker.confidence import ConfidenceScorer
-from oc_apprentice_worker.db import WorkerDB
-from oc_apprentice_worker.episode_builder import EpisodeBuilder
-from oc_apprentice_worker.exporter import AtomicWriter, IndexGenerator, SOPExporter
-from oc_apprentice_worker.models.semantic_step import Evidence, SemanticStep
-from oc_apprentice_worker.negative_demo import NegativeDemoPruner
-from oc_apprentice_worker.openclaw_writer import OpenClawWriter
-from oc_apprentice_worker.scheduler import (
+from agenthandover_worker.clipboard_linker import ClipboardLinker
+from agenthandover_worker.confidence import ConfidenceScorer
+from agenthandover_worker.db import WorkerDB
+from agenthandover_worker.episode_builder import EpisodeBuilder
+from agenthandover_worker.exporter import AtomicWriter, IndexGenerator, SOPExporter
+from agenthandover_worker.models.semantic_step import Evidence, SemanticStep
+from agenthandover_worker.negative_demo import NegativeDemoPruner
+from agenthandover_worker.openclaw_writer import OpenClawWriter
+from agenthandover_worker.scheduler import (
     GateResult,
     IdleJobGate,
     IdleScheduler,
     SchedulerConfig,
     SystemConditions,
 )
-from oc_apprentice_worker.sop_format import SOPFormatter
-from oc_apprentice_worker.sop_inducer import SOPInducer
-from oc_apprentice_worker.sop_versioner import SOPVersioner
-from oc_apprentice_worker.translator import SemanticTranslator
-from oc_apprentice_worker.vlm_queue import QueueBudget, VLMFallbackQueue, VLMJob
+from agenthandover_worker.sop_format import SOPFormatter
+from agenthandover_worker.sop_inducer import SOPInducer
+from agenthandover_worker.sop_versioner import SOPVersioner
+from agenthandover_worker.translator import SemanticTranslator
+from agenthandover_worker.vlm_queue import QueueBudget, VLMFallbackQueue, VLMJob
 
 # ---------------------------------------------------------------------------
 # Schema — mirrors crates/storage/src/migrations/v001_initial.sql exactly

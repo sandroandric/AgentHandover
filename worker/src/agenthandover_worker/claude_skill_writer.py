@@ -139,13 +139,13 @@ class ClaudeSkillWriter(SOPExportAdapter):
         return path
 
     def write_all_sops(self, sop_templates: list[dict]) -> list[Path]:
-        """Write all skill files + OPENMIMIC-INDEX.md manifest."""
+        """Write all skill files + AGENTHANDOVER-INDEX.md manifest."""
         paths = [self.write_sop(t) for t in sop_templates]
 
         if sop_templates:
             self._write_index(sop_templates)
         else:
-            index_path = self._skills_root / "OPENMIMIC-INDEX.md"
+            index_path = self._skills_root / "AGENTHANDOVER-INDEX.md"
             if index_path.exists():
                 index_path.unlink()
 
@@ -553,7 +553,7 @@ class ClaudeSkillWriter(SOPExportAdapter):
     # ------------------------------------------------------------------
 
     def _write_index(self, sop_templates: list[dict]) -> Path:
-        """Write OPENMIMIC-INDEX.md listing all exported Claude Code skills."""
+        """Write AGENTHANDOVER-INDEX.md listing all exported Claude Code skills."""
         lines: list[str] = []
         lines.append("# AgentHandover Exported Skills")
         lines.append("")
@@ -581,7 +581,7 @@ class ClaudeSkillWriter(SOPExportAdapter):
 
         lines.append("")
 
-        index_path = self._skills_root / "OPENMIMIC-INDEX.md"
+        index_path = self._skills_root / "AGENTHANDOVER-INDEX.md"
         self._skills_root.mkdir(parents=True, exist_ok=True)
         AtomicWriter.write(index_path, "\n".join(lines))
         return index_path

@@ -278,7 +278,7 @@ def _make_v2_sop_template(**overrides) -> dict:
                 "selector": None,
                 "parameters": {
                     "app": "VS Code",
-                    "location": "~/openmimic/worker/main.py",
+                    "location": "~/agenthandover/worker/main.py",
                     "verify": "git status shows expected files changed",
                 },
                 "confidence": 0.85,
@@ -319,7 +319,7 @@ def _make_v2_sop_template(**overrides) -> dict:
             {
                 "name": "staging_url",
                 "type": "string",
-                "example": "staging-api.openmimic.dev",
+                "example": "staging-api.agenthandover.dev",
                 "description": "Staging base URL",
             },
         ],
@@ -406,7 +406,7 @@ class TestSkillMdWriterV2:
         template = _make_v2_sop_template()
         path = self.writer.write_sop(template)
         content = path.read_text()
-        assert "- **Location**: `~/openmimic/worker/main.py`" in content
+        assert "- **Location**: `~/agenthandover/worker/main.py`" in content
 
     def test_v2_success_criteria(self):
         template = _make_v2_sop_template()

@@ -515,11 +515,11 @@ class TestFileOperations:
         assert data["metadata_type"] == "export_info"
 
     def test_index_generation(self):
-        """OPENMIMIC-INDEX.md is created on write_all_sops."""
+        """AGENTHANDOVER-INDEX.md is created on write_all_sops."""
         sops = [_make_v2_focus_sop(), _make_v2_passive_sop()]
         self.writer.write_all_sops(sops)
 
-        index_path = Path(self.tmpdir) / "OPENMIMIC-INDEX.md"
+        index_path = Path(self.tmpdir) / "AGENTHANDOVER-INDEX.md"
         assert index_path.exists()
 
         content = index_path.read_text()
@@ -532,7 +532,7 @@ class TestFileOperations:
         """Index is removed when called with empty SOP list."""
         # First create index
         self.writer.write_all_sops([_make_v2_focus_sop()])
-        index_path = Path(self.tmpdir) / "OPENMIMIC-INDEX.md"
+        index_path = Path(self.tmpdir) / "AGENTHANDOVER-INDEX.md"
         assert index_path.exists()
 
         # Now call with empty

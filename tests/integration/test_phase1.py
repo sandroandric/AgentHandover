@@ -31,10 +31,10 @@ import pytest
 WORKER_SRC = Path(__file__).resolve().parent.parent.parent / "worker" / "src"
 sys.path.insert(0, str(WORKER_SRC))
 
-from oc_apprentice_worker.clipboard_linker import ClipboardLinker
-from oc_apprentice_worker.db import WorkerDB
-from oc_apprentice_worker.episode_builder import EpisodeBuilder
-from oc_apprentice_worker.negative_demo import NegativeDemoPruner
+from agenthandover_worker.clipboard_linker import ClipboardLinker
+from agenthandover_worker.db import WorkerDB
+from agenthandover_worker.episode_builder import EpisodeBuilder
+from agenthandover_worker.negative_demo import NegativeDemoPruner
 
 # ---------------------------------------------------------------------------
 # Schema — mirrors crates/storage/src/migrations/v001_initial.sql exactly

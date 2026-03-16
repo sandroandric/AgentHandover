@@ -39,7 +39,7 @@ class OpenAICompatBackend(VLMInferenceBackend):
     def _resolve_api_key(self) -> str | None:
         if self._config.api_key:
             return self._config.api_key
-        key = os.environ.get("OPENMIMIC_API_KEY")
+        key = os.environ.get("AGENTHANDOVER_API_KEY")
         if key:
             return key
         return os.environ.get("OPENAI_API_KEY")

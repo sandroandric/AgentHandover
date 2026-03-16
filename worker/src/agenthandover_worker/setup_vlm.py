@@ -71,9 +71,9 @@ def check_vlm_available() -> dict[str, bool]:
         # Mark openai_compat available only when BOTH an API key is set
         # AND the base URL points to a local server (deny_network_egress).
         has_key = bool(
-            os.environ.get("OPENAI_API_KEY") or os.environ.get("OPENMIMIC_API_KEY")
+            os.environ.get("OPENAI_API_KEY") or os.environ.get("AGENTHANDOVER_API_KEY")
         )
-        base_url = os.environ.get("OPENMIMIC_VLM_BASE_URL", "")
+        base_url = os.environ.get("AGENTHANDOVER_VLM_BASE_URL", "")
         _local_prefixes = (
             "http://localhost", "http://127.0.0.1",
             "https://localhost", "https://127.0.0.1",

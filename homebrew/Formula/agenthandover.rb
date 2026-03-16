@@ -1,6 +1,6 @@
 class Agenthandover < Formula
   desc "Local, privacy-first workflow apprentice that generates AI-executable SOPs"
-  homepage "https://github.com/sandroandric/OpenMimic"
+  homepage "https://github.com/sandroandric/AgentHandover"
   license "MIT"
 
   # HEAD-only formula until the first tagged release.
@@ -13,10 +13,10 @@ class Agenthandover < Formula
   #
   # To cut a stable release later:
   #   1. Tag:    git tag v0.1.0 && git push --tags
-  #   2. SHA:    curl -sL https://github.com/sandroandric/OpenMimic/archive/refs/tags/v0.1.0.tar.gz | shasum -a 256
+  #   2. SHA:    curl -sL https://github.com/sandroandric/AgentHandover/archive/refs/tags/v0.1.0.tar.gz | shasum -a 256
   #   3. Add:    url "https://github.com/.../v0.1.0.tar.gz"
   #              sha256 "<computed hash>"
-  head "https://github.com/sandroandric/OpenMimic.git", branch: "main"
+  head "https://github.com/sandroandric/AgentHandover.git", branch: "main"
 
   depends_on "rust" => :build
   depends_on "python@3.12"
@@ -128,7 +128,7 @@ class Agenthandover < Formula
           <array>
               <string>#{libexec}/venv/bin/python</string>
               <string>-m</string>
-              <string>oc_apprentice_worker</string>
+              <string>agenthandover_worker</string>
           </array>
           <key>RunAtLoad</key>
           <true/>

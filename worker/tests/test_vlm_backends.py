@@ -490,7 +490,7 @@ class TestOpenAICompatBackend:
         fake_openai = types.ModuleType("openai")
         monkeypatch.setitem(sys.modules, "openai", fake_openai)
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-        monkeypatch.delenv("OPENMIMIC_API_KEY", raising=False)
+        monkeypatch.delenv("AGENTHANDOVER_API_KEY", raising=False)
 
         backend = OpenAICompatBackend(_make_config())
         assert backend.is_available() is False
@@ -634,7 +634,7 @@ class TestOpenAICompatBackend:
         from agenthandover_worker.backends.openai_compat import OpenAICompatBackend
 
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-        monkeypatch.delenv("OPENMIMIC_API_KEY", raising=False)
+        monkeypatch.delenv("AGENTHANDOVER_API_KEY", raising=False)
 
         config = _make_config(base_url="http://localhost:8080/v1")
         backend = OpenAICompatBackend(config)

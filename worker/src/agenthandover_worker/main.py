@@ -3897,7 +3897,7 @@ def main(argv: list[str] | None = None) -> None:
                 elif vlm_status["llama_cpp"]:
                     backend_type = VLMBackend.LLAMA_CPP
                 elif vlm_status.get("openai_compat"):
-                    base_url = os.environ.get("OPENMIMIC_VLM_BASE_URL", "")
+                    base_url = os.environ.get("AGENTHANDOVER_VLM_BASE_URL", "")
                     _local_prefixes = (
                         "http://localhost", "http://127.0.0.1",
                         "https://localhost", "https://127.0.0.1",
@@ -3908,7 +3908,7 @@ def main(argv: list[str] | None = None) -> None:
                     else:
                         logger.warning(
                             "OpenAI-compat backend skipped: deny_network_egress is "
-                            "enforced by default. Set OPENMIMIC_VLM_BASE_URL to a "
+                            "enforced by default. Set AGENTHANDOVER_VLM_BASE_URL to a "
                             "local server (e.g. http://localhost:8000) to use it."
                         )
                         backend_type = None  # type: ignore[assignment]

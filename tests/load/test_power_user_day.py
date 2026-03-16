@@ -25,16 +25,16 @@ import pytest
 WORKER_SRC = Path(__file__).resolve().parent.parent.parent / "worker" / "src"
 sys.path.insert(0, str(WORKER_SRC))
 
-from oc_apprentice_worker.episode_builder import EpisodeBuilder
-from oc_apprentice_worker.negative_demo import NegativeDemoPruner
-from oc_apprentice_worker.vlm_queue import (
+from agenthandover_worker.episode_builder import EpisodeBuilder
+from agenthandover_worker.negative_demo import NegativeDemoPruner
+from agenthandover_worker.vlm_queue import (
     VLMFallbackQueue,
     VLMJob,
     VLMJobStatus,
     QueueBudget,
 )
-from oc_apprentice_worker.confidence import ConfidenceScorer
-from oc_apprentice_worker.translator import SemanticTranslator, TranslationResult, UIAnchor
+from agenthandover_worker.confidence import ConfidenceScorer
+from agenthandover_worker.translator import SemanticTranslator, TranslationResult, UIAnchor
 
 
 # ---- Constants ----
@@ -843,15 +843,15 @@ class TestPerformanceValidation:
 
     def test_1000_events_processed_under_30s(self, tmp_path: Path):
         """Processing 1000 events through the full pipeline should take <30s."""
-        from oc_apprentice_worker.episode_builder import EpisodeBuilder
-        from oc_apprentice_worker.clipboard_linker import ClipboardLinker
-        from oc_apprentice_worker.negative_demo import NegativeDemoPruner
-        from oc_apprentice_worker.translator import SemanticTranslator
-        from oc_apprentice_worker.confidence import ConfidenceScorer
-        from oc_apprentice_worker.vlm_queue import VLMFallbackQueue
-        from oc_apprentice_worker.openclaw_writer import OpenClawWriter
-        from oc_apprentice_worker.exporter import IndexGenerator
-        from oc_apprentice_worker.main import run_pipeline
+        from agenthandover_worker.episode_builder import EpisodeBuilder
+        from agenthandover_worker.clipboard_linker import ClipboardLinker
+        from agenthandover_worker.negative_demo import NegativeDemoPruner
+        from agenthandover_worker.translator import SemanticTranslator
+        from agenthandover_worker.confidence import ConfidenceScorer
+        from agenthandover_worker.vlm_queue import VLMFallbackQueue
+        from agenthandover_worker.openclaw_writer import OpenClawWriter
+        from agenthandover_worker.exporter import IndexGenerator
+        from agenthandover_worker.main import run_pipeline
 
         events = generate_power_user_day(1000)
         workspace = tmp_path / "workspace"

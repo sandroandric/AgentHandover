@@ -1,4 +1,4 @@
-"""End-to-end integration test for the full OpenMimic pipeline.
+"""End-to-end integration test for the full AgentHandover pipeline.
 
 Starts daemon + worker processes, inserts synthetic events into the DB,
 waits for SOP output, verifies status files, and performs clean shutdown.
@@ -29,7 +29,7 @@ POLL_INTERVAL = 1.0
 
 def _data_dir(tmp_path: Path) -> Path:
     """Create and return a temporary data directory mimicking the real layout."""
-    data = tmp_path / "oc-apprentice"
+    data = tmp_path / "agenthandover"
     data.mkdir(parents=True)
     (data / "logs").mkdir()
     (data / "artifacts").mkdir()
@@ -270,15 +270,15 @@ class TestWorkerPipeline:
 
     def test_run_pipeline_with_synthetic_events(self, tmp_path: Path):
         """Test the pipeline function directly with synthetic data."""
-        from oc_apprentice_worker.episode_builder import EpisodeBuilder
-        from oc_apprentice_worker.clipboard_linker import ClipboardLinker
-        from oc_apprentice_worker.negative_demo import NegativeDemoPruner
-        from oc_apprentice_worker.translator import SemanticTranslator
-        from oc_apprentice_worker.confidence import ConfidenceScorer
-        from oc_apprentice_worker.vlm_queue import VLMFallbackQueue
-        from oc_apprentice_worker.openclaw_writer import OpenClawWriter
-        from oc_apprentice_worker.exporter import IndexGenerator
-        from oc_apprentice_worker.main import run_pipeline
+        from agenthandover_worker.episode_builder import EpisodeBuilder
+        from agenthandover_worker.clipboard_linker import ClipboardLinker
+        from agenthandover_worker.negative_demo import NegativeDemoPruner
+        from agenthandover_worker.translator import SemanticTranslator
+        from agenthandover_worker.confidence import ConfidenceScorer
+        from agenthandover_worker.vlm_queue import VLMFallbackQueue
+        from agenthandover_worker.openclaw_writer import OpenClawWriter
+        from agenthandover_worker.exporter import IndexGenerator
+        from agenthandover_worker.main import run_pipeline
 
         # Create synthetic events as dicts (matching what WorkerDB returns)
         events = []
@@ -323,7 +323,7 @@ class TestExportAdapters:
     """Test that both export adapters produce valid output."""
 
     def test_openclaw_adapter_writes_sops(self, tmp_path: Path):
-        from oc_apprentice_worker.openclaw_writer import OpenClawWriter
+        from agenthandover_worker.openclaw_writer import OpenClawWriter
 
         writer = OpenClawWriter(workspace_dir=tmp_path)
         sop = {
@@ -344,7 +344,7 @@ class TestExportAdapters:
         assert "E2E Test SOP" in content
 
     def test_generic_adapter_writes_md_and_json(self, tmp_path: Path):
-        from oc_apprentice_worker.generic_writer import GenericWriter
+        from agenthandover_worker.generic_writer import GenericWriter
 
         writer = GenericWriter(output_dir=tmp_path, json_export=True)
         sop = {
@@ -367,7 +367,7 @@ class TestExportAdapters:
         assert data["slug"] == "e2e-generic"
 
     def test_adapter_list_sops(self, tmp_path: Path):
-        from oc_apprentice_worker.generic_writer import GenericWriter
+        from agenthandover_worker.generic_writer import GenericWriter
 
         writer = GenericWriter(output_dir=tmp_path)
         for i in range(3):

@@ -1,4 +1,4 @@
-"""Error recovery tests for OpenMimic services.
+"""Error recovery tests for AgentHandover services.
 
 Tests crash recovery scenarios, DB lock contention, full disk behavior,
 missing permissions, and stale PID handling.

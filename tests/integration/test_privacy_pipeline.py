@@ -44,7 +44,7 @@ import pytest
 WORKER_SRC = Path(__file__).resolve().parent.parent.parent / "worker" / "src"
 sys.path.insert(0, str(WORKER_SRC))
 
-from oc_apprentice_worker.db import WorkerDB
+from agenthandover_worker.db import WorkerDB
 
 # ---------------------------------------------------------------------------
 # Python Redactor — mirrors crates/common/src/redaction.rs

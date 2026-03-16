@@ -16,7 +16,7 @@ npx webpack --mode production
 
 ### 2. Install Native Messaging Host
 
-First, run `openmimic doctor` to check whether the native messaging host is
+First, run `agenthandover doctor` to check whether the native messaging host is
 already installed. If it reports missing, install it with the script below.
 
 Alternatively, run the install script **from the repo root**:
@@ -40,7 +40,7 @@ bash scripts/install-native-host.sh --extension-id knldjmfmopnpolahpmmgbagdohdnh
 
 ### 4. Verify
 
-The extension connects to the daemon automatically. Check `openmimic status` to see if browser events are flowing.
+The extension connects to the daemon automatically. Check `agenthandover status` to see if browser events are flowing.
 
 ## Privacy
 

@@ -621,7 +621,7 @@ struct OnboardingView: View {
 
         // 2. Resolve Homebrew Cellar path by following the CLI binary symlink.
         //    This covers cases where the opt symlink is broken or not yet created.
-        //    Pattern: /usr/local/bin/agenthandover → .../Cellar/agenthandover/HEAD-xxx/bin/openmimic
+        //    Pattern: /usr/local/bin/agenthandover → .../Cellar/agenthandover/HEAD-xxx/bin/agenthandover
         //             → .../Cellar/agenthandover/HEAD-xxx/libexec/extension/
         let cliBinaryPaths = ["/usr/local/bin/agenthandover", "/opt/homebrew/bin/agenthandover"]
         for binaryPath in cliBinaryPaths {
@@ -629,7 +629,7 @@ struct OnboardingView: View {
             let resolved = url.resolvingSymlinksInPath().path
                 .components(separatedBy: "/")
             if !resolved.isEmpty {
-                // resolved: ["", "usr", "local", "Cellar", "openmimic", "HEAD-xxx", "bin", "openmimic"]
+                // resolved: ["", "usr", "local", "Cellar", "agenthandover", "HEAD-xxx", "bin", "agenthandover"]
                 // We want: .../Cellar/agenthandover/HEAD-xxx/libexec/extension
                 if let binIdx = resolved.lastIndex(of: "bin") {
                     let prefix = resolved[..<binIdx].joined(separator: "/")
@@ -642,7 +642,7 @@ struct OnboardingView: View {
             }
         }
 
-        // 3. Check for dev/source build by looking for the openmimic CLI binary
+        // 3. Check for dev/source build by looking for the agenthandover CLI binary
         //    and walking ancestors to find extension/dist relative to the repo root.
         if let cliPath = findCLIBinary() {
             var dir = URL(fileURLWithPath: cliPath).deletingLastPathComponent()
@@ -657,7 +657,7 @@ struct OnboardingView: View {
         }
     }
 
-    /// Find the openmimic CLI binary on the system.
+    /// Find the agenthandover CLI binary on the system.
     private func findCLIBinary() -> String? {
         let knownPaths = [
             "/usr/local/bin/agenthandover",

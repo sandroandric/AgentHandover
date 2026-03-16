@@ -1,5 +1,5 @@
 #!/bin/bash
-# OpenMimic post-install script
+# AgentHandover post-install script
 set -e
 
 # Track non-fatal warnings that shouldn't abort install but should be reported.
@@ -13,9 +13,9 @@ USER_HOME=$(dscl . -read /Users/"${CONSOLE_USER}" NFSHomeDirectory 2>/dev/null |
 if [ -z "$USER_HOME" ] || [ ! -d "$USER_HOME" ]; then
     USER_HOME=$(eval echo ~"$CONSOLE_USER")
 fi
-DATA_DIR="${USER_HOME}/Library/Application Support/oc-apprentice"
+DATA_DIR="${USER_HOME}/Library/Application Support/agenthandover"
 LAUNCH_AGENTS="${USER_HOME}/Library/LaunchAgents"
-LIB_DIR="/usr/local/lib/openmimic"
+LIB_DIR="/usr/local/lib/agenthandover"
 
 # Create data directories
 mkdir -p "${DATA_DIR}/logs"
@@ -26,23 +26,23 @@ mkdir -p "${DATA_DIR}/artifacts"
 mkdir -p "${LAUNCH_AGENTS}"
 LOG_DIR="${DATA_DIR}/logs"
 
-cp "${LIB_DIR}/launchd/com.openmimic.daemon.plist" "${LAUNCH_AGENTS}/"
+cp "${LIB_DIR}/launchd/com.agenthandover.daemon.plist" "${LAUNCH_AGENTS}/"
 sed -i '' \
-    -e "s|/tmp/com.openmimic.daemon.stdout.log|${LOG_DIR}/daemon.stdout.log|" \
-    -e "s|/tmp/com.openmimic.daemon.stderr.log|${LOG_DIR}/daemon.stderr.log|" \
-    "${LAUNCH_AGENTS}/com.openmimic.daemon.plist"
+    -e "s|/tmp/com.agenthandover.daemon.stdout.log|${LOG_DIR}/daemon.stdout.log|" \
+    -e "s|/tmp/com.agenthandover.daemon.stderr.log|${LOG_DIR}/daemon.stderr.log|" \
+    "${LAUNCH_AGENTS}/com.agenthandover.daemon.plist"
 
-cp "${LIB_DIR}/launchd/com.openmimic.worker.plist" "${LAUNCH_AGENTS}/"
+cp "${LIB_DIR}/launchd/com.agenthandover.worker.plist" "${LAUNCH_AGENTS}/"
 sed -i '' \
-    -e "s|/tmp/com.openmimic.worker.stdout.log|${LOG_DIR}/worker.stdout.log|" \
-    -e "s|/tmp/com.openmimic.worker.stderr.log|${LOG_DIR}/worker.stderr.log|" \
-    "${LAUNCH_AGENTS}/com.openmimic.worker.plist"
+    -e "s|/tmp/com.agenthandover.worker.stdout.log|${LOG_DIR}/worker.stdout.log|" \
+    -e "s|/tmp/com.agenthandover.worker.stderr.log|${LOG_DIR}/worker.stderr.log|" \
+    "${LAUNCH_AGENTS}/com.agenthandover.worker.plist"
 
 # Create default config if none exists
 if [ ! -f "${DATA_DIR}/config.toml" ]; then
     cat > "${DATA_DIR}/config.toml" << 'TOML'
-# OpenMimic Configuration
-# See https://github.com/sandroandric/OpenMimic for documentation
+# AgentHandover Configuration
+# See https://github.com/sandroandric/AgentHandover for documentation
 
 [observer]
 t_dwell_seconds = 3
@@ -67,11 +67,11 @@ fi
 # Install Chrome native messaging host manifest
 NM_DIR="${USER_HOME}/Library/Application Support/Google/Chrome/NativeMessagingHosts"
 mkdir -p "${NM_DIR}"
-cat > "${NM_DIR}/com.openclaw.apprentice.json" << JSON
+cat > "${NM_DIR}/com.agenthandover.host.json" << JSON
 {
-    "name": "com.openclaw.apprentice",
-    "description": "OpenMimic native messaging host",
-    "path": "/usr/local/bin/oc-apprentice-daemon",
+    "name": "com.agenthandover.host",
+    "description": "AgentHandover native messaging host",
+    "path": "/usr/local/bin/agenthandover-daemon",
     "type": "stdio",
     "args": ["--native-messaging"],
     "allowed_origins": [
@@ -81,7 +81,7 @@ cat > "${NM_DIR}/com.openclaw.apprentice.json" << JSON
 JSON
 
 # Set up Python virtual environment for worker (non-fatal: worker is optional
-# on first install — user can run `openmimic setup --vlm` later).
+# on first install — user can run `agenthandover setup --vlm` later).
 if [ ! -d "${LIB_DIR}/venv" ]; then
     if python3 -m venv "${LIB_DIR}/venv" 2>/dev/null && \
        "${LIB_DIR}/venv/bin/pip" install --quiet "${LIB_DIR}/worker/" 2>/dev/null; then
@@ -92,8 +92,8 @@ if [ ! -d "${LIB_DIR}/venv" ]; then
 fi
 
 # Set proper permissions
-chmod 755 /usr/local/bin/oc-apprentice-daemon
-chmod 755 /usr/local/bin/openmimic
+chmod 755 /usr/local/bin/agenthandover-daemon
+chmod 755 /usr/local/bin/agenthandover
 
 # Chrome extension setup (informational only — never fatal)
 EXT_DIR="${LIB_DIR}/extension"
@@ -111,20 +111,20 @@ else
     echo ""
     echo "Chrome extension not included in this package."
     echo "To install it from source:"
-    echo "  git clone https://github.com/sandroandric/OpenMimic.git"
-    echo "  cd OpenMimic/extension && npm install && npm run build"
+    echo "  git clone https://github.com/sandroandric/AgentHandover.git"
+    echo "  cd AgentHandover/extension && npm install && npm run build"
     echo "Then load in Chrome: chrome://extensions -> Load unpacked -> extension/dist"
 fi
 
 echo ""
 if [ -n "$WARNINGS" ]; then
-    echo "OpenMimic installed with warnings:"
+    echo "AgentHandover installed with warnings:"
     echo -e "$WARNINGS"
     echo ""
-    echo "Run 'openmimic doctor' to diagnose issues."
+    echo "Run 'agenthandover doctor' to diagnose issues."
     exit 0
 else
-    echo "OpenMimic installed successfully."
-    echo "Run 'openmimic doctor' to verify the installation."
+    echo "AgentHandover installed successfully."
+    echo "Run 'agenthandover doctor' to verify the installation."
     exit 0
 fi
