@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AgentHandover</title>
+    <meta name="description" content="Watch your screen. Learn your workflows. Hand them to agents.">
+    <link rel="icon" type="image/png" href="favicon.png">
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&family=JetBrains+Mono:wght@400&display=swap');
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: 'Inter', sans-serif;
+            background: #050505;
+            color: #e0e0e0;
+            overflow-x: hidden;
+            cursor: crosshair;
+        }
+
+        /* Noise texture overlay */
+        body::after {
+            content: '';
+            position: fixed;
+            inset: 0;
+            background: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.03'/%3E%3C/svg%3E");
+            pointer-events: none;
+            z-index: 9999;
+        }
+
+        a { color: inherit; }
+
+        .page {
+            max-width: 660px;
+            margin: 0 auto;
+            padding: 12vh 2rem 6rem;
+            position: relative;
+        }
+
+        /* ---- MASCOT ---- */
+        .mascot-wrap {
+            margin-bottom: 4rem;
+            position: relative;
+            width: fit-content;
+        }
+
+        .mascot-wrap img {
+            width: 80px;
+            filter: grayscale(1) brightness(1.8) contrast(1.2);
+            transition: filter 0.6s ease;
+        }
+
+        .mascot-wrap:hover img {
+            filter: grayscale(0) brightness(1) contrast(1);
+        }
+
+        .mascot-wrap::after {
+            content: '';
+            position: absolute;
+            width: 80px;
+            height: 80px;
+            top: 0;
+            left: 0;
+            background: radial-gradient(circle, rgba(245,158,11,0.08) 0%, transparent 70%);
+            opacity: 0;
+            transition: opacity 0.6s;
+        }
+
+        .mascot-wrap:hover::after { opacity: 1; }
+
+        /* ---- HEADLINE ---- */
+        h1 {
+            font-size: clamp(2.2rem, 5.5vw, 3.8rem);
+            font-weight: 800;
+            letter-spacing: -0.04em;
+            line-height: 1.05;
+            margin-bottom: 2rem;
+        }
+
+        h1 em {
+            font-style: normal;
+            color: #f59e0b;
+        }
+
+        /* ---- INTRO ---- */
+        .intro {
+            font-size: 1.1rem;
+            line-height: 1.8;
+            color: #888;
+            margin-bottom: 4rem;
+            max-width: 520px;
+        }
+
+        .intro strong { color: #ccc; font-weight: 600; }
+
+        /* ---- PIPELINE ---- */
+        .pipeline {
+            margin-bottom: 5rem;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.82rem;
+            line-height: 2.2;
+            color: #555;
+            border-left: 2px solid #1a1a1a;
+            padding-left: 1.5rem;
+        }
+
+        .pipeline span {
+            color: #888;
+            transition: color 0.3s;
+        }
+
+        .pipeline span:hover { color: #f59e0b; }
+
+        .pipeline .arrow { color: #333; }
+
+        /* ---- BLOCKS ---- */
+        .block {
+            margin-bottom: 5rem;
+        }
+
+        .block h2 {
+            font-size: 0.7rem;
+            text-transform: uppercase;
+            letter-spacing: 0.15em;
+            color: #444;
+            margin-bottom: 1.5rem;
+        }
+
+        .block p {
+            font-size: 0.95rem;
+            line-height: 1.8;
+            color: #777;
+        }
+
+        .block p strong { color: #bbb; font-weight: 600; }
+
+        /* ---- INSTALL ---- */
+        .install-block {
+            background: #0a0a0a;
+            border: 1px solid #161616;
+            border-radius: 12px;
+            padding: 1.8rem 2rem;
+            margin-bottom: 5rem;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.82rem;
+            line-height: 2.4;
+        }
+
+        .install-block .dim { color: #383838; }
+        .install-block .cmd { color: #f59e0b; }
+
+        /* ---- CTA ---- */
+        .cta {
+            display: flex;
+            gap: 1rem;
+            margin-bottom: 6rem;
+        }
+
+        .cta a {
+            padding: 0.75rem 1.8rem;
+            border-radius: 8px;
+            font-size: 0.85rem;
+            font-weight: 600;
+            text-decoration: none;
+            transition: all 0.2s;
+        }
+
+        .cta .primary {
+            background: #f59e0b;
+            color: #050505;
+        }
+        .cta .primary:hover {
+            background: #fbbf24;
+            transform: translateY(-1px);
+        }
+
+        .cta .secondary {
+            border: 1px solid #222;
+            color: #888;
+        }
+        .cta .secondary:hover {
+            border-color: #444;
+            color: #ccc;
+        }
+
+        /* ---- FOOTER ---- */
+        footer {
+            padding-top: 3rem;
+            border-top: 1px solid #111;
+            font-size: 0.75rem;
+            color: #333;
+        }
+
+        footer a { text-decoration: none; }
+        footer a:hover { color: #888; }
+
+        /* ---- RESPONSIVE ---- */
+        @media (max-width: 640px) {
+            .page { padding-top: 8vh; }
+            .cta { flex-direction: column; }
+            .cta a { text-align: center; }
+        }
+    </style>
+</head>
+<body>
+
+<div class="page">
+
+    <div class="mascot-wrap">
+        <img src="favicon.png" alt="AgentHandover">
+    </div>
+
+    <h1>Your agents don't know<br>how you <em>work</em>.</h1>
+
+    <p class="intro">
+        <strong>AgentHandover</strong> runs locally on your Mac, watches your screen through a vision model, and turns your real workflows into step-by-step procedures that Claude Code, OpenClaw, or any agent can follow. You never write an instruction. You just work.
+    </p>
+
+    <div class="pipeline">
+        <span>screen capture</span> <span class="arrow">→</span>
+        <span>vision model annotation</span> <span class="arrow">→</span>
+        <span>activity classification</span> <span class="arrow">→</span>
+        <span>task continuity</span> <span class="arrow">→</span>
+        <span>semantic alignment</span> <span class="arrow">→</span>
+        <span>procedure generation</span> <span class="arrow">→</span>
+        <span>human review</span> <span class="arrow">→</span>
+        <span>agent handover</span>
+    </div>
+
+    <div class="block">
+        <h2>Not screen recording</h2>
+        <p>
+            Screen recording gives you pixels. AgentHandover gives you <strong>structured understanding</strong> — app context, step sequences, CSS selectors, form field IDs, typed variables, verification criteria, and failure recovery. All from watching you work. All deletable. All local.
+        </p>
+    </div>
+
+    <div class="block">
+        <h2>Trust nothing by default</h2>
+        <p>
+            Every procedure passes through a <strong>7-state lifecycle</strong> with human approval at every gate. Screenshots are deleted after annotation. Passwords are never captured. 3 execution failures auto-demote a procedure. The system is designed to be <strong>honest about what's ready</strong> — it will never tell an agent something works when it doesn't.
+        </p>
+    </div>
+
+    <div class="block">
+        <h2>Private by architecture</h2>
+        <p>
+            All AI runs on your machine via Ollama. No cloud. No telemetry. No accounts. Artifacts encrypted with XChaCha20-Poly1305. Raw events auto-purge after 14 days. <strong>Nothing leaves your laptop.</strong>
+        </p>
+    </div>
+
+    <div class="install-block">
+        <span class="dim">$ </span><span class="cmd">agenthandover doctor</span><br>
+        <span class="dim">$ </span><span class="cmd">agenthandover setup --vlm</span><br>
+        <span class="dim">$ </span><span class="cmd">agenthandover start all</span>
+    </div>
+
+    <div class="cta">
+        <a href="https://github.com/sandroandric/AgentHandover/releases" class="primary">Download for macOS</a>
+        <a href="https://github.com/sandroandric/AgentHandover" class="secondary">Source on GitHub</a>
+    </div>
+
+    <footer>
+        <a href="https://github.com/sandroandric/AgentHandover">GitHub</a> &middot; MIT &middot; <a href="https://github.com/sandroandric">Sandro Andric</a>
+    </footer>
+
+</div>
+
+</body>
+</html>
