@@ -1,9 +1,9 @@
 import SwiftUI
 
-/// Step-by-step onboarding for first-run setup.
+/// Premium onboarding experience — 8 screens with progressive disclosure.
 ///
-/// 7 steps: Welcome → How It Works → Permissions → AI Model → Browser Extension →
-/// Ready (First Recording)
+/// Screens: Welcome → Teach by Doing → What You'll Get → Review Cycle →
+///          Permissions → AI Model → Browser Extension → Ready (First Recording)
 struct OnboardingView: View {
     @EnvironmentObject var appState: AppState
     @State private var currentStep = 0
@@ -65,19 +65,26 @@ struct OnboardingView: View {
     /// Called when onboarding completes (sets hasCompletedOnboarding).
     var onComplete: (() -> Void)?
 
-    private let totalSteps = 7
+    private let totalSteps = 8
+
+    // MARK: - Design Tokens
+
+    private let cardBackground = Color.primary.opacity(0.04)
+    private let cardRadius: CGFloat = 12
+    private let highlightStroke = Color.accentColor.opacity(0.3)
+    private let sectionSpacing: CGFloat = 20
+    private let cardPadding: CGFloat = 16
+    private let titleFont = Font.system(size: 22, weight: .semibold)
+    private let bodyFont = Font.system(size: 14)
+    private let smallNoteFont = Font.system(size: 12)
+    private let smallNoteColor = Color.secondary.opacity(0.7)
 
     var body: some View {
         VStack(spacing: 0) {
-            // Progress dots
-            HStack(spacing: 8) {
-                ForEach(0..<totalSteps, id: \.self) { index in
-                    Circle()
-                        .fill(index <= currentStep ? Color.accentColor : Color.secondary.opacity(0.3))
-                        .frame(width: 8, height: 8)
-                }
-            }
-            .padding(.top, 20)
+            // Progress bar
+            progressBar
+                .padding(.top, 16)
+                .padding(.horizontal, 40)
 
             Spacer()
 
@@ -97,6 +104,33 @@ struct OnboardingView: View {
         }
     }
 
+    // MARK: - Progress Bar
+
+    private var progressBar: some View {
+        VStack(spacing: 6) {
+            GeometryReader { geometry in
+                ZStack(alignment: .leading) {
+                    RoundedRectangle(cornerRadius: 2)
+                        .fill(Color.secondary.opacity(0.12))
+                        .frame(height: 3)
+
+                    RoundedRectangle(cornerRadius: 2)
+                        .fill(Color.accentColor)
+                        .frame(
+                            width: geometry.size.width * CGFloat(currentStep + 1) / CGFloat(totalSteps),
+                            height: 3
+                        )
+                        .animation(.easeInOut(duration: 0.3), value: currentStep)
+                }
+            }
+            .frame(height: 3)
+
+            Text("Step \(currentStep + 1) of \(totalSteps)")
+                .font(.system(size: 11))
+                .foregroundColor(.secondary.opacity(0.6))
+        }
+    }
+
     // MARK: - Navigation Bar
 
     private var navigationBar: some View {
@@ -105,27 +139,32 @@ struct OnboardingView: View {
                 Button("Back") {
                     withAnimation { currentStep -= 1 }
                 }
+                .buttonStyle(.plain)
+                .foregroundColor(.secondary)
             }
 
             Spacer()
 
             switch currentStep {
             case 0:
-                // Welcome — single CTA
-                Button("Get Started") {
+                Button {
                     withAnimation { currentStep += 1 }
+                } label: {
+                    HStack(spacing: 4) {
+                        Text("Get Started")
+                        Image(systemName: "arrow.right")
+                    }
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
 
-            case 1:
-                // How it works
-                Button("Next -- Let's set up") {
+            case 1, 2, 3:
+                Button("Next") {
                     withAnimation { currentStep += 1 }
                 }
                 .buttonStyle(.borderedProminent)
 
-            case 2:
+            case 4:
                 // Permissions — blocked until both granted, with skip option
                 VStack(spacing: 4) {
                     Button("Next") {
@@ -144,7 +183,7 @@ struct OnboardingView: View {
                     }
                 }
 
-            case 3:
+            case 5:
                 // VLM Setup — blocked until model ready
                 VStack(spacing: 2) {
                     Button("Next") {
@@ -160,10 +199,10 @@ struct OnboardingView: View {
                     }
                 }
 
-            case 4:
+            case 6:
                 // Browser extension — optional
                 HStack(spacing: 12) {
-                    Button("Skip for now") {
+                    Button("Skip") {
                         withAnimation { currentStep += 1 }
                     }
                     .foregroundColor(.secondary)
@@ -176,15 +215,8 @@ struct OnboardingView: View {
                     .buttonStyle(.borderedProminent)
                 }
 
-            case 5:
-                // Summary — next to final
-                Button("Next") {
-                    withAnimation { currentStep += 1 }
-                }
-                .buttonStyle(.borderedProminent)
-
-            case 6:
-                // Ready — final step with actions
+            case 7:
+                // Ready — final step, no Next button
                 EmptyView()
 
             default:
@@ -199,205 +231,418 @@ struct OnboardingView: View {
     private func stepContent(for step: Int) -> some View {
         switch step {
         case 0: welcomeStep
-        case 1: howItWorksStep
-        case 2: permissionsStep
-        case 3: vlmSetupStep
-        case 4: chromeExtensionStep
-        case 5: summaryStep
-        case 6: readyStep
+        case 1: teachByDoingStep
+        case 2: whatYoullGetStep
+        case 3: reviewCycleStep
+        case 4: permissionsStep
+        case 5: vlmSetupStep
+        case 6: chromeExtensionStep
+        case 7: readyStep
         default: EmptyView()
         }
     }
 
-    // MARK: - Step 0: Welcome
+    // MARK: - Screen 1: Welcome
 
     private var welcomeStep: some View {
-        VStack(spacing: 20) {
-            Image(systemName: "binoculars.fill")
-                .font(.system(size: 56))
-                .foregroundStyle(
-                    LinearGradient(
-                        colors: [.orange, .yellow],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
+        VStack(spacing: sectionSpacing) {
+            // Icon with gradient background circle
+            ZStack {
+                Circle()
+                    .fill(
+                        LinearGradient(
+                            colors: [Color.orange.opacity(0.15), Color.yellow.opacity(0.08)],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
                     )
-                )
-                .padding(.bottom, 4)
+                    .frame(width: 80, height: 80)
+
+                Image(systemName: "binoculars.fill")
+                    .font(.system(size: 36))
+                    .foregroundStyle(
+                        LinearGradient(
+                            colors: [.orange, .yellow],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+            }
 
             Text("AgentHandover")
-                .font(.largeTitle)
-                .fontWeight(.bold)
+                .font(.system(size: 28, weight: .semibold))
 
-            Text("Your work, turned into agent instructions")
-                .font(.title3)
+            Text("Turns your everyday work into step-by-step procedures that AI agents can follow.")
+                .font(bodyFont)
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
+                .frame(maxWidth: 400)
 
-            VStack(alignment: .leading, spacing: 14) {
-                valueBullet(
-                    icon: "magnifyingglass",
-                    color: .blue,
-                    text: "Silently watches your screen as you work"
-                )
-                valueBullet(
-                    icon: "brain.head.profile",
-                    color: .purple,
-                    text: "Learns your repeatable workflows automatically"
-                )
-                valueBullet(
-                    icon: "list.clipboard",
-                    color: .green,
-                    text: "Produces step-by-step procedures agents can follow"
-                )
+            // Three visual cards
+            HStack(spacing: 14) {
+                featureCard(emoji: "\u{1F440}", label: "Watches silently")
+                featureCard(emoji: "\u{1F9E0}", label: "Learns patterns")
+                featureCard(emoji: "\u{1F4CB}", label: "Writes procedures")
             }
-            .padding(.vertical, 8)
+            .padding(.top, 4)
 
+            // Privacy note
             HStack(spacing: 6) {
                 Image(systemName: "lock.shield.fill")
                     .foregroundColor(.green)
-                    .font(.caption)
-                Text("Everything runs locally on your Mac. Nothing leaves your machine.")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
+                    .font(.system(size: 11))
+                Text("100% local \u{00B7} Nothing leaves your Mac")
+                    .font(smallNoteFont)
+                    .foregroundColor(smallNoteColor)
             }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 8)
-            .background(
-                RoundedRectangle(cornerRadius: 8)
-                    .fill(Color.green.opacity(0.08))
-            )
+            .padding(.top, 4)
         }
     }
 
-    private func valueBullet(icon: String, color: Color, text: String) -> some View {
-        HStack(spacing: 12) {
-            Image(systemName: icon)
-                .font(.title3)
-                .foregroundColor(color)
-                .frame(width: 28)
-            Text(text)
-                .font(.body)
+    private func featureCard(emoji: String, label: String) -> some View {
+        VStack(spacing: 8) {
+            Text(emoji)
+                .font(.system(size: 28))
+            Text(label)
+                .font(.system(size: 13, weight: .medium))
+                .foregroundColor(.primary)
         }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 14)
+        .padding(.horizontal, 8)
+        .background(
+            RoundedRectangle(cornerRadius: cardRadius)
+                .fill(cardBackground)
+        )
     }
 
-    // MARK: - Step 1: How It Works
+    // MARK: - Screen 2: Teach by Doing
 
-    private var howItWorksStep: some View {
-        VStack(spacing: 20) {
-            Text("Two ways to teach")
-                .font(.title2)
-                .fontWeight(.semibold)
+    private var teachByDoingStep: some View {
+        VStack(spacing: sectionSpacing) {
+            Text("Two ways to teach your agent")
+                .font(titleFont)
 
-            HStack(spacing: 16) {
-                // Focus Recording card
-                modeCard(
-                    icon: "record.circle",
-                    iconColor: .red,
-                    title: "Focus Recording",
-                    badge: "Start here",
-                    badgeColor: .orange,
-                    bullets: [
-                        "Record a specific task",
-                        "Click Record \u{2192} do the workflow \u{2192} Stop",
-                        "Get a procedure in ~60 seconds",
-                        "Best for: your most important 5-10 tasks",
-                    ]
+            HStack(spacing: 14) {
+                // Focus Recording — highlighted
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack {
+                        Image(systemName: "record.circle")
+                            .font(.system(size: 22))
+                            .foregroundColor(.red)
+                        Spacer()
+                        Text("\u{2728} Start here")
+                            .font(.system(size: 11, weight: .semibold))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 3)
+                            .background(
+                                RoundedRectangle(cornerRadius: 4)
+                                    .fill(Color.orange.opacity(0.12))
+                            )
+                            .foregroundColor(.orange)
+                    }
+
+                    Text("Record a specific task")
+                        .font(.system(size: 15, weight: .semibold))
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Click Record \u{00B7} Do the task \u{00B7} Stop")
+                            .font(.system(size: 13))
+                            .foregroundColor(.secondary)
+                        Text("Results in ~60 seconds")
+                            .font(.system(size: 13))
+                            .foregroundColor(.secondary)
+                    }
+                }
+                .padding(cardPadding)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(
+                    RoundedRectangle(cornerRadius: cardRadius)
+                        .fill(cardBackground)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: cardRadius)
+                        .stroke(highlightStroke, lineWidth: 1.5)
                 )
 
-                // Passive Discovery card
-                modeCard(
-                    icon: "eye",
-                    iconColor: .blue,
-                    title: "Passive Discovery",
-                    badge: nil,
-                    badgeColor: .clear,
-                    bullets: [
-                        "Learns automatically in the background",
-                        "Detects patterns when you repeat workflows",
-                        "Gets smarter over time with more observations",
-                        "Best for: discovering workflows you didn't think to record",
-                    ]
+                // Passive Learning — subtle
+                VStack(alignment: .leading, spacing: 10) {
+                    Image(systemName: "eye")
+                        .font(.system(size: 22))
+                        .foregroundColor(.blue)
+
+                    Text("Learns automatically")
+                        .font(.system(size: 15, weight: .semibold))
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Watches for repeated patterns")
+                            .font(.system(size: 13))
+                            .foregroundColor(.secondary)
+                        Text("Gets smarter over days")
+                            .font(.system(size: 13))
+                            .foregroundColor(.secondary)
+                    }
+                }
+                .padding(cardPadding)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(
+                    RoundedRectangle(cornerRadius: cardRadius)
+                        .fill(cardBackground)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: cardRadius)
+                        .stroke(Color.secondary.opacity(0.1), lineWidth: 1)
                 )
             }
 
-            Text("We recommend starting with Focus Recording to see results immediately.")
-                .font(.caption)
-                .foregroundColor(.secondary)
+            Text("We recommend starting with Focus Recording \u{2014} you'll see your first procedure in under a minute.")
+                .font(smallNoteFont)
+                .foregroundColor(smallNoteColor)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: 460)
         }
     }
 
-    private func modeCard(
-        icon: String,
-        iconColor: Color,
-        title: String,
-        badge: String?,
-        badgeColor: Color,
-        bullets: [String]
-    ) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Image(systemName: icon)
-                    .font(.title2)
-                    .foregroundColor(iconColor)
-                Spacer()
-                if let badge = badge {
-                    Text(badge)
-                        .font(.caption2)
-                        .fontWeight(.semibold)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 3)
-                        .background(
-                            RoundedRectangle(cornerRadius: 4)
-                                .fill(badgeColor.opacity(0.15))
-                        )
-                        .foregroundColor(badgeColor)
+    // MARK: - Screen 3: What You'll Get
+
+    private var whatYoullGetStep: some View {
+        VStack(spacing: sectionSpacing) {
+            Text("Here's what a learned procedure looks like")
+                .font(titleFont)
+
+            // Mock procedure card
+            VStack(alignment: .leading, spacing: 0) {
+                // Header
+                HStack(spacing: 8) {
+                    Image(systemName: "list.clipboard")
+                        .font(.system(size: 16))
+                        .foregroundColor(.accentColor)
+                    Text("File Expense Report")
+                        .font(.system(size: 16, weight: .semibold))
+                    Spacer()
                 }
-            }
+                .padding(.bottom, 12)
 
-            Text(title)
-                .font(.headline)
-                .fontWeight(.semibold)
+                Divider()
+                    .padding(.bottom, 12)
 
-            VStack(alignment: .leading, spacing: 6) {
-                ForEach(bullets, id: \.self) { bullet in
-                    HStack(alignment: .top, spacing: 6) {
-                        Text("\u{2022}")
+                // Strategy
+                procedureSectionLabel("Strategy")
+                Text("Open Expensify, upload receipt, categorize, submit for approval")
+                    .font(.system(size: 12))
+                    .foregroundColor(.secondary)
+                    .padding(.bottom, 12)
+
+                // Steps
+                procedureSectionLabel("Steps")
+                VStack(alignment: .leading, spacing: 4) {
+                    procedureStep(1, "Open Expensify in Chrome")
+                    procedureStep(2, "Click \"New Expense\"")
+                    procedureStep(3, "Upload receipt photo")
+                    procedureStep(4, "Select category: Travel")
+                    procedureStep(5, "Submit for manager approval")
+                }
+                .padding(.bottom, 12)
+
+                // Verification & Guardrails side by side
+                HStack(alignment: .top, spacing: 16) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack(spacing: 4) {
+                            Image(systemName: "checkmark.circle.fill")
+                                .font(.system(size: 11))
+                                .foregroundColor(.green)
+                            Text("Verification")
+                                .font(.system(size: 11, weight: .semibold))
+                        }
+                        Text("\"Expense submitted\" confirmation")
+                            .font(.system(size: 11))
                             .foregroundColor(.secondary)
-                            .font(.caption)
-                        Text(bullet)
-                            .font(.caption)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack(spacing: 4) {
+                            Image(systemName: "shield.fill")
+                                .font(.system(size: 11))
+                                .foregroundColor(.orange)
+                            Text("Guardrails")
+                                .font(.system(size: 11, weight: .semibold))
+                        }
+                        Text("Never submit without receipt")
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                        Text("Max $500 without pre-approval")
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .padding(.bottom, 10)
+
+                Divider()
+                    .padding(.bottom, 8)
+
+                // Footer
+                HStack(spacing: 12) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "clock")
+                            .font(.system(size: 10))
+                            .foregroundColor(.secondary)
+                        Text("~5 min")
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                    }
+                    HStack(spacing: 4) {
+                        Image(systemName: "chart.bar.fill")
+                            .font(.system(size: 10))
+                            .foregroundColor(.green)
+                        Text("Confidence: 92%")
+                            .font(.system(size: 11))
                             .foregroundColor(.secondary)
                     }
                 }
             }
+            .padding(cardPadding)
+            .background(
+                RoundedRectangle(cornerRadius: cardRadius)
+                    .fill(cardBackground)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: cardRadius)
+                    .stroke(Color.secondary.opacity(0.12), lineWidth: 1)
+            )
+
+            Text("This is exported as a SKILL.md that Claude Code, OpenClaw, and other agents can execute.")
+                .font(smallNoteFont)
+                .foregroundColor(smallNoteColor)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 460)
         }
-        .padding(16)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 12)
-                .fill(Color.secondary.opacity(0.06))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 12)
-                .stroke(Color.secondary.opacity(0.12), lineWidth: 1)
-        )
     }
 
-    // MARK: - Step 2: Permissions (Combined)
+    private func procedureSectionLabel(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 11, weight: .semibold))
+            .foregroundColor(.primary.opacity(0.6))
+            .textCase(.uppercase)
+            .padding(.bottom, 4)
+    }
+
+    private func procedureStep(_ number: Int, _ text: String) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Text("\(number).")
+                .font(.system(size: 12, weight: .medium, design: .monospaced))
+                .foregroundColor(.accentColor)
+                .frame(width: 18, alignment: .trailing)
+            Text(text)
+                .font(.system(size: 12))
+                .foregroundColor(.secondary)
+        }
+    }
+
+    // MARK: - Screen 4: The Review Cycle
+
+    private var reviewCycleStep: some View {
+        VStack(spacing: sectionSpacing) {
+            Text("You stay in control")
+                .font(titleFont)
+
+            // Visual pipeline
+            HStack(spacing: 0) {
+                pipelineNode(icon: "camera.fill", label: "Record/\nObserve", color: .blue)
+                pipelineArrow()
+                pipelineNode(icon: "brain.head.profile", label: "AI\nAnalyzes", color: .purple)
+                pipelineArrow()
+                pipelineNode(icon: "person.fill", label: "You\nReview", color: .orange, highlighted: true)
+                pipelineArrow()
+                pipelineNode(icon: "cpu", label: "Agent\nReady", color: .green)
+            }
+            .padding(.vertical, 8)
+
+            Text("Every procedure goes through your review before any agent can use it. Nothing reaches agents without your approval.")
+                .font(bodyFont)
+                .foregroundColor(.secondary)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 440)
+
+            // Highlight card
+            HStack(spacing: 12) {
+                Image(systemName: "hand.tap.fill")
+                    .font(.system(size: 20))
+                    .foregroundColor(.orange)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Review from your menu bar")
+                        .font(.system(size: 13, weight: .medium))
+                    Text("Approve with one tap, or edit to refine.")
+                        .font(.system(size: 12))
+                        .foregroundColor(.secondary)
+                }
+            }
+            .padding(cardPadding)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: cardRadius)
+                    .fill(Color.orange.opacity(0.06))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: cardRadius)
+                    .stroke(Color.orange.opacity(0.2), lineWidth: 1)
+            )
+        }
+    }
+
+    private func pipelineNode(icon: String, label: String, color: Color, highlighted: Bool = false) -> some View {
+        VStack(spacing: 6) {
+            ZStack {
+                Circle()
+                    .fill(
+                        highlighted
+                            ? color.opacity(0.15)
+                            : color.opacity(0.08)
+                    )
+                    .frame(width: 48, height: 48)
+
+                if highlighted {
+                    Circle()
+                        .stroke(color.opacity(0.4), lineWidth: 1.5)
+                        .frame(width: 48, height: 48)
+                }
+
+                Image(systemName: icon)
+                    .font(.system(size: 18))
+                    .foregroundColor(color)
+            }
+
+            Text(label)
+                .font(.system(size: 11))
+                .foregroundColor(.secondary)
+                .multilineTextAlignment(.center)
+                .lineLimit(2)
+                .frame(width: 60)
+        }
+    }
+
+    private func pipelineArrow() -> some View {
+        Image(systemName: "chevron.right")
+            .font(.system(size: 12, weight: .medium))
+            .foregroundColor(.secondary.opacity(0.4))
+            .padding(.horizontal, 4)
+            .padding(.bottom, 20)
+    }
+
+    // MARK: - Screen 5: Permissions
 
     private var permissionsStep: some View {
-        VStack(spacing: 20) {
-            Text("Two permissions needed")
-                .font(.title2)
-                .fontWeight(.semibold)
+        VStack(spacing: sectionSpacing) {
+            Text("Two permissions to enable")
+                .font(titleFont)
 
-            HStack(spacing: 16) {
+            VStack(spacing: 12) {
                 // Accessibility card
                 permissionCard(
                     icon: "hand.raised.circle.fill",
                     title: "Accessibility",
+                    description: "Read window titles and UI elements",
                     granted: appState.accessibilityGranted,
                     action: {
                         PermissionChecker.requestAccessibility()
@@ -409,6 +654,7 @@ struct OnboardingView: View {
                 permissionCard(
                     icon: "rectangle.dashed.badge.record",
                     title: "Screen Recording",
+                    description: "Capture screenshots for AI analysis",
                     granted: appState.screenRecordingGranted,
                     action: {
                         PermissionChecker.openScreenRecordingSettings()
@@ -417,28 +663,37 @@ struct OnboardingView: View {
                 )
             }
 
-            Text("These let AgentHandover see what's on your screen. It reads window titles and takes screenshots -- never types or clicks anything.")
-                .font(.caption)
-                .foregroundColor(.secondary)
+            Text("AgentHandover reads your screen. It never types, clicks, or takes actions.")
+                .font(smallNoteFont)
+                .foregroundColor(smallNoteColor)
                 .multilineTextAlignment(.center)
-                .frame(maxWidth: 460)
+                .frame(maxWidth: 440)
         }
     }
 
     private func permissionCard(
         icon: String,
         title: String,
+        description: String,
         granted: Bool,
         action: @escaping () -> Void,
         actionLabel: String
     ) -> some View {
-        VStack(spacing: 12) {
+        HStack(spacing: 14) {
             Image(systemName: icon)
-                .font(.system(size: 32))
+                .font(.system(size: 28))
                 .foregroundColor(granted ? .green : .accentColor)
+                .frame(width: 36)
 
-            Text(title)
-                .font(.headline)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.system(size: 14, weight: .semibold))
+                Text(description)
+                    .font(.system(size: 12))
+                    .foregroundColor(.secondary)
+            }
+
+            Spacer()
 
             if granted {
                 HStack(spacing: 4) {
@@ -447,7 +702,7 @@ struct OnboardingView: View {
                     Text("Granted")
                         .foregroundColor(.green)
                 }
-                .font(.caption)
+                .font(.system(size: 12))
                 .padding(.horizontal, 10)
                 .padding(.vertical, 5)
                 .background(
@@ -462,32 +717,45 @@ struct OnboardingView: View {
                 .controlSize(.small)
             }
         }
-        .padding(16)
-        .frame(maxWidth: .infinity)
+        .padding(cardPadding)
         .background(
-            RoundedRectangle(cornerRadius: 12)
-                .fill(Color.secondary.opacity(0.06))
+            RoundedRectangle(cornerRadius: cardRadius)
+                .fill(cardBackground)
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 12)
-                .stroke(granted ? Color.green.opacity(0.3) : Color.secondary.opacity(0.12), lineWidth: 1)
+            RoundedRectangle(cornerRadius: cardRadius)
+                .stroke(
+                    granted ? Color.green.opacity(0.3) : Color.secondary.opacity(0.1),
+                    lineWidth: 1
+                )
         )
     }
 
-    // MARK: - Step 3: VLM Setup (Required)
+    // MARK: - Screen 6: VLM Setup (Required)
 
     private var vlmSetupStep: some View {
         VStack(spacing: 16) {
-            Image(systemName: "brain.head.profile")
-                .font(.system(size: 48))
-                .foregroundColor(.orange)
+            ZStack {
+                Circle()
+                    .fill(
+                        LinearGradient(
+                            colors: [Color.purple.opacity(0.12), Color.orange.opacity(0.08)],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+                    .frame(width: 72, height: 72)
 
-            Text("Set up the AI brain")
-                .font(.title2)
-                .fontWeight(.semibold)
+                Image(systemName: "brain.head.profile")
+                    .font(.system(size: 32))
+                    .foregroundColor(.orange)
+            }
 
-            Text("AgentHandover uses a local AI model to understand what's on your screen. This runs entirely on your Mac.")
-                .font(.body)
+            Text("Set up your local AI")
+                .font(titleFont)
+
+            Text("A small AI model runs on your Mac to understand what's on your screen.")
+                .font(bodyFont)
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: 440)
@@ -520,7 +788,7 @@ struct OnboardingView: View {
     // MARK: - Local VLM Content
 
     private var localVLMContent: some View {
-        VStack(spacing: 8) {
+        VStack(spacing: 10) {
             let ollamaInstalled = isOllamaInstalled()
 
             if ollamaInstalled {
@@ -531,31 +799,35 @@ struct OnboardingView: View {
                 )
 
                 if vlmPullInProgress {
-                    VStack(spacing: 4) {
+                    VStack(spacing: 6) {
                         ProgressView()
                             .progressViewStyle(.circular)
                             .controlSize(.small)
                         Text("Pulling models...")
-                            .font(.caption)
+                            .font(.system(size: 12))
                             .foregroundColor(.secondary)
                         if !vlmPullOutput.isEmpty {
                             Text(vlmPullOutput)
-                                .font(.caption2)
-                                .fontDesign(.monospaced)
+                                .font(.system(size: 11, design: .monospaced))
                                 .foregroundColor(.secondary)
                                 .lineLimit(2)
                         }
                     }
                 } else {
                     VStack(alignment: .leading, spacing: 8) {
-                        Text("Recommended models (~6 GB total):")
-                            .font(.caption)
-                            .fontWeight(.semibold)
+                        HStack(spacing: 6) {
+                            Image(systemName: "arrow.down.circle.fill")
+                                .foregroundColor(.accentColor)
+                                .font(.system(size: 14))
+                            Text("~6 GB download \u{00B7} Runs on Apple Silicon")
+                                .font(.system(size: 12))
+                                .foregroundColor(.secondary)
+                        }
 
                         VStack(alignment: .leading, spacing: 4) {
-                            modelRow("qwen3.5:2b", "2.7 GB", "Screen annotation -- reads your screen and describes what you're doing")
-                            modelRow("qwen3.5:4b", "3.4 GB", "SOP generation -- writes step-by-step procedures from observations")
-                            modelRow("all-minilm:l6-v2", "45 MB", "Task matching -- groups similar work together")
+                            modelRow("qwen3.5:2b", "2.7 GB", "Screen annotation \u{2014} reads your screen and describes what you're doing")
+                            modelRow("qwen3.5:4b", "3.4 GB", "SOP generation \u{2014} writes step-by-step procedures from observations")
+                            modelRow("all-minilm:l6-v2", "45 MB", "Task matching \u{2014} groups similar work together")
                         }
 
                         Button("Pull All Recommended Models") {
@@ -563,28 +835,30 @@ struct OnboardingView: View {
                         }
                         .buttonStyle(.borderedProminent)
 
-                        Text("Or use any Ollama-compatible model -- edit annotation_model and sop_model in config.toml after setup.")
-                            .font(.caption2)
+                        Text("Or use any Ollama-compatible model \u{2014} edit annotation_model and sop_model in config.toml after setup.")
+                            .font(.system(size: 11))
                             .foregroundColor(.secondary)
                             .frame(maxWidth: 380)
                     }
                     .frame(maxWidth: 440)
                 }
             } else {
-                Text("Ollama not installed")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
+                VStack(spacing: 8) {
+                    Text("Ollama not installed")
+                        .font(.system(size: 12))
+                        .foregroundColor(.secondary)
 
-                Button("Download Ollama") {
-                    if let url = URL(string: "https://ollama.com/download/mac") {
-                        NSWorkspace.shared.open(url)
+                    Button("Download Ollama") {
+                        if let url = URL(string: "https://ollama.com/download/mac") {
+                            NSWorkspace.shared.open(url)
+                        }
                     }
-                }
-                .buttonStyle(.bordered)
+                    .buttonStyle(.bordered)
 
-                Text("Or install via: brew install ollama")
-                    .font(.caption2)
-                    .foregroundColor(.secondary)
+                    Text("Or install via: brew install ollama")
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundColor(.secondary)
+                }
             }
         }
     }
@@ -600,11 +874,10 @@ struct OnboardingView: View {
                         Image(systemName: "exclamationmark.triangle.fill")
                             .foregroundColor(.orange)
                         Text("Privacy Notice")
-                            .font(.caption)
-                            .fontWeight(.semibold)
+                            .font(.system(size: 12, weight: .semibold))
                     }
                     Text("Cloud VLM sends screenshots of your desktop to a third-party API for analysis. Only enable this if you accept this trade-off.")
-                        .font(.caption2)
+                        .font(.system(size: 11))
                         .foregroundColor(.secondary)
                         .multilineTextAlignment(.center)
                         .frame(maxWidth: 350)
@@ -630,7 +903,7 @@ struct OnboardingView: View {
                 // Model selection
                 HStack(spacing: 8) {
                     Text("Model:")
-                        .font(.caption)
+                        .font(.system(size: 12))
                         .foregroundColor(.secondary)
                     TextField("Model name", text: $customModelName)
                         .textFieldStyle(.roundedBorder)
@@ -638,7 +911,7 @@ struct OnboardingView: View {
                 }
 
                 Text("Default: \(selectedProvider.defaultModel)")
-                    .font(.caption2)
+                    .font(.system(size: 11))
                     .foregroundColor(.secondary)
 
                 // API Key input
@@ -647,7 +920,7 @@ struct OnboardingView: View {
                     .frame(maxWidth: 300)
 
                 Text("Stored securely in macOS Keychain")
-                    .font(.caption2)
+                    .font(.system(size: 11))
                     .foregroundColor(.secondary)
 
                 // Save & Test button
@@ -750,40 +1023,49 @@ struct OnboardingView: View {
         try? content.write(to: configPath, atomically: true, encoding: .utf8)
     }
 
-    // MARK: - Step 4: Chrome Extension (Optional)
+    // MARK: - Screen 7: Browser Extension (Optional)
 
     private var chromeExtensionStep: some View {
-        VStack(spacing: 16) {
-            HStack(spacing: 6) {
-                Image(systemName: "globe.badge.chevron.backward")
-                    .font(.system(size: 48))
-                    .foregroundColor(.accentColor)
-            }
+        VStack(spacing: sectionSpacing) {
+            HStack(spacing: 8) {
+                Text("Supercharge browser workflows")
+                    .font(titleFont)
 
-            Text("Supercharge with browser context")
-                .font(.title2)
-                .fontWeight(.semibold)
-
-            HStack(spacing: 6) {
                 Text("Optional")
-                    .font(.caption)
-                    .fontWeight(.semibold)
+                    .font(.system(size: 11, weight: .medium))
                     .padding(.horizontal, 8)
-                    .padding(.vertical, 2)
+                    .padding(.vertical, 3)
                     .background(
                         RoundedRectangle(cornerRadius: 4)
-                            .fill(Color.secondary.opacity(0.15))
+                            .fill(Color.secondary.opacity(0.12))
                     )
                     .foregroundColor(.secondary)
             }
 
-            Text("The Chrome extension adds CSS selectors, form fields, and page structure to your procedures -- making them more precise for browser automation.")
-                .font(.body)
-                .foregroundColor(.secondary)
-                .multilineTextAlignment(.center)
-                .frame(maxWidth: 440)
+            // Explanation card
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 10) {
+                    Image(systemName: "globe.badge.chevron.backward")
+                        .font(.system(size: 24))
+                        .foregroundColor(.accentColor)
 
-            // Connection status
+                    Text("Adds CSS selectors, form field names, and page structure to your procedures \u{2014} making browser automation more precise.")
+                        .font(bodyFont)
+                        .foregroundColor(.secondary)
+                }
+            }
+            .padding(cardPadding)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: cardRadius)
+                    .fill(cardBackground)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: cardRadius)
+                    .stroke(Color.secondary.opacity(0.1), lineWidth: 1)
+            )
+
+            // Connection status and install
             if appState.extensionConnected {
                 PermissionStatusBadge(
                     granted: true,
@@ -791,107 +1073,92 @@ struct OnboardingView: View {
                     deniedLabel: ""
                 )
             } else {
-                // Show extension path
                 if !extensionPath.isEmpty {
-                    VStack(spacing: 8) {
+                    VStack(spacing: 10) {
                         Text("Extension location:")
-                            .font(.caption)
+                            .font(.system(size: 12))
                             .foregroundColor(.secondary)
+
                         Text(extensionPath)
-                            .font(.caption)
-                            .fontDesign(.monospaced)
+                            .font(.system(size: 11, design: .monospaced))
                             .textSelection(.enabled)
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 4)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 6)
                             .background(
-                                RoundedRectangle(cornerRadius: 4)
-                                    .fill(Color.secondary.opacity(0.1))
+                                RoundedRectangle(cornerRadius: 6)
+                                    .fill(Color.secondary.opacity(0.08))
                             )
-                    }
 
-                    Button("Copy Path & Open Chrome") {
-                        copyPathAndOpenChrome()
-                    }
-                    .buttonStyle(.bordered)
+                        Button("Copy Path & Open Chrome") {
+                            copyPathAndOpenChrome()
+                        }
+                        .buttonStyle(.bordered)
 
-                    if let error = chromeOpenError {
-                        Text(error)
-                            .font(.caption)
-                            .foregroundColor(.red)
-                    }
+                        if let error = chromeOpenError {
+                            Text(error)
+                                .font(.system(size: 12))
+                                .foregroundColor(.red)
+                        }
 
-                    VStack(alignment: .leading, spacing: 4) {
-                        instructionRow(number: "1", text: "Enable Developer Mode (top-right toggle)")
-                        instructionRow(number: "2", text: "Click \"Load Unpacked\"")
-                        instructionRow(number: "3", text: "Paste path (Cmd+V) and click Select")
-                    }
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                } else {
-                    Text("Extension files not found. Install via:")
-                        .font(.caption)
+                        VStack(alignment: .leading, spacing: 4) {
+                            instructionRow(number: "1", text: "Enable Developer Mode (top-right toggle)")
+                            instructionRow(number: "2", text: "Click \"Load Unpacked\"")
+                            instructionRow(number: "3", text: "Paste path (Cmd+V) and click Select")
+                        }
+                        .font(.system(size: 12))
                         .foregroundColor(.secondary)
-                    Text("brew install --HEAD agenthandover")
-                        .font(.caption)
-                        .fontDesign(.monospaced)
-                        .textSelection(.enabled)
+                    }
+                } else {
+                    VStack(spacing: 6) {
+                        Text("Extension files not found. Install via:")
+                            .font(.system(size: 12))
+                            .foregroundColor(.secondary)
+                        Text("brew install --HEAD agenthandover")
+                            .font(.system(size: 12, design: .monospaced))
+                            .textSelection(.enabled)
+                    }
                 }
             }
         }
     }
 
-    // MARK: - Step 5: Summary
-
-    private var summaryStep: some View {
-        VStack(spacing: 20) {
-            Image(systemName: "checkmark.seal.fill")
-                .font(.system(size: 48))
-                .foregroundStyle(
-                    LinearGradient(
-                        colors: [.green, .mint],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    )
-                )
-
-            Text("Setup complete")
-                .font(.title2)
-                .fontWeight(.semibold)
-
-            VStack(spacing: 8) {
-                summaryRow(label: "Accessibility", ok: appState.accessibilityGranted)
-                summaryRow(label: "Screen Recording", ok: appState.screenRecordingGranted)
-                summaryRow(label: "AI Model", ok: appState.vlmAvailable)
-                summaryRow(label: "Chrome Extension", ok: appState.extensionConnected, optional: true)
-            }
-            .padding(.horizontal, 20)
-        }
-    }
-
-    // MARK: - Step 6: Ready — First Recording
+    // MARK: - Screen 8: Ready — First Recording
 
     private var readyStep: some View {
-        VStack(spacing: 20) {
-            Text("You're all set!")
-                .font(.title2)
-                .fontWeight(.bold)
+        VStack(spacing: sectionSpacing) {
+            Text("You're ready!")
+                .font(.system(size: 26, weight: .semibold))
 
-            // Primary: Record first workflow
+            // Summary checks
+            HStack(spacing: 16) {
+                readinessChip(
+                    icon: "checkmark.shield.fill",
+                    label: "Permissions",
+                    ok: appState.accessibilityGranted && appState.screenRecordingGranted
+                )
+                readinessChip(
+                    icon: "brain.head.profile",
+                    label: "AI Model",
+                    ok: appState.vlmAvailable
+                )
+                readinessChip(
+                    icon: "globe",
+                    label: "Extension",
+                    ok: appState.extensionConnected,
+                    optional: true
+                )
+            }
+
+            // Main recording card
             VStack(spacing: 14) {
-                Image(systemName: "record.circle")
-                    .font(.system(size: 28))
-                    .foregroundColor(.red)
-
                 Text("Record your first workflow")
-                    .font(.headline)
+                    .font(.system(size: 16, weight: .semibold))
 
-                Text("What's something you do regularly? Type a name and we'll record you doing it.")
-                    .font(.caption)
+                Text("What's something you do regularly?")
+                    .font(.system(size: 13))
                     .foregroundColor(.secondary)
-                    .multilineTextAlignment(.center)
-                    .frame(maxWidth: 340)
 
-                TextField("e.g. \"Process expense report\"", text: $firstRecordingTitle)
+                TextField("e.g. File expense report", text: $firstRecordingTitle)
                     .textFieldStyle(.roundedBorder)
                     .frame(maxWidth: 320)
 
@@ -899,8 +1166,11 @@ struct OnboardingView: View {
                     startServicesAndRecord()
                 } label: {
                     HStack(spacing: 6) {
-                        Image(systemName: "record.circle")
+                        Circle()
+                            .fill(Color.red)
+                            .frame(width: 10, height: 10)
                         Text("Start Recording")
+                            .fontWeight(.medium)
                     }
                 }
                 .buttonStyle(.borderedProminent)
@@ -913,52 +1183,67 @@ struct OnboardingView: View {
                 )
             }
             .padding(20)
+            .frame(maxWidth: .infinity)
             .background(
                 RoundedRectangle(cornerRadius: 14)
-                    .fill(Color.secondary.opacity(0.06))
+                    .fill(cardBackground)
             )
             .overlay(
                 RoundedRectangle(cornerRadius: 14)
-                    .stroke(Color.secondary.opacity(0.12), lineWidth: 1)
+                    .stroke(Color.secondary.opacity(0.1), lineWidth: 1)
             )
 
             // Secondary: Just start observing
-            VStack(spacing: 6) {
-                Text("or")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-
-                Button("Just start observing") {
-                    startServicesOnly()
-                }
-                .foregroundColor(.accentColor)
-                .buttonStyle(.plain)
-                .font(.callout)
+            Button("Or start observing \u{2192}") {
+                startServicesOnly()
             }
+            .foregroundColor(.accentColor)
+            .buttonStyle(.plain)
+            .font(.system(size: 13))
 
             if serviceStartFailed {
                 Text("Services may not have started. Check agenthandover status in Terminal.")
-                    .font(.caption2)
+                    .font(.system(size: 11))
                     .foregroundColor(.red)
             } else if !appState.accessibilityGranted {
-                Text("Accessibility permission is required (go back to step 3)")
-                    .font(.caption2)
+                Text("Accessibility permission is required (go back to step 5)")
+                    .font(.system(size: 11))
                     .foregroundColor(.orange)
             } else if !appState.vlmAvailable {
-                Text("An AI model must be configured (go back to step 4)")
-                    .font(.caption2)
+                Text("An AI model must be configured (go back to step 6)")
+                    .font(.system(size: 11))
                     .foregroundColor(.orange)
             }
 
             HStack(spacing: 4) {
-                Text("AgentHandover will run quietly in your menu bar")
-                    .font(.caption2)
-                    .foregroundColor(.secondary)
+                Text("AgentHandover lives in your menu bar")
+                    .font(.system(size: 11))
+                    .foregroundColor(smallNoteColor)
                 Image(systemName: "arrow.up.right")
-                    .font(.caption2)
-                    .foregroundColor(.secondary)
+                    .font(.system(size: 10))
+                    .foregroundColor(smallNoteColor)
+                Text("\u{2014} that's your control center")
+                    .font(.system(size: 11))
+                    .foregroundColor(smallNoteColor)
             }
         }
+    }
+
+    private func readinessChip(icon: String, label: String, ok: Bool, optional: Bool = false) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: ok ? "checkmark.circle.fill" : (optional ? "minus.circle" : "xmark.circle.fill"))
+                .font(.system(size: 14))
+                .foregroundColor(ok ? .green : (optional ? .secondary.opacity(0.5) : .orange))
+            Text(label)
+                .font(.system(size: 12))
+                .foregroundColor(ok ? .primary : .secondary)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(ok ? Color.green.opacity(0.06) : cardBackground)
+        )
     }
 
     // MARK: - Actions
@@ -1128,19 +1413,17 @@ struct OnboardingView: View {
         HStack(alignment: .top, spacing: 8) {
             Text("\u{2022}")
                 .foregroundColor(.orange)
-                .font(.caption)
+                .font(.system(size: 12))
             VStack(alignment: .leading, spacing: 1) {
                 HStack(spacing: 6) {
                     Text(name)
-                        .font(.caption)
-                        .fontWeight(.medium)
-                        .fontDesign(.monospaced)
+                        .font(.system(size: 12, weight: .medium, design: .monospaced))
                     Text(size)
-                        .font(.caption2)
+                        .font(.system(size: 11))
                         .foregroundColor(.secondary)
                 }
                 Text(description)
-                    .font(.caption2)
+                    .font(.system(size: 11))
                     .foregroundColor(.secondary)
             }
         }
@@ -1222,30 +1505,6 @@ struct OnboardingView: View {
             Text(text)
         }
     }
-
-    private func summaryRow(label: String, ok: Bool, optional: Bool = false) -> some View {
-        HStack(spacing: 6) {
-            Image(systemName: ok ? "checkmark.circle.fill" : (optional ? "minus.circle" : "xmark.circle.fill"))
-                .foregroundColor(ok ? .green : (optional ? .secondary : .orange))
-            Text(label)
-                .font(.caption)
-            Spacer()
-            if ok {
-                Text("Ready")
-                    .font(.caption2)
-                    .foregroundColor(.green)
-            } else if optional {
-                Text("Skipped")
-                    .font(.caption2)
-                    .foregroundColor(.secondary)
-            } else {
-                Text("Not Set Up")
-                    .font(.caption2)
-                    .foregroundColor(.orange)
-            }
-        }
-        .padding(.horizontal, 40)
-    }
 }
 
 // MARK: - Models
@@ -1314,7 +1573,7 @@ struct PermissionStatusBadge: View {
             Image(systemName: granted ? "checkmark.circle.fill" : "xmark.circle.fill")
                 .foregroundColor(granted ? .green : .orange)
             Text(granted ? grantedLabel : deniedLabel)
-                .font(.caption)
+                .font(.system(size: 12))
                 .foregroundColor(granted ? .green : .orange)
         }
         .padding(.horizontal, 12)
