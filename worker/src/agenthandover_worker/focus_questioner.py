@@ -62,7 +62,7 @@ class FocusQAResult:
 FOCUS_QUESTIONS_FILE = "focus-questions.json"
 FOCUS_PENDING_FILE = "focus-pending.json"
 
-_VALID_CATEGORIES = frozenset({
+_LEGACY_MERGE_CATEGORIES = frozenset({
     "credentials", "strategy", "decision", "verification", "scope",
 })
 
@@ -74,14 +74,16 @@ _MAX_QUESTIONS = 3
 # ---------------------------------------------------------------------------
 
 _QUESTIONER_SYSTEM = """\
-You are an analyst reviewing a newly recorded workflow demonstration. \
-Your job is to identify 1-3 critical gaps that would prevent an agent \
-from executing this workflow reliably. \
+You are an AI agent that has been given a workflow to execute autonomously. \
+Before you can execute it, you need to identify what's missing or unclear. \
+Think practically: what would YOU need to know to do this task reliably \
+on your own, without the human watching? \
 Respond with ONLY valid JSON. No markdown fences, no commentary."""
 
 
 _QUESTIONER_PROMPT = """\
-A user just recorded a workflow demonstration. Below is the generated procedure.
+You are an AI agent about to execute this workflow autonomously. \
+A human just recorded themselves doing it. Here is what was captured:
 
 TITLE: {title}
 DESCRIPTION: {description}
@@ -94,38 +96,34 @@ APPS INVOLVED: {apps}
 URLS DETECTED: {urls}
 INPUTS/VARIABLES: {variables}
 
-Analyze this procedure for gaps an agent would need answered. \
-Consider these categories:
+Put yourself in the agent's position. Think step by step:
+- Could you actually execute each step with the information given?
+- Do you know WHERE to do things (which app, which URL, which page)?
+- Do you know HOW to make decisions the human made implicitly?
+- Do you know WHEN you're done and whether you succeeded?
+- Do you have ACCESS to everything you'd need (logins, permissions, data)?
 
-1. "credentials" — Does this workflow require logging in? \
-   (Flag if browser URLs detected but no login/auth step is recorded.)
-2. "strategy" — Is the overall goal clear? \
-   (Flag if the strategy field is empty or vague.)
-3. "decision" — Are there branch/decision points where the condition is unclear? \
-   (Flag if steps imply choices but the criteria aren't stated.)
-4. "verification" — What does "done" look like? \
-   (Flag if no expected outcome or success criteria are defined.)
-5. "scope" — Should this run on a schedule or is it one-off? \
-   (Flag if timing patterns or recurrence seem relevant.)
+Identify 1-3 questions that would be MOST practically useful for you \
+as the executing agent. Do not ask generic questions. Ask specific, \
+practical questions grounded in what you see in the steps above.
 
 Return a JSON object:
 {{
   "questions": [
     {{
-      "question": "<clear, specific question for the user>",
-      "category": "<one of: credentials, strategy, decision, verification, scope>",
-      "context": "<why this gap matters for reliable agent execution>",
-      "default": "<reasonable default if user skips>"
+      "question": "<specific, practical question you need answered>",
+      "category": "<short label: e.g. access, data_source, decision_logic, output_format, error_handling, verification, scheduling, permissions, or any other relevant label>",
+      "context": "<why you need this to execute reliably>",
+      "default": "<your best guess if the human doesn't answer>"
     }}
   ]
 }}
 
 Rules:
-- Return 1-3 questions MAXIMUM. Only ask about genuine gaps.
-- If the procedure is complete and clear, return {{"questions": []}}
-- Questions must be specific to THIS workflow, not generic.
-- Defaults should be conservative (e.g. "No login required" for credentials).
-- Do not ask about things already covered in the steps or strategy.
+- Ask 1-3 questions MAXIMUM. Only what truly blocks reliable execution.
+- If you could execute this workflow as-is, return {{"questions": []}}
+- Every question must reference specific steps or details from above.
+- Defaults should be your most conservative practical assumption.
 
 Respond with ONLY the JSON object."""
 
@@ -247,8 +245,8 @@ class FocusQuestioner:
 
             if not question_text:
                 continue
-            if category not in _VALID_CATEGORIES:
-                category = "strategy"  # safe fallback
+            if not category:
+                category = "general"
             if not default:
                 default = "Not specified"
 
@@ -292,16 +290,28 @@ class FocusQuestioner:
             if not answer:
                 answer = q.default
 
-            if q.category == "credentials":
+            cat = q.category.lower().replace(" ", "_")
+
+            # Known categories merge into specific procedure fields
+            if cat in ("credentials", "access", "login", "auth", "permissions"):
                 self._merge_credentials(proc, answer, q)
-            elif q.category == "strategy":
+            elif cat in ("strategy", "goal", "purpose", "approach"):
                 self._merge_strategy(proc, answer)
-            elif q.category == "decision":
+            elif cat in ("decision", "decision_logic", "branching", "condition"):
                 self._merge_decision(proc, answer, q)
-            elif q.category == "verification":
+            elif cat in ("verification", "success", "done", "outcome", "output_format"):
                 self._merge_verification(proc, answer)
-            elif q.category == "scope":
+            elif cat in ("scope", "scheduling", "recurrence", "frequency"):
                 self._merge_scope(proc, answer)
+            else:
+                # Open-ended category — store as agent clarification
+                clarifications = proc.setdefault("agent_clarifications", [])
+                clarifications.append({
+                    "category": q.category,
+                    "question": q.question,
+                    "answer": answer,
+                    "context": q.context,
+                })
 
         return proc
 

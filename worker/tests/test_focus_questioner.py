@@ -163,12 +163,13 @@ class TestGenerateQuestions:
         questions = questioner.generate_questions(_make_procedure())
         assert questions == []
 
-    def test_invalid_category_defaults_to_strategy(self):
+    def test_open_category_preserved(self):
+        """Non-standard categories are kept as-is (not forced to a fixed set)."""
         llm_response = {
             "questions": [
                 {
                     "question": "What happens next?",
-                    "category": "invalid_category",
+                    "category": "error_handling",
                     "context": "test",
                     "default": "default",
                 }
@@ -179,7 +180,7 @@ class TestGenerateQuestions:
 
         questions = questioner.generate_questions(_make_procedure())
         assert len(questions) == 1
-        assert questions[0].category == "strategy"
+        assert questions[0].category == "error_handling"
 
     def test_empty_question_text_filtered(self):
         llm_response = {
