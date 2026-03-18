@@ -40,7 +40,7 @@ struct AgentHandoverApp: App {
                 hasCompletedOnboarding = true
             })
                 .environmentObject(appState)
-                .frame(width: 520, height: 520)
+                .frame(width: 600, height: 620)
         }
         .windowResizability(.contentSize)
 

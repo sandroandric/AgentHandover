@@ -2,8 +2,8 @@ import SwiftUI
 
 /// Step-by-step onboarding for first-run setup.
 ///
-/// 6 steps: Welcome → Accessibility → Screen Recording → Chrome Extension →
-/// VLM Setup (optional) → Ready to Go!
+/// 7 steps: Welcome → How It Works → Permissions → AI Model → Browser Extension →
+/// Ready (First Recording)
 struct OnboardingView: View {
     @EnvironmentObject var appState: AppState
     @State private var currentStep = 0
@@ -59,14 +59,17 @@ struct OnboardingView: View {
     @State private var apiKeyValid: Bool? = nil
     @State private var remoteConsentGiven = false
 
+    // Focus recording from onboarding
+    @State private var firstRecordingTitle: String = ""
+
     /// Called when onboarding completes (sets hasCompletedOnboarding).
     var onComplete: (() -> Void)?
 
-    private let totalSteps = 6
+    private let totalSteps = 7
 
     var body: some View {
         VStack(spacing: 0) {
-            // Progress indicators
+            // Progress dots
             HStack(spacing: 8) {
                 ForEach(0..<totalSteps, id: \.self) { index in
                     Circle()
@@ -85,79 +88,108 @@ struct OnboardingView: View {
             Spacer()
 
             // Navigation
-            HStack {
-                if currentStep > 0 {
-                    Button("Back") {
-                        withAnimation { currentStep -= 1 }
-                    }
-                }
-
-                Spacer()
-
-                if currentStep < totalSteps - 1 {
-                    let vlmStep = 4
-                    let vlmBlocked = currentStep == vlmStep && !appState.vlmAvailable
-
-                    VStack(spacing: 2) {
-                        Button("Next") {
-                            withAnimation { currentStep += 1 }
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(vlmBlocked)
-
-                        if vlmBlocked {
-                            Text("Set up an AI model above to continue")
-                                .font(.caption2)
-                                .foregroundColor(.orange)
-                        }
-                    }
-                } else {
-                    VStack(spacing: 4) {
-                        Button("Start Observing") {
-                            let ok = ServiceController.startAll()
-                            if ok {
-                                onComplete?()
-                                NSApplication.shared.keyWindow?.close()
-                            } else {
-                                serviceStartFailed = true
-                            }
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(!appState.accessibilityGranted || !appState.vlmAvailable)
-
-                        if serviceStartFailed {
-                            Text("Services may not have started. Check agenthandover status in Terminal.")
-                                .font(.caption2)
-                                .foregroundColor(.red)
-                        } else if !appState.accessibilityGranted {
-                            Text("Accessibility permission is required to start observing")
-                                .font(.caption2)
-                                .foregroundColor(.orange)
-                        } else if !appState.vlmAvailable {
-                            Text("An AI model must be configured before observing (go back to step 5)")
-                                .font(.caption2)
-                                .foregroundColor(.orange)
-                        } else if appState.extensionConnected {
-                            HStack(spacing: 4) {
-                                Image(systemName: "checkmark.circle.fill")
-                                    .foregroundColor(.green)
-                                Text("Extension Connected — browser events enabled")
-                                    .foregroundColor(.green)
-                            }
-                            .font(.caption2)
-                        } else {
-                            Text("Chrome extension not connected — native capture will work, browser events require the extension")
-                                .font(.caption2)
-                                .foregroundColor(.secondary)
-                        }
-                    }
-                }
-            }
-            .padding(.horizontal, 40)
-            .padding(.bottom, 24)
+            navigationBar
+                .padding(.horizontal, 40)
+                .padding(.bottom, 24)
         }
         .onAppear {
             resolveExtensionPath()
+        }
+    }
+
+    // MARK: - Navigation Bar
+
+    private var navigationBar: some View {
+        HStack {
+            if currentStep > 0 {
+                Button("Back") {
+                    withAnimation { currentStep -= 1 }
+                }
+            }
+
+            Spacer()
+
+            switch currentStep {
+            case 0:
+                // Welcome — single CTA
+                Button("Get Started") {
+                    withAnimation { currentStep += 1 }
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+
+            case 1:
+                // How it works
+                Button("Next -- Let's set up") {
+                    withAnimation { currentStep += 1 }
+                }
+                .buttonStyle(.borderedProminent)
+
+            case 2:
+                // Permissions — blocked until both granted, with skip option
+                VStack(spacing: 4) {
+                    Button("Next") {
+                        withAnimation { currentStep += 1 }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!appState.accessibilityGranted || !appState.screenRecordingGranted)
+
+                    if !appState.accessibilityGranted || !appState.screenRecordingGranted {
+                        Button("Skip for now") {
+                            withAnimation { currentStep += 1 }
+                        }
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .buttonStyle(.plain)
+                    }
+                }
+
+            case 3:
+                // VLM Setup — blocked until model ready
+                VStack(spacing: 2) {
+                    Button("Next") {
+                        withAnimation { currentStep += 1 }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!appState.vlmAvailable)
+
+                    if !appState.vlmAvailable {
+                        Text("Set up an AI model above to continue")
+                            .font(.caption2)
+                            .foregroundColor(.orange)
+                    }
+                }
+
+            case 4:
+                // Browser extension — optional
+                HStack(spacing: 12) {
+                    Button("Skip for now") {
+                        withAnimation { currentStep += 1 }
+                    }
+                    .foregroundColor(.secondary)
+                    .buttonStyle(.plain)
+                    .font(.caption)
+
+                    Button("Next") {
+                        withAnimation { currentStep += 1 }
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+
+            case 5:
+                // Summary — next to final
+                Button("Next") {
+                    withAnimation { currentStep += 1 }
+                }
+                .buttonStyle(.borderedProminent)
+
+            case 6:
+                // Ready — final step with actions
+                EmptyView()
+
+            default:
+                EmptyView()
+            }
         }
     }
 
@@ -167,11 +199,12 @@ struct OnboardingView: View {
     private func stepContent(for step: Int) -> some View {
         switch step {
         case 0: welcomeStep
-        case 1: accessibilityStep
-        case 2: screenRecordingStep
-        case 3: chromeExtensionStep
-        case 4: vlmSetupStep
-        case 5: readyStep
+        case 1: howItWorksStep
+        case 2: permissionsStep
+        case 3: vlmSetupStep
+        case 4: chromeExtensionStep
+        case 5: summaryStep
+        case 6: readyStep
         default: EmptyView()
         }
     }
@@ -179,173 +212,269 @@ struct OnboardingView: View {
     // MARK: - Step 0: Welcome
 
     private var welcomeStep: some View {
-        VStack(spacing: 16) {
-            Image(systemName: "briefcase.fill")
-                .font(.system(size: 48))
-                .foregroundColor(.orange)
-
-            Text("Welcome to AgentHandover")
-                .font(.title2)
-                .fontWeight(.semibold)
-
-            Text("Watch your screen. Learn your workflows. Hand them to agents.")
-                .font(.headline)
-                .foregroundColor(.primary)
-                .multilineTextAlignment(.center)
-                .frame(maxWidth: 400)
-
-            Text("AgentHandover silently observes your work, learns repeatable patterns, and produces procedure files that AI agents like Claude Code and OpenClaw can follow.")
-                .font(.body)
-                .foregroundColor(.secondary)
-                .multilineTextAlignment(.center)
-                .frame(maxWidth: 400)
-        }
-    }
-
-    // MARK: - Step 1: Accessibility
-
-    private var accessibilityStep: some View {
-        VStack(spacing: 16) {
-            Image(systemName: "hand.raised.circle.fill")
-                .font(.system(size: 48))
-                .foregroundColor(.accentColor)
-
-            Text("Accessibility Permission")
-                .font(.title2)
-                .fontWeight(.semibold)
-
-            Text("AgentHandover needs Accessibility access to observe window titles and UI elements. This is read-only — it never takes actions.")
-                .font(.body)
-                .foregroundColor(.secondary)
-                .multilineTextAlignment(.center)
-                .frame(maxWidth: 400)
-
-            PermissionStatusBadge(
-                granted: appState.accessibilityGranted,
-                grantedLabel: "Accessibility Granted",
-                deniedLabel: "Accessibility Not Granted"
-            )
-
-            if !appState.accessibilityGranted {
-                Button("Grant Accessibility Access") {
-                    PermissionChecker.requestAccessibility()
-                }
-                .buttonStyle(.bordered)
-            }
-        }
-    }
-
-    // MARK: - Step 2: Screen Recording
-
-    private var screenRecordingStep: some View {
-        VStack(spacing: 16) {
-            Image(systemName: "rectangle.dashed.badge.record")
-                .font(.system(size: 48))
-                .foregroundColor(.accentColor)
-
-            Text("Screen Recording Permission")
-                .font(.title2)
-                .fontWeight(.semibold)
-
-            Text("Screen Recording access allows AgentHandover to capture screenshots for visual context. Images are stored locally and encrypted.")
-                .font(.body)
-                .foregroundColor(.secondary)
-                .multilineTextAlignment(.center)
-                .frame(maxWidth: 400)
-
-            PermissionStatusBadge(
-                granted: appState.screenRecordingGranted,
-                grantedLabel: "Screen Recording Granted",
-                deniedLabel: "Screen Recording Not Granted"
-            )
-
-            if !appState.screenRecordingGranted {
-                Button("Open Screen Recording Settings") {
-                    PermissionChecker.openScreenRecordingSettings()
-                }
-                .buttonStyle(.bordered)
-            }
-        }
-    }
-
-    // MARK: - Step 3: Chrome Extension (Enhanced)
-
-    private var chromeExtensionStep: some View {
-        VStack(spacing: 16) {
-            Image(systemName: "globe.badge.chevron.backward")
-                .font(.system(size: 48))
-                .foregroundColor(.accentColor)
-
-            Text("Chrome Extension")
-                .font(.title2)
-                .fontWeight(.semibold)
-
-            Text("Install the AgentHandover Chrome extension for rich browser observation.")
-                .font(.body)
-                .foregroundColor(.secondary)
-                .multilineTextAlignment(.center)
-                .frame(maxWidth: 400)
-
-            // Connection status
-            if appState.extensionConnected {
-                PermissionStatusBadge(
-                    granted: true,
-                    grantedLabel: "Extension Connected",
-                    deniedLabel: ""
+        VStack(spacing: 20) {
+            Image(systemName: "binoculars.fill")
+                .font(.system(size: 56))
+                .foregroundStyle(
+                    LinearGradient(
+                        colors: [.orange, .yellow],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
                 )
-            } else {
-                // Show extension path
-                if !extensionPath.isEmpty {
-                    VStack(spacing: 8) {
-                        Text("Extension location:")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                        Text(extensionPath)
-                            .font(.caption)
-                            .fontDesign(.monospaced)
-                            .textSelection(.enabled)
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 4)
-                            .background(
-                                RoundedRectangle(cornerRadius: 4)
-                                    .fill(Color.secondary.opacity(0.1))
-                            )
-                    }
+                .padding(.bottom, 4)
 
-                    // Copy path + open Chrome button
-                    Button("Copy Path & Open Chrome") {
-                        copyPathAndOpenChrome()
-                    }
-                    .buttonStyle(.bordered)
+            Text("AgentHandover")
+                .font(.largeTitle)
+                .fontWeight(.bold)
 
-                    if let error = chromeOpenError {
-                        Text(error)
-                            .font(.caption)
-                            .foregroundColor(.red)
-                    }
+            Text("Your work, turned into agent instructions")
+                .font(.title3)
+                .foregroundColor(.secondary)
+                .multilineTextAlignment(.center)
 
-                    // Instructions
-                    VStack(alignment: .leading, spacing: 4) {
-                        instructionRow(number: "1", text: "Enable Developer Mode (top-right toggle)")
-                        instructionRow(number: "2", text: "Click \"Load Unpacked\"")
-                        instructionRow(number: "3", text: "Paste path (Cmd+V) and click Select")
-                    }
+            VStack(alignment: .leading, spacing: 14) {
+                valueBullet(
+                    icon: "magnifyingglass",
+                    color: .blue,
+                    text: "Silently watches your screen as you work"
+                )
+                valueBullet(
+                    icon: "brain.head.profile",
+                    color: .purple,
+                    text: "Learns your repeatable workflows automatically"
+                )
+                valueBullet(
+                    icon: "list.clipboard",
+                    color: .green,
+                    text: "Produces step-by-step procedures agents can follow"
+                )
+            }
+            .padding(.vertical, 8)
+
+            HStack(spacing: 6) {
+                Image(systemName: "lock.shield.fill")
+                    .foregroundColor(.green)
+                    .font(.caption)
+                Text("Everything runs locally on your Mac. Nothing leaves your machine.")
                     .font(.caption)
                     .foregroundColor(.secondary)
-                } else {
-                    Text("Extension files not found. Install via:")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                    Text("brew install --HEAD agenthandover")
-                        .font(.caption)
-                        .fontDesign(.monospaced)
-                        .textSelection(.enabled)
-                }
             }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
+            .background(
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(Color.green.opacity(0.08))
+            )
         }
     }
 
-    // MARK: - Step 4: VLM Setup (Required)
+    private func valueBullet(icon: String, color: Color, text: String) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: icon)
+                .font(.title3)
+                .foregroundColor(color)
+                .frame(width: 28)
+            Text(text)
+                .font(.body)
+        }
+    }
+
+    // MARK: - Step 1: How It Works
+
+    private var howItWorksStep: some View {
+        VStack(spacing: 20) {
+            Text("Two ways to teach")
+                .font(.title2)
+                .fontWeight(.semibold)
+
+            HStack(spacing: 16) {
+                // Focus Recording card
+                modeCard(
+                    icon: "record.circle",
+                    iconColor: .red,
+                    title: "Focus Recording",
+                    badge: "Start here",
+                    badgeColor: .orange,
+                    bullets: [
+                        "Record a specific task",
+                        "Click Record \u{2192} do the workflow \u{2192} Stop",
+                        "Get a procedure in ~60 seconds",
+                        "Best for: your most important 5-10 tasks",
+                    ]
+                )
+
+                // Passive Discovery card
+                modeCard(
+                    icon: "eye",
+                    iconColor: .blue,
+                    title: "Passive Discovery",
+                    badge: nil,
+                    badgeColor: .clear,
+                    bullets: [
+                        "Learns automatically in the background",
+                        "Detects patterns when you repeat workflows",
+                        "Gets smarter over time with more observations",
+                        "Best for: discovering workflows you didn't think to record",
+                    ]
+                )
+            }
+
+            Text("We recommend starting with Focus Recording to see results immediately.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 460)
+        }
+    }
+
+    private func modeCard(
+        icon: String,
+        iconColor: Color,
+        title: String,
+        badge: String?,
+        badgeColor: Color,
+        bullets: [String]
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Image(systemName: icon)
+                    .font(.title2)
+                    .foregroundColor(iconColor)
+                Spacer()
+                if let badge = badge {
+                    Text(badge)
+                        .font(.caption2)
+                        .fontWeight(.semibold)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3)
+                        .background(
+                            RoundedRectangle(cornerRadius: 4)
+                                .fill(badgeColor.opacity(0.15))
+                        )
+                        .foregroundColor(badgeColor)
+                }
+            }
+
+            Text(title)
+                .font(.headline)
+                .fontWeight(.semibold)
+
+            VStack(alignment: .leading, spacing: 6) {
+                ForEach(bullets, id: \.self) { bullet in
+                    HStack(alignment: .top, spacing: 6) {
+                        Text("\u{2022}")
+                            .foregroundColor(.secondary)
+                            .font(.caption)
+                        Text(bullet)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+            }
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(Color.secondary.opacity(0.06))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(Color.secondary.opacity(0.12), lineWidth: 1)
+        )
+    }
+
+    // MARK: - Step 2: Permissions (Combined)
+
+    private var permissionsStep: some View {
+        VStack(spacing: 20) {
+            Text("Two permissions needed")
+                .font(.title2)
+                .fontWeight(.semibold)
+
+            HStack(spacing: 16) {
+                // Accessibility card
+                permissionCard(
+                    icon: "hand.raised.circle.fill",
+                    title: "Accessibility",
+                    granted: appState.accessibilityGranted,
+                    action: {
+                        PermissionChecker.requestAccessibility()
+                    },
+                    actionLabel: "Grant Access"
+                )
+
+                // Screen Recording card
+                permissionCard(
+                    icon: "rectangle.dashed.badge.record",
+                    title: "Screen Recording",
+                    granted: appState.screenRecordingGranted,
+                    action: {
+                        PermissionChecker.openScreenRecordingSettings()
+                    },
+                    actionLabel: "Open Settings"
+                )
+            }
+
+            Text("These let AgentHandover see what's on your screen. It reads window titles and takes screenshots -- never types or clicks anything.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 460)
+        }
+    }
+
+    private func permissionCard(
+        icon: String,
+        title: String,
+        granted: Bool,
+        action: @escaping () -> Void,
+        actionLabel: String
+    ) -> some View {
+        VStack(spacing: 12) {
+            Image(systemName: icon)
+                .font(.system(size: 32))
+                .foregroundColor(granted ? .green : .accentColor)
+
+            Text(title)
+                .font(.headline)
+
+            if granted {
+                HStack(spacing: 4) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundColor(.green)
+                    Text("Granted")
+                        .foregroundColor(.green)
+                }
+                .font(.caption)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(
+                    RoundedRectangle(cornerRadius: 6)
+                        .fill(Color.green.opacity(0.1))
+                )
+            } else {
+                Button(actionLabel) {
+                    action()
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity)
+        .background(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(Color.secondary.opacity(0.06))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(granted ? Color.green.opacity(0.3) : Color.secondary.opacity(0.12), lineWidth: 1)
+        )
+    }
+
+    // MARK: - Step 3: VLM Setup (Required)
 
     private var vlmSetupStep: some View {
         VStack(spacing: 16) {
@@ -353,35 +482,25 @@ struct OnboardingView: View {
                 .font(.system(size: 48))
                 .foregroundColor(.orange)
 
-            Text("AI Model Setup")
+            Text("Set up the AI brain")
                 .font(.title2)
                 .fontWeight(.semibold)
 
-            HStack(spacing: 4) {
-                Text("Required")
-                    .font(.caption)
-                    .fontWeight(.semibold)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 2)
-                    .background(
-                        RoundedRectangle(cornerRadius: 4)
-                            .fill(Color.orange.opacity(0.15))
-                    )
-                    .foregroundColor(.orange)
-                Text("— this is the brain that understands your screen")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-            }
+            Text("AgentHandover uses a local AI model to understand what's on your screen. This runs entirely on your Mac.")
+                .font(.body)
+                .foregroundColor(.secondary)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 440)
 
             if appState.vlmAvailable {
                 PermissionStatusBadge(
                     granted: true,
-                    grantedLabel: "VLM Available",
+                    grantedLabel: "AI Model Ready",
                     deniedLabel: ""
                 )
             } else {
                 // Local / Cloud toggle
-                Picker("VLM Mode", selection: $vlmMode) {
+                Picker("Mode", selection: $vlmMode) {
                     ForEach(VLMMode.allCases, id: \.self) { mode in
                         Text(mode.rawValue).tag(mode)
                     }
@@ -434,9 +553,9 @@ struct OnboardingView: View {
                             .fontWeight(.semibold)
 
                         VStack(alignment: .leading, spacing: 4) {
-                            modelRow("qwen3.5:2b", "2.7 GB", "Screen annotation — reads your screen and describes what you're doing")
-                            modelRow("qwen3.5:4b", "3.4 GB", "SOP generation — writes step-by-step procedures from observations")
-                            modelRow("all-minilm:l6-v2", "45 MB", "Task matching — groups similar work together")
+                            modelRow("qwen3.5:2b", "2.7 GB", "Screen annotation -- reads your screen and describes what you're doing")
+                            modelRow("qwen3.5:4b", "3.4 GB", "SOP generation -- writes step-by-step procedures from observations")
+                            modelRow("all-minilm:l6-v2", "45 MB", "Task matching -- groups similar work together")
                         }
 
                         Button("Pull All Recommended Models") {
@@ -444,12 +563,12 @@ struct OnboardingView: View {
                         }
                         .buttonStyle(.borderedProminent)
 
-                        Text("Or use any Ollama-compatible model — edit annotation_model and sop_model in config.toml after setup.")
+                        Text("Or use any Ollama-compatible model -- edit annotation_model and sop_model in config.toml after setup.")
                             .font(.caption2)
                             .foregroundColor(.secondary)
                             .frame(maxWidth: 380)
                     }
-                    .frame(maxWidth: 400)
+                    .frame(maxWidth: 440)
                 }
             } else {
                 Text("Ollama not installed")
@@ -631,31 +750,265 @@ struct OnboardingView: View {
         try? content.write(to: configPath, atomically: true, encoding: .utf8)
     }
 
-    // MARK: - Step 5: Ready
+    // MARK: - Step 4: Chrome Extension (Optional)
 
-    private var readyStep: some View {
+    private var chromeExtensionStep: some View {
         VStack(spacing: 16) {
-            Image(systemName: "checkmark.circle.fill")
-                .font(.system(size: 48))
-                .foregroundColor(.green)
+            HStack(spacing: 6) {
+                Image(systemName: "globe.badge.chevron.backward")
+                    .font(.system(size: 48))
+                    .foregroundColor(.accentColor)
+            }
 
-            Text("Ready to Go!")
+            Text("Supercharge with browser context")
                 .font(.title2)
                 .fontWeight(.semibold)
 
-            Text("AgentHandover will now observe your workflows in the background. Look for the briefcase icon in your menu bar. Procedures appear once repeated patterns are detected.")
+            HStack(spacing: 6) {
+                Text("Optional")
+                    .font(.caption)
+                    .fontWeight(.semibold)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 2)
+                    .background(
+                        RoundedRectangle(cornerRadius: 4)
+                            .fill(Color.secondary.opacity(0.15))
+                    )
+                    .foregroundColor(.secondary)
+            }
+
+            Text("The Chrome extension adds CSS selectors, form fields, and page structure to your procedures -- making them more precise for browser automation.")
                 .font(.body)
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
-                .frame(maxWidth: 400)
+                .frame(maxWidth: 440)
 
-            // Summary badges
-            VStack(spacing: 6) {
+            // Connection status
+            if appState.extensionConnected {
+                PermissionStatusBadge(
+                    granted: true,
+                    grantedLabel: "Extension Connected",
+                    deniedLabel: ""
+                )
+            } else {
+                // Show extension path
+                if !extensionPath.isEmpty {
+                    VStack(spacing: 8) {
+                        Text("Extension location:")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        Text(extensionPath)
+                            .font(.caption)
+                            .fontDesign(.monospaced)
+                            .textSelection(.enabled)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(
+                                RoundedRectangle(cornerRadius: 4)
+                                    .fill(Color.secondary.opacity(0.1))
+                            )
+                    }
+
+                    Button("Copy Path & Open Chrome") {
+                        copyPathAndOpenChrome()
+                    }
+                    .buttonStyle(.bordered)
+
+                    if let error = chromeOpenError {
+                        Text(error)
+                            .font(.caption)
+                            .foregroundColor(.red)
+                    }
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        instructionRow(number: "1", text: "Enable Developer Mode (top-right toggle)")
+                        instructionRow(number: "2", text: "Click \"Load Unpacked\"")
+                        instructionRow(number: "3", text: "Paste path (Cmd+V) and click Select")
+                    }
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                } else {
+                    Text("Extension files not found. Install via:")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    Text("brew install --HEAD agenthandover")
+                        .font(.caption)
+                        .fontDesign(.monospaced)
+                        .textSelection(.enabled)
+                }
+            }
+        }
+    }
+
+    // MARK: - Step 5: Summary
+
+    private var summaryStep: some View {
+        VStack(spacing: 20) {
+            Image(systemName: "checkmark.seal.fill")
+                .font(.system(size: 48))
+                .foregroundStyle(
+                    LinearGradient(
+                        colors: [.green, .mint],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
+
+            Text("Setup complete")
+                .font(.title2)
+                .fontWeight(.semibold)
+
+            VStack(spacing: 8) {
                 summaryRow(label: "Accessibility", ok: appState.accessibilityGranted)
                 summaryRow(label: "Screen Recording", ok: appState.screenRecordingGranted)
-                summaryRow(label: "Chrome Extension", ok: appState.extensionConnected)
-                summaryRow(label: "VLM", ok: appState.vlmAvailable, optional: true)
+                summaryRow(label: "AI Model", ok: appState.vlmAvailable)
+                summaryRow(label: "Chrome Extension", ok: appState.extensionConnected, optional: true)
             }
+            .padding(.horizontal, 20)
+        }
+    }
+
+    // MARK: - Step 6: Ready — First Recording
+
+    private var readyStep: some View {
+        VStack(spacing: 20) {
+            Text("You're all set!")
+                .font(.title2)
+                .fontWeight(.bold)
+
+            // Primary: Record first workflow
+            VStack(spacing: 14) {
+                Image(systemName: "record.circle")
+                    .font(.system(size: 28))
+                    .foregroundColor(.red)
+
+                Text("Record your first workflow")
+                    .font(.headline)
+
+                Text("What's something you do regularly? Type a name and we'll record you doing it.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 340)
+
+                TextField("e.g. \"Process expense report\"", text: $firstRecordingTitle)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(maxWidth: 320)
+
+                Button {
+                    startServicesAndRecord()
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "record.circle")
+                        Text("Start Recording")
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.red)
+                .controlSize(.large)
+                .disabled(
+                    firstRecordingTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    || !appState.accessibilityGranted
+                    || !appState.vlmAvailable
+                )
+            }
+            .padding(20)
+            .background(
+                RoundedRectangle(cornerRadius: 14)
+                    .fill(Color.secondary.opacity(0.06))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 14)
+                    .stroke(Color.secondary.opacity(0.12), lineWidth: 1)
+            )
+
+            // Secondary: Just start observing
+            VStack(spacing: 6) {
+                Text("or")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+
+                Button("Just start observing") {
+                    startServicesOnly()
+                }
+                .foregroundColor(.accentColor)
+                .buttonStyle(.plain)
+                .font(.callout)
+            }
+
+            if serviceStartFailed {
+                Text("Services may not have started. Check agenthandover status in Terminal.")
+                    .font(.caption2)
+                    .foregroundColor(.red)
+            } else if !appState.accessibilityGranted {
+                Text("Accessibility permission is required (go back to step 3)")
+                    .font(.caption2)
+                    .foregroundColor(.orange)
+            } else if !appState.vlmAvailable {
+                Text("An AI model must be configured (go back to step 4)")
+                    .font(.caption2)
+                    .foregroundColor(.orange)
+            }
+
+            HStack(spacing: 4) {
+                Text("AgentHandover will run quietly in your menu bar")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                Image(systemName: "arrow.up.right")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+        }
+    }
+
+    // MARK: - Actions
+
+    private func startServicesOnly() {
+        let ok = ServiceController.startAll()
+        if ok {
+            onComplete?()
+            NSApplication.shared.keyWindow?.close()
+        } else {
+            serviceStartFailed = true
+        }
+    }
+
+    private func startServicesAndRecord() {
+        let ok = ServiceController.startAll()
+        if ok {
+            // Write focus-session.json to trigger a recording
+            let sessionId = UUID().uuidString
+            let signal: [String: Any] = [
+                "session_id": sessionId,
+                "title": firstRecordingTitle.trimmingCharacters(in: .whitespacesAndNewlines),
+                "started_at": ISO8601DateFormatter().string(from: Date()),
+                "status": "recording",
+            ]
+            writeFocusSignalFile(signal)
+            onComplete?()
+            NSApplication.shared.keyWindow?.close()
+        } else {
+            serviceStartFailed = true
+        }
+    }
+
+    private func writeFocusSignalFile(_ signal: [String: Any]) {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let dir = home.appendingPathComponent("Library/Application Support/agenthandover")
+        let target = dir.appendingPathComponent("focus-session.json")
+        let tmp = dir.appendingPathComponent(".focus-session.json.tmp")
+
+        do {
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            let data = try JSONSerialization.data(withJSONObject: signal, options: .prettyPrinted)
+            try data.write(to: tmp, options: .atomic)
+            if FileManager.default.fileExists(atPath: target.path) {
+                try FileManager.default.removeItem(at: target)
+            }
+            try FileManager.default.moveItem(at: tmp, to: target)
+        } catch {
+            // Silently fail — the recording won't start but services are already running.
+            // The user can start a recording from the menu bar.
         }
     }
 
@@ -679,16 +1032,14 @@ struct OnboardingView: View {
 
         // 2. Resolve Homebrew Cellar path by following the CLI binary symlink.
         //    This covers cases where the opt symlink is broken or not yet created.
-        //    Pattern: /usr/local/bin/agenthandover → .../Cellar/agenthandover/HEAD-xxx/bin/agenthandover
-        //             → .../Cellar/agenthandover/HEAD-xxx/libexec/extension/
+        //    Pattern: /usr/local/bin/agenthandover -> .../Cellar/agenthandover/HEAD-xxx/bin/agenthandover
+        //             -> .../Cellar/agenthandover/HEAD-xxx/libexec/extension/
         let cliBinaryPaths = ["/usr/local/bin/agenthandover", "/opt/homebrew/bin/agenthandover"]
         for binaryPath in cliBinaryPaths {
             let url = URL(fileURLWithPath: binaryPath)
             let resolved = url.resolvingSymlinksInPath().path
                 .components(separatedBy: "/")
             if !resolved.isEmpty {
-                // resolved: ["", "usr", "local", "Cellar", "agenthandover", "HEAD-xxx", "bin", "agenthandover"]
-                // We want: .../Cellar/agenthandover/HEAD-xxx/libexec/extension
                 if let binIdx = resolved.lastIndex(of: "bin") {
                     let prefix = resolved[..<binIdx].joined(separator: "/")
                     let cellarExt = prefix + "/libexec/extension"
@@ -775,7 +1126,7 @@ struct OnboardingView: View {
 
     private func modelRow(_ name: String, _ size: String, _ description: String) -> some View {
         HStack(alignment: .top, spacing: 8) {
-            Text("•")
+            Text("\u{2022}")
                 .foregroundColor(.orange)
                 .font(.caption)
             VStack(alignment: .leading, spacing: 1) {

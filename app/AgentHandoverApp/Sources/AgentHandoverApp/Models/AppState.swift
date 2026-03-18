@@ -143,10 +143,15 @@ final class AppState: ObservableObject {
 
     var menuBarIcon: String {
         switch health {
-        case .healthy: return "briefcase.fill"
-        case .warning: return "briefcase.badge.clock"
-        case .down:    return "briefcase"
-        case .stopped: return "briefcase"
+        case .healthy: return "binoculars.fill"       // Actively observing
+        case .warning: return "binoculars.badge.clock" // Watching but with issues
+        case .down:
+            // Worker only (daemon stopped, worker running) = processing but not watching
+            if workerRunning && !daemonRunning {
+                return "binoculars"
+            }
+            return "briefcase"                         // Idle, not active
+        case .stopped: return "briefcase"              // Idle, not active
         }
     }
 
