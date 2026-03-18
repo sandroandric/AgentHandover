@@ -57,6 +57,11 @@ struct MenuBarView: View {
                 openWindow(id: "onboarding")
             }
         }
+        .onChange(of: appState.focusQuestionsAvailable) { available in
+            if available {
+                openWindow(id: "focus-qa")
+            }
+        }
         .onAppear {
             // Also check on first appear (when user clicks menu bar icon)
             if !hasCompletedOnboarding && delegate.pendingOnboarding {
@@ -236,6 +241,41 @@ struct MenuBarView: View {
                 .buttonStyle(.plain)
                 .padding(.horizontal, 16)
                 .padding(.vertical, 6)
+
+                // Pending questions indicator
+                if appState.focusQuestionsAvailable {
+                    Button(action: {
+                        openWindow(id: "focus-qa")
+                    }) {
+                        HStack(spacing: 6) {
+                            Image(systemName: "bolt.fill")
+                                .font(.caption)
+                                .foregroundColor(.orange)
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text("Questions ready")
+                                    .font(.caption)
+                                    .fontWeight(.medium)
+                                    .foregroundColor(.primary)
+                                Text("\"\(appState.focusQuestionsSlug)\"")
+                                    .font(.caption2)
+                                    .foregroundColor(.secondary)
+                                    .lineLimit(1)
+                            }
+                            Spacer()
+                            Text("Tap to answer")
+                                .font(.caption2)
+                                .foregroundColor(.orange)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 6)
+                    .background(
+                        RoundedRectangle(cornerRadius: 6)
+                            .fill(Color.orange.opacity(0.08))
+                            .padding(.horizontal, 8)
+                    )
+                }
             }
         }
         .padding(.vertical, 4)

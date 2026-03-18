@@ -58,6 +58,30 @@ struct FocusSessionSignalFile: Codable {
     let status: String
 }
 
+/// A single question from focus-questions.json
+struct FocusQuestion: Codable, Identifiable {
+    let index: Int
+    let question: String
+    let category: String
+    let context: String
+    let `default`: String
+
+    var id: Int { index }
+}
+
+/// Decoded focus-questions.json
+struct FocusQuestionsFile: Codable {
+    let session_id: String
+    let slug: String
+    let questions: [FocusQuestion]
+    var status: String
+    var answers: [String: String]?
+
+    enum CodingKeys: String, CodingKey {
+        case session_id, slug, questions, status, answers
+    }
+}
+
 /// Decoded worker-status.json
 struct WorkerStatusFile: Codable {
     let pid: UInt32
@@ -110,6 +134,10 @@ final class AppState: ObservableObject {
     @Published var focusSessionTitle: String = ""
     @Published var focusSessionId: String?
     @Published var focusSessionStartedAt: String?
+
+    // Focus Q&A
+    @Published var focusQuestionsAvailable = false
+    @Published var focusQuestionsSlug: String = ""
 
     // MARK: - Computed
 
@@ -182,6 +210,7 @@ final class AppState: ObservableObject {
         readWorkerStatus()
         readExtensionHeartbeat()
         readFocusSession()
+        readFocusQuestions()
         readSOPIndex()
         updateHealth()
         checkPermissions()
@@ -247,6 +276,24 @@ final class AppState: ObservableObject {
         focusSessionTitle = signal.title
         focusSessionId = signal.session_id
         focusSessionStartedAt = signal.started_at
+    }
+
+    private func readFocusQuestions() {
+        let path = statusDir.appendingPathComponent("focus-questions.json")
+        guard let data = try? Data(contentsOf: path),
+              let file = try? JSONDecoder().decode(FocusQuestionsFile.self, from: data) else {
+            focusQuestionsAvailable = false
+            focusQuestionsSlug = ""
+            return
+        }
+
+        if file.status == "pending" {
+            focusQuestionsAvailable = true
+            focusQuestionsSlug = file.slug
+        } else {
+            focusQuestionsAvailable = false
+            focusQuestionsSlug = ""
+        }
     }
 
     private func readSOPIndex() {

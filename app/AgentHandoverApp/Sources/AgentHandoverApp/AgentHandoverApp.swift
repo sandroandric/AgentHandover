@@ -64,6 +64,14 @@ struct AgentHandoverApp: App {
         }
         .defaultSize(width: 560, height: 600)
         .windowResizability(.contentMinSize)
+
+        // Focus Q&A window (questions from worker after focus recording)
+        Window("Focus Q&A", id: "focus-qa") {
+            FocusQAView()
+                .environmentObject(appState)
+        }
+        .defaultSize(width: 480, height: 400)
+        .windowResizability(.contentSize)
     }
 }
 
