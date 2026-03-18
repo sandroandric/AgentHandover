@@ -181,14 +181,16 @@ class FocusQuestioner:
         # Extract URLs from steps and SOP template
         urls_set: set[str] = set()
         for s in steps:
-            url = s.get("url", s.get("parameters", {}).get("url", ""))
-            if url:
-                urls_set.add(url)
+            for key in ("location", "target", "url"):
+                val = s.get(key, "") or s.get("parameters", {}).get(key, "")
+                if val and ("http://" in val or "https://" in val):
+                    urls_set.add(val)
         if sop_template:
             for s in sop_template.get("steps", []):
-                url = s.get("url", s.get("parameters", {}).get("url", ""))
-                if url:
-                    urls_set.add(url)
+                for key in ("location", "target", "url"):
+                    val = s.get(key, "") or s.get("parameters", {}).get(key, "")
+                    if val and ("http://" in val or "https://" in val):
+                        urls_set.add(val)
         urls = ", ".join(sorted(urls_set)) or "(none)"
 
         # Extract variables / inputs
