@@ -48,21 +48,21 @@ struct AgentHandoverApp: App {
         Window("Workflows", id: "workflows") {
             WorkflowInboxView()
         }
-        .defaultSize(width: 700, height: 550)
+        .defaultSize(width: 900, height: 620)
         .windowResizability(.contentMinSize)
 
         // Daily digest window
         Window("Daily Digest", id: "daily-digest") {
             DailyDigestView()
         }
-        .defaultSize(width: 560, height: 600)
+        .defaultSize(width: 640, height: 680)
         .windowResizability(.contentMinSize)
 
         // Micro-review window
         Window("Review Queue", id: "micro-review") {
             MicroReviewView()
         }
-        .defaultSize(width: 560, height: 600)
+        .defaultSize(width: 640, height: 680)
         .windowResizability(.contentMinSize)
 
         // Focus Q&A window (questions from worker after focus recording)

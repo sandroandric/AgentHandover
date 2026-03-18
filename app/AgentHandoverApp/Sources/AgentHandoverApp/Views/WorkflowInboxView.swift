@@ -26,7 +26,7 @@ struct WorkflowInboxView: View {
         } detail: {
             detailPane
         }
-        .frame(minWidth: 600, minHeight: 400)
+        .frame(minWidth: 750, minHeight: 500)
         .onAppear { sopManager.startPolling() }
         .onDisappear { sopManager.stopPolling() }
     }
@@ -46,7 +46,7 @@ struct WorkflowInboxView: View {
                 sopList
             }
         }
-        .navigationSplitViewColumnWidth(min: 240, ideal: 280, max: 400)
+        .navigationSplitViewColumnWidth(min: 280, ideal: 320, max: 450)
     }
 
     // MARK: - Detail pane

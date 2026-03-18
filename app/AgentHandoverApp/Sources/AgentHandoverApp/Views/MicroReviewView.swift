@@ -19,8 +19,8 @@ struct MicroReviewView: View {
                 cardStack
             }
         }
-        .padding(24)
-        .frame(minWidth: 500, minHeight: 400)
+        .padding(28)
+        .frame(minWidth: 580, minHeight: 500)
         .onAppear { viewModel.load() }
     }
 

@@ -23,7 +23,7 @@ struct DailyDigestView: View {
             }
             .padding(24)
         }
-        .frame(minWidth: 500, minHeight: 400)
+        .frame(minWidth: 580, minHeight: 500)
         .onAppear { viewModel.load() }
     }
 
