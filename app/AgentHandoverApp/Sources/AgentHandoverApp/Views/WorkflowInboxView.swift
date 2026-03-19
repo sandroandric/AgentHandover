@@ -123,31 +123,34 @@ struct WorkflowInboxView: View {
                 }
             }
 
-            // Filter tabs - Contra segmented style
-            HStack(spacing: 3) {
-                ForEach(SOPFilter.allCases, id: \.self) { tab in
-                    Button(action: { withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) { filter = tab } }) {
-                        Text(tab.rawValue)
-                            .font(.system(size: 12, weight: filter == tab ? .bold : .medium))
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 6)
-                            .background(
-                                filter == tab
-                                    ? RoundedRectangle(cornerRadius: 8)
-                                        .fill(goldenYellow)
-                                    : nil
-                            )
-                            .overlay(
-                                filter == tab
-                                    ? RoundedRectangle(cornerRadius: 8)
-                                        .stroke(darkNavy, lineWidth: 1.5)
-                                    : nil
-                            )
-                            .foregroundColor(darkNavy)
+            // Filter tabs - Contra segmented style, scrollable
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 4) {
+                    ForEach(SOPFilter.allCases, id: \.self) { tab in
+                        Button(action: { withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) { filter = tab } }) {
+                            Text(tab.rawValue)
+                                .font(.system(size: 11, weight: filter == tab ? .bold : .medium))
+                                .lineLimit(1)
+                                .fixedSize()
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 6)
+                                .background(
+                                    filter == tab
+                                        ? RoundedRectangle(cornerRadius: 8)
+                                            .fill(goldenYellow)
+                                        : nil
+                                )
+                                .overlay(
+                                    filter == tab
+                                        ? RoundedRectangle(cornerRadius: 8)
+                                            .stroke(darkNavy, lineWidth: 1.5)
+                                        : nil
+                                )
+                                .foregroundColor(darkNavy)
+                        }
+                        .buttonStyle(.plain)
                     }
-                    .buttonStyle(.plain)
                 }
-                Spacer()
             }
             .padding(3)
             .background(
