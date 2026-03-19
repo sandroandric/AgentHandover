@@ -19,7 +19,7 @@ struct MenuBarView: View {
     // Record button idle pulse
     @State private var idlePulse = false
     // Prevent reopening Q&A window on every poll
-    @State private var hasOpenedQA = false
+    @AppStorage("lastOpenedQASlug") private var lastOpenedQASlug = ""
 
     // Contra design tokens
     private let darkNavy = Color(red: 0.09, green: 0.10, blue: 0.12)
@@ -63,12 +63,12 @@ struct MenuBarView: View {
             }
         }
         .onChange(of: appState.focusQuestionsAvailable) { available in
-            if available && !hasOpenedQA {
-                hasOpenedQA = true
+            if available && appState.focusQuestionsSlug != lastOpenedQASlug {
+                lastOpenedQASlug = appState.focusQuestionsSlug
                 openWindow(id: "focus-qa")
             }
             if !available {
-                hasOpenedQA = false  // Reset when questions are answered/cleared
+                lastOpenedQASlug = ""
             }
         }
         .onAppear {
