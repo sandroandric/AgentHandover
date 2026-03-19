@@ -231,21 +231,28 @@ final class AppState: ObservableObject {
             return
         }
 
-        daemonStatus = status
-        daemonRunning = isHeartbeatFresh(status.heartbeat) && isProcessRunning(pid: status.pid)
+        let newRunning = isHeartbeatFresh(status.heartbeat) && isProcessRunning(pid: status.pid)
+        // Only update @Published if values actually changed to avoid view redraws
+        if daemonStatus?.heartbeat != status.heartbeat || daemonStatus?.events_today != status.events_today {
+            daemonStatus = status
+        }
+        if daemonRunning != newRunning { daemonRunning = newRunning }
     }
 
     private func readWorkerStatus() {
         let path = statusDir.appendingPathComponent("worker-status.json")
         guard let data = try? Data(contentsOf: path),
               let status = try? JSONDecoder().decode(WorkerStatusFile.self, from: data) else {
-            workerStatus = nil
-            workerRunning = false
+            if workerStatus != nil { workerStatus = nil }
+            if workerRunning { workerRunning = false }
             return
         }
 
-        workerStatus = status
-        workerRunning = isHeartbeatFresh(status.heartbeat) && isProcessRunning(pid: status.pid)
+        let newRunning = isHeartbeatFresh(status.heartbeat) && isProcessRunning(pid: status.pid)
+        if workerStatus?.heartbeat != status.heartbeat || workerStatus?.events_processed_today != status.events_processed_today {
+            workerStatus = status
+        }
+        if workerRunning != newRunning { workerRunning = newRunning }
     }
 
     private func readExtensionHeartbeat() {
@@ -382,22 +389,19 @@ final class AppState: ObservableObject {
     }
 
     private func updateHealth() {
+        let newHealth: ServiceHealth
         if userStopped {
-            health = .stopped
-            return
+            newHealth = .stopped
+        } else if !daemonRunning && !workerRunning {
+            newHealth = .down
+        } else {
+            let hasWarnings = !(daemonStatus?.permissions_ok ?? true)
+                || (workerStatus?.consecutive_errors ?? 0) > 0
+                || !daemonRunning || !workerRunning
+                || vlmBacklogged
+            newHealth = hasWarnings ? .warning : .healthy
         }
-
-        if !daemonRunning && !workerRunning {
-            health = .down
-            return
-        }
-
-        let hasWarnings = !(daemonStatus?.permissions_ok ?? true)
-            || (workerStatus?.consecutive_errors ?? 0) > 0
-            || !daemonRunning || !workerRunning
-            || vlmBacklogged
-
-        health = hasWarnings ? .warning : .healthy
+        if health != newHealth { health = newHealth }
     }
 
     // MARK: - Permissions
