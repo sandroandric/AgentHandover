@@ -220,11 +220,11 @@ def _format_annotation_for_diff(annotation: dict) -> str:
 
     vc = annotation.get("visible_content", {})
     if vc.get("headings"):
-        lines.append(f"Headings: {', '.join(vc['headings'])}")
+        lines.append(f"Headings: {', '.join(str(h) for h in vc['headings'])}")
     if vc.get("labels"):
-        lines.append(f"Labels: {', '.join(vc['labels'])}")
+        lines.append(f"Labels: {', '.join(str(l) for l in vc['labels'])}")
     if vc.get("values"):
-        lines.append(f"Values: {', '.join(vc['values'])}")
+        lines.append(f"Values: {', '.join(str(v) for v in vc['values'])}")
 
     ui = annotation.get("ui_state", {})
     if ui.get("active_element"):
