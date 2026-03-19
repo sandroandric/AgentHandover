@@ -199,24 +199,21 @@ struct OnboardingView: View {
                 }
 
             case 4:
-                // Permissions -- blocked until both granted, with skip option
+                // Permissions -- always allow proceeding, user sees status
                 VStack(spacing: 6) {
                     contraButton(
-                        "Next",
+                        appState.accessibilityGranted && appState.screenRecordingGranted ? "Next" : "Continue anyway",
                         icon: "arrow.right",
                         style: .darkFilled,
-                        disabled: !appState.accessibilityGranted || !appState.screenRecordingGranted
+                        disabled: false
                     ) {
                         withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) { currentStep += 1 }
                     }
 
                     if !appState.accessibilityGranted || !appState.screenRecordingGranted {
-                        Button("Skip for now") {
-                            withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) { currentStep += 1 }
-                        }
-                        .font(.system(size: 12, weight: .medium, design: .rounded))
-                        .foregroundColor(darkNavy.opacity(0.35))
-                        .buttonStyle(.plain)
+                        Text("You can grant permissions later via agenthandover doctor")
+                            .font(.system(size: 11))
+                            .foregroundColor(darkNavy.opacity(0.35))
                     }
                 }
 
