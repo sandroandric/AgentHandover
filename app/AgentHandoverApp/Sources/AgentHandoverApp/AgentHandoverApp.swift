@@ -38,6 +38,7 @@ struct AgentHandoverApp: App {
         Window("AgentHandover Setup", id: "onboarding") {
             OnboardingView(onComplete: {
                 hasCompletedOnboarding = true
+                delegate.hideFromDock()
             })
                 .environmentObject(appState)
                 .frame(width: 600, height: 640)
@@ -86,32 +87,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         if !UserDefaults.standard.bool(forKey: "hasCompletedOnboarding") {
-            // Signal that onboarding should open.  The actual `openWindow`
-            // call happens in MenuBarView (which owns @Environment(\.openWindow)).
             pendingOnboarding = true
             hasTriggeredOnboarding = true
 
-            // Activate the app and bring onboarding to front after a short delay
-            // to allow SwiftUI to create the window scenes.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+            // Show the app in the dock during onboarding so users know it launched.
+            // After onboarding completes, it becomes a menu-bar-only app.
+            NSApp.setActivationPolicy(.regular)
+
+            // Keep trying to find and show the onboarding window.
+            // SwiftUI creates Window scenes lazily, so we poll briefly.
+            var attempts = 0
+            Timer.scheduledTimer(withTimeInterval: 0.3, repeats: true) { timer in
+                attempts += 1
                 NSApp.activate(ignoringOtherApps: true)
 
-                // Bring the onboarding window to front if it exists
                 for window in NSApp.windows {
                     if window.title == "AgentHandover Setup" {
                         window.makeKeyAndOrderFront(nil)
                         window.orderFrontRegardless()
+                        timer.invalidate()
                         return
                     }
                 }
 
-                // Fallback: simulate a click on the menu bar to trigger .onAppear
-                if let button = NSApp.windows
-                    .compactMap({ $0.contentView?.subviews.first as? NSStatusBarButton })
-                    .first {
-                    button.performClick(nil)
+                // After a few attempts, try clicking the menu bar to trigger .onAppear
+                if attempts == 3 {
+                    if let button = NSApp.windows
+                        .compactMap({ $0.contentView?.subviews.first as? NSStatusBarButton })
+                        .first {
+                        button.performClick(nil)
+                    }
                 }
+
+                if attempts >= 8 { timer.invalidate() }
             }
         }
+    }
+
+    /// Called when onboarding completes — hide from dock, become menu-bar-only.
+    func hideFromDock() {
+        NSApp.setActivationPolicy(.accessory)
     }
 }
