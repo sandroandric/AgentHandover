@@ -97,13 +97,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             self?.hideFromDock()
         })
         .environmentObject(state)
-        .frame(width: 600, height: 640)
+        .frame(width: 620, height: 720)
 
         let hostingController = NSHostingController(rootView: onboardingView)
         let window = NSWindow(contentViewController: hostingController)
         window.title = "AgentHandover Setup"
         window.styleMask = [.titled, .closable, .miniaturizable]
-        window.setContentSize(NSSize(width: 600, height: 640))
+        window.setContentSize(NSSize(width: 620, height: 720))
         window.center()
         window.isReleasedWhenClosed = false
 

@@ -560,6 +560,7 @@ struct OnboardingView: View {
     // MARK: - Screen 3: What You Get (WHITE BACKGROUND)
 
     private var whatYoullGetStep: some View {
+        ScrollView(showsIndicators: false) {
         VStack(spacing: sectionSpacing) {
             Text("What your agent receives")
                 .font(titleFont)
@@ -688,6 +689,7 @@ struct OnboardingView: View {
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: 460)
         }
+        } // ScrollView
     }
 
     private func docSectionLabel(_ text: String) -> some View {
