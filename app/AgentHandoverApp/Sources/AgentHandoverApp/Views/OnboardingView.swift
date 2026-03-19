@@ -1336,13 +1336,39 @@ struct OnboardingView: View {
             }
         }
 
-        // 3. Check for dev/source build by looking for the agenthandover CLI binary
-        //    and walking ancestors to find extension/dist relative to the repo root.
+        // 3. Check for dev/source build by walking ancestors from the app binary
+        //    AND from the CLI binary to find extension/dist relative to repo root.
+        var searchRoots: [URL] = []
+
+        // From the running app binary
+        if let execPath = Bundle.main.executableURL {
+            searchRoots.append(execPath.deletingLastPathComponent())
+        }
+
+        // From the CLI binary
         if let cliPath = findCLIBinary() {
-            var dir = URL(fileURLWithPath: cliPath).deletingLastPathComponent()
-            for _ in 0..<6 {
+            searchRoots.append(URL(fileURLWithPath: cliPath).deletingLastPathComponent())
+        }
+
+        // Also check common source build locations
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let commonPaths = [
+            "\(home)/Desktop/openmimic/extension/dist",
+            "\(home)/Projects/AgentHandover/extension/dist",
+            "\(home)/Developer/AgentHandover/extension/dist",
+        ]
+        for path in commonPaths {
+            if FileManager.default.fileExists(atPath: path + "/manifest.json") {
+                extensionPath = path
+                return
+            }
+        }
+
+        for root in searchRoots {
+            var dir = root
+            for _ in 0..<8 {
                 let candidate = dir.appendingPathComponent("extension/dist").path
-                if FileManager.default.fileExists(atPath: candidate) {
+                if FileManager.default.fileExists(atPath: candidate + "/manifest.json") {
                     extensionPath = candidate
                     return
                 }
