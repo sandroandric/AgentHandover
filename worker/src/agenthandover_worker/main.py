@@ -850,8 +850,18 @@ def _write_sops_index(
         return
 
     try:
-        all_sops = db.get_generated_sops()
+        all_sops_raw = db.get_generated_sops()
         failed = db.get_failed_generations()
+
+        # Only include v2 pipeline SOPs in the user-facing index.
+        # v1 PrefixSpan SOPs (source="sop_pipeline", "focus_recording") are
+        # mechanical patterns (switch_app, navigate) not worth reviewing.
+        _V2_SOURCES = {"v2_focus_recording", "v2_passive_discovery", "focus"}
+        all_sops = [
+            s for s in all_sops_raw
+            if s.get("source", "") in _V2_SOURCES
+            or s.get("confidence", 0) >= 0.5
+        ]
 
         draft_count = sum(1 for s in all_sops if s.get("status") == "draft")
         approved_count = sum(1 for s in all_sops if s.get("status") == "approved")
