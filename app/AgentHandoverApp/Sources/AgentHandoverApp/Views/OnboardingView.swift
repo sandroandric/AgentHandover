@@ -362,7 +362,7 @@ struct OnboardingView: View {
                     .font(.system(size: 20, weight: .semibold, design: .rounded))
                     .foregroundColor(warmBrown)
 
-                Text("AgentHandover studies how you work \u{2014} every app, every step, every pattern \u{2014} and teaches agents like OpenClaw, Claude Code, and Codex to do it exactly the way you would.")
+                Text("AgentHandover studies how you work -every app, every step, every pattern -and teaches agents like OpenClaw, Claude Code, and Codex to do it exactly the way you would.")
                     .font(bodyFont)
                     .foregroundColor(.secondary)
                     .multilineTextAlignment(.center)
@@ -442,7 +442,7 @@ struct OnboardingView: View {
                         .font(.system(size: 15, weight: .semibold, design: .rounded))
                         .foregroundColor(warmBrown)
 
-                    Text("Show your agent how it\u{2019}s done. Record yourself doing the task once \u{2014} AgentHandover figures out the rest.")
+                    Text("Show your agent how it\u{2019}s done. Record yourself doing the task once -AgentHandover figures out the rest.")
                         .font(.system(size: 12))
                         .foregroundColor(.secondary)
                         .lineSpacing(6)
@@ -450,7 +450,7 @@ struct OnboardingView: View {
                     VStack(alignment: .leading, spacing: 7) {
                         numberedStep(1, "Click Record")
                         numberedStep(2, "Do the task as usual")
-                        numberedStep(3, "Stop \u{2014} AI analyzes in 2\u{2013}5 min")
+                        numberedStep(3, "Stop -AI analyzes in 2-5 min")
                     }
 
                     Text("Your agent gets a complete handoff document with steps, strategy, guardrails, and verification criteria.")
@@ -505,7 +505,7 @@ struct OnboardingView: View {
                 )
             }
 
-            Text("We recommend starting with a Focus Recording \u{2014} you\u{2019}ll have your first agent-ready handoff in minutes.")
+            Text("We recommend starting with a Focus Recording -you\u{2019}ll have your first agent-ready handoff in minutes.")
                 .font(captionFont)
                 .foregroundColor(captionColor)
                 .multilineTextAlignment(.center)
@@ -568,7 +568,7 @@ struct OnboardingView: View {
                     docSectionLabel("Steps")
                     VStack(alignment: .leading, spacing: 5) {
                         docStep(1, "Open Reddit and navigate to r/startups")
-                        docStep(2, "Scan posts \u{2014} skip promotional, skip < 10 comments")
+                        docStep(2, "Scan posts -skip promotional, skip < 10 comments")
                         docStep(3, "Open high-signal post and read top comments")
                         docStep(4, "Write reply: acknowledge \u{2192} experience \u{2192} mention product")
                         docStep(5, "Submit and verify not auto-removed")
@@ -610,7 +610,7 @@ struct OnboardingView: View {
                             Image(systemName: "clock")
                                 .font(.system(size: 9))
                                 .foregroundColor(warmBrown.opacity(0.4))
-                            Text("~15 min daily \u{00B7} 9\u{2013}10am")
+                            Text("~15 min daily \u{00B7} 9-10am")
                                 .font(.system(size: 11))
                                 .foregroundColor(warmBrown.opacity(0.4))
                         }
@@ -636,7 +636,7 @@ struct OnboardingView: View {
             )
             .shadow(color: warmBrown.opacity(0.08), radius: 16, y: 5)
 
-            Text("This is what your agent receives \u{2014} not just steps, but the strategy, decisions, and guardrails behind them.")
+            Text("This is what your agent receives -not just steps, but the strategy, decisions, and guardrails behind them.")
                 .font(captionFont)
                 .foregroundColor(captionColor)
                 .multilineTextAlignment(.center)
@@ -691,7 +691,7 @@ struct OnboardingView: View {
                 timelineNode(
                     icon: "camera.fill",
                     title: "Record or Observe",
-                    subtitle: "Work normally \u{2014} AgentHandover captures everything",
+                    subtitle: "Work normally -AgentHandover captures everything",
                     isHighlighted: false,
                     isLast: false
                 )
@@ -729,7 +729,7 @@ struct OnboardingView: View {
                     Text("Review from your menu bar")
                         .font(.system(size: 13, weight: .semibold, design: .rounded))
                         .foregroundColor(warmBrown)
-                    Text("All of this lives in your menu bar \u{2014} review drafts, approve handoffs, and monitor your agents from one place.")
+                    Text("All of this lives in your menu bar -review drafts, approve handoffs, and monitor your agents from one place.")
                         .font(bodyFont)
                         .foregroundColor(.secondary)
                         .lineSpacing(6)
@@ -988,9 +988,9 @@ struct OnboardingView: View {
                         }
 
                         VStack(alignment: .leading, spacing: 4) {
-                            modelRow("qwen3.5:2b", "2.7 GB", "Screen annotation \u{2014} reads your screen and describes what you\u{2019}re doing")
-                            modelRow("qwen3.5:4b", "3.4 GB", "SOP generation \u{2014} writes step-by-step procedures from observations")
-                            modelRow("all-minilm:l6-v2", "45 MB", "Task matching \u{2014} groups similar work together")
+                            modelRow("qwen3.5:2b", "2.7 GB", "Screen annotation -reads your screen and describes what you\u{2019}re doing")
+                            modelRow("qwen3.5:4b", "3.4 GB", "SOP generation -writes step-by-step procedures from observations")
+                            modelRow("all-minilm:l6-v2", "45 MB", "Task matching -groups similar work together")
                         }
 
                         Button("Pull All Recommended Models") {
@@ -1000,7 +1000,7 @@ struct OnboardingView: View {
                         .buttonStyle(.borderedProminent)
                         .tint(warmOrange)
 
-                        Text("Or use any Ollama-compatible model \u{2014} edit annotation_model and sop_model in config.toml after setup.")
+                        Text("Or use any Ollama-compatible model -edit annotation_model and sop_model in config.toml after setup.")
                             .font(.system(size: 11))
                             .foregroundColor(.secondary)
                             .frame(maxWidth: 380)
@@ -1217,7 +1217,7 @@ struct OnboardingView: View {
                     .foregroundColor(warmOrange.opacity(0.8))
                     .frame(width: 36)
 
-                Text("Adds CSS selectors, form field names, and page structure to your procedures \u{2014} making browser automation more precise.")
+                Text("Adds CSS selectors, form field names, and page structure to your procedures -making browser automation more precise.")
                     .font(bodyFont)
                     .foregroundColor(.secondary)
                     .lineSpacing(6)
@@ -1412,7 +1412,7 @@ struct OnboardingView: View {
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
 
-            Text("For now, you can skip this step \u{2014} AgentHandover works great without it.")
+            Text("For now, you can skip this step -AgentHandover works great without it.")
                 .font(captionFont)
                 .foregroundColor(captionColor)
                 .multilineTextAlignment(.center)
@@ -1571,7 +1571,7 @@ struct OnboardingView: View {
                 Image(systemName: "arrow.up.right")
                     .font(.system(size: 9))
                     .foregroundColor(captionColor)
-                Text("\u{2014} that\u{2019}s your control center")
+                Text(" - that\u{2019}s your control center")
                     .font(captionFont)
                     .foregroundColor(captionColor)
             }
