@@ -13,6 +13,7 @@ let package = Package(
             exclude: ["Info.plist"],
             resources: [
                 .process("Resources/Assets.xcassets"),
+                .process("Resources/mascot.png"),
             ]
         ),
         .testTarget(

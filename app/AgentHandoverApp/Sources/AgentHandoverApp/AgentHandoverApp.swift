@@ -91,13 +91,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             pendingOnboarding = true
             hasTriggeredOnboarding = true
 
-            // Activate the app so the menu bar popover auto-opens, which
-            // in turn triggers MenuBarView's `.onAppear` → onboarding.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            // Activate the app and bring onboarding to front after a short delay
+            // to allow SwiftUI to create the window scenes.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
                 NSApp.activate(ignoringOtherApps: true)
-                // Simulate a click on the menu bar extra to open the popover.
-                // This is the only reliable way to trigger `.onAppear` on the
-                // MenuBarExtra content at launch.
+
+                // Bring the onboarding window to front if it exists
+                for window in NSApp.windows {
+                    if window.title == "AgentHandover Setup" {
+                        window.makeKeyAndOrderFront(nil)
+                        window.orderFrontRegardless()
+                        return
+                    }
+                }
+
+                // Fallback: simulate a click on the menu bar to trigger .onAppear
                 if let button = NSApp.windows
                     .compactMap({ $0.contentView?.subviews.first as? NSStatusBarButton })
                     .first {

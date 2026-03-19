@@ -2,7 +2,7 @@ import SwiftUI
 
 /// Premium onboarding experience — 8 screens with progressive disclosure.
 ///
-/// Screens: Welcome → Teach by Doing → What You'll Get → Review Cycle →
+/// Screens: Welcome → Two Ways to Teach → What You Get → Review Cycle →
 ///          Permissions → AI Model → Browser Extension → Ready (First Recording)
 struct OnboardingView: View {
     @EnvironmentObject var appState: AppState
@@ -73,49 +73,72 @@ struct OnboardingView: View {
 
     private let totalSteps = 8
 
-    // MARK: - Design Tokens
+    // MARK: - Design Tokens (Warm Amber Palette)
 
-    private let brandGradient = LinearGradient(
-        colors: [.orange, Color(red: 0.95, green: 0.4, blue: 0.2)],
-        startPoint: .topLeading,
-        endPoint: .bottomTrailing
-    )
+    private let warmOrange = Color(red: 0.92, green: 0.57, blue: 0.20)       // #EA9134
+    private let warmAmber = Color(red: 0.95, green: 0.68, blue: 0.30)        // #F2AD4D
+    private let warmBrown = Color(red: 0.42, green: 0.28, blue: 0.15)        // #6B4726
+    private let warmCream = Color(red: 0.98, green: 0.96, blue: 0.92)        // #FAF5EB
+    private let warmWhite = Color(red: 0.995, green: 0.985, blue: 0.975)     // warm-shifted white
 
-    private let cardBg = Color(nsColor: .controlBackgroundColor)
-    private let cardBorder = Color.primary.opacity(0.08)
-    private let cardRadius: CGFloat = 14
-    private let cardShadow = Color.black.opacity(0.04)
+    private var bgWash: LinearGradient {
+        LinearGradient(
+            colors: [warmOrange.opacity(0.05), Color.clear],
+            startPoint: .topLeading,
+            endPoint: .bottomTrailing
+        )
+    }
+
+    private var brandGradient: LinearGradient {
+        LinearGradient(
+            colors: [warmOrange, Color(red: 0.88, green: 0.48, blue: 0.16)],
+            startPoint: .topLeading,
+            endPoint: .bottomTrailing
+        )
+    }
+
+    // Card styling
+    private let cardRadius: CGFloat = 16
+    private let cardPadding: CGFloat = 18
     private let sectionSpacing: CGFloat = 24
-    private let cardPadding: CGFloat = 16
 
-    private let heroFont = Font.system(size: 28, weight: .bold, design: .rounded)
-    private let sectionFont = Font.system(size: 15, weight: .semibold).leading(.tight)
-    private let bodyFont = Font.system(size: 13)
+    private var cardBg: Color { warmWhite }
+    private var cardBorder: Color { warmBrown.opacity(0.08) }
+    private var cardShadowColor: Color { warmBrown.opacity(0.06) }
+
+    // Typography
+    private let heroFont = Font.system(size: 32, weight: .bold, design: .rounded)
+    private let sectionFont = Font.system(size: 16, weight: .semibold, design: .rounded)
+    private let bodyFont = Font.system(size: 14)
     private let captionFont = Font.system(size: 11)
     private let monoFont = Font.system(size: 12, design: .monospaced)
 
-    private let captionColor = Color.secondary.opacity(0.8)
-    private let subtleBg = Color.primary.opacity(0.03)
+    private let captionColor = Color.secondary.opacity(0.7)
 
     var body: some View {
-        VStack(spacing: 0) {
-            // Progress bar
-            progressBar
-                .padding(.top, 20)
-                .padding(.horizontal, 40)
+        ZStack {
+            // Warm background wash
+            bgWash.ignoresSafeArea()
 
-            Spacer()
+            VStack(spacing: 0) {
+                // Progress indicator
+                progressBar
+                    .padding(.top, 20)
+                    .padding(.horizontal, 44)
 
-            // Current step content
-            stepContent(for: currentStep)
-                .padding(.horizontal, 40)
+                Spacer()
 
-            Spacer()
+                // Current step content
+                stepContent(for: currentStep)
+                    .padding(.horizontal, 44)
 
-            // Navigation
-            navigationBar
-                .padding(.horizontal, 40)
-                .padding(.bottom, 28)
+                Spacer()
+
+                // Navigation
+                navigationBar
+                    .padding(.horizontal, 44)
+                    .padding(.bottom, 28)
+            }
         }
         .onAppear {
             resolveExtensionPath()
@@ -128,24 +151,27 @@ struct OnboardingView: View {
         VStack(spacing: 8) {
             GeometryReader { geometry in
                 ZStack(alignment: .leading) {
-                    RoundedRectangle(cornerRadius: 3)
-                        .fill(Color.secondary.opacity(0.1))
-                        .frame(height: 4)
+                    // Track
+                    Capsule()
+                        .fill(warmBrown.opacity(0.06))
+                        .frame(height: 3)
 
-                    RoundedRectangle(cornerRadius: 3)
+                    // Fill
+                    Capsule()
                         .fill(brandGradient)
                         .frame(
                             width: geometry.size.width * CGFloat(currentStep + 1) / CGFloat(totalSteps),
-                            height: 4
+                            height: 3
                         )
-                        .animation(.easeOut(duration: 0.4), value: currentStep)
+                        .animation(.easeOut(duration: 0.45), value: currentStep)
                 }
             }
-            .frame(height: 4)
+            .frame(height: 3)
 
-            Text("Step \(currentStep + 1) of \(totalSteps)")
-                .font(captionFont)
+            Text("\(currentStep + 1) of \(totalSteps)")
+                .font(.system(size: 10, weight: .medium, design: .rounded))
                 .foregroundColor(captionColor)
+                .tracking(0.3)
         }
     }
 
@@ -158,8 +184,8 @@ struct OnboardingView: View {
                     withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) { currentStep -= 1 }
                 }
                 .buttonStyle(.plain)
-                .foregroundColor(.secondary)
-                .font(.system(size: 13))
+                .foregroundColor(warmBrown.opacity(0.5))
+                .font(.system(size: 13, weight: .medium, design: .rounded))
             }
 
             Spacer()
@@ -169,41 +195,39 @@ struct OnboardingView: View {
                 Button {
                     withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) { currentStep += 1 }
                 } label: {
-                    HStack(spacing: 6) {
+                    HStack(spacing: 7) {
                         Text("Get Started")
-                            .font(.system(size: 14, weight: .semibold))
+                            .font(.system(size: 15, weight: .semibold, design: .rounded))
                         Image(systemName: "arrow.right")
-                            .font(.system(size: 12, weight: .semibold))
+                            .font(.system(size: 12, weight: .bold))
                     }
-                    .padding(.horizontal, 20)
-                    .padding(.vertical, 10)
+                    .padding(.horizontal, 24)
+                    .padding(.vertical, 11)
                     .background(brandGradient)
                     .foregroundColor(.white)
-                    .cornerRadius(10)
+                    .clipShape(Capsule())
+                    .shadow(color: warmOrange.opacity(0.25), radius: 8, y: 3)
                 }
                 .buttonStyle(.plain)
 
             case 1, 2, 3:
-                Button("Next") {
+                nextButton {
                     withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) { currentStep += 1 }
                 }
-                .buttonStyle(.borderedProminent)
 
             case 4:
                 // Permissions — blocked until both granted, with skip option
                 VStack(spacing: 4) {
-                    Button("Next") {
+                    nextButton(disabled: !appState.accessibilityGranted || !appState.screenRecordingGranted) {
                         withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) { currentStep += 1 }
                     }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(!appState.accessibilityGranted || !appState.screenRecordingGranted)
 
                     if !appState.accessibilityGranted || !appState.screenRecordingGranted {
                         Button("Skip for now") {
                             withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) { currentStep += 1 }
                         }
-                        .font(.caption)
-                        .foregroundColor(.secondary)
+                        .font(.system(size: 11, design: .rounded))
+                        .foregroundColor(captionColor)
                         .buttonStyle(.plain)
                     }
                 }
@@ -211,16 +235,14 @@ struct OnboardingView: View {
             case 5:
                 // VLM Setup — blocked until model ready
                 VStack(spacing: 2) {
-                    Button("Next") {
+                    nextButton(disabled: !appState.vlmAvailable) {
                         withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) { currentStep += 1 }
                     }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(!appState.vlmAvailable)
 
                     if !appState.vlmAvailable {
                         Text("Set up an AI model above to continue")
-                            .font(.caption2)
-                            .foregroundColor(.orange)
+                            .font(.system(size: 11, design: .rounded))
+                            .foregroundColor(warmOrange)
                     }
                 }
 
@@ -231,15 +253,14 @@ struct OnboardingView: View {
                         Button("Skip") {
                             withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) { currentStep += 1 }
                         }
-                        .foregroundColor(.secondary)
+                        .foregroundColor(captionColor)
                         .buttonStyle(.plain)
-                        .font(.system(size: 13))
+                        .font(.system(size: 13, design: .rounded))
                     }
 
-                    Button("Next") {
+                    nextButton {
                         withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) { currentStep += 1 }
                     }
-                    .buttonStyle(.borderedProminent)
                 }
 
             case 7:
@@ -250,6 +271,36 @@ struct OnboardingView: View {
                 EmptyView()
             }
         }
+    }
+
+    /// Consistent warm "Next" button used across nav bar.
+    private func nextButton(disabled: Bool = false, action: @escaping () -> Void) -> some View {
+        Button {
+            action()
+        } label: {
+            HStack(spacing: 5) {
+                Text("Next")
+                    .font(.system(size: 14, weight: .semibold, design: .rounded))
+                Image(systemName: "arrow.right")
+                    .font(.system(size: 10, weight: .bold))
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 9)
+            .background(
+                ZStack {
+                    if disabled {
+                        Capsule().fill(warmBrown.opacity(0.08))
+                    } else {
+                        Capsule().fill(brandGradient)
+                    }
+                }
+            )
+            .foregroundColor(disabled ? .secondary : .white)
+            .clipShape(Capsule())
+            .shadow(color: disabled ? .clear : warmOrange.opacity(0.15), radius: 6, y: 2)
+        }
+        .buttonStyle(.plain)
+        .disabled(disabled)
     }
 
     // MARK: - Step Content
@@ -269,185 +320,153 @@ struct OnboardingView: View {
         }
     }
 
+    // MARK: - Mascot Image Helper
+
+    /// Loads the mascot image with multiple fallback strategies.
+    @ViewBuilder
+    private func mascotImage(height: CGFloat) -> some View {
+        if let nsImg = Bundle.module.image(forResource: "mascot") {
+            Image(nsImage: nsImg)
+                .resizable()
+                .aspectRatio(contentMode: .fit)
+                .frame(height: height)
+        } else if let nsImg = NSImage(named: "mascot") {
+            Image(nsImage: nsImg)
+                .resizable()
+                .aspectRatio(contentMode: .fit)
+                .frame(height: height)
+        } else {
+            // Last resort: styled SF Symbol
+            Image(systemName: "binoculars.fill")
+                .font(.system(size: height * 0.6, weight: .medium))
+                .foregroundStyle(brandGradient)
+                .frame(height: height)
+        }
+    }
+
     // MARK: - Screen 1: Welcome
 
     private var welcomeStep: some View {
-        VStack(spacing: sectionSpacing) {
-            // Hero icon with gradient circle background
-            ZStack {
-                Circle()
-                    .fill(
-                        RadialGradient(
-                            colors: [Color.orange.opacity(0.2), Color(red: 0.95, green: 0.4, blue: 0.2).opacity(0.06)],
-                            center: .center,
-                            startRadius: 5,
-                            endRadius: 50
-                        )
-                    )
-                    .frame(width: 96, height: 96)
-                    .shadow(color: Color.orange.opacity(0.15), radius: 20, y: 4)
+        VStack(spacing: 28) {
+            // Hero: mascot, large and proud
+            mascotImage(height: 120)
+                .shadow(color: warmOrange.opacity(0.12), radius: 20, y: 6)
 
-                Image(systemName: "binoculars.fill")
-                    .font(.system(size: 40))
-                    .foregroundStyle(brandGradient)
-            }
-
-            VStack(spacing: 10) {
+            // Title
+            VStack(spacing: 8) {
                 Text("AgentHandover")
                     .font(heroFont)
+                    .foregroundColor(warmBrown)
 
-                Text("Turns your everyday work into step-by-step procedures\nthat AI agents can follow.")
-                    .font(bodyFont)
+                Text("Your work, turned into agent instructions")
+                    .font(.system(size: 15, weight: .medium, design: .rounded))
                     .foregroundColor(.secondary)
-                    .multilineTextAlignment(.center)
-                    .lineSpacing(4)
-                    .frame(maxWidth: 400)
             }
 
-            // Three feature cards with borders and shadows
-            HStack(spacing: 12) {
-                featureCard(icon: "eye.fill", iconColor: .blue, label: "Watches silently")
-                featureCard(icon: "brain.head.profile.fill", iconColor: .purple, label: "Learns patterns")
-                featureCard(icon: "doc.text.fill", iconColor: .orange, label: "Writes procedures")
+            // Three value props as clean text lines (no cards, no icons)
+            VStack(spacing: 10) {
+                valuePropLine("Watches your screen silently")
+                valuePropLine("Learns repeatable workflows")
+                valuePropLine("Writes procedures agents can follow")
             }
             .padding(.top, 4)
 
-            // Privacy note
-            HStack(spacing: 8) {
-                Image(systemName: "lock.shield.fill")
-                    .foregroundColor(.green)
-                    .font(.system(size: 12))
-                Text("100% local \u{00B7} Nothing leaves your Mac")
-                    .font(captionFont)
-                    .foregroundColor(captionColor)
+            // Privacy badge
+            HStack(spacing: 7) {
+                Image(systemName: "lock.fill")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundColor(warmOrange)
+                Text("Everything runs locally on your Mac")
+                    .font(.system(size: 12, weight: .medium, design: .rounded))
+                    .foregroundColor(warmBrown.opacity(0.6))
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 8)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 9)
             .background(
-                RoundedRectangle(cornerRadius: 8)
-                    .fill(Color.green.opacity(0.04))
+                Capsule()
+                    .fill(warmOrange.opacity(0.06))
             )
         }
     }
 
-    private func featureCard(icon: String, iconColor: Color, label: String) -> some View {
-        VStack(spacing: 10) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 10)
-                    .fill(iconColor.opacity(0.08))
-                    .frame(width: 40, height: 40)
-                Image(systemName: icon)
-                    .font(.system(size: 18))
-                    .foregroundColor(iconColor)
-            }
-            Text(label)
-                .font(.system(size: 13, weight: .medium))
-                .foregroundColor(.primary)
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, 16)
-        .padding(.horizontal, 8)
-        .background(
-            RoundedRectangle(cornerRadius: cardRadius)
-                .fill(cardBg)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: cardRadius)
-                .stroke(cardBorder, lineWidth: 1)
-        )
-        .shadow(color: cardShadow, radius: 8, y: 2)
+    private func valuePropLine(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 14, weight: .regular))
+            .foregroundColor(.secondary)
+            .lineSpacing(5)
     }
 
-    // MARK: - Screen 2: Teach by Doing
+    // MARK: - Screen 2: Two Ways to Teach
 
     private var teachByDoingStep: some View {
         VStack(spacing: sectionSpacing) {
-            Text("Two ways to teach your agent")
+            Text("Two ways to teach")
                 .font(heroFont)
+                .foregroundColor(warmBrown)
 
-            HStack(spacing: 14) {
-                // Focus Recording — highlighted
-                VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 16) {
+                // Focus Recording — warm, recommended
+                VStack(alignment: .leading, spacing: 14) {
+                    // Recommended ribbon
                     HStack {
-                        ZStack {
-                            Circle()
-                                .fill(Color.red.opacity(0.1))
-                                .frame(width: 40, height: 40)
-                            Image(systemName: "record.circle")
-                                .font(.system(size: 20))
-                                .foregroundColor(.red)
-                        }
                         Spacer()
-                        Text("Start here")
-                            .font(.system(size: 11, weight: .semibold))
+                        Text("Recommended")
+                            .font(.system(size: 10, weight: .bold, design: .rounded))
+                            .tracking(0.5)
+                            .textCase(.uppercase)
+                            .foregroundColor(.white)
                             .padding(.horizontal, 10)
                             .padding(.vertical, 4)
                             .background(
-                                RoundedRectangle(cornerRadius: 6)
-                                    .fill(Color.orange.opacity(0.1))
+                                Capsule().fill(brandGradient)
                             )
-                            .foregroundColor(.orange)
                     }
 
-                    Text("Record a specific task")
-                        .font(sectionFont)
-                        .tracking(0.3)
+                    Image(systemName: "record.circle")
+                        .font(.system(size: 26))
+                        .foregroundColor(warmOrange)
 
-                    VStack(alignment: .leading, spacing: 6) {
-                        HStack(spacing: 6) {
-                            Image(systemName: "1.circle.fill")
-                                .font(.system(size: 12))
-                                .foregroundColor(.secondary.opacity(0.5))
-                            Text("Click Record")
-                                .font(bodyFont)
-                                .foregroundColor(.secondary)
-                        }
-                        HStack(spacing: 6) {
-                            Image(systemName: "2.circle.fill")
-                                .font(.system(size: 12))
-                                .foregroundColor(.secondary.opacity(0.5))
-                            Text("Do the task as usual")
-                                .font(bodyFont)
-                                .foregroundColor(.secondary)
-                        }
-                        HStack(spacing: 6) {
-                            Image(systemName: "3.circle.fill")
-                                .font(.system(size: 12))
-                                .foregroundColor(.secondary.opacity(0.5))
-                            Text("Stop \u{2014} AI analyzes in 2-5 min")
-                                .font(bodyFont)
-                                .foregroundColor(.secondary)
-                        }
+                    Text("Focus Recording")
+                        .font(.system(size: 15, weight: .semibold, design: .rounded))
+                        .foregroundColor(warmBrown)
+
+                    VStack(alignment: .leading, spacing: 7) {
+                        numberedStep(1, "Click Record")
+                        numberedStep(2, "Do the task as usual")
+                        numberedStep(3, "Stop \u{2014} AI analyzes in 2\u{2013}5 min")
                     }
                 }
                 .padding(cardPadding)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(
                     RoundedRectangle(cornerRadius: cardRadius)
-                        .fill(cardBg)
+                        .fill(
+                            LinearGradient(
+                                colors: [warmOrange.opacity(0.06), warmAmber.opacity(0.03)],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                        )
                 )
                 .overlay(
                     RoundedRectangle(cornerRadius: cardRadius)
-                        .stroke(Color.orange.opacity(0.4), lineWidth: 1.5)
+                        .stroke(warmOrange.opacity(0.25), lineWidth: 1.5)
                 )
-                .shadow(color: Color.orange.opacity(0.06), radius: 12, y: 3)
+                .shadow(color: warmOrange.opacity(0.08), radius: 14, y: 4)
 
-                // Passive Learning — subtle
-                VStack(alignment: .leading, spacing: 12) {
-                    ZStack {
-                        Circle()
-                            .fill(Color.blue.opacity(0.1))
-                            .frame(width: 40, height: 40)
-                        Image(systemName: "eye")
-                            .font(.system(size: 20))
-                            .foregroundColor(.blue)
-                    }
+                // Passive Learning — cool/neutral
+                VStack(alignment: .leading, spacing: 14) {
+                    Spacer().frame(height: 24) // align with ribbon space
 
-                    Text("Learns automatically")
-                        .font(sectionFont)
-                        .tracking(0.3)
+                    Image(systemName: "eye")
+                        .font(.system(size: 26))
+                        .foregroundColor(.secondary.opacity(0.6))
 
-                    VStack(alignment: .leading, spacing: 6) {
+                    Text("Passive Learning")
+                        .font(.system(size: 15, weight: .semibold, design: .rounded))
+                        .foregroundColor(.primary.opacity(0.7))
+
+                    VStack(alignment: .leading, spacing: 7) {
                         Text("Watches for repeated patterns")
                             .font(bodyFont)
                             .foregroundColor(.secondary)
@@ -463,151 +482,144 @@ struct OnboardingView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(
                     RoundedRectangle(cornerRadius: cardRadius)
-                        .fill(cardBg)
+                        .fill(Color.primary.opacity(0.02))
                 )
                 .overlay(
                     RoundedRectangle(cornerRadius: cardRadius)
-                        .stroke(cardBorder, lineWidth: 1)
+                        .stroke(Color.primary.opacity(0.06), lineWidth: 1)
                 )
-                .shadow(color: cardShadow, radius: 8, y: 2)
             }
 
-            Text("We recommend starting with Focus Recording. After you stop, the AI analyzes your screenshots in 2-5 minutes and asks you a few questions to finalize the procedure.")
+            Text("Start with a Focus Recording. After you stop, the AI analyzes your screenshots in 2\u{2013}5 minutes and asks a few questions to finalize the procedure.")
                 .font(captionFont)
                 .foregroundColor(captionColor)
                 .multilineTextAlignment(.center)
+                .lineSpacing(3)
                 .frame(maxWidth: 460)
         }
     }
 
-    // MARK: - Screen 3: What You'll Get
+    private func numberedStep(_ n: Int, _ text: String) -> some View {
+        HStack(spacing: 8) {
+            Text("\(n)")
+                .font(.system(size: 11, weight: .bold, design: .rounded))
+                .foregroundColor(warmOrange)
+                .frame(width: 20, height: 20)
+                .background(
+                    Circle().fill(warmOrange.opacity(0.1))
+                )
+            Text(text)
+                .font(.system(size: 13))
+                .foregroundColor(.secondary)
+        }
+    }
+
+    // MARK: - Screen 3: What You Get
 
     private var whatYoullGetStep: some View {
         VStack(spacing: sectionSpacing) {
-            Text("Here's what a learned procedure looks like")
+            Text("What your agent receives")
                 .font(heroFont)
-                .multilineTextAlignment(.center)
+                .foregroundColor(warmBrown)
 
-            // Mock procedure card — premium document style
-            VStack(alignment: .leading, spacing: 0) {
-                // Header
-                HStack(spacing: 10) {
-                    ZStack {
-                        RoundedRectangle(cornerRadius: 8)
-                            .fill(Color.accentColor.opacity(0.1))
-                            .frame(width: 32, height: 32)
-                        Image(systemName: "list.clipboard")
-                            .font(.system(size: 15))
-                            .foregroundColor(.accentColor)
-                    }
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("File Expense Report")
-                            .font(.system(size: 16, weight: .semibold))
-                        Text("Expensify workflow \u{00B7} 5 steps")
-                            .font(.system(size: 11))
-                            .foregroundColor(.secondary)
-                    }
-                    Spacer()
-                }
-                .padding(.bottom, 14)
+            // Mock procedure — styled as a real paper document
+            HStack(spacing: 0) {
+                // Orange left border stripe
+                warmOrange
+                    .frame(width: 3)
+                    .clipShape(RoundedRectangle(cornerRadius: 1.5))
 
-                // Thin divider
-                Rectangle()
-                    .fill(Color.primary.opacity(0.06))
-                    .frame(height: 1)
+                VStack(alignment: .leading, spacing: 0) {
+                    // Document title (serif-like rounded font for contrast)
+                    Text("File Expense Report")
+                        .font(.system(size: 18, weight: .semibold, design: .rounded))
+                        .foregroundColor(warmBrown)
+                        .padding(.bottom, 3)
+
+                    Text("Expensify workflow \u{00B7} 5 steps")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(warmBrown.opacity(0.5))
+                        .padding(.bottom, 16)
+
+                    // Strategy
+                    docSectionLabel("Strategy")
+                    Text("Open Expensify, upload receipt, categorize, submit for approval")
+                        .font(.system(size: 12))
+                        .foregroundColor(.secondary)
+                        .lineSpacing(3)
+                        .padding(.bottom, 16)
+
+                    // Steps
+                    docSectionLabel("Steps")
+                    VStack(alignment: .leading, spacing: 5) {
+                        docStep(1, "Open Expensify in Chrome")
+                        docStep(2, "Click \"New Expense\"")
+                        docStep(3, "Upload receipt photo")
+                        docStep(4, "Select category: Travel")
+                        docStep(5, "Submit for manager approval")
+                    }
+                    .padding(.bottom, 16)
+
+                    // Verification & Guardrails
+                    HStack(alignment: .top, spacing: 20) {
+                        VStack(alignment: .leading, spacing: 5) {
+                            docSectionLabel("Verification")
+                            Text("\"Expense submitted\" confirmation")
+                                .font(.system(size: 11))
+                                .foregroundColor(.secondary)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+
+                        VStack(alignment: .leading, spacing: 5) {
+                            docSectionLabel("Guardrails")
+                            Text("Never submit without receipt")
+                                .font(.system(size: 11))
+                                .foregroundColor(.secondary)
+                            Text("Max $500 without pre-approval")
+                                .font(.system(size: 11))
+                                .foregroundColor(.secondary)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
                     .padding(.bottom, 14)
 
-                // Strategy section
-                procedureSectionLabel("Strategy", icon: "lightbulb.fill", color: .yellow)
-                Text("Open Expensify, upload receipt, categorize, submit for approval")
-                    .font(.system(size: 12))
-                    .foregroundColor(.secondary)
-                    .lineSpacing(3)
-                    .padding(.bottom, 14)
+                    // Thin divider
+                    Rectangle()
+                        .fill(warmBrown.opacity(0.06))
+                        .frame(height: 1)
+                        .padding(.bottom, 10)
 
-                // Steps section
-                procedureSectionLabel("Steps", icon: "list.number", color: .blue)
-                VStack(alignment: .leading, spacing: 6) {
-                    procedureStep(1, "Open Expensify in Chrome")
-                    procedureStep(2, "Click \"New Expense\"")
-                    procedureStep(3, "Upload receipt photo")
-                    procedureStep(4, "Select category: Travel")
-                    procedureStep(5, "Submit for manager approval")
-                }
-                .padding(.bottom, 14)
-
-                // Verification & Guardrails side by side
-                HStack(alignment: .top, spacing: 16) {
-                    VStack(alignment: .leading, spacing: 6) {
-                        HStack(spacing: 5) {
-                            Image(systemName: "checkmark.circle.fill")
+                    // Footer
+                    HStack(spacing: 14) {
+                        HStack(spacing: 4) {
+                            Image(systemName: "clock")
+                                .font(.system(size: 9))
+                                .foregroundColor(warmBrown.opacity(0.4))
+                            Text("~5 min")
                                 .font(.system(size: 11))
-                                .foregroundColor(.green)
-                            Text("Verification")
-                                .font(.system(size: 11, weight: .semibold))
-                                .tracking(0.3)
+                                .foregroundColor(warmBrown.opacity(0.4))
                         }
-                        Text("\"Expense submitted\" confirmation")
-                            .font(.system(size: 11))
-                            .foregroundColor(.secondary)
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-
-                    VStack(alignment: .leading, spacing: 6) {
-                        HStack(spacing: 5) {
-                            Image(systemName: "shield.fill")
+                        HStack(spacing: 4) {
+                            Image(systemName: "chart.bar.fill")
+                                .font(.system(size: 9))
+                                .foregroundColor(Color.green.opacity(0.7))
+                            Text("Confidence: 92%")
                                 .font(.system(size: 11))
-                                .foregroundColor(.orange)
-                            Text("Guardrails")
-                                .font(.system(size: 11, weight: .semibold))
-                                .tracking(0.3)
+                                .foregroundColor(warmBrown.opacity(0.4))
                         }
-                        Text("Never submit without receipt")
-                            .font(.system(size: 11))
-                            .foregroundColor(.secondary)
-                        Text("Max $500 without pre-approval")
-                            .font(.system(size: 11))
-                            .foregroundColor(.secondary)
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                .padding(.bottom, 12)
-
-                Rectangle()
-                    .fill(Color.primary.opacity(0.06))
-                    .frame(height: 1)
-                    .padding(.bottom, 10)
-
-                // Footer
-                HStack(spacing: 14) {
-                    HStack(spacing: 5) {
-                        Image(systemName: "clock")
-                            .font(.system(size: 10))
-                            .foregroundColor(.secondary)
-                        Text("~5 min")
-                            .font(.system(size: 11))
-                            .foregroundColor(.secondary)
-                    }
-                    HStack(spacing: 5) {
-                        Image(systemName: "chart.bar.fill")
-                            .font(.system(size: 10))
-                            .foregroundColor(.green)
-                        Text("Confidence: 92%")
-                            .font(.system(size: 11))
-                            .foregroundColor(.secondary)
                     }
                 }
+                .padding(20)
             }
-            .padding(18)
             .background(
                 RoundedRectangle(cornerRadius: cardRadius)
-                    .fill(cardBg)
+                    .fill(warmCream.opacity(0.6))
             )
             .overlay(
                 RoundedRectangle(cornerRadius: cardRadius)
-                    .stroke(cardBorder, lineWidth: 1)
+                    .stroke(warmBrown.opacity(0.06), lineWidth: 1)
             )
-            .shadow(color: cardShadow, radius: 12, y: 3)
+            .shadow(color: warmBrown.opacity(0.08), radius: 16, y: 5)
 
             Text("Exported as a SKILL.md that Claude Code, OpenClaw, and other agents can execute.")
                 .font(captionFont)
@@ -617,29 +629,22 @@ struct OnboardingView: View {
         }
     }
 
-    private func procedureSectionLabel(_ text: String, icon: String, color: Color) -> some View {
-        HStack(spacing: 6) {
-            Image(systemName: icon)
-                .font(.system(size: 10))
-                .foregroundColor(color)
-            Text(text)
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundColor(.primary.opacity(0.6))
-                .textCase(.uppercase)
-                .tracking(0.5)
-        }
-        .padding(.bottom, 6)
+    private func docSectionLabel(_ text: String) -> some View {
+        Text(text.uppercased())
+            .font(.system(size: 10, weight: .bold, design: .rounded))
+            .foregroundColor(warmBrown.opacity(0.4))
+            .tracking(0.8)
+            .padding(.bottom, 5)
     }
 
-    private func procedureStep(_ number: Int, _ text: String) -> some View {
-        HStack(alignment: .center, spacing: 10) {
+    private func docStep(_ number: Int, _ text: String) -> some View {
+        HStack(alignment: .center, spacing: 9) {
             Text("\(number)")
-                .font(.system(size: 11, weight: .semibold, design: .rounded))
-                .foregroundColor(.accentColor)
-                .frame(width: 22, height: 22)
+                .font(.system(size: 10, weight: .bold, design: .rounded))
+                .foregroundColor(warmOrange)
+                .frame(width: 18, height: 18)
                 .background(
-                    Circle()
-                        .fill(Color.accentColor.opacity(0.08))
+                    Circle().fill(warmOrange.opacity(0.1))
                 )
             Text(text)
                 .font(.system(size: 12))
@@ -647,66 +652,57 @@ struct OnboardingView: View {
         }
     }
 
-    // MARK: - Screen 4: The Review Cycle
+    // MARK: - Screen 4: Review Cycle (Vertical Timeline)
 
     private var reviewCycleStep: some View {
         VStack(spacing: sectionSpacing) {
             Text("You stay in control")
                 .font(heroFont)
+                .foregroundColor(warmBrown)
 
-            // Visual pipeline with styled circles and connecting line
-            ZStack {
-                // Connecting line behind the nodes
-                GeometryReader { geometry in
-                    let nodeWidth: CGFloat = 60
-                    let totalNodes: CGFloat = 4
-                    let spacing = (geometry.size.width - nodeWidth * totalNodes) / (totalNodes - 1)
-                    let centerY: CGFloat = 24
-
-                    Path { path in
-                        for i in 0..<3 {
-                            let startX = nodeWidth * CGFloat(i + 1) + spacing * CGFloat(i)
-                            let endX = nodeWidth * CGFloat(i + 1) + spacing * CGFloat(i + 1)
-                            path.move(to: CGPoint(x: startX, y: centerY))
-                            path.addLine(to: CGPoint(x: endX, y: centerY))
-                        }
-                    }
-                    .stroke(Color.secondary.opacity(0.15), style: StrokeStyle(lineWidth: 2, dash: [6, 4]))
-                }
-                .frame(height: 48)
-
-                HStack(spacing: 0) {
-                    pipelineNode(icon: "camera.fill", label: "Record /\nObserve", color: .blue)
-                    Spacer()
-                    pipelineNode(icon: "brain.head.profile", label: "AI\nAnalyzes", color: .purple)
-                    Spacer()
-                    pipelineNode(icon: "person.fill", label: "You\nReview", color: .orange, highlighted: true)
-                    Spacer()
-                    pipelineNode(icon: "cpu", label: "Agent\nReady", color: .green)
-                }
+            // Vertical timeline
+            VStack(alignment: .leading, spacing: 0) {
+                timelineNode(
+                    icon: "camera.fill",
+                    title: "Record or Observe",
+                    subtitle: "You do your work normally",
+                    isHighlighted: false,
+                    isLast: false
+                )
+                timelineNode(
+                    icon: "brain.head.profile",
+                    title: "AI Analyzes",
+                    subtitle: "Extracts steps from your screen recordings",
+                    isHighlighted: false,
+                    isLast: false
+                )
+                timelineNode(
+                    icon: "person.fill",
+                    title: "You Review",
+                    subtitle: "Approve, edit, or reject each procedure",
+                    isHighlighted: true,
+                    isLast: false
+                )
+                timelineNode(
+                    icon: "cpu",
+                    title: "Agent Ready",
+                    subtitle: "Only approved procedures reach agents",
+                    isHighlighted: false,
+                    isLast: true
+                )
             }
-            .padding(.vertical, 8)
+            .padding(.leading, 4)
 
-            Text("Every procedure goes through your review before any agent can use it.\nNothing reaches agents without your approval.")
-                .font(bodyFont)
-                .foregroundColor(.secondary)
-                .multilineTextAlignment(.center)
-                .lineSpacing(4)
-                .frame(maxWidth: 440)
+            // Menu bar callout
+            HStack(spacing: 12) {
+                Image(systemName: "hand.tap.fill")
+                    .font(.system(size: 18))
+                    .foregroundColor(warmOrange)
 
-            // Highlight card
-            HStack(spacing: 14) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 10)
-                        .fill(Color.orange.opacity(0.1))
-                        .frame(width: 40, height: 40)
-                    Image(systemName: "hand.tap.fill")
-                        .font(.system(size: 18))
-                        .foregroundColor(.orange)
-                }
                 VStack(alignment: .leading, spacing: 3) {
                     Text("Review from your menu bar")
-                        .font(.system(size: 13, weight: .medium))
+                        .font(.system(size: 13, weight: .semibold, design: .rounded))
+                        .foregroundColor(warmBrown)
                     Text("Approve with one tap, or edit to refine.")
                         .font(bodyFont)
                         .foregroundColor(.secondary)
@@ -716,45 +712,58 @@ struct OnboardingView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(
                 RoundedRectangle(cornerRadius: cardRadius)
-                    .fill(cardBg)
+                    .fill(warmOrange.opacity(0.04))
             )
             .overlay(
                 RoundedRectangle(cornerRadius: cardRadius)
-                    .stroke(Color.orange.opacity(0.25), lineWidth: 1)
+                    .stroke(warmOrange.opacity(0.15), lineWidth: 1)
             )
-            .shadow(color: Color.orange.opacity(0.05), radius: 10, y: 2)
+            .shadow(color: warmOrange.opacity(0.05), radius: 10, y: 2)
         }
     }
 
-    private func pipelineNode(icon: String, label: String, color: Color, highlighted: Bool = false) -> some View {
-        VStack(spacing: 8) {
-            ZStack {
-                Circle()
-                    .fill(
-                        highlighted
-                            ? color.opacity(0.15)
-                            : color.opacity(0.08)
-                    )
-                    .frame(width: 48, height: 48)
-                    .shadow(color: highlighted ? color.opacity(0.2) : .clear, radius: 8, y: 2)
-
-                if highlighted {
+    private func timelineNode(
+        icon: String,
+        title: String,
+        subtitle: String,
+        isHighlighted: Bool,
+        isLast: Bool
+    ) -> some View {
+        HStack(alignment: .top, spacing: 14) {
+            // Dot + connecting line
+            VStack(spacing: 0) {
+                ZStack {
                     Circle()
-                        .stroke(color.opacity(0.4), lineWidth: 2)
-                        .frame(width: 48, height: 48)
+                        .fill(isHighlighted ? warmOrange : warmBrown.opacity(0.12))
+                        .frame(width: 28, height: 28)
+
+                    if isHighlighted {
+                        Circle()
+                            .stroke(warmOrange.opacity(0.3), lineWidth: 2)
+                            .frame(width: 36, height: 36)
+                    }
+
+                    Image(systemName: icon)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(isHighlighted ? .white : warmBrown.opacity(0.5))
                 }
 
-                Image(systemName: icon)
-                    .font(.system(size: 18))
-                    .foregroundColor(color)
+                if !isLast {
+                    Rectangle()
+                        .fill(warmBrown.opacity(0.08))
+                        .frame(width: 1.5, height: 28)
+                }
             }
 
-            Text(label)
-                .font(captionFont)
-                .foregroundColor(.secondary)
-                .multilineTextAlignment(.center)
-                .lineLimit(2)
-                .frame(width: 60)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.system(size: 14, weight: isHighlighted ? .bold : .semibold, design: .rounded))
+                    .foregroundColor(isHighlighted ? warmOrange : warmBrown.opacity(0.8))
+                Text(subtitle)
+                    .font(.system(size: 12))
+                    .foregroundColor(.secondary)
+            }
+            .padding(.top, 3)
         }
     }
 
@@ -764,6 +773,7 @@ struct OnboardingView: View {
         VStack(spacing: sectionSpacing) {
             Text("Two permissions to enable")
                 .font(heroFont)
+                .foregroundColor(warmBrown)
 
             VStack(spacing: 12) {
                 // Accessibility card
@@ -791,10 +801,10 @@ struct OnboardingView: View {
                 )
             }
 
-            HStack(spacing: 8) {
+            HStack(spacing: 7) {
                 Image(systemName: "eye.fill")
-                    .font(.system(size: 11))
-                    .foregroundColor(.blue)
+                    .font(.system(size: 10))
+                    .foregroundColor(warmOrange.opacity(0.7))
                 Text("AgentHandover reads your screen. It never types, clicks, or takes actions.")
                     .font(captionFont)
                     .foregroundColor(captionColor)
@@ -813,21 +823,17 @@ struct OnboardingView: View {
         actionLabel: String
     ) -> some View {
         HStack(spacing: 14) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 10)
-                    .fill(granted ? Color.green.opacity(0.08) : Color.accentColor.opacity(0.08))
-                    .frame(width: 40, height: 40)
-                Image(systemName: icon)
-                    .font(.system(size: 20))
-                    .foregroundColor(granted ? .green : .accentColor)
-            }
+            Image(systemName: icon)
+                .font(.system(size: 22))
+                .foregroundColor(granted ? .green : warmOrange)
+                .frame(width: 36)
 
             VStack(alignment: .leading, spacing: 3) {
                 Text(title)
-                    .font(sectionFont)
-                    .tracking(0.3)
+                    .font(.system(size: 14, weight: .semibold, design: .rounded))
+                    .foregroundColor(warmBrown)
                 Text(description)
-                    .font(bodyFont)
+                    .font(.system(size: 12))
                     .foregroundColor(.secondary)
             }
 
@@ -840,17 +846,17 @@ struct OnboardingView: View {
                     Text("Granted")
                         .foregroundColor(.green)
                 }
-                .font(.system(size: 12, weight: .medium))
+                .font(.system(size: 12, weight: .medium, design: .rounded))
                 .padding(.horizontal, 12)
                 .padding(.vertical, 6)
                 .background(
-                    RoundedRectangle(cornerRadius: 8)
-                        .fill(Color.green.opacity(0.08))
+                    Capsule().fill(Color.green.opacity(0.08))
                 )
             } else {
                 Button(actionLabel) {
                     action()
                 }
+                .font(.system(size: 12, weight: .medium, design: .rounded))
                 .buttonStyle(.bordered)
                 .controlSize(.small)
             }
@@ -858,48 +864,36 @@ struct OnboardingView: View {
         .padding(cardPadding)
         .background(
             RoundedRectangle(cornerRadius: cardRadius)
-                .fill(cardBg)
+                .fill(granted ? Color.green.opacity(0.02) : cardBg)
         )
         .overlay(
             RoundedRectangle(cornerRadius: cardRadius)
                 .stroke(
-                    granted ? Color.green.opacity(0.25) : cardBorder,
+                    granted ? Color.green.opacity(0.2) : cardBorder,
                     lineWidth: 1
                 )
         )
-        .shadow(color: cardShadow, radius: 8, y: 2)
+        .shadow(color: cardShadowColor, radius: 12, y: 3)
     }
 
     // MARK: - Screen 6: VLM Setup (Required)
 
     private var vlmSetupStep: some View {
         VStack(spacing: 16) {
-            ZStack {
-                Circle()
-                    .fill(
-                        RadialGradient(
-                            colors: [Color.purple.opacity(0.15), Color.orange.opacity(0.06)],
-                            center: .center,
-                            startRadius: 5,
-                            endRadius: 44
-                        )
-                    )
-                    .frame(width: 80, height: 80)
-                    .shadow(color: Color.purple.opacity(0.1), radius: 16, y: 3)
+            Image(systemName: "brain.head.profile")
+                .font(.system(size: 36))
+                .foregroundColor(warmOrange)
+                .shadow(color: warmOrange.opacity(0.15), radius: 12, y: 3)
 
-                Image(systemName: "brain.head.profile")
-                    .font(.system(size: 34))
-                    .foregroundColor(.orange)
-            }
-
-            Text("Set up your local AI")
+            Text("Set up your AI")
                 .font(heroFont)
+                .foregroundColor(warmBrown)
 
-            Text("A small AI model runs on your Mac to understand what's on your screen.")
+            Text("A small AI model runs on your Mac to understand what\u{2019}s on your screen.")
                 .font(bodyFont)
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
-                .lineSpacing(4)
+                .lineSpacing(5)
                 .frame(maxWidth: 440)
 
             if appState.vlmAvailable {
@@ -946,7 +940,7 @@ struct OnboardingView: View {
                             .progressViewStyle(.circular)
                             .controlSize(.small)
                         Text("Pulling models...")
-                            .font(.system(size: 12))
+                            .font(.system(size: 12, design: .rounded))
                             .foregroundColor(.secondary)
                         if !vlmPullOutput.isEmpty {
                             Text(vlmPullOutput)
@@ -959,7 +953,7 @@ struct OnboardingView: View {
                     VStack(alignment: .leading, spacing: 8) {
                         HStack(spacing: 6) {
                             Image(systemName: "arrow.down.circle.fill")
-                                .foregroundColor(.accentColor)
+                                .foregroundColor(warmOrange)
                                 .font(.system(size: 14))
                             Text("~6 GB download \u{00B7} Runs on Apple Silicon")
                                 .font(.system(size: 12))
@@ -967,7 +961,7 @@ struct OnboardingView: View {
                         }
 
                         VStack(alignment: .leading, spacing: 4) {
-                            modelRow("qwen3.5:2b", "2.7 GB", "Screen annotation \u{2014} reads your screen and describes what you're doing")
+                            modelRow("qwen3.5:2b", "2.7 GB", "Screen annotation \u{2014} reads your screen and describes what you\u{2019}re doing")
                             modelRow("qwen3.5:4b", "3.4 GB", "SOP generation \u{2014} writes step-by-step procedures from observations")
                             modelRow("all-minilm:l6-v2", "45 MB", "Task matching \u{2014} groups similar work together")
                         }
@@ -975,7 +969,9 @@ struct OnboardingView: View {
                         Button("Pull All Recommended Models") {
                             pullOllamaModel()
                         }
+                        .font(.system(size: 13, weight: .semibold, design: .rounded))
                         .buttonStyle(.borderedProminent)
+                        .tint(warmOrange)
 
                         Text("Or use any Ollama-compatible model \u{2014} edit annotation_model and sop_model in config.toml after setup.")
                             .font(.system(size: 11))
@@ -987,7 +983,7 @@ struct OnboardingView: View {
             } else {
                 VStack(spacing: 8) {
                     Text("Ollama not installed")
-                        .font(.system(size: 12))
+                        .font(.system(size: 12, design: .rounded))
                         .foregroundColor(.secondary)
 
                     Button("Download Ollama") {
@@ -1014,9 +1010,9 @@ struct OnboardingView: View {
                 VStack(spacing: 8) {
                     HStack(spacing: 6) {
                         Image(systemName: "exclamationmark.triangle.fill")
-                            .foregroundColor(.orange)
+                            .foregroundColor(warmOrange)
                         Text("Privacy Notice")
-                            .font(.system(size: 12, weight: .semibold))
+                            .font(.system(size: 12, weight: .semibold, design: .rounded))
                     }
                     Text("Cloud VLM sends screenshots of your desktop to a third-party API for analysis. Only enable this if you accept this trade-off.")
                         .font(.system(size: 11))
@@ -1070,7 +1066,9 @@ struct OnboardingView: View {
                     Button("Save Configuration") {
                         saveCloudVLMConfig()
                     }
+                    .font(.system(size: 13, weight: .semibold, design: .rounded))
                     .buttonStyle(.borderedProminent)
+                    .tint(warmOrange)
                     .disabled(apiKeyInput.count < 10)
 
                     if apiKeyValidating {
@@ -1170,35 +1168,32 @@ struct OnboardingView: View {
     private var chromeExtensionStep: some View {
         VStack(spacing: sectionSpacing) {
             HStack(spacing: 10) {
-                Text("Supercharge browser workflows")
+                Text("Browser workflows")
                     .font(heroFont)
+                    .foregroundColor(warmBrown)
 
                 Text("Optional")
-                    .font(.system(size: 11, weight: .medium))
+                    .font(.system(size: 10, weight: .bold, design: .rounded))
+                    .tracking(0.3)
                     .padding(.horizontal, 10)
                     .padding(.vertical, 4)
                     .background(
-                        RoundedRectangle(cornerRadius: 6)
-                            .fill(Color.secondary.opacity(0.1))
+                        Capsule().fill(warmBrown.opacity(0.06))
                     )
-                    .foregroundColor(.secondary)
+                    .foregroundColor(warmBrown.opacity(0.5))
             }
 
             // What the extension does
             HStack(spacing: 12) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 10)
-                        .fill(Color.blue.opacity(0.08))
-                        .frame(width: 40, height: 40)
-                    Image(systemName: "globe.badge.chevron.backward")
-                        .font(.system(size: 18))
-                        .foregroundColor(.blue)
-                }
+                Image(systemName: "globe.badge.chevron.backward")
+                    .font(.system(size: 20))
+                    .foregroundColor(warmOrange.opacity(0.8))
+                    .frame(width: 36)
 
                 Text("Adds CSS selectors, form field names, and page structure to your procedures \u{2014} making browser automation more precise.")
                     .font(bodyFont)
                     .foregroundColor(.secondary)
-                    .lineSpacing(4)
+                    .lineSpacing(5)
             }
             .padding(cardPadding)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -1210,25 +1205,22 @@ struct OnboardingView: View {
                 RoundedRectangle(cornerRadius: cardRadius)
                     .stroke(cardBorder, lineWidth: 1)
             )
-            .shadow(color: cardShadow, radius: 8, y: 2)
+            .shadow(color: cardShadowColor, radius: 12, y: 3)
 
             // Connection status and install instructions
             if appState.extensionConnected {
-                // Already connected
                 extensionConnectedView
             } else if !extensionPath.isEmpty {
-                // Extension found — show Load Unpacked instructions
                 extensionReadyView
             } else {
-                // Extension not found — coming soon
                 extensionNotFoundView
             }
 
             // Supported browsers note
             HStack(spacing: 6) {
                 Image(systemName: "info.circle")
-                    .font(.system(size: 11))
-                    .foregroundColor(.secondary.opacity(0.6))
+                    .font(.system(size: 10))
+                    .foregroundColor(warmBrown.opacity(0.3))
                 Text("Works with Chrome, Brave, and Edge")
                     .font(captionFont)
                     .foregroundColor(captionColor)
@@ -1239,20 +1231,15 @@ struct OnboardingView: View {
     // Extension already connected
     private var extensionConnectedView: some View {
         VStack(spacing: 10) {
-            ZStack {
-                Circle()
-                    .fill(Color.green.opacity(0.1))
-                    .frame(width: 56, height: 56)
-                Image(systemName: "checkmark.circle.fill")
-                    .font(.system(size: 28))
-                    .foregroundColor(.green)
-            }
+            Image(systemName: "checkmark.circle.fill")
+                .font(.system(size: 28))
+                .foregroundColor(.green)
 
             Text("Browser extension connected!")
-                .font(sectionFont)
-                .tracking(0.3)
+                .font(.system(size: 14, weight: .semibold, design: .rounded))
+                .foregroundColor(warmBrown)
 
-            Text("You're getting enhanced browser context in your procedures.")
+            Text("You\u{2019}re getting enhanced browser context in your procedures.")
                 .font(bodyFont)
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
@@ -1265,7 +1252,7 @@ struct OnboardingView: View {
         )
         .overlay(
             RoundedRectangle(cornerRadius: cardRadius)
-                .stroke(Color.green.opacity(0.2), lineWidth: 1)
+                .stroke(Color.green.opacity(0.15), lineWidth: 1)
         )
     }
 
@@ -1278,8 +1265,8 @@ struct OnboardingView: View {
                     .font(.system(size: 16))
                     .foregroundColor(.green)
                 Text("Extension ready to install")
-                    .font(sectionFont)
-                    .tracking(0.3)
+                    .font(.system(size: 14, weight: .semibold, design: .rounded))
+                    .foregroundColor(warmBrown)
             }
 
             // Three numbered steps
@@ -1288,8 +1275,8 @@ struct OnboardingView: View {
                 HStack(alignment: .top, spacing: 12) {
                     stepCircle(number: 1)
                     VStack(alignment: .leading, spacing: 6) {
-                        Text("Open your browser's extension page")
-                            .font(.system(size: 13, weight: .medium))
+                        Text("Open your browser\u{2019}s extension page")
+                            .font(.system(size: 13, weight: .medium, design: .rounded))
                         Button {
                             openBrowserExtensionsPage()
                         } label: {
@@ -1297,7 +1284,7 @@ struct OnboardingView: View {
                                 Image(systemName: "arrow.up.right.square")
                                     .font(.system(size: 11))
                                 Text("Open Extensions Page")
-                                    .font(.system(size: 12, weight: .medium))
+                                    .font(.system(size: 12, weight: .medium, design: .rounded))
                             }
                         }
                         .buttonStyle(.bordered)
@@ -1310,7 +1297,7 @@ struct OnboardingView: View {
                     stepCircle(number: 2)
                     VStack(alignment: .leading, spacing: 3) {
                         Text("Enable Developer Mode")
-                            .font(.system(size: 13, weight: .medium))
+                            .font(.system(size: 13, weight: .medium, design: .rounded))
                         Text("Toggle in the top-right corner of the extensions page")
                             .font(captionFont)
                             .foregroundColor(.secondary)
@@ -1322,13 +1309,13 @@ struct OnboardingView: View {
                     stepCircle(number: 3)
                     VStack(alignment: .leading, spacing: 6) {
                         Text("Click \"Load unpacked\" and select this folder:")
-                            .font(.system(size: 13, weight: .medium))
+                            .font(.system(size: 13, weight: .medium, design: .rounded))
 
                         // Path display with copy button
                         HStack(spacing: 0) {
                             Text(extensionPath)
                                 .font(monoFont)
-                                .foregroundColor(.primary.opacity(0.8))
+                                .foregroundColor(warmBrown.opacity(0.7))
                                 .textSelection(.enabled)
                                 .lineLimit(1)
                                 .truncationMode(.middle)
@@ -1348,21 +1335,21 @@ struct OnboardingView: View {
                                     Image(systemName: pathCopied ? "checkmark" : "doc.on.doc")
                                         .font(.system(size: 10))
                                     Text(pathCopied ? "Copied" : "Copy")
-                                        .font(.system(size: 11, weight: .medium))
+                                        .font(.system(size: 11, weight: .medium, design: .rounded))
                                 }
-                                .foregroundColor(pathCopied ? .green : .accentColor)
+                                .foregroundColor(pathCopied ? .green : warmOrange)
                             }
                             .buttonStyle(.plain)
                         }
                         .padding(.horizontal, 10)
                         .padding(.vertical, 7)
                         .background(
-                            RoundedRectangle(cornerRadius: 8)
-                                .fill(subtleBg)
+                            RoundedRectangle(cornerRadius: 10)
+                                .fill(warmCream.opacity(0.5))
                         )
                         .overlay(
-                            RoundedRectangle(cornerRadius: 8)
-                                .stroke(Color.primary.opacity(0.06), lineWidth: 1)
+                            RoundedRectangle(cornerRadius: 10)
+                                .stroke(warmBrown.opacity(0.06), lineWidth: 1)
                         )
                     }
                 }
@@ -1381,22 +1368,17 @@ struct OnboardingView: View {
         )
         .overlay(
             RoundedRectangle(cornerRadius: cardRadius)
-                .stroke(Color.green.opacity(0.2), lineWidth: 1)
+                .stroke(Color.green.opacity(0.15), lineWidth: 1)
         )
-        .shadow(color: cardShadow, radius: 8, y: 2)
+        .shadow(color: cardShadowColor, radius: 12, y: 3)
     }
 
     // Extension not found — coming soon
     private var extensionNotFoundView: some View {
         VStack(spacing: 12) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 10)
-                    .fill(Color.secondary.opacity(0.06))
-                    .frame(width: 40, height: 40)
-                Image(systemName: "clock.badge.checkmark")
-                    .font(.system(size: 18))
-                    .foregroundColor(.secondary)
-            }
+            Image(systemName: "clock.badge.checkmark")
+                .font(.system(size: 20))
+                .foregroundColor(warmBrown.opacity(0.3))
 
             Text("Extension will be available on the Chrome Web Store soon.")
                 .font(bodyFont)
@@ -1413,7 +1395,7 @@ struct OnboardingView: View {
         .frame(maxWidth: .infinity)
         .background(
             RoundedRectangle(cornerRadius: cardRadius)
-                .fill(subtleBg)
+                .fill(Color.primary.opacity(0.02))
         )
         .overlay(
             RoundedRectangle(cornerRadius: cardRadius)
@@ -1427,20 +1409,23 @@ struct OnboardingView: View {
             .foregroundColor(.white)
             .frame(width: 24, height: 24)
             .background(
-                Circle()
-                    .fill(brandGradient)
+                Circle().fill(brandGradient)
             )
     }
 
     // MARK: - Screen 8: Ready — First Recording
 
     private var readyStep: some View {
-        VStack(spacing: sectionSpacing) {
-            Text("You're ready!")
+        VStack(spacing: 20) {
+            // Small mascot at top
+            mascotImage(height: 64)
+
+            Text("You\u{2019}re ready!")
                 .font(heroFont)
+                .foregroundColor(warmBrown)
 
             // Summary checks
-            HStack(spacing: 16) {
+            HStack(spacing: 14) {
                 readinessChip(
                     icon: "checkmark.shield.fill",
                     label: "Permissions",
@@ -1459,12 +1444,13 @@ struct OnboardingView: View {
                 )
             }
 
-            // Main recording card — the CTA of the onboarding
+            // Main recording card
             VStack(spacing: 16) {
                 Text("Record your first workflow")
-                    .font(.system(size: 17, weight: .semibold))
+                    .font(.system(size: 17, weight: .semibold, design: .rounded))
+                    .foregroundColor(warmBrown)
 
-                Text("What's something you do regularly?")
+                Text("What\u{2019}s something you do regularly?")
                     .font(bodyFont)
                     .foregroundColor(.secondary)
 
@@ -1473,43 +1459,44 @@ struct OnboardingView: View {
                     .font(bodyFont)
                     .frame(maxWidth: 340)
 
+                let isDisabled = firstRecordingTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    || !appState.accessibilityGranted
+                    || !appState.vlmAvailable
+
                 Button {
                     startServicesAndRecord()
                 } label: {
-                    HStack(spacing: 8) {
+                    HStack(spacing: 10) {
                         ZStack {
+                            // Pulse ring
                             Circle()
                                 .fill(Color.white.opacity(0.3))
-                                .frame(width: 20, height: 20)
-                                .scaleEffect(recordPulse ? 1.3 : 1.0)
-                                .opacity(recordPulse ? 0.0 : 0.6)
+                                .frame(width: 22, height: 22)
+                                .scaleEffect(recordPulse ? 1.4 : 1.0)
+                                .opacity(recordPulse ? 0.0 : 0.5)
 
+                            // Solid dot
                             Circle()
                                 .fill(Color.white)
-                                .frame(width: 10, height: 10)
+                                .frame(width: 11, height: 11)
                         }
                         Text("Start Recording")
-                            .font(.system(size: 14, weight: .semibold))
+                            .font(.system(size: 15, weight: .bold, design: .rounded))
                     }
-                    .padding(.horizontal, 24)
-                    .padding(.vertical, 12)
+                    .padding(.horizontal, 28)
+                    .padding(.vertical, 13)
                     .background(
-                        RoundedRectangle(cornerRadius: 10)
-                            .fill(Color.red)
+                        Capsule()
+                            .fill(isDisabled ? warmBrown.opacity(0.15) : Color.red)
+                            .shadow(
+                                color: isDisabled ? .clear : Color.red.opacity(0.3),
+                                radius: 12, y: 4
+                            )
                     )
-                    .foregroundColor(.white)
+                    .foregroundColor(isDisabled ? .secondary : .white)
                 }
                 .buttonStyle(.plain)
-                .disabled(
-                    firstRecordingTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                    || !appState.accessibilityGranted
-                    || !appState.vlmAvailable
-                )
-                .opacity(
-                    (firstRecordingTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                    || !appState.accessibilityGranted
-                    || !appState.vlmAvailable) ? 0.5 : 1.0
-                )
+                .disabled(isDisabled)
                 .onAppear {
                     withAnimation(.easeInOut(duration: 1.5).repeatForever(autoreverses: false)) {
                         recordPulse = true
@@ -1519,22 +1506,22 @@ struct OnboardingView: View {
             .padding(24)
             .frame(maxWidth: .infinity)
             .background(
-                RoundedRectangle(cornerRadius: 16)
+                RoundedRectangle(cornerRadius: 18)
                     .fill(cardBg)
             )
             .overlay(
-                RoundedRectangle(cornerRadius: 16)
-                    .stroke(Color.red.opacity(0.15), lineWidth: 1)
+                RoundedRectangle(cornerRadius: 18)
+                    .stroke(warmOrange.opacity(0.12), lineWidth: 1)
             )
-            .shadow(color: Color.red.opacity(0.06), radius: 16, y: 4)
+            .shadow(color: warmOrange.opacity(0.08), radius: 18, y: 5)
 
             // Secondary: Just start observing
             Button("Or start observing \u{2192}") {
                 startServicesOnly()
             }
-            .foregroundColor(.accentColor)
+            .foregroundColor(warmOrange)
             .buttonStyle(.plain)
-            .font(bodyFont)
+            .font(.system(size: 13, weight: .medium, design: .rounded))
 
             if serviceStartFailed {
                 Text("Services may not have started. Check agenthandover status in Terminal.")
@@ -1543,11 +1530,11 @@ struct OnboardingView: View {
             } else if !appState.accessibilityGranted {
                 Text("Accessibility permission is required (go back to step 5)")
                     .font(captionFont)
-                    .foregroundColor(.orange)
+                    .foregroundColor(warmOrange)
             } else if !appState.vlmAvailable {
                 Text("An AI model must be configured (go back to step 6)")
                     .font(captionFont)
-                    .foregroundColor(.orange)
+                    .foregroundColor(warmOrange)
             }
 
             HStack(spacing: 4) {
@@ -1555,9 +1542,9 @@ struct OnboardingView: View {
                     .font(captionFont)
                     .foregroundColor(captionColor)
                 Image(systemName: "arrow.up.right")
-                    .font(.system(size: 10))
+                    .font(.system(size: 9))
                     .foregroundColor(captionColor)
-                Text("\u{2014} that's your control center")
+                Text("\u{2014} that\u{2019}s your control center")
                     .font(captionFont)
                     .foregroundColor(captionColor)
             }
@@ -1567,21 +1554,21 @@ struct OnboardingView: View {
     private func readinessChip(icon: String, label: String, ok: Bool, optional: Bool = false) -> some View {
         HStack(spacing: 6) {
             Image(systemName: ok ? "checkmark.circle.fill" : (optional ? "minus.circle" : "xmark.circle.fill"))
-                .font(.system(size: 14))
-                .foregroundColor(ok ? .green : (optional ? .secondary.opacity(0.5) : .orange))
+                .font(.system(size: 13))
+                .foregroundColor(ok ? .green : (optional ? warmBrown.opacity(0.3) : warmOrange))
             Text(label)
-                .font(.system(size: 12, weight: .medium))
-                .foregroundColor(ok ? .primary : .secondary)
+                .font(.system(size: 12, weight: .medium, design: .rounded))
+                .foregroundColor(ok ? warmBrown : .secondary)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 7)
         .background(
-            RoundedRectangle(cornerRadius: 8)
-                .fill(ok ? Color.green.opacity(0.06) : subtleBg)
+            Capsule()
+                .fill(ok ? Color.green.opacity(0.05) : Color.primary.opacity(0.02))
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 8)
-                .stroke(ok ? Color.green.opacity(0.15) : cardBorder, lineWidth: 1)
+            Capsule()
+                .stroke(ok ? Color.green.opacity(0.12) : cardBorder, lineWidth: 1)
         )
     }
 
@@ -1805,7 +1792,7 @@ struct OnboardingView: View {
     private func modelRow(_ name: String, _ size: String, _ description: String) -> some View {
         HStack(alignment: .top, spacing: 8) {
             Text("\u{2022}")
-                .foregroundColor(.orange)
+                .foregroundColor(warmOrange)
                 .font(.system(size: 12))
             VStack(alignment: .leading, spacing: 1) {
                 HStack(spacing: 6) {
@@ -1953,23 +1940,25 @@ struct PermissionStatusBadge: View {
     let grantedLabel: String
     let deniedLabel: String
 
+    private let warmOrange = Color(red: 0.92, green: 0.57, blue: 0.20)
+
     var body: some View {
         HStack(spacing: 6) {
             Image(systemName: granted ? "checkmark.circle.fill" : "xmark.circle.fill")
-                .foregroundColor(granted ? .green : .orange)
+                .foregroundColor(granted ? .green : warmOrange)
             Text(granted ? grantedLabel : deniedLabel)
-                .font(.system(size: 12, weight: .medium))
-                .foregroundColor(granted ? .green : .orange)
+                .font(.system(size: 12, weight: .medium, design: .rounded))
+                .foregroundColor(granted ? .green : warmOrange)
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 8)
         .background(
-            RoundedRectangle(cornerRadius: 8)
-                .fill((granted ? Color.green : Color.orange).opacity(0.08))
+            Capsule()
+                .fill((granted ? Color.green : warmOrange).opacity(0.08))
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 8)
-                .stroke((granted ? Color.green : Color.orange).opacity(0.15), lineWidth: 1)
+            Capsule()
+                .stroke((granted ? Color.green : warmOrange).opacity(0.15), lineWidth: 1)
         )
     }
 }
