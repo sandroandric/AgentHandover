@@ -136,7 +136,7 @@ struct FocusQAView: View {
                     .padding(.bottom, 8)
             }
         }
-        .frame(minWidth: 480, maxWidth: 480, minHeight: 300)
+        .frame(minWidth: 520, maxWidth: 600, minHeight: 550)
     }
 
     // MARK: - Question Card

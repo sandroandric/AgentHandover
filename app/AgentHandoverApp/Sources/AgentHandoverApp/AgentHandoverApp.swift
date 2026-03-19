@@ -45,8 +45,8 @@ struct AgentHandoverApp: App {
             FocusQAView()
                 .environmentObject(appState)
         }
-        .defaultSize(width: 480, height: 400)
-        .windowResizability(.contentSize)
+        .defaultSize(width: 560, height: 620)
+        .windowResizability(.contentMinSize)
     }
 }
 
