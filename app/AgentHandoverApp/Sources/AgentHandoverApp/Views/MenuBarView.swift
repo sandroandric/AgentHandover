@@ -19,11 +19,12 @@ struct MenuBarView: View {
     // Record button idle pulse
     @State private var idlePulse = false
 
-    // Design tokens
-    private let cardBg = Color(nsColor: .controlBackgroundColor)
-    private let cardBorder = Color.primary.opacity(0.08)
-    private let cardRadius: CGFloat = 12
-    private let cardShadow = Color.black.opacity(0.04)
+    // Contra design tokens
+    private let darkNavy = Color(red: 0.09, green: 0.10, blue: 0.12)
+    private let warmOrange = Color(red: 0.92, green: 0.57, blue: 0.20)
+    private let goldenYellow = Color(red: 1.0, green: 0.74, blue: 0.07)
+    private let cardRadius: CGFloat = 14
+    private let contraBorder: CGFloat = 1.5
 
     var body: some View {
         VStack(spacing: 0) {
@@ -81,19 +82,21 @@ struct MenuBarView: View {
 
     private var statusHeader: some View {
         HStack(spacing: 10) {
-            // Animated status indicator
+            // Status indicator with thick border
             ZStack {
                 Circle()
-                    .fill(appState.health.color.opacity(0.15))
-                    .frame(width: 34, height: 34)
-                Circle()
                     .fill(appState.health.color)
-                    .frame(width: 10, height: 10)
+                    .frame(width: 28, height: 28)
+                    .overlay(
+                        Circle()
+                            .stroke(darkNavy, lineWidth: 2)
+                    )
             }
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(statusTitle)
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(.system(size: 14, weight: .bold, design: .rounded))
+                    .foregroundColor(darkNavy)
                 Text(statusSubtitle)
                     .font(.system(size: 11))
                     .foregroundColor(.secondary)
@@ -106,7 +109,7 @@ struct MenuBarView: View {
                 Button(action: { delegate.showOnboarding(appState: appState) }) {
                     Image(systemName: "exclamationmark.circle.fill")
                         .font(.system(size: 16))
-                        .foregroundColor(.orange)
+                        .foregroundColor(warmOrange)
                 }
                 .buttonStyle(.plain)
                 .help("Setup needed")
@@ -188,13 +191,12 @@ struct MenuBarView: View {
         .padding(12)
         .background(
             RoundedRectangle(cornerRadius: cardRadius)
-                .fill(cardBg)
+                .fill(Color(nsColor: .controlBackgroundColor))
         )
         .overlay(
             RoundedRectangle(cornerRadius: cardRadius)
-                .stroke(cardBorder, lineWidth: 1)
+                .stroke(darkNavy.opacity(0.12), lineWidth: contraBorder)
         )
-        .shadow(color: cardShadow, radius: 8, y: 2)
     }
 
     // MARK: - Attention Section
@@ -210,17 +212,19 @@ struct MenuBarView: View {
                 Button(action: { openWindow(id: "focus-qa") }) {
                     HStack(spacing: 10) {
                         ZStack {
-                            RoundedRectangle(cornerRadius: 7)
-                                .fill(Color.orange.opacity(0.12))
+                            Circle()
+                                .fill(goldenYellow)
                                 .frame(width: 30, height: 30)
+                                .overlay(Circle().stroke(darkNavy, lineWidth: 1.5))
                             Image(systemName: "questionmark.bubble.fill")
                                 .font(.system(size: 13))
-                                .foregroundColor(.orange)
+                                .foregroundColor(darkNavy)
                         }
 
                         VStack(alignment: .leading, spacing: 2) {
                             Text("Finish your workflow")
-                                .font(.system(size: 12, weight: .medium))
+                                .font(.system(size: 12, weight: .bold, design: .rounded))
+                                .foregroundColor(darkNavy)
                             Text("Answer a few questions to complete")
                                 .font(.system(size: 10))
                                 .foregroundColor(.secondary)
@@ -229,23 +233,17 @@ struct MenuBarView: View {
                         Spacer()
 
                         Image(systemName: "chevron.right")
-                            .font(.system(size: 10, weight: .semibold))
-                            .foregroundColor(.secondary)
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundColor(darkNavy)
                     }
                     .padding(10)
                     .background(
-                        RoundedRectangle(cornerRadius: 10)
-                            .fill(Color.orange.opacity(0.04))
+                        RoundedRectangle(cornerRadius: cardRadius)
+                            .fill(goldenYellow.opacity(0.12))
                     )
                     .overlay(
-                        HStack {
-                            Rectangle()
-                                .fill(Color.orange)
-                                .frame(width: 3)
-                                .cornerRadius(2)
-                            Spacer()
-                        }
-                        .clipShape(RoundedRectangle(cornerRadius: 10))
+                        RoundedRectangle(cornerRadius: cardRadius)
+                            .stroke(darkNavy.opacity(0.15), lineWidth: contraBorder)
                     )
                 }
                 .buttonStyle(.plain)
@@ -256,17 +254,19 @@ struct MenuBarView: View {
                 Button(action: { openWindow(id: "micro-review") }) {
                     HStack(spacing: 10) {
                         ZStack {
-                            RoundedRectangle(cornerRadius: 7)
-                                .fill(Color.blue.opacity(0.12))
+                            Circle()
+                                .fill(warmOrange)
                                 .frame(width: 30, height: 30)
+                                .overlay(Circle().stroke(darkNavy, lineWidth: 1.5))
                             Image(systemName: "checkmark.rectangle.stack.fill")
                                 .font(.system(size: 13))
-                                .foregroundColor(.blue)
+                                .foregroundColor(.white)
                         }
 
                         VStack(alignment: .leading, spacing: 2) {
                             Text("\(appState.sopDraftCount) workflow\(appState.sopDraftCount == 1 ? "" : "s") to review")
-                                .font(.system(size: 12, weight: .medium))
+                                .font(.system(size: 12, weight: .bold, design: .rounded))
+                                .foregroundColor(darkNavy)
                             Text("Approve to make agent-ready")
                                 .font(.system(size: 10))
                                 .foregroundColor(.secondary)
@@ -275,23 +275,17 @@ struct MenuBarView: View {
                         Spacer()
 
                         Image(systemName: "chevron.right")
-                            .font(.system(size: 10, weight: .semibold))
-                            .foregroundColor(.secondary)
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundColor(darkNavy)
                     }
                     .padding(10)
                     .background(
-                        RoundedRectangle(cornerRadius: 10)
-                            .fill(Color.blue.opacity(0.04))
+                        RoundedRectangle(cornerRadius: cardRadius)
+                            .fill(warmOrange.opacity(0.08))
                     )
                     .overlay(
-                        HStack {
-                            Rectangle()
-                                .fill(Color.blue)
-                                .frame(width: 3)
-                                .cornerRadius(2)
-                            Spacer()
-                        }
-                        .clipShape(RoundedRectangle(cornerRadius: 10))
+                        RoundedRectangle(cornerRadius: cardRadius)
+                            .stroke(darkNavy.opacity(0.15), lineWidth: contraBorder)
                     )
                 }
                 .buttonStyle(.plain)
@@ -342,7 +336,7 @@ struct MenuBarView: View {
                 .padding(12)
                 .background(
                     RoundedRectangle(cornerRadius: cardRadius)
-                        .fill(cardBg)
+                        .fill(Color(nsColor: .controlBackgroundColor))
                 )
                 .overlay(
                     RoundedRectangle(cornerRadius: cardRadius)
@@ -389,11 +383,11 @@ struct MenuBarView: View {
                 .padding(12)
                 .background(
                     RoundedRectangle(cornerRadius: cardRadius)
-                        .fill(cardBg)
+                        .fill(Color(nsColor: .controlBackgroundColor))
                 )
                 .overlay(
                     RoundedRectangle(cornerRadius: cardRadius)
-                        .stroke(cardBorder, lineWidth: 1)
+                        .stroke(darkNavy.opacity(0.12), lineWidth: contraBorder)
                 )
             } else if appState.focusSessionProcessing {
                 // Focus session stopped, worker is processing
@@ -405,7 +399,7 @@ struct MenuBarView: View {
                         Text("Analyzing \"\(appState.focusSessionTitle)\"")
                             .font(.system(size: 12, weight: .medium))
                             .lineLimit(1)
-                        Text("AI is reviewing your screenshots \u{2014} 2-5 min")
+                        Text("AI is reviewing your screenshots - 2-5 min")
                             .font(.system(size: 10))
                             .foregroundColor(.secondary)
                     }
@@ -447,11 +441,11 @@ struct MenuBarView: View {
                     .padding(12)
                     .background(
                         RoundedRectangle(cornerRadius: cardRadius)
-                            .fill(cardBg)
+                            .fill(Color(nsColor: .controlBackgroundColor))
                     )
                     .overlay(
                         RoundedRectangle(cornerRadius: cardRadius)
-                            .stroke(cardBorder, lineWidth: 1)
+                            .stroke(darkNavy.opacity(0.12), lineWidth: contraBorder)
                     )
                 }
                 .buttonStyle(.plain)

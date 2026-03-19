@@ -565,6 +565,25 @@ struct OnboardingView: View {
                 .font(titleFont)
                 .foregroundColor(darkNavy)
 
+            // Illustrative example badge
+            HStack(spacing: 6) {
+                Image(systemName: "lightbulb.fill")
+                    .font(.system(size: 10))
+                Text("Illustrative example")
+                    .font(.system(size: 11, weight: .semibold))
+            }
+            .foregroundColor(darkNavy.opacity(0.5))
+            .padding(.horizontal, 12)
+            .padding(.vertical, 5)
+            .background(
+                Capsule()
+                    .fill(goldenYellow.opacity(0.25))
+            )
+            .overlay(
+                Capsule()
+                    .stroke(goldenYellow.opacity(0.4), lineWidth: 1)
+            )
+
             // Mock procedure -- card with thick dark border
             HStack(spacing: 0) {
                 // Orange left accent stripe
