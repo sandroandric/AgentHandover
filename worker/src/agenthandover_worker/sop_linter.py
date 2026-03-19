@@ -136,7 +136,7 @@ def lint_sop(sop_template: dict) -> LintResult:
     for var_name in sorted(undeclared):
         issues.append(
             LintIssue(
-                "error",
+                "warning",
                 f"variables.{var_name}",
                 f"Variable '{{{{{var_name}}}}}' referenced in steps but not declared",
             )
