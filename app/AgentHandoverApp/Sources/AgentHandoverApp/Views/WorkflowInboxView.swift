@@ -17,7 +17,7 @@ struct WorkflowInboxView: View {
         case focus = "Focus"
         case passive = "Discovered"
         case drafts = "Drafts"
-        case agentReady = "Agent Ready"
+        case agentReady = "Ready"
     }
 
     // Contra design tokens
@@ -401,14 +401,16 @@ struct StatPill: View {
     }
 
     var body: some View {
-        HStack(spacing: 4) {
+        HStack(spacing: 3) {
             Text("\(count)")
-                .font(.system(size: 11, weight: .bold, design: .rounded))
+                .font(.system(size: 10, weight: .bold, design: .rounded))
             Text(label)
-                .font(.system(size: 10, weight: .medium))
+                .font(.system(size: 9, weight: .medium))
         }
+        .lineLimit(1)
+        .fixedSize()
         .foregroundColor(navyColor)
-        .padding(.horizontal, 10)
+        .padding(.horizontal, 8)
         .padding(.vertical, 4)
         .background(accentColor.opacity(0.12))
         .clipShape(Capsule())
