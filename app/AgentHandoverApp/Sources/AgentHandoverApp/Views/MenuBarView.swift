@@ -663,10 +663,8 @@ struct MenuBarView: View {
         openWindow(id: windowId)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
             NSApp.activate(ignoringOtherApps: true)
-            // Find and bring the window to front
             for window in NSApp.windows {
-                if window.title.lowercased().contains(windowId.replacingOccurrences(of: "-", with: " ").lowercased())
-                    || window.title == "Workflows"
+                if window.title == "Workflows"
                     || window.title == "Review Queue"
                     || window.title == "Daily Digest"
                     || window.title == "Focus Q&A" {
@@ -674,10 +672,6 @@ struct MenuBarView: View {
                     window.orderFrontRegardless()
                     break
                 }
-            }
-            // Go back to accessory after a moment
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                NSApp.setActivationPolicy(.accessory)
             }
         }
     }
