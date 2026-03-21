@@ -146,60 +146,58 @@ struct SOPDetailView: View {
         }
     }
 
+    private var isAgentReady: Bool {
+        sop.lifecycleState == "agent_ready" && sop.status == "approved"
+    }
+
     private var actionBar: some View {
         HStack(spacing: 10) {
-            // Approve button - Contra green
-            Button(action: {
-                sopManager.approveSOP(sop)
-            }) {
+            if isAgentReady {
+                // Agent Ready badge
                 HStack(spacing: 5) {
-                    Image(systemName: "checkmark.circle.fill")
+                    Image(systemName: "checkmark.seal.fill")
                         .font(.system(size: 12))
-                    Text("Approve")
+                    Text("Agent Ready")
                         .font(.system(size: 12, weight: .bold))
                 }
                 .padding(.horizontal, 14)
                 .padding(.vertical, 7)
                 .background(
                     RoundedRectangle(cornerRadius: 8)
-                        .fill(sop.status == "approved" ? brightGreen.opacity(0.1) : brightGreen.opacity(0.15))
+                        .fill(brightGreen)
                 )
-                .foregroundColor(sop.status == "approved" ? brightGreen.opacity(0.4) : brightGreen)
+                .foregroundColor(.white)
                 .overlay(
                     RoundedRectangle(cornerRadius: 8)
-                        .stroke(darkNavy.opacity(0.12), lineWidth: contraBorder)
+                        .stroke(brightGreen, lineWidth: contraBorder)
                 )
-            }
-            .buttonStyle(.plain)
-            .disabled(sop.status == "approved")
-
-            // Promote lifecycle button - Contra dark navy filled
-            if sop.canPromote, let nextState = sop.nextLifecycleState {
+            } else {
+                // Approve for Agents - green filled
                 Button(action: {
-                    sopManager.promoteProcedure(sop, toState: nextState)
+                    sopManager.approveForAgents(sop)
                 }) {
                     HStack(spacing: 5) {
-                        Image(systemName: "arrow.up.circle.fill")
+                        Image(systemName: "checkmark.circle.fill")
                             .font(.system(size: 12))
-                        Text("Promote to \(SOPEntry.lifecycleLabelFor(nextState))")
+                        Text("Approve for Agents")
                             .font(.system(size: 12, weight: .bold))
                     }
                     .padding(.horizontal, 14)
                     .padding(.vertical, 7)
                     .background(
                         RoundedRectangle(cornerRadius: 8)
-                            .fill(darkNavy)
+                            .fill(brightGreen)
                     )
                     .foregroundColor(.white)
                     .overlay(
                         RoundedRectangle(cornerRadius: 8)
-                            .stroke(darkNavy, lineWidth: contraBorder)
+                            .stroke(brightGreen, lineWidth: contraBorder)
                     )
                 }
                 .buttonStyle(.plain)
             }
 
-            // Reject button - outlined red
+            // Reject button - red outline
             Button(action: {
                 sopManager.rejectSOP(sop)
             }) {
@@ -220,6 +218,7 @@ struct SOPDetailView: View {
             .buttonStyle(.plain)
             .disabled(sop.status == "rejected")
 
+            // Open in Editor - subtle
             Button(action: openInEditor) {
                 HStack(spacing: 5) {
                     Image(systemName: "square.and.pencil")
@@ -268,58 +267,52 @@ struct SOPDetailView: View {
 
                 // Steps
                 if let steps = json["steps"] as? [[String: Any]], !steps.isEmpty {
-                    VStack(alignment: .leading, spacing: 12) {
+                    VStack(alignment: .leading, spacing: 10) {
                         sectionHeader("Steps", icon: "list.number", color: warmOrange)
-                        ForEach(Array(steps.enumerated()), id: \.offset) { index, step in
-                            HStack(alignment: .top, spacing: 12) {
-                                // Numbered circle - Contra style
-                                Text("\(index + 1)")
-                                    .font(.system(size: 11, weight: .bold, design: .rounded))
-                                    .foregroundColor(.white)
-                                    .frame(width: 26, height: 26)
-                                    .background(
-                                        Circle()
-                                            .fill(warmOrange)
-                                    )
-                                    .overlay(
-                                        Circle()
-                                            .stroke(darkNavy.opacity(0.12), lineWidth: contraBorder)
-                                    )
+                        VStack(alignment: .leading, spacing: 6) {
+                            ForEach(Array(steps.enumerated()), id: \.offset) { index, step in
+                                HStack(alignment: .top, spacing: 10) {
+                                    // Numbered circle - Contra style
+                                    Text("\(index + 1)")
+                                        .font(.system(size: 11, weight: .bold, design: .rounded))
+                                        .foregroundColor(.white)
+                                        .frame(width: 24, height: 24)
+                                        .background(
+                                            Circle()
+                                                .fill(warmOrange)
+                                        )
 
-                                VStack(alignment: .leading, spacing: 4) {
-                                    if let app = step["app"] as? String {
-                                        Text(app)
-                                            .font(.system(size: 10, weight: .medium))
-                                            .foregroundColor(darkNavy.opacity(0.5))
-                                            .padding(.horizontal, 7)
-                                            .padding(.vertical, 2)
-                                            .background(lightGray)
-                                            .cornerRadius(5)
-                                            .overlay(
-                                                RoundedRectangle(cornerRadius: 5)
-                                                    .stroke(darkNavy.opacity(0.08), lineWidth: 1)
-                                            )
+                                    VStack(alignment: .leading, spacing: 3) {
+                                        if let app = step["app"] as? String, !app.trimmingCharacters(in: .whitespaces).isEmpty {
+                                            Text(app)
+                                                .font(.system(size: 10, weight: .medium))
+                                                .foregroundColor(darkNavy.opacity(0.5))
+                                                .padding(.horizontal, 7)
+                                                .padding(.vertical, 2)
+                                                .background(lightGray)
+                                                .cornerRadius(5)
+                                        }
+                                        Text(step["action"] as? String ?? step["description"] as? String ?? "")
+                                            .font(.system(size: 12))
+                                            .foregroundColor(darkNavy.opacity(0.85))
+                                            .textSelection(.enabled)
+                                            .fixedSize(horizontal: false, vertical: true)
+                                            .lineSpacing(3)
                                     }
-                                    Text(step["action"] as? String ?? step["description"] as? String ?? "")
-                                        .font(.system(size: 12))
-                                        .foregroundColor(darkNavy.opacity(0.85))
-                                        .textSelection(.enabled)
-                                        .fixedSize(horizontal: false, vertical: true)
-                                        .lineSpacing(3)
                                 }
                             }
-                            .padding(.horizontal, 14)
-                            .padding(.vertical, 12)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(
-                                RoundedRectangle(cornerRadius: cardRadius)
-                                    .fill(Color.white)
-                            )
-                            .overlay(
-                                RoundedRectangle(cornerRadius: cardRadius)
-                                    .stroke(darkNavy.opacity(0.12), lineWidth: contraBorder)
-                            )
                         }
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 12)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(
+                            RoundedRectangle(cornerRadius: cardRadius)
+                                .fill(Color.white)
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: cardRadius)
+                                .stroke(darkNavy.opacity(0.12), lineWidth: contraBorder)
+                        )
                     }
                 }
 
@@ -535,30 +528,26 @@ struct SOPDetailView: View {
     }
 
     private func stepsSection(_ section: ParsedSection) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 10) {
             sectionHeader(section.title, icon: "list.number", color: warmOrange)
 
-            VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: 6) {
                 let steps = parseSteps(section.lines)
                 ForEach(Array(steps.enumerated()), id: \.offset) { index, step in
-                    HStack(alignment: .top, spacing: 12) {
+                    HStack(alignment: .top, spacing: 10) {
                         // Numbered circle - Contra style
                         Text("\(index + 1)")
                             .font(.system(size: 11, weight: .bold, design: .rounded))
                             .foregroundColor(.white)
-                            .frame(width: 26, height: 26)
+                            .frame(width: 24, height: 24)
                             .background(
                                 Circle()
                                     .fill(warmOrange)
                             )
-                            .overlay(
-                                Circle()
-                                    .stroke(darkNavy.opacity(0.12), lineWidth: contraBorder)
-                            )
 
-                        VStack(alignment: .leading, spacing: 4) {
-                            // App badge if present
-                            if let app = step.app {
+                        VStack(alignment: .leading, spacing: 3) {
+                            // App badge - only show if non-empty
+                            if let app = step.app, !app.trimmingCharacters(in: .whitespaces).isEmpty {
                                 Text(app)
                                     .font(.system(size: 10, weight: .medium))
                                     .foregroundColor(darkNavy.opacity(0.5))
@@ -566,10 +555,6 @@ struct SOPDetailView: View {
                                     .padding(.vertical, 2)
                                     .background(lightGray)
                                     .cornerRadius(5)
-                                    .overlay(
-                                        RoundedRectangle(cornerRadius: 5)
-                                            .stroke(darkNavy.opacity(0.08), lineWidth: 1)
-                                    )
                             }
 
                             Text(step.action)
@@ -585,23 +570,23 @@ struct SOPDetailView: View {
                                     .italic()
                                     .foregroundColor(darkNavy.opacity(0.45))
                                     .textSelection(.enabled)
-                                    .padding(.top, 2)
+                                    .padding(.top, 1)
                             }
                         }
                     }
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 12)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(
-                        RoundedRectangle(cornerRadius: cardRadius)
-                            .fill(Color.white)
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: cardRadius)
-                            .stroke(darkNavy.opacity(0.12), lineWidth: contraBorder)
-                    )
                 }
             }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: cardRadius)
+                    .fill(Color.white)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: cardRadius)
+                    .stroke(darkNavy.opacity(0.12), lineWidth: contraBorder)
+            )
         }
     }
 

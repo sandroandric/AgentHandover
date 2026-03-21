@@ -284,6 +284,50 @@ final class SOPIndexManager: ObservableObject {
         }
     }
 
+    /// Approve an SOP and promote it all the way to agent_ready in one action.
+    /// Writes the approval trigger, then writes sequential lifecycle promotion
+    /// triggers with staggered delays so the worker processes each transition.
+    func approveForAgents(_ sop: SOPEntry) {
+        // Step 1: Approve the SOP
+        approveSOP(sop)
+
+        // Step 2: Promote through all lifecycle states to agent_ready
+        let promotionChain = ["draft", "reviewed", "verified", "agent_ready"]
+
+        // Find where we need to start promoting from
+        let currentIndex: Int
+        switch sop.lifecycleState {
+        case "observed": currentIndex = 0
+        case "draft": currentIndex = 1
+        case "reviewed": currentIndex = 2
+        case "verified": currentIndex = 3
+        default: currentIndex = 0
+        }
+
+        // Write each promotion trigger with staggered delays
+        for i in currentIndex..<promotionChain.count {
+            let targetState = promotionChain[i]
+            let delay = Double(i - currentIndex + 1) * 2.5  // 2.5s between each promotion
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                guard let self = self else { return }
+                let trigger: [String: Any] = [
+                    "procedure_slug": sop.slug,
+                    "to_state": targetState,
+                    "actor": "human",
+                    "reason": "Approved for agents via AgentHandover app",
+                    "requested_at": ISO8601DateFormatter().string(from: Date())
+                ]
+                self.writeTrigger(trigger, filename: "lifecycle-promote-trigger.json")
+            }
+        }
+
+        // Final refresh after all promotions should be done
+        let totalDelay = Double(promotionChain.count - currentIndex + 1) * 2.5 + 1.0
+        DispatchQueue.main.asyncAfter(deadline: .now() + totalDelay) { [weak self] in
+            self?.loadIndex()
+        }
+    }
+
     /// Atomic trigger file writer. Writes payload as JSON to a named file
     /// inside the agenthandover state directory using tmp+rename.
     func writeTrigger(_ payload: [String: Any], filename: String) {
