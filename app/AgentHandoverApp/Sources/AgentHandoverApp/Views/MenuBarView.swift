@@ -247,9 +247,9 @@ struct MenuBarView: View {
                 .buttonStyle(.plain)
             }
 
-            // Drafts to review
+            // Drafts to review — opens Workflows where user can see details + approve
             if appState.sopDraftCount > 0 {
-                Button(action: { openAndActivate("micro-review") }) {
+                Button(action: { openAndActivate("workflows") }) {
                     HStack(spacing: 10) {
                         ZStack {
                             Circle()
@@ -468,12 +468,6 @@ struct MenuBarView: View {
             }
             QuickLink(icon: "calendar.badge.clock", label: "Digest") {
                 openAndActivate("daily-digest")
-            }
-            QuickLink(icon: "checkmark.rectangle.stack", label: "Review") {
-                openAndActivate("micro-review")
-            }
-            QuickLink(icon: "gearshape", label: "Settings") {
-                openConfig()
             }
         }
     }
