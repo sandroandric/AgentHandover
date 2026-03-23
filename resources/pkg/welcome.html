@@ -1,20 +1,29 @@
 <!DOCTYPE html>
 <html>
-<head><style>body{font-family:-apple-system,sans-serif;padding:20px;color:#333}h1{color:#1a1a1a}ul{line-height:1.8}</style></head>
+<head>
+<meta charset="utf-8">
+<style>
+body { font-family: -apple-system, sans-serif; padding: 24px; color: #18191F; line-height: 1.7; }
+h1 { font-size: 24px; font-weight: 800; margin-bottom: 4px; }
+.tagline { font-size: 16px; font-weight: 600; color: #EA9134; margin-bottom: 16px; }
+p { font-size: 14px; color: #555; }
+.what { background: #FFF5E0; border-radius: 8px; padding: 16px; margin-top: 16px; border: 1.5px solid #EA913440; }
+.what ul { margin: 8px 0 0 0; padding-left: 20px; }
+.what li { font-size: 13px; color: #333; margin-bottom: 4px; }
+</style>
+</head>
 <body>
-<h1>Welcome to AgentHandover</h1>
-<p>AgentHandover is a local, privacy-first apprentice that observes your workflows and generates semantic SOPs.</p>
+<h1>AgentHandover</h1>
+<div class="tagline">Work once. Hand over forever.</div>
+<p>AgentHandover watches how you work and turns your workflows into step-by-step procedures that AI agents can follow. Everything runs locally on your Mac.</p>
+<div class="what">
+<strong>This installer sets up:</strong>
 <ul>
-<li>Runs entirely on your machine — no data leaves your laptop</li>
-<li>Learns from your daily work patterns</li>
-<li>Generates AI-executable SOPs</li>
+<li>The background observer (captures your screen locally)</li>
+<li>The AI analysis engine (understands what you're doing)</li>
+<li>The menu bar app (your control center)</li>
+<li>CLI tools for power users</li>
 </ul>
-<p>This installer will set up:</p>
-<ul>
-<li>The AgentHandover daemon and CLI tools</li>
-<li>The menu bar status app</li>
-<li>Chrome extension for browser observation</li>
-<li>Auto-start services</li>
-</ul>
+</div>
 </body>
 </html>
