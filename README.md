@@ -21,7 +21,7 @@
 
 You already know how to do your work. Now your agents can too.
 
-AgentHandover watches you work on your Mac, understands what you're doing and why, and turns your real workflows into step-by-step procedures that agents can follow. Not screen recordings. Not macros. Actual procedures with strategy, decision criteria, guardrails, and timing - the kind of context a capable agent needs to do the work right.
+AgentHandover watches you work on your Mac, understands what you're doing and why, and produces step-by-step procedures that agents like **OpenClaw**, **Claude Code**, **Codex**, and any AI agent can follow. Not screen recordings. Not macros. Actual procedures with strategy, decision criteria, guardrails, and timing - the kind of handoff a capable agent needs to do the work exactly how you would.
 
 You keep working normally. AgentHandover writes the manual.
 
