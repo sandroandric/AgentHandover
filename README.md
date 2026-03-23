@@ -19,6 +19,10 @@
 
 ---
 
+<p align="center">
+  <img src="AgentHandover.png" alt="The Struggle → The Discovery → The Transformation" />
+</p>
+
 You already know how to do your work. Now your agents can too.
 
 AgentHandover watches you work on your Mac, understands what you're doing and why, and produces step-by-step procedures that agents like **OpenClaw**, **Claude Code**, **Codex**, and any AI agent can follow. Not screen recordings. Not macros. Actual procedures with strategy, decision criteria, guardrails, and timing - the kind of handoff a capable agent needs to do the work exactly how you would.
