@@ -3,10 +3,10 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AgentHandover - Work once. Hand over forever.</title>
+    <title>AgentHandover</title>
     <link rel="icon" type="image/png" href="favicon.png">
     <style>
-        @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap');
+        @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap');
 
         * { margin: 0; padding: 0; box-sizing: border-box; }
 
@@ -15,955 +15,372 @@
             --orange: #EA9134;
             --yellow: #FFBD12;
             --cream: #FFF5E0;
-            --light: #F8F7F4;
-            --green: #2ECC57;
-            --red: #E74C3C;
-            --border: 2.5px;
-            --radius: 14px;
-            --radius-lg: 20px;
         }
 
         body {
             font-family: 'Space Grotesk', -apple-system, sans-serif;
             background: var(--navy);
-            color: var(--navy);
-            overflow-x: hidden;
             -webkit-font-smoothing: antialiased;
         }
 
-        /* ============================================================
-           HERO — warm orange, full screen, mascot + floating terminal
-           ============================================================ */
+        a { text-decoration: none; }
+
+        /* ---- HERO ---- */
         .hero {
-            background: var(--orange);
             min-height: 100vh;
+            background: var(--orange);
             display: flex;
-            align-items: center;
-            padding: 0 clamp(2rem, 6vw, 8rem);
-            position: relative;
-            overflow: hidden;
-        }
-
-        .hero-left {
-            flex: 1;
-            z-index: 2;
-            max-width: 600px;
-        }
-
-        .hero-right {
-            flex: 1;
-            display: flex;
+            flex-direction: column;
             justify-content: center;
-            z-index: 2;
+            padding: clamp(3rem, 8vw, 6rem) clamp(2rem, 8vw, 10rem);
         }
 
-        .mascot-circle {
-            width: 90px;
-            height: 90px;
-            background: var(--yellow);
-            border-radius: 50%;
-            border: 3px solid var(--navy);
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            margin-bottom: 2rem;
-            animation: float 6s ease-in-out infinite;
-        }
-
-        .mascot-circle img { width: 60px; height: 60px; }
-
-        @keyframes float {
-            0%, 100% { transform: translateY(0); }
-            50% { transform: translateY(-8px); }
+        .hero img {
+            width: 64px;
+            height: 64px;
+            margin-bottom: 3rem;
         }
 
         .hero h1 {
-            font-size: clamp(3.2rem, 7vw, 5.5rem);
+            font-size: clamp(3.5rem, 9vw, 7rem);
             font-weight: 800;
-            line-height: 0.92;
-            letter-spacing: -0.05em;
+            line-height: 0.9;
+            letter-spacing: -0.06em;
             color: white;
-            margin-bottom: 1.5rem;
         }
 
-        .hero h1 span { color: var(--navy); }
-
-        .hero .sub {
-            font-size: clamp(1.05rem, 1.8vw, 1.2rem);
-            line-height: 1.75;
-            color: rgba(255,255,255,0.88);
-            margin-bottom: 2.5rem;
-            max-width: 480px;
+        .hero h1 span {
+            display: block;
+            color: var(--navy);
         }
 
-        .hero .sub strong { color: white; }
-
-        .btn-row { display: flex; gap: 0.7rem; flex-wrap: wrap; }
-
-        .btn {
-            display: inline-block;
-            text-decoration: none;
-            padding: 0.9rem 2.2rem;
-            border-radius: var(--radius);
-            font-weight: 700;
-            font-size: 0.95rem;
-            border: var(--border) solid var(--navy);
-            transition: transform 0.2s, box-shadow 0.2s;
-            cursor: pointer;
-        }
-
-        .btn:hover { transform: translateY(-2px); }
-
-        .btn-dark { background: var(--navy); color: white; }
-        .btn-dark:hover { box-shadow: 0 8px 30px rgba(24,25,31,0.3); }
-        .btn-ghost { background: transparent; color: var(--navy); }
-        .btn-ghost:hover { background: rgba(24,25,31,0.08); }
-        .btn-white { background: white; color: var(--navy); }
-        .btn-white:hover { box-shadow: 0 8px 30px rgba(0,0,0,0.1); }
-        .btn-orange { background: var(--orange); color: white; border-color: var(--orange); }
-        .btn-orange:hover { box-shadow: 0 8px 30px rgba(234,145,52,0.4); }
-
-        /* Floating terminal in hero */
-        .hero-terminal {
-            background: var(--navy);
-            border: 3px solid rgba(255,255,255,0.15);
-            border-radius: var(--radius-lg);
-            padding: 0;
-            width: 100%;
-            max-width: 440px;
-            overflow: hidden;
-            box-shadow: 0 40px 80px rgba(24,25,31,0.4);
-            animation: float 6s ease-in-out infinite;
-            animation-delay: -3s;
-        }
-
-        .terminal-bar {
-            display: flex;
-            gap: 6px;
-            padding: 12px 16px;
-            border-bottom: 2px solid rgba(255,255,255,0.06);
-        }
-
-        .terminal-dot {
-            width: 10px;
-            height: 10px;
-            border-radius: 50%;
-            border: 2px solid rgba(255,255,255,0.15);
-        }
-
-        .terminal-dot:nth-child(1) { background: var(--red); border-color: var(--red); }
-        .terminal-dot:nth-child(2) { background: var(--yellow); border-color: var(--yellow); }
-        .terminal-dot:nth-child(3) { background: var(--green); border-color: var(--green); }
-
-        .terminal-body {
-            padding: 1.2rem 1.5rem 1.5rem;
-            font-family: 'JetBrains Mono', monospace;
-            font-size: 0.72rem;
-            line-height: 2;
-            color: #a1a1aa;
-        }
-
-        .terminal-body .t-orange { color: var(--orange); }
-        .terminal-body .t-yellow { color: var(--yellow); }
-        .terminal-body .t-green { color: var(--green); }
-        .terminal-body .t-white { color: white; }
-        .terminal-body .t-dim { color: #3f3f46; }
-        .terminal-body .t-bold { font-weight: 600; }
-
-        /* ============================================================
-           TICKER
-           ============================================================ */
-        .ticker {
-            background: var(--navy);
-            border-bottom: var(--border) solid rgba(255,255,255,0.06);
-            padding: 1rem 0;
-            overflow: hidden;
-            white-space: nowrap;
-        }
-
-        .ticker-inner {
-            display: inline-flex;
-            gap: 2.5rem;
-            animation: scroll-left 45s linear infinite;
-            font-family: 'JetBrains Mono', monospace;
-            font-size: 0.68rem;
-            letter-spacing: 0.07em;
-            text-transform: uppercase;
-            color: #3f3f46;
-        }
-
-        .ticker-inner .hl { color: var(--orange); }
-
-        @keyframes scroll-left {
-            0% { transform: translateX(0); }
-            100% { transform: translateX(-50%); }
-        }
-
-        /* ============================================================
-           SECTIONS — alternating backgrounds for visual rhythm
-           ============================================================ */
-        .s-navy { background: var(--navy); color: white; }
-        .s-cream { background: var(--cream); color: var(--navy); }
-        .s-light { background: var(--light); color: var(--navy); }
-        .s-orange { background: var(--orange); color: white; }
-
-        .sect {
-            padding: clamp(5rem, 10vw, 8rem) clamp(2rem, 6vw, 8rem);
-        }
-
-        .sect h2 {
-            font-size: clamp(2.2rem, 4.5vw, 3.2rem);
-            font-weight: 800;
-            letter-spacing: -0.04em;
-            line-height: 1.08;
-            margin-bottom: 1.2rem;
-        }
-
-        .sect h2 em { font-style: normal; color: var(--orange); }
-        .s-orange h2 em { color: var(--navy); }
-        .s-cream h2 em { color: var(--orange); }
-
-        .sect .lead {
-            font-size: 1.05rem;
+        .hero p {
+            margin-top: 2rem;
+            font-size: clamp(1rem, 2vw, 1.15rem);
             line-height: 1.8;
-            max-width: 580px;
-            opacity: 0.7;
-            margin-bottom: 2.5rem;
-        }
-
-        .s-navy .lead { color: #a1a1aa; }
-
-        .grid-2 {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 4rem;
-            align-items: center;
-        }
-
-        /* ============================================================
-           DELIVERABLE — the hero card showing what agents receive
-           ============================================================ */
-        .deliverable-card {
-            background: var(--navy);
-            border: 3px solid #2a2a32;
-            border-radius: var(--radius-lg);
-            overflow: hidden;
+            color: rgba(255,255,255,0.82);
             max-width: 520px;
         }
 
-        .del-header {
-            padding: 1.5rem 2rem 0;
+        .hero p strong { color: white; }
+
+        .hero-btns {
+            margin-top: 2.5rem;
+            display: flex;
+            gap: 0.6rem;
         }
 
-        .del-title {
-            font-size: 1.15rem;
+        .btn {
+            padding: 0.85rem 2rem;
+            border-radius: 12px;
+            font-weight: 700;
+            font-size: 0.9rem;
+            font-family: inherit;
+            border: 2.5px solid var(--navy);
+            transition: transform 0.15s;
+            display: inline-block;
+        }
+
+        .btn:hover { transform: translateY(-2px); }
+        .btn-dark { background: var(--navy); color: white; }
+        .btn-outline { background: none; color: var(--navy); }
+
+        /* ---- WHAT IT PRODUCES ---- */
+        .product {
+            background: var(--navy);
+            padding: clamp(5rem, 10vw, 9rem) clamp(2rem, 8vw, 10rem);
+        }
+
+        .product h2 {
+            font-size: clamp(2rem, 5vw, 3.5rem);
             font-weight: 800;
+            letter-spacing: -0.04em;
+            line-height: 1;
             color: white;
+            margin-bottom: 1rem;
         }
 
-        .del-meta {
+        .product h2 em {
+            font-style: normal;
+            color: var(--orange);
+        }
+
+        .product > p {
+            font-size: 1rem;
+            color: #71717a;
+            max-width: 480px;
+            line-height: 1.7;
+            margin-bottom: 3rem;
+        }
+
+        .card {
+            background: #0e0f13;
+            border: 2.5px solid #28282e;
+            border-radius: 16px;
+            max-width: 600px;
+            overflow: hidden;
+        }
+
+        .card-body {
+            padding: 2rem 2.5rem;
             font-family: 'JetBrains Mono', monospace;
-            font-size: 0.68rem;
-            color: #52525b;
-            margin-top: 0.2rem;
+            font-size: 0.76rem;
+            line-height: 2.1;
+            color: #8a8a98;
         }
 
-        .del-section {
-            padding: 0 2rem;
-            margin-top: 1rem;
+        .card-body .t { color: white; font-weight: 500; font-size: 1.05rem; font-family: 'Space Grotesk', sans-serif; }
+        .card-body .m { color: #3f3f46; font-size: 0.68rem; }
+        .card-body .l { color: var(--orange); text-transform: uppercase; letter-spacing: 0.1em; font-size: 0.6rem; font-weight: 600; margin-top: 0.6em; display: block; }
+
+        .card-voice {
+            background: rgba(234,145,52,0.05);
+            border-top: 2.5px solid #28282e;
+            padding: 1.2rem 2.5rem;
         }
 
-        .del-label {
+        .card-voice .l { color: var(--orange); text-transform: uppercase; letter-spacing: 0.1em; font-size: 0.6rem; font-weight: 600; font-family: 'JetBrains Mono', monospace; margin-bottom: 0.5rem; }
+
+        .tags { display: flex; gap: 0.35rem; margin-bottom: 0.6rem; }
+
+        .tag {
             font-family: 'JetBrains Mono', monospace;
             font-size: 0.6rem;
-            text-transform: uppercase;
-            letter-spacing: 0.12em;
-            color: var(--orange);
             font-weight: 600;
-            margin-bottom: 0.3rem;
+            padding: 0.2rem 0.6rem;
+            border-radius: 5px;
+            color: var(--orange);
+            background: rgba(234,145,52,0.12);
         }
 
-        .del-text {
+        .quote {
             font-size: 0.82rem;
-            line-height: 1.7;
-            color: #a1a1aa;
-        }
-
-        .del-voice {
-            padding: 1rem 2rem;
-            margin-top: 1rem;
-            background: rgba(234,145,52,0.06);
-            border-top: 2px solid rgba(234,145,52,0.15);
-        }
-
-        .voice-tags {
-            display: flex;
-            gap: 0.4rem;
-            flex-wrap: wrap;
-            margin-bottom: 0.5rem;
-        }
-
-        .vtag {
-            font-family: 'JetBrains Mono', monospace;
-            font-size: 0.62rem;
-            font-weight: 600;
-            padding: 0.25rem 0.65rem;
-            border-radius: 6px;
-            background: rgba(234,145,52,0.15);
-            color: var(--orange);
-            border: 1px solid rgba(234,145,52,0.3);
-        }
-
-        .del-sample {
-            font-size: 0.78rem;
             font-style: italic;
-            color: #71717a;
+            color: #5a5a68;
             border-left: 3px solid var(--orange);
             padding-left: 0.8rem;
             line-height: 1.6;
         }
 
-        .del-footer {
-            padding: 0.8rem 2rem;
-            border-top: 2px solid #27272a;
+        .card-foot {
+            border-top: 2.5px solid #28282e;
+            padding: 0.7rem 2.5rem;
             display: flex;
             justify-content: space-between;
             font-family: 'JetBrains Mono', monospace;
-            font-size: 0.62rem;
-            color: #52525b;
+            font-size: 0.6rem;
+            color: #3f3f46;
         }
 
-        .del-footer .conf { color: var(--green); font-weight: 600; }
+        .card-foot .g { color: #2ECC57; font-weight: 600; }
 
-        /* ============================================================
-           FEATURES — big icon circles (matching app onboarding style)
-           ============================================================ */
-        .features-grid {
+        /* ---- HOW ---- */
+        .how {
+            background: var(--cream);
+            padding: clamp(5rem, 10vw, 9rem) clamp(2rem, 8vw, 10rem);
+        }
+
+        .how h2 {
+            font-size: clamp(2rem, 5vw, 3.5rem);
+            font-weight: 800;
+            letter-spacing: -0.04em;
+            line-height: 1;
+            color: var(--navy);
+            margin-bottom: 3.5rem;
+        }
+
+        .how h2 em { font-style: normal; color: var(--orange); }
+
+        .how-grid {
             display: grid;
-            grid-template-columns: repeat(3, 1fr);
-            gap: 1.5rem;
-            margin-top: 2.5rem;
+            grid-template-columns: 1fr 1fr;
+            gap: 2rem;
         }
 
-        .feat {
+        .how-block {
+            border: 2.5px solid var(--navy);
+            border-radius: 16px;
+            padding: 2rem 2.2rem;
             background: white;
-            border: var(--border) solid var(--navy);
-            border-radius: var(--radius-lg);
-            padding: 2rem;
-            transition: transform 0.2s;
         }
 
-        .feat:hover { transform: translateY(-4px); }
-
-        .feat-icon {
-            width: 48px;
-            height: 48px;
-            border-radius: 12px;
-            border: var(--border) solid var(--navy);
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 1.3rem;
-            margin-bottom: 1rem;
-        }
-
-        .feat-icon.orange { background: rgba(234,145,52,0.12); }
-        .feat-icon.yellow { background: rgba(255,189,18,0.15); }
-        .feat-icon.green { background: rgba(46,204,87,0.12); }
-
-        .feat h3 {
-            font-size: 1rem;
+        .how-block h3 {
+            font-size: 1.1rem;
             font-weight: 700;
-            margin-bottom: 0.4rem;
+            color: var(--navy);
+            margin-bottom: 0.6rem;
         }
 
-        .feat p {
-            font-size: 0.85rem;
-            line-height: 1.6;
+        .how-block p {
+            font-size: 0.9rem;
             color: #71717a;
+            line-height: 1.7;
         }
 
-        /* ============================================================
-           PIPELINE — vertical timeline with nodes (matching app step 4)
-           ============================================================ */
-        .timeline {
-            display: flex;
-            flex-direction: column;
-            gap: 0;
-            position: relative;
+        /* ---- CONNECT ---- */
+        .connect {
+            background: var(--navy);
+            padding: clamp(5rem, 10vw, 9rem) clamp(2rem, 8vw, 10rem);
+        }
+
+        .connect h2 {
+            font-size: clamp(2rem, 5vw, 3.5rem);
+            font-weight: 800;
+            letter-spacing: -0.04em;
+            color: white;
+            margin-bottom: 0.8rem;
+        }
+
+        .connect h2 em { font-style: normal; color: var(--orange); }
+
+        .connect > p {
+            font-size: 1rem;
+            color: #71717a;
+            max-width: 460px;
+            line-height: 1.7;
+            margin-bottom: 2.5rem;
+        }
+
+        .code-block {
+            background: #0e0f13;
+            border: 2.5px solid #28282e;
+            border-radius: 16px;
+            padding: 1.5rem 2rem;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.78rem;
+            line-height: 2.4;
+            color: #71717a;
             max-width: 480px;
         }
 
-        .tl-step {
-            display: flex;
-            align-items: center;
-            gap: 1.2rem;
-            padding: 0.6rem 0;
-            position: relative;
-        }
+        .code-block .c { color: var(--orange); }
+        .code-block .s { color: #2ECC57; }
+        .code-block .d { color: #3f3f46; }
 
-        .tl-node {
-            width: 36px;
-            height: 36px;
-            border-radius: 50%;
-            border: var(--border) solid var(--navy);
-            background: var(--light);
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-family: 'JetBrains Mono', monospace;
-            font-size: 0.6rem;
-            font-weight: 600;
-            color: var(--navy);
-            flex-shrink: 0;
-            z-index: 2;
-            transition: all 0.2s;
-        }
-
-        .tl-step:hover .tl-node {
-            background: var(--orange);
-            border-color: var(--orange);
-            color: white;
-        }
-
-        .tl-node.highlight {
-            background: var(--orange);
-            color: white;
-            border-color: var(--orange);
-            width: 40px;
-            height: 40px;
-        }
-
-        .tl-line {
-            position: absolute;
-            left: 17px;
-            top: 36px;
-            bottom: -1px;
-            width: 3px;
-            background: var(--navy);
-            opacity: 0.12;
-            z-index: 1;
-        }
-
-        .tl-step:last-child .tl-line { display: none; }
-
-        .tl-text {
-            font-size: 0.88rem;
-            font-weight: 500;
-            color: var(--navy);
-        }
-
-        .tl-step:hover .tl-text { color: var(--orange); }
-
-        .tl-new {
-            font-family: 'JetBrains Mono', monospace;
-            font-size: 0.5rem;
-            text-transform: uppercase;
-            letter-spacing: 0.1em;
-            background: var(--yellow);
-            color: var(--navy);
-            padding: 0.12rem 0.45rem;
-            border-radius: 4px;
-            font-weight: 700;
-            margin-left: 0.5rem;
-            border: 1.5px solid var(--navy);
-        }
-
-        /* ============================================================
-           CONNECT CARDS
-           ============================================================ */
-        .connect-grid {
-            display: grid;
-            grid-template-columns: repeat(4, 1fr);
-            gap: 1rem;
-            margin-top: 2.5rem;
-        }
-
-        .cc {
-            background: rgba(255,255,255,0.04);
-            border: var(--border) solid rgba(255,255,255,0.08);
-            border-radius: var(--radius-lg);
-            padding: 1.8rem;
-            transition: all 0.2s;
-        }
-
-        .cc:hover { border-color: var(--orange); transform: translateY(-3px); }
-
-        .cc-badge {
-            font-family: 'JetBrains Mono', monospace;
-            font-size: 0.58rem;
-            text-transform: uppercase;
-            letter-spacing: 0.08em;
-            padding: 0.25rem 0.6rem;
-            border-radius: 6px;
-            display: inline-block;
-            margin-bottom: 0.8rem;
-            font-weight: 600;
-        }
-
-        .cc-badge.rec { background: var(--orange); color: white; }
-        .cc-badge.auto { background: rgba(46,204,87,0.15); color: var(--green); border: 1px solid rgba(46,204,87,0.3); }
-        .cc-badge.gen { background: rgba(255,255,255,0.06); color: #71717a; border: 1px solid rgba(255,255,255,0.1); }
-
-        .cc h3 { font-size: 1rem; font-weight: 700; color: white; margin-bottom: 0.5rem; }
-        .cc p { font-size: 0.82rem; line-height: 1.6; color: #71717a; }
-
-        .mcp-code {
-            margin-top: 2rem;
-            background: rgba(0,0,0,0.3);
-            border: var(--border) solid rgba(255,255,255,0.06);
-            border-radius: var(--radius);
-            padding: 1.2rem 1.5rem;
-            font-family: 'JetBrains Mono', monospace;
-            font-size: 0.75rem;
-            line-height: 1.8;
-            color: #a1a1aa;
-            max-width: 440px;
-        }
-
-        .mcp-code .key { color: var(--orange); }
-
-        /* ============================================================
-           TRUST
-           ============================================================ */
-        .trust-row {
-            display: flex;
-            gap: 3px;
-            margin-top: 1.5rem;
-        }
-
-        .trust-stage {
-            flex: 1;
-            height: 44px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-family: 'JetBrains Mono', monospace;
-            font-size: 0.58rem;
-            text-transform: uppercase;
-            letter-spacing: 0.1em;
-            border-radius: 10px;
-            border: var(--border) solid var(--navy);
-            color: #71717a;
-            background: white;
-            transition: all 0.2s;
-            cursor: default;
-        }
-
-        .trust-stage:hover { background: var(--cream); color: var(--navy); }
-
-        .trust-stage.active {
-            background: var(--orange);
-            border-color: var(--orange);
-            color: white;
-            font-weight: 600;
-        }
-
-        /* ============================================================
-           PRIVACY STRIP
-           ============================================================ */
-        .privacy-pills {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 0.6rem;
-            margin-top: 2rem;
-        }
-
-        .ppill {
-            display: inline-flex;
-            align-items: center;
-            gap: 0.5rem;
-            padding: 0.55rem 1.1rem;
-            border: var(--border) solid var(--navy);
-            border-radius: 999px;
-            font-size: 0.8rem;
-            font-weight: 500;
-            background: white;
-        }
-
-        .ppill .dot {
-            width: 7px; height: 7px;
-            border-radius: 50%;
-            background: var(--green);
-        }
-
-        /* ============================================================
-           STATS STRIP
-           ============================================================ */
-        .stats {
-            display: flex;
-            justify-content: center;
-            gap: clamp(2rem, 6vw, 5rem);
-            padding: 3rem 2rem;
-            background: var(--navy);
-            border-top: var(--border) solid rgba(255,255,255,0.06);
-            border-bottom: var(--border) solid rgba(255,255,255,0.06);
-        }
-
-        .stat {
-            text-align: center;
-        }
-
-        .stat-num {
-            font-size: clamp(2rem, 4vw, 3rem);
-            font-weight: 800;
-            color: var(--orange);
-            letter-spacing: -0.04em;
-        }
-
-        .stat-label {
-            font-size: 0.78rem;
-            color: #52525b;
-            margin-top: 0.2rem;
-            font-weight: 500;
-        }
-
-        /* ============================================================
-           CTA
-           ============================================================ */
+        /* ---- CTA ---- */
         .cta {
-            padding: 7rem clamp(2rem, 6vw, 8rem);
-            text-align: center;
             background: var(--orange);
+            padding: clamp(5rem, 10vw, 8rem) clamp(2rem, 8vw, 10rem);
         }
 
         .cta h2 {
-            font-size: clamp(2.5rem, 5vw, 4rem);
+            font-size: clamp(2.5rem, 6vw, 4.5rem);
             font-weight: 800;
+            letter-spacing: -0.05em;
+            line-height: 0.95;
             color: white;
-            letter-spacing: -0.04em;
-            margin-bottom: 0.5rem;
         }
 
         .cta h2 span { color: var(--navy); }
 
         .cta p {
-            color: rgba(255,255,255,0.7);
-            margin-bottom: 2.5rem;
-            font-size: 1rem;
+            margin-top: 1rem;
+            color: rgba(255,255,255,0.6);
+            font-size: 0.9rem;
+            margin-bottom: 2rem;
         }
 
-        /* ============================================================
-           FOOTER
-           ============================================================ */
+        /* ---- FOOTER ---- */
         footer {
-            padding: 1.5rem clamp(2rem, 6vw, 8rem);
+            padding: 1.5rem clamp(2rem, 8vw, 10rem);
             background: var(--navy);
-            border-top: var(--border) solid rgba(255,255,255,0.06);
+            border-top: 2.5px solid rgba(255,255,255,0.05);
             display: flex;
             justify-content: space-between;
             font-size: 0.75rem;
-            color: #52525b;
+            color: #3f3f46;
         }
 
-        footer a { text-decoration: none; color: #71717a; }
+        footer a { color: #52525b; text-decoration: none; }
         footer a:hover { color: white; }
 
-        /* ============================================================
-           RESPONSIVE
-           ============================================================ */
-        @media (max-width: 900px) {
-            .hero { flex-direction: column; padding-top: 6rem; padding-bottom: 4rem; min-height: auto; }
-            .hero-right { margin-top: 3rem; }
-            .grid-2 { grid-template-columns: 1fr; gap: 2.5rem; }
-            .features-grid { grid-template-columns: 1fr 1fr; }
-            .connect-grid { grid-template-columns: 1fr 1fr; }
-            .stats { flex-wrap: wrap; gap: 2rem; }
-        }
-
-        @media (max-width: 550px) {
-            .features-grid { grid-template-columns: 1fr; }
-            .connect-grid { grid-template-columns: 1fr; }
-            .hero-terminal { max-width: 100%; }
-            footer { flex-direction: column; gap: 0.5rem; }
+        @media (max-width: 768px) {
+            .how-grid { grid-template-columns: 1fr; }
+            footer { flex-direction: column; gap: 0.4rem; }
         }
     </style>
 </head>
 <body>
 
-<!-- ================================================================
-     HERO
-     ================================================================ -->
 <section class="hero">
-    <div class="hero-left">
-        <div class="mascot-circle">
-            <img src="favicon.png" alt="">
-        </div>
-        <h1>Work once.<br><span>Hand over forever.</span></h1>
-        <p class="sub">
-            <strong>AgentHandover</strong> watches how you work, captures the strategy and judgment behind your actions, learns your voice, and produces handoff documents that AI agents follow <strong>exactly the way you would.</strong>
-        </p>
-        <div class="btn-row">
-            <a href="https://github.com/sandroandric/AgentHandover/releases" class="btn btn-dark">Download for macOS</a>
-            <a href="https://github.com/sandroandric/AgentHandover" class="btn btn-ghost">GitHub</a>
-        </div>
+    <img src="favicon.png" alt="AgentHandover">
+    <h1>Work once.<br><span>Hand over forever.</span></h1>
+    <p>AgentHandover watches how you work on your Mac, learns the strategy and voice behind your actions, and writes handoff documents that <strong>AI agents follow exactly the way you would</strong>.</p>
+    <div class="hero-btns">
+        <a href="https://github.com/sandroandric/AgentHandover/releases" class="btn btn-dark">Download for macOS</a>
+        <a href="https://github.com/sandroandric/AgentHandover" class="btn btn-outline">GitHub</a>
     </div>
-    <div class="hero-right">
-        <div class="hero-terminal">
-            <div class="terminal-bar">
-                <div class="terminal-dot"></div>
-                <div class="terminal-dot"></div>
-                <div class="terminal-dot"></div>
+</section>
+
+<section class="product">
+    <h2>Not steps.<br><em>Understanding.</em></h2>
+    <p>Strategy, decision logic, guardrails, and your actual writing voice. The kind of brief you'd give a sharp new hire -- except it writes itself.</p>
+    <div class="card">
+        <div class="card-body">
+            <div class="t">Reddit Community Marketing</div>
+            <div class="m">6 steps &middot; 4 sessions learned &middot; daily workflow</div>
+            <span class="l">Strategy</span>
+            Target high-signal posts (10+ comments, &lt;48h, not promotional). Write authentic replies that acknowledge the problem, share experience, and mention product.<br>
+            <span class="l">Guardrails</span>
+            Max 5 replies/day &middot; Never identical phrasing &middot; Never own posts &middot; Empathy-first tone
+        </div>
+        <div class="card-voice">
+            <div class="l">Voice &amp; Style</div>
+            <div class="tags">
+                <span class="tag">casual</span>
+                <span class="tag">short sentences</span>
+                <span class="tag">uses emoji</span>
             </div>
-            <div class="terminal-body">
-                <span class="t-dim">$</span> <span class="t-orange">agenthandover</span> sops list<br>
-                <span class="t-white t-bold">Reddit Community Marketing</span> <span class="t-green">agent-ready</span><br>
-                <span class="t-dim">&nbsp; 6 steps - 89% confidence - 4 sessions</span><br>
-                <span class="t-white t-bold">Deploy to Staging</span> <span class="t-yellow">reviewed</span><br>
-                <span class="t-dim">&nbsp; 8 steps - 92% confidence - 7 sessions</span><br>
-                <span class="t-white t-bold">Client Invoice Processing</span> <span class="t-dim">draft</span><br>
-                <span class="t-dim">&nbsp; 5 steps - 76% confidence - 2 sessions</span><br><br>
-                <span class="t-dim">$</span> <span class="t-orange">agenthandover</span> connect mcp<br>
-                <span class="t-green">MCP server ready.</span> <span class="t-dim">5 tools exposed.</span>
-            </div>
+            <div class="quote">Hey great point about the engagement metrics! We should def try that approach</div>
+        </div>
+        <div class="card-foot">
+            <span>~15 min daily &middot; 9-10am</span>
+            <span class="g">89% confidence</span>
         </div>
     </div>
 </section>
 
-<!-- ================================================================
-     TICKER
-     ================================================================ -->
-<div class="ticker">
-    <div class="ticker-inner">
-        <span>strategy, not just steps</span>
-        <span class="hl">captures your writing voice</span>
-        <span>semantic vector search</span>
-        <span class="hl">MCP server for any agent</span>
-        <span>100% on your machine</span>
-        <span class="hl">nothing leaves your laptop</span>
-        <span>style strengthens over sessions</span>
-        <span class="hl">agents write like you</span>
-        <span>screenshots deleted instantly</span>
-        <span class="hl">every procedure needs your approval</span>
-        <span>optional image embeddings</span>
-        <span class="hl">Claude Code + OpenClaw + Codex</span>
-        <span>strategy, not just steps</span>
-        <span class="hl">captures your writing voice</span>
-        <span>semantic vector search</span>
-        <span class="hl">MCP server for any agent</span>
-        <span>100% on your machine</span>
-        <span class="hl">nothing leaves your laptop</span>
-        <span>style strengthens over sessions</span>
-        <span class="hl">agents write like you</span>
-        <span>screenshots deleted instantly</span>
-        <span class="hl">every procedure needs your approval</span>
-        <span>optional image embeddings</span>
-        <span class="hl">Claude Code + OpenClaw + Codex</span>
-    </div>
-</div>
-
-<!-- ================================================================
-     WHAT AGENTS GET — cream bg, deliverable card
-     ================================================================ -->
-<section class="sect s-cream">
-    <div class="grid-2">
-        <div>
-            <h2>This is what your<br>agent <em>actually gets</em>.</h2>
-            <p class="lead">
-                Not a list of clicks. A complete handoff with strategy, decision logic, guardrails, and your voice. The kind of brief you'd give a capable new hire -- except it writes itself.
-            </p>
+<section class="how">
+    <h2>Watches. Learns.<br><em>Hands over.</em></h2>
+    <div class="how-grid">
+        <div class="how-block">
+            <h3>You work normally</h3>
+            <p>A local AI watches your screen and builds structured understanding of every workflow. Activity classification filters noise. A vector knowledge base links tasks by meaning across sessions. Style analysis captures how you write.</p>
         </div>
-        <div class="deliverable-card">
-            <div class="del-header">
-                <div class="del-title">Reddit Community Marketing</div>
-                <div class="del-meta">6 steps - 4 sessions - daily workflow</div>
-            </div>
-            <div class="del-section">
-                <div class="del-label">Strategy</div>
-                <div class="del-text">Target high-signal posts (10+ comments, &lt;48h). Write authentic replies: acknowledge problem, share experience, mention product.</div>
-            </div>
-            <div class="del-section">
-                <div class="del-label">Guardrails</div>
-                <div class="del-text">Max 5/day - Never identical phrasing - Never own posts - Empathy-first</div>
-            </div>
-            <div class="del-voice">
-                <div class="del-label">Voice &amp; Style</div>
-                <div class="voice-tags">
-                    <span class="vtag">casual</span>
-                    <span class="vtag">short sentences</span>
-                    <span class="vtag">uses emoji</span>
-                </div>
-                <div class="del-sample">Hey great point about the engagement metrics! We should def try that approach</div>
-            </div>
-            <div class="del-footer">
-                <span>~15 min daily - 9-10am</span>
-                <span class="conf">89% confidence</span>
-            </div>
+        <div class="how-block">
+            <h3>Agents get the real thing</h3>
+            <p>Procedures include strategy, steps, guardrails, your voice, and decision logic. Compiled to Claude Code skills, OpenClaw SOPs, Codex instructions, and a universal MCP server. One observation, every agent format.</p>
+        </div>
+        <div class="how-block">
+            <h3>You stay in control</h3>
+            <p>Every procedure starts as a draft. You review strategy, steps, and guardrails before anything reaches an agent. Six readiness gates must pass. The system never auto-promotes.</p>
+        </div>
+        <div class="how-block">
+            <h3>Everything stays local</h3>
+            <p>Local VLM via Ollama. Screenshots deleted after annotation. Auto-redaction of secrets. Encrypted at rest. No cloud, no accounts, no telemetry. Your data never leaves your machine.</p>
         </div>
     </div>
 </section>
 
-<!-- ================================================================
-     STATS STRIP
-     ================================================================ -->
-<div class="stats">
-    <div class="stat">
-        <div class="stat-num">11</div>
-        <div class="stat-label">pipeline stages</div>
-    </div>
-    <div class="stat">
-        <div class="stat-num">768d</div>
-        <div class="stat-label">text embeddings</div>
-    </div>
-    <div class="stat">
-        <div class="stat-num">1152d</div>
-        <div class="stat-label">image embeddings</div>
-    </div>
-    <div class="stat">
-        <div class="stat-num">5</div>
-        <div class="stat-label">MCP tools</div>
-    </div>
-    <div class="stat">
-        <div class="stat-num">0</div>
-        <div class="stat-label">data sent to cloud</div>
-    </div>
-</div>
-
-<!-- ================================================================
-     FEATURES — light bg, bold cards
-     ================================================================ -->
-<section class="sect s-light">
-    <h2>What makes this <em>different</em>.</h2>
-    <p class="lead">Other tools record clicks. AgentHandover understands intent.</p>
-
-    <div class="features-grid">
-        <div class="feat">
-            <div class="feat-icon orange">&#127919;</div>
-            <h3>Strategy, not just steps</h3>
-            <p>Behavioral synthesis extracts the reasoning behind your actions. Not "click here" but "target high-signal posts because..."</p>
-        </div>
-        <div class="feat">
-            <div class="feat-icon yellow">&#128483;</div>
-            <h3>Your voice, per workflow</h3>
-            <p>Style analysis captures formality, sentence patterns, emoji. Casual on Reddit, formal in email. Strengthens across sessions.</p>
-        </div>
-        <div class="feat">
-            <div class="feat-icon green">&#128270;</div>
-            <h3>Semantic understanding</h3>
-            <p>Vector KB powered by nomic-embed-text. "Deploy to staging" matches "push to stage environment." Not keyword matching.</p>
-        </div>
-        <div class="feat">
-            <div class="feat-icon orange">&#128065;</div>
-            <h3>Visual intelligence</h3>
-            <p>Optional SigLIP image embeddings let agents find visually similar screens even when text differs entirely.</p>
-        </div>
-        <div class="feat">
-            <div class="feat-icon yellow">&#128279;</div>
-            <h3>Universal agent support</h3>
-            <p>MCP server, Claude Code /skills, Codex AGENTS.md, OpenClaw SOPs, REST API. One observation, every format.</p>
-        </div>
-        <div class="feat">
-            <div class="feat-icon green">&#128274;</div>
-            <h3>Your machine, your data</h3>
-            <p>Local VLM. Screenshots deleted after annotation. Auto-redaction. XChaCha20 encryption. No telemetry. Ever.</p>
-        </div>
-    </div>
-</section>
-
-<!-- ================================================================
-     HOW IT WORKS — cream bg, timeline
-     ================================================================ -->
-<section class="sect s-cream">
-    <div class="grid-2">
-        <div>
-            <h2>An 11-stage intelligence<br><em>pipeline</em>.</h2>
-            <p class="lead">
-                From raw screenshot to agent-ready procedure with strategy, voice, and guardrails. Runs continuously on your Mac.
-            </p>
-        </div>
-        <div class="timeline">
-            <div class="tl-step"><div class="tl-node">01</div><div class="tl-text">Screen capture + perceptual dedup</div><div class="tl-line"></div></div>
-            <div class="tl-step"><div class="tl-node">02</div><div class="tl-text">Local VLM annotation (Qwen 3.5)</div><div class="tl-line"></div></div>
-            <div class="tl-step"><div class="tl-node">03</div><div class="tl-text">Activity classification (8 types)</div><div class="tl-line"></div></div>
-            <div class="tl-step"><div class="tl-node highlight">04</div><div class="tl-text">Vector embedding (768d) <span class="tl-new">new</span></div><div class="tl-line"></div></div>
-            <div class="tl-step"><div class="tl-node highlight">05</div><div class="tl-text">Image embedding (1152d) <span class="tl-new">new</span></div><div class="tl-line"></div></div>
-            <div class="tl-step"><div class="tl-node">06</div><div class="tl-text">Semantic clustering + session linking</div><div class="tl-line"></div></div>
-            <div class="tl-step"><div class="tl-node">07</div><div class="tl-text">Behavioral synthesis</div><div class="tl-line"></div></div>
-            <div class="tl-step"><div class="tl-node highlight">08</div><div class="tl-text">Voice &amp; style analysis <span class="tl-new">new</span></div><div class="tl-line"></div></div>
-            <div class="tl-step"><div class="tl-node">09</div><div class="tl-text">Procedure generation + semantic dedup</div><div class="tl-line"></div></div>
-            <div class="tl-step"><div class="tl-node">10</div><div class="tl-text">Human review + approval</div><div class="tl-line"></div></div>
-            <div class="tl-step"><div class="tl-node">11</div><div class="tl-text">Export to every agent format</div></div>
-        </div>
-    </div>
-</section>
-
-<!-- ================================================================
-     CONNECT — navy bg
-     ================================================================ -->
-<section class="sect s-navy">
+<section class="connect">
     <h2>Connect <em>any</em> agent.</h2>
-    <p class="lead">One observation pipeline. Every agent format. One command.</p>
-
-    <div class="connect-grid">
-        <div class="cc">
-            <span class="cc-badge rec">recommended</span>
-            <h3>MCP Server</h3>
-            <p>Claude Code, Cursor, Windsurf, any MCP client. 5 tools including semantic search. One config line.</p>
-        </div>
-        <div class="cc">
-            <span class="cc-badge gen">/commands</span>
-            <h3>Claude Code</h3>
-            <p>Procedures as /slash-commands. Type /reddit-marketing and get the full procedure with voice guidance.</p>
-        </div>
-        <div class="cc">
-            <span class="cc-badge gen">agents.md</span>
-            <h3>Codex</h3>
-            <p>Auto-generated AGENTS.md with procedures, strategy, guardrails, and voice. Codex reads it automatically.</p>
-        </div>
-        <div class="cc">
-            <span class="cc-badge auto">auto-sync</span>
-            <h3>OpenClaw</h3>
-            <p>Procedures sync to OpenClaw workspace automatically. SOP markdown + v3 JSON. Zero config.</p>
-        </div>
-    </div>
-
-    <div class="mcp-code">
-        <span class="key">"mcpServers"</span>: {<br>
-        &nbsp;&nbsp;<span class="key">"agenthandover"</span>: {<br>
-        &nbsp;&nbsp;&nbsp;&nbsp;<span class="key">"command"</span>: <span style="color: var(--green)">"agenthandover-mcp"</span><br>
-        &nbsp;&nbsp;}<br>
-        }
+    <p>One command. Works with Claude Code, OpenClaw, Codex, Cursor, Windsurf, or anything that speaks MCP.</p>
+    <div class="code-block">
+        <span class="d">$</span> <span class="c">agenthandover</span> connect claude-code<br>
+        <span class="s">Done.</span> <span class="d">3 procedures available as /slash-commands</span><br><br>
+        <span class="d">$</span> <span class="c">agenthandover</span> connect mcp<br>
+        <span class="s">MCP server ready.</span> <span class="d">5 tools exposed to any agent.</span><br><br>
+        <span class="d">$</span> <span class="c">agenthandover</span> connect openclaw<br>
+        <span class="s">Synced.</span> <span class="d">3 procedures in ~/.openclaw/workspace/</span>
     </div>
 </section>
 
-<!-- ================================================================
-     TRUST + PRIVACY — cream bg
-     ================================================================ -->
-<section class="sect s-cream">
-    <div class="grid-2">
-        <div>
-            <h2>Nothing runs without<br>your <em>say</em>.</h2>
-            <p class="lead">Every procedure starts as a draft. Six gates must pass before an agent can execute. The system suggests -- you decide.</p>
-            <div class="trust-row">
-                <div class="trust-stage">observed</div>
-                <div class="trust-stage">draft</div>
-                <div class="trust-stage">reviewed</div>
-                <div class="trust-stage">verified</div>
-                <div class="trust-stage active">agent ready</div>
-            </div>
-        </div>
-        <div>
-            <h2>Everything stays on<br>your <em>machine</em>.</h2>
-            <div class="privacy-pills">
-                <div class="ppill"><span class="dot"></span> Local VLM inference</div>
-                <div class="ppill"><span class="dot"></span> Screenshots deleted after annotation</div>
-                <div class="ppill"><span class="dot"></span> Auto-redaction of secrets</div>
-                <div class="ppill"><span class="dot"></span> XChaCha20 encryption at rest</div>
-                <div class="ppill"><span class="dot"></span> No telemetry ever</div>
-            </div>
-        </div>
-    </div>
-</section>
-
-<!-- ================================================================
-     CTA
-     ================================================================ -->
 <section class="cta">
-    <h2>Your work, <span>their playbook.</span></h2>
+    <h2>Your work,<br><span>their playbook.</span></h2>
     <p>macOS only. Local by default. MIT licensed.</p>
-    <div class="btn-row" style="justify-content: center;">
+    <div class="hero-btns">
         <a href="https://github.com/sandroandric/AgentHandover/releases" class="btn btn-dark">Download</a>
-        <a href="https://github.com/sandroandric/AgentHandover" class="btn btn-ghost">View source</a>
+        <a href="https://github.com/sandroandric/AgentHandover" class="btn btn-outline">View source</a>
     </div>
 </section>
 
