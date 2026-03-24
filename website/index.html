@@ -3,116 +3,85 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AgentHandover</title>
+    <title>AgentHandover - Work once. Hand over forever.</title>
     <link rel="icon" type="image/png" href="favicon.png">
     <style>
-        @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+        @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap');
 
         * { margin: 0; padding: 0; box-sizing: border-box; }
 
+        :root {
+            --navy: #18191F;
+            --orange: #EA9134;
+            --yellow: #FFBD12;
+            --cream: #FFF5E0;
+            --light: #F5F5F5;
+            --green: #2ECC57;
+            --text: #d4d4d8;
+            --muted: #71717a;
+            --border: 2px;
+            --radius: 16px;
+        }
+
         body {
             font-family: 'Space Grotesk', sans-serif;
-            background: #07070a;
-            color: #d4d4d8;
+            background: var(--navy);
+            color: var(--text);
             overflow-x: hidden;
-        }
-
-        /* Animated gradient mesh background */
-        .mesh {
-            position: fixed;
-            inset: 0;
-            z-index: 0;
-            overflow: hidden;
-        }
-
-        .mesh .blob {
-            position: absolute;
-            border-radius: 50%;
-            filter: blur(120px);
-            opacity: 0.12;
-            animation: drift 20s ease-in-out infinite;
-        }
-
-        .mesh .blob:nth-child(1) {
-            width: 600px; height: 600px;
-            background: #f59e0b;
-            top: -20%; left: -10%;
-            animation-delay: 0s;
-        }
-
-        .mesh .blob:nth-child(2) {
-            width: 500px; height: 500px;
-            background: #8b5cf6;
-            bottom: -15%; right: -5%;
-            animation-delay: -7s;
-            animation-duration: 25s;
-        }
-
-        .mesh .blob:nth-child(3) {
-            width: 400px; height: 400px;
-            background: #06b6d4;
-            top: 50%; left: 60%;
-            animation-delay: -14s;
-            animation-duration: 22s;
-        }
-
-        @keyframes drift {
-            0%, 100% { transform: translate(0, 0) scale(1); }
-            33% { transform: translate(60px, -40px) scale(1.1); }
-            66% { transform: translate(-40px, 60px) scale(0.9); }
-        }
-
-        .content {
-            position: relative;
-            z-index: 1;
         }
 
         /* ---- HERO ---- */
         .hero {
+            background: var(--orange);
             min-height: 100vh;
             display: flex;
             flex-direction: column;
             justify-content: center;
             padding: 0 clamp(2rem, 8vw, 10rem);
+            position: relative;
         }
 
         .mascot {
             width: 100px;
-            margin-bottom: 3rem;
-            animation: observe 4s ease-in-out infinite;
+            height: 100px;
+            background: var(--yellow);
+            border-radius: 50%;
+            border: 3px solid var(--navy);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin-bottom: 2.5rem;
+            overflow: hidden;
         }
 
-        @keyframes observe {
-            0%, 100% { transform: rotate(0deg); }
-            25% { transform: rotate(-3deg) translateX(4px); }
-            75% { transform: rotate(2deg) translateX(-3px); }
+        .mascot img {
+            width: 72px;
+            height: 72px;
         }
 
         .hero h1 {
-            font-size: clamp(3rem, 8vw, 6rem);
-            font-weight: 700;
+            font-size: clamp(3rem, 8vw, 5.5rem);
+            font-weight: 800;
             line-height: 0.95;
             letter-spacing: -0.04em;
-            margin-bottom: 2rem;
+            color: white;
+            margin-bottom: 1.5rem;
         }
 
         .hero h1 .line2 {
             display: block;
-            background: linear-gradient(90deg, #f59e0b, #f97316, #ef4444);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            background-clip: text;
+            color: var(--navy);
         }
 
         .hero p {
-            font-size: clamp(1rem, 2vw, 1.25rem);
+            font-size: clamp(1rem, 2vw, 1.2rem);
             line-height: 1.7;
-            color: #71717a;
-            max-width: 540px;
-            margin-bottom: 3rem;
+            color: rgba(255,255,255,0.85);
+            max-width: 560px;
+            margin-bottom: 2.5rem;
         }
 
-        .hero p strong { color: #a1a1aa; }
+        .hero p strong { color: white; }
 
         .actions {
             display: flex;
@@ -122,54 +91,51 @@
 
         .actions a {
             text-decoration: none;
-            padding: 0.8rem 2rem;
-            border-radius: 999px;
-            font-weight: 600;
-            font-size: 0.9rem;
-            transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+            padding: 0.85rem 2.2rem;
+            border-radius: var(--radius);
+            font-weight: 700;
+            font-size: 0.95rem;
+            transition: all 0.2s;
+            border: var(--border) solid var(--navy);
         }
 
         .actions .dl {
-            background: #f59e0b;
-            color: #07070a;
+            background: white;
+            color: var(--navy);
         }
-        .actions .dl:hover {
-            background: #fbbf24;
-            box-shadow: 0 0 40px rgba(245, 158, 11, 0.25);
-            transform: translateY(-2px);
-        }
+        .actions .dl:hover { transform: translateY(-2px); }
 
         .actions .gh {
-            border: 1.5px solid #27272a;
-            color: #a1a1aa;
+            background: transparent;
+            color: var(--navy);
         }
         .actions .gh:hover {
-            border-color: #52525b;
-            color: #e4e4e7;
+            background: rgba(24,25,31,0.1);
             transform: translateY(-2px);
         }
 
         /* ---- TICKER ---- */
         .ticker {
-            border-top: 1px solid #18181b;
-            border-bottom: 1px solid #18181b;
+            border-top: var(--border) solid var(--navy);
+            border-bottom: var(--border) solid rgba(255,255,255,0.08);
             padding: 1.2rem 0;
             overflow: hidden;
             white-space: nowrap;
+            background: var(--navy);
         }
 
         .ticker-inner {
             display: inline-flex;
             gap: 3rem;
-            animation: scroll-left 30s linear infinite;
+            animation: scroll-left 40s linear infinite;
             font-family: 'JetBrains Mono', monospace;
-            font-size: 0.75rem;
-            letter-spacing: 0.05em;
+            font-size: 0.72rem;
+            letter-spacing: 0.06em;
             text-transform: uppercase;
             color: #3f3f46;
         }
 
-        .ticker-inner span.hl { color: #f59e0b; }
+        .ticker-inner span.hl { color: var(--orange); }
 
         @keyframes scroll-left {
             0% { transform: translateX(0); }
@@ -178,7 +144,7 @@
 
         /* ---- SECTION ---- */
         .sect {
-            padding: clamp(4rem, 10vw, 8rem) clamp(2rem, 8vw, 10rem);
+            padding: clamp(5rem, 10vw, 8rem) clamp(2rem, 8vw, 10rem);
         }
 
         .sect-split {
@@ -190,70 +156,204 @@
 
         .sect h2 {
             font-size: clamp(2rem, 4vw, 3rem);
-            font-weight: 700;
+            font-weight: 800;
             letter-spacing: -0.03em;
             line-height: 1.1;
             margin-bottom: 1.5rem;
+            color: white;
         }
 
         .sect h2 em {
             font-style: normal;
-            color: #f59e0b;
+            color: var(--orange);
         }
 
         .sect p {
             font-size: 1rem;
             line-height: 1.8;
-            color: #71717a;
+            color: var(--muted);
         }
 
         .sect p strong { color: #a1a1aa; }
 
-        /* Pipeline visual */
+        /* ---- DELIVERABLE CARD ---- */
+        .deliverable {
+            background: #0f1014;
+            border: var(--border) solid #2a2a30;
+            border-radius: var(--radius);
+            padding: 2rem 2.2rem;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.78rem;
+            line-height: 2;
+            max-width: 520px;
+        }
+
+        .deliverable .title {
+            font-family: 'Space Grotesk', sans-serif;
+            font-size: 1.1rem;
+            font-weight: 700;
+            color: white;
+            margin-bottom: 0.2rem;
+        }
+
+        .deliverable .meta {
+            color: #52525b;
+            margin-bottom: 1rem;
+            font-size: 0.7rem;
+        }
+
+        .deliverable .label {
+            color: var(--orange);
+            font-weight: 500;
+            font-size: 0.68rem;
+            text-transform: uppercase;
+            letter-spacing: 0.1em;
+            margin-top: 0.8rem;
+        }
+
+        .deliverable .content {
+            color: #a1a1aa;
+        }
+
+        .deliverable .voice-tag {
+            display: inline-block;
+            background: rgba(234,145,52,0.1);
+            border: 1px solid rgba(234,145,52,0.3);
+            border-radius: 6px;
+            padding: 0.15rem 0.6rem;
+            font-size: 0.65rem;
+            color: var(--orange);
+            margin-right: 0.4rem;
+        }
+
+        .deliverable .sample {
+            border-left: 3px solid var(--orange);
+            padding-left: 0.8rem;
+            color: #71717a;
+            font-style: italic;
+            margin: 0.3rem 0;
+        }
+
+        /* ---- PIPELINE ---- */
         .pipe-viz {
             display: flex;
             flex-direction: column;
             gap: 0;
             font-family: 'JetBrains Mono', monospace;
-            font-size: 0.8rem;
+            font-size: 0.78rem;
         }
 
         .pipe-step {
             display: flex;
             align-items: center;
             gap: 1rem;
-            padding: 0.7rem 0;
+            padding: 0.65rem 0;
             color: #52525b;
-            border-left: 2px solid #18181b;
+            border-left: var(--border) solid #27272a;
             padding-left: 1.2rem;
             transition: all 0.3s;
             cursor: default;
         }
 
         .pipe-step:hover {
-            color: #f59e0b;
-            border-left-color: #f59e0b;
-            background: linear-gradient(90deg, rgba(245,158,11,0.05) 0%, transparent 60%);
+            color: var(--orange);
+            border-left-color: var(--orange);
+            background: linear-gradient(90deg, rgba(234,145,52,0.06) 0%, transparent 60%);
         }
 
         .pipe-num {
             color: #27272a;
-            font-size: 0.65rem;
+            font-size: 0.62rem;
             min-width: 1.2rem;
         }
 
-        .pipe-step:hover .pipe-num { color: #f59e0b; }
+        .pipe-step:hover .pipe-num { color: var(--orange); }
 
-        /* Trust bar */
+        .pipe-step.new-tag::after {
+            content: 'new';
+            font-size: 0.5rem;
+            text-transform: uppercase;
+            letter-spacing: 0.1em;
+            background: var(--orange);
+            color: var(--navy);
+            padding: 0.1rem 0.4rem;
+            border-radius: 4px;
+            margin-left: auto;
+            font-weight: 600;
+        }
+
+        /* ---- CONNECT CARDS ---- */
+        .connect-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 1rem;
+            margin-top: 2rem;
+        }
+
+        .connect-card {
+            background: #0f1014;
+            border: var(--border) solid #27272a;
+            border-radius: var(--radius);
+            padding: 1.5rem;
+            transition: all 0.2s;
+        }
+
+        .connect-card:hover {
+            border-color: var(--orange);
+        }
+
+        .connect-card h3 {
+            font-size: 0.95rem;
+            font-weight: 700;
+            color: white;
+            margin-bottom: 0.5rem;
+        }
+
+        .connect-card p {
+            font-size: 0.82rem;
+            line-height: 1.6;
+            color: #71717a;
+        }
+
+        .connect-card .badge {
+            display: inline-block;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.62rem;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            padding: 0.2rem 0.5rem;
+            border-radius: 6px;
+            margin-bottom: 0.8rem;
+        }
+
+        .badge-rec {
+            background: rgba(234,145,52,0.15);
+            color: var(--orange);
+            border: 1px solid rgba(234,145,52,0.3);
+        }
+
+        .badge-auto {
+            background: rgba(46,204,87,0.1);
+            color: var(--green);
+            border: 1px solid rgba(46,204,87,0.3);
+        }
+
+        .badge-gen {
+            background: rgba(255,255,255,0.05);
+            color: #71717a;
+            border: 1px solid #27272a;
+        }
+
+        /* ---- TRUST BAR ---- */
         .trust-bar {
             display: flex;
-            gap: 2px;
-            margin-top: 1rem;
+            gap: 3px;
+            margin-top: 1.2rem;
         }
 
         .trust-bar .stage {
             flex: 1;
-            height: 36px;
+            height: 38px;
             display: flex;
             align-items: center;
             justify-content: center;
@@ -261,207 +361,297 @@
             font-size: 0.55rem;
             text-transform: uppercase;
             letter-spacing: 0.1em;
-            border-radius: 4px;
+            border-radius: 8px;
             color: #52525b;
-            background: #0f0f12;
-            border: 1px solid #18181b;
+            background: #0f1014;
+            border: var(--border) solid #27272a;
             transition: all 0.3s;
             cursor: default;
         }
 
         .trust-bar .stage:hover {
-            background: #18181b;
+            border-color: #52525b;
             color: #d4d4d8;
-            border-color: #27272a;
         }
 
         .trust-bar .stage.active {
-            background: rgba(245, 158, 11, 0.1);
-            border-color: #f59e0b;
-            color: #f59e0b;
+            background: rgba(234,145,52,0.1);
+            border-color: var(--orange);
+            color: var(--orange);
         }
 
-        /* Terminal */
-        .terminal {
-            background: #0c0c0f;
-            border: 1px solid #1c1c20;
-            border-radius: 12px;
-            padding: 1.5rem 2rem;
-            font-family: 'JetBrains Mono', monospace;
-            font-size: 0.82rem;
-            line-height: 2.4;
-            max-width: 420px;
+        /* ---- PRIVACY PILLS ---- */
+        .privacy-grid {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.5rem;
+            margin-top: 1.5rem;
         }
 
-        .terminal .prompt { color: #f59e0b; }
-        .terminal .dim { color: #3f3f46; user-select: none; }
+        .pill {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.4rem;
+            padding: 0.5rem 1rem;
+            background: #0f1014;
+            border: var(--border) solid #27272a;
+            border-radius: var(--radius);
+            font-size: 0.78rem;
+            color: #a1a1aa;
+        }
+
+        .pill .dot {
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            background: var(--green);
+        }
 
         /* ---- BOTTOM CTA ---- */
         .bottom {
             padding: 6rem clamp(2rem, 8vw, 10rem);
             text-align: center;
+            background: var(--cream);
+            border-top: var(--border) solid var(--navy);
         }
 
         .bottom h2 {
             font-size: clamp(2rem, 5vw, 3.5rem);
-            font-weight: 700;
+            font-weight: 800;
             letter-spacing: -0.03em;
-            margin-bottom: 1rem;
+            margin-bottom: 0.8rem;
+            color: var(--navy);
         }
 
         .bottom p {
-            color: #52525b;
+            color: #71717a;
             margin-bottom: 2.5rem;
             font-size: 0.95rem;
+        }
+
+        .bottom .actions a { border-color: var(--navy); }
+        .bottom .actions .dl {
+            background: var(--navy);
+            color: white;
+        }
+        .bottom .actions .gh {
+            color: var(--navy);
         }
 
         /* ---- FOOTER ---- */
         footer {
             padding: 2rem clamp(2rem, 8vw, 10rem);
-            border-top: 1px solid #1c1c20;
+            border-top: var(--border) solid rgba(255,255,255,0.06);
             display: flex;
             justify-content: space-between;
             font-size: 0.75rem;
-            color: #71717a;
+            color: var(--muted);
+            background: var(--navy);
         }
 
         footer a { text-decoration: none; color: #a1a1aa; }
-        footer a:hover { color: #e4e4e7; }
+        footer a:hover { color: white; }
 
         /* ---- RESPONSIVE ---- */
-        @media (max-width: 768px) {
-            .sect-split {
-                grid-template-columns: 1fr;
-                gap: 2.5rem;
-            }
-            .ticker-inner { gap: 2rem; }
+        @media (max-width: 900px) {
+            .sect-split { grid-template-columns: 1fr; gap: 2.5rem; }
+            .connect-grid { grid-template-columns: 1fr 1fr; }
             footer { flex-direction: column; gap: 0.5rem; }
+        }
+        @media (max-width: 500px) {
+            .connect-grid { grid-template-columns: 1fr; }
         }
     </style>
 </head>
 <body>
 
-<div class="mesh">
-    <div class="blob"></div>
-    <div class="blob"></div>
-    <div class="blob"></div>
+<!-- HERO (warm orange bg - matches app onboarding welcome screen) -->
+<section class="hero">
+    <div class="mascot">
+        <img src="favicon.png" alt="AgentHandover mascot">
+    </div>
+    <h1>
+        Work once.<br>
+        <span class="line2">Hand over forever.</span>
+    </h1>
+    <p>
+        <strong>AgentHandover</strong> watches how you work, learns the strategy behind your actions, captures your voice and judgment, and produces handoff documents that AI agents can follow exactly the way you would. Not macros. Not recordings. <strong>Real understanding.</strong>
+    </p>
+    <div class="actions">
+        <a href="https://github.com/sandroandric/AgentHandover/releases" class="dl">Download for macOS</a>
+        <a href="https://github.com/sandroandric/AgentHandover" class="gh">GitHub</a>
+    </div>
+</section>
+
+<!-- TICKER -->
+<div class="ticker">
+    <div class="ticker-inner">
+        <span>learns your strategy, not just steps</span>
+        <span class="hl">captures your writing voice per workflow</span>
+        <span>semantic search via vector KB</span>
+        <span class="hl">connects any agent via MCP</span>
+        <span>runs 100% on your machine</span>
+        <span class="hl">nothing leaves your laptop</span>
+        <span>style strengthens over sessions</span>
+        <span class="hl">agents write like you, not like a robot</span>
+        <span>screenshots deleted instantly</span>
+        <span class="hl">every procedure needs your approval</span>
+        <span>optional image embeddings (SigLIP)</span>
+        <span class="hl">works with Claude Code, OpenClaw, Codex</span>
+        <!-- duplicate for seamless loop -->
+        <span>learns your strategy, not just steps</span>
+        <span class="hl">captures your writing voice per workflow</span>
+        <span>semantic search via vector KB</span>
+        <span class="hl">connects any agent via MCP</span>
+        <span>runs 100% on your machine</span>
+        <span class="hl">nothing leaves your laptop</span>
+        <span>style strengthens over sessions</span>
+        <span class="hl">agents write like you, not like a robot</span>
+        <span>screenshots deleted instantly</span>
+        <span class="hl">every procedure needs your approval</span>
+        <span>optional image embeddings (SigLIP)</span>
+        <span class="hl">works with Claude Code, OpenClaw, Codex</span>
+    </div>
 </div>
 
-<div class="content">
-
-    <!-- HERO -->
-    <section class="hero">
-        <img src="favicon.png" alt="" class="mascot">
-        <h1>
-            Work once.<br>
-            <span class="line2">Hand over forever.</span>
-        </h1>
-        <p>
-            <strong>AgentHandover</strong> studies how you work — every app, every step, every pattern — and teaches agents like OpenClaw, Claude Code, and Codex to do it exactly the way you would. No instructions to write. No workflows to document. It just watches and learns.
-        </p>
-        <div class="actions">
-            <a href="https://github.com/sandroandric/AgentHandover/releases" class="dl">Download for macOS</a>
-            <a href="https://github.com/sandroandric/AgentHandover" class="gh">GitHub</a>
+<!-- WHAT AGENTS GET -->
+<section class="sect">
+    <div class="sect-split">
+        <div>
+            <h2>This is what your<br>agent <em>actually gets</em>.</h2>
+            <p>
+                Not a list of clicks. A complete handoff with <strong>strategy</strong>, <strong>decision criteria</strong>, <strong>guardrails</strong>, and <strong>your voice</strong> -- so the agent doesn't just do the work, it does it the way you would. Style confidence builds across sessions. One reply is a guess. Twenty replies is a voice profile.
+            </p>
         </div>
-    </section>
+        <div class="deliverable">
+            <div class="title">Reddit Community Marketing</div>
+            <div class="meta">6 steps - 4 sessions learned - 89% confidence</div>
 
-    <!-- TICKER -->
-    <div class="ticker">
-        <div class="ticker-inner">
-            <span>it learns how you work</span>
-            <span class="hl">so agents can work like you</span>
-            <span>runs 100% on your machine</span>
-            <span class="hl">nothing leaves your laptop</span>
-            <span>teaches OpenClaw, Claude Code, Codex</span>
-            <span class="hl">your workflows, their playbook</span>
-            <span>screenshots deleted instantly</span>
-            <span class="hl">no cloud, no accounts, no telemetry</span>
-            <span>watches once, hands over forever</span>
-            <span class="hl">every procedure needs your approval</span>
-            <span>reconnects tasks across interruptions</span>
-            <span class="hl">filters noise from real work automatically</span>
-            <!-- duplicate for seamless loop -->
-            <span>it learns how you work</span>
-            <span class="hl">so agents can work like you</span>
-            <span>runs 100% on your machine</span>
-            <span class="hl">nothing leaves your laptop</span>
-            <span>teaches OpenClaw, Claude Code, Codex</span>
-            <span class="hl">your workflows, their playbook</span>
-            <span>screenshots deleted instantly</span>
-            <span class="hl">no cloud, no accounts, no telemetry</span>
-            <span>watches once, hands over forever</span>
-            <span class="hl">every procedure needs your approval</span>
-            <span>reconnects tasks across interruptions</span>
-            <span class="hl">filters noise from real work automatically</span>
+            <div class="label">Strategy</div>
+            <div class="content">Target high-signal posts (10+ comments, <48h, not promotional). Write authentic replies: acknowledge problem, share experience, mention product.</div>
+
+            <div class="label">Steps</div>
+            <div class="content">
+                1. Open Reddit, navigate to target subreddit<br>
+                2. Scan posts - skip promotional, skip &lt;10 comments<br>
+                3. Open high-signal post, read top comments<br>
+                4. Write reply: acknowledge &rarr; experience &rarr; mention<br>
+                5. Submit, verify not auto-removed<br>
+                6. Repeat for 2 more subreddits (max 5/day)
+            </div>
+
+            <div class="label">Voice &amp; Style</div>
+            <div>
+                <span class="voice-tag">casual</span>
+                <span class="voice-tag">short sentences</span>
+                <span class="voice-tag">uses emoji</span>
+            </div>
+            <div class="sample">Hey great point about the engagement metrics! We should def try that approach</div>
+
+            <div class="label">Guardrails</div>
+            <div class="content">Max 5 replies/day - Never identical phrasing - Never reply to own posts - Empathy-first tone</div>
         </div>
     </div>
+</section>
 
-    <!-- HOW IT WORKS -->
-    <section class="sect">
-        <div class="sect-split">
-            <div>
-                <h2>It learns <em>your way</em>,<br>so agents<br>do it <em>like you would</em>.</h2>
-                <p>
-                    A local AI watches your screen and builds a deep understanding of how you work — which apps, which steps, which order, which fields. When the same workflow shows up twice, it writes a procedure that any agent can follow exactly the way you'd do it. <strong>Your agents stop guessing and start doing.</strong>
-                </p>
-            </div>
-            <div class="pipe-viz">
-                <div class="pipe-step"><span class="pipe-num">01</span> screen capture + dedup</div>
-                <div class="pipe-step"><span class="pipe-num">02</span> vision model annotation</div>
-                <div class="pipe-step"><span class="pipe-num">03</span> activity classification</div>
-                <div class="pipe-step"><span class="pipe-num">04</span> task continuity tracking</div>
-                <div class="pipe-step"><span class="pipe-num">05</span> semantic step alignment</div>
-                <div class="pipe-step"><span class="pipe-num">06</span> procedure generation</div>
-                <div class="pipe-step"><span class="pipe-num">07</span> human review + approval</div>
-                <div class="pipe-step"><span class="pipe-num">08</span> agent handover</div>
+<!-- INTELLIGENCE PIPELINE -->
+<section class="sect">
+    <div class="sect-split">
+        <div>
+            <h2>It doesn't just record.<br>It <em>understands</em>.</h2>
+            <p>
+                A local vision model annotates every frame. A vector knowledge base links activity by meaning, not keywords. A style analyzer captures how you write. A behavioral synthesizer extracts the strategy behind your actions. <strong>All on your machine.</strong>
+            </p>
+        </div>
+        <div class="pipe-viz">
+            <div class="pipe-step"><span class="pipe-num">01</span> screen capture + perceptual dedup</div>
+            <div class="pipe-step"><span class="pipe-num">02</span> local VLM annotation (Qwen 3.5)</div>
+            <div class="pipe-step"><span class="pipe-num">03</span> activity classification (8 types)</div>
+            <div class="pipe-step new-tag"><span class="pipe-num">04</span> vector embedding (nomic-embed-text)</div>
+            <div class="pipe-step new-tag"><span class="pipe-num">05</span> image embedding (SigLIP, optional)</div>
+            <div class="pipe-step"><span class="pipe-num">06</span> semantic clustering + session linking</div>
+            <div class="pipe-step"><span class="pipe-num">07</span> behavioral synthesis (strategy + guardrails)</div>
+            <div class="pipe-step new-tag"><span class="pipe-num">08</span> voice &amp; style analysis</div>
+            <div class="pipe-step"><span class="pipe-num">09</span> procedure generation + semantic dedup</div>
+            <div class="pipe-step"><span class="pipe-num">10</span> human review + approval</div>
+            <div class="pipe-step"><span class="pipe-num">11</span> export to every agent format</div>
+        </div>
+    </div>
+</section>
+
+<!-- CONNECT YOUR AGENT -->
+<section class="sect">
+    <h2>Connect <em>any</em> agent.</h2>
+    <p style="max-width: 560px;">One observation pipeline, every agent format. MCP for universal access. Slash commands for Claude Code. AGENTS.md for Codex. Auto-sync for OpenClaw.</p>
+
+    <div class="connect-grid">
+        <div class="connect-card">
+            <span class="badge badge-rec">recommended</span>
+            <h3>MCP Server</h3>
+            <p>Works with Claude Code, Cursor, Windsurf, and any MCP client. One config line. 5 tools including semantic search.</p>
+        </div>
+        <div class="connect-card">
+            <span class="badge badge-gen">slash commands</span>
+            <h3>Claude Code</h3>
+            <p>Procedures appear as /slash-commands. Type /reddit-marketing and Claude Code gets the full procedure with voice.</p>
+        </div>
+        <div class="connect-card">
+            <span class="badge badge-gen">generates file</span>
+            <h3>Codex</h3>
+            <p>Auto-generates AGENTS.md with all agent-ready procedures, strategy, guardrails, and voice guidance.</p>
+        </div>
+        <div class="connect-card">
+            <span class="badge badge-auto">auto-sync</span>
+            <h3>OpenClaw</h3>
+            <p>Procedures sync to the OpenClaw workspace automatically. SOP markdown + v3 JSON. Nothing to configure.</p>
+        </div>
+    </div>
+</section>
+
+<!-- TRUST -->
+<section class="sect">
+    <div class="sect-split">
+        <div>
+            <h2>Nothing runs<br>without your <em>say</em>.</h2>
+            <p>
+                Every procedure starts as a draft. <strong>You review the strategy, steps, and guardrails.</strong> You decide what's ready. Only then can agents use it. Six gates must pass. The system never auto-promotes.
+            </p>
+            <div class="trust-bar">
+                <div class="stage">observed</div>
+                <div class="stage">draft</div>
+                <div class="stage">reviewed</div>
+                <div class="stage">verified</div>
+                <div class="stage active">agent ready</div>
             </div>
         </div>
-    </section>
-
-    <!-- TRUST -->
-    <section class="sect">
-        <div class="sect-split">
-            <div>
-                <h2>Nothing runs<br>without your <em>say</em>.</h2>
-                <p>
-                    When AgentHandover learns a new workflow, it shows up as a draft in your menu bar app. <strong>You decide what's ready</strong> — approve it, promote it through review stages, and only then can agents use it. If a procedure isn't good enough, it stays in draft until you say otherwise.
-                </p>
-                <div class="trust-bar">
-                    <div class="stage">observed</div>
-                    <div class="stage">draft</div>
-                    <div class="stage">reviewed</div>
-                    <div class="stage">verified</div>
-                    <div class="stage active">agent ready</div>
-                </div>
-            </div>
-            <div class="terminal">
-                <span class="dim">$</span> <span class="prompt">agenthandover sops list</span><br>
-                <span class="dim">  3 procedures (2 draft, 1 agent-ready)</span><br><br>
-                <span class="dim">$</span> <span class="prompt">agenthandover sops promote expense-report reviewed</span><br>
-                <span class="dim">  ✓ expense-report → reviewed</span><br><br>
-                <span class="dim">$</span> <span class="prompt">agenthandover start all</span><br>
-                <span class="dim">  ● daemon (running)</span><br>
-                <span class="dim">  ● worker (running)</span>
+        <div>
+            <h2 style="font-size: 1.4rem; margin-bottom: 1rem;">Everything stays<br>on your <em>machine</em>.</h2>
+            <div class="privacy-grid">
+                <div class="pill"><span class="dot"></span> Local VLM inference</div>
+                <div class="pill"><span class="dot"></span> Screenshots deleted after annotation</div>
+                <div class="pill"><span class="dot"></span> Auto-redaction (API keys, tokens, passwords)</div>
+                <div class="pill"><span class="dot"></span> XChaCha20-Poly1305 encryption at rest</div>
+                <div class="pill"><span class="dot"></span> No telemetry, no cloud, no accounts</div>
+                <div class="pill"><span class="dot"></span> Configurable retention (14d events, 90d episodes)</div>
             </div>
         </div>
-    </section>
+    </div>
+</section>
 
-    <!-- BOTTOM CTA -->
-    <section class="bottom">
-        <h2>Your work, their playbook.</h2>
-        <p>macOS only. Local by default. MIT licensed.</p>
-        <div class="actions" style="justify-content:center;">
-            <a href="https://github.com/sandroandric/AgentHandover/releases" class="dl">Download</a>
-            <a href="https://github.com/sandroandric/AgentHandover" class="gh">View source</a>
-        </div>
-    </section>
+<!-- BOTTOM CTA -->
+<section class="bottom">
+    <h2>Your work, their playbook.</h2>
+    <p>macOS only. Local by default. MIT licensed.</p>
+    <div class="actions" style="justify-content:center;">
+        <a href="https://github.com/sandroandric/AgentHandover/releases" class="dl">Download</a>
+        <a href="https://github.com/sandroandric/AgentHandover" class="gh">View source</a>
+    </div>
+</section>
 
-    <footer>
-        <span>AgentHandover</span>
-        <span><a href="https://github.com/sandroandric/AgentHandover">GitHub</a> · MIT · <a href="https://github.com/sandroandric">Sandro Andric</a></span>
-    </footer>
-
-</div>
+<footer>
+    <span>AgentHandover</span>
+    <span><a href="https://github.com/sandroandric/AgentHandover">GitHub</a> &middot; MIT &middot; <a href="https://github.com/sandroandric">Sandro Andric</a></span>
+</footer>
 
 </body>
 </html>
