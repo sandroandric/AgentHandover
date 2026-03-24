@@ -36,8 +36,10 @@
         }
 
         .hero img {
-            height: 80px;
+            max-width: 140px;
+            max-height: 84px;
             width: auto;
+            height: auto;
             margin-bottom: 3rem;
         }
 
@@ -200,21 +202,39 @@
         .how-block {
             border: 2.5px solid var(--navy);
             border-radius: 16px;
-            padding: 2rem 2.2rem;
+            padding: 2.2rem 2.2rem;
             background: white;
+            position: relative;
+            overflow: hidden;
         }
 
+        .how-block::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 5px;
+            background: var(--navy);
+        }
+
+        .how-block:nth-child(1)::before { background: var(--orange); }
+        .how-block:nth-child(2)::before { background: var(--yellow); }
+        .how-block:nth-child(3)::before { background: var(--navy); }
+        .how-block:nth-child(4)::before { background: #2ECC57; }
+
         .how-block h3 {
-            font-size: 1.1rem;
-            font-weight: 700;
+            font-size: 1.3rem;
+            font-weight: 800;
             color: var(--navy);
-            margin-bottom: 0.6rem;
+            letter-spacing: -0.02em;
+            margin-bottom: 0.8rem;
         }
 
         .how-block p {
-            font-size: 0.9rem;
-            color: #71717a;
-            line-height: 1.7;
+            font-size: 0.88rem;
+            color: #52525b;
+            line-height: 1.75;
         }
 
         /* ---- CONNECT ---- */
@@ -345,19 +365,19 @@
     <div class="how-grid">
         <div class="how-block">
             <h3>You work normally</h3>
-            <p>A local AI watches your screen and builds structured understanding of every workflow. Activity classification filters noise. A vector knowledge base links tasks by meaning across sessions. Style analysis captures how you write.</p>
+            <p>A local AI watches your screen. It classifies activity, filters noise, and links related tasks across sessions by meaning -- not keywords. It also captures how you write.</p>
         </div>
         <div class="how-block">
-            <h3>Agents get the real thing</h3>
-            <p>Procedures include strategy, steps, guardrails, your voice, and decision logic. Compiled to Claude Code skills, OpenClaw SOPs, Codex instructions, and a universal MCP server. One observation, every agent format.</p>
+            <h3>Agents get the full picture</h3>
+            <p>Strategy. Steps. Guardrails. Your voice. Decision logic. Compiled to Claude Code, OpenClaw, Codex, and a universal MCP server. One observation, every agent format.</p>
         </div>
         <div class="how-block">
             <h3>You stay in control</h3>
-            <p>Every procedure starts as a draft. You review strategy, steps, and guardrails before anything reaches an agent. Six readiness gates must pass. The system never auto-promotes.</p>
+            <p>Every procedure starts as a draft. You review it, approve it, promote it. Six gates must pass before any agent can execute. Nothing auto-promotes.</p>
         </div>
         <div class="how-block">
             <h3>Everything stays local</h3>
-            <p>Local VLM via Ollama. Screenshots deleted after annotation. Auto-redaction of secrets. Encrypted at rest. No cloud, no accounts, no telemetry. Your data never leaves your machine.</p>
+            <p>Local models via Ollama. Screenshots deleted after processing. Secrets auto-redacted. Encrypted at rest. No cloud. No accounts. No telemetry. Ever.</p>
         </div>
     </div>
 </section>
