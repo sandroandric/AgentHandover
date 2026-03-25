@@ -980,7 +980,7 @@ class TestExportParity:
         assert json_path.exists(), "v3 JSON sidecar not written"
 
         data = json.loads(json_path.read_text())
-        assert data["schema_version"] in ("3.0.0", "3.1.0")
+        assert data["schema_version"] in ("3.0.0", "3.1.0", "3.2.0")
         assert data["id"] == slug
         assert "environment" in data
         assert "constraints" in data
@@ -998,7 +998,7 @@ class TestExportParity:
         assert json_path.exists(), "v3 JSON not written"
 
         data = json.loads(json_path.read_text())
-        assert data["schema_version"] in ("3.0.0", "3.1.0")
+        assert data["schema_version"] in ("3.0.0", "3.1.0", "3.2.0")
         assert data["id"] == slug
 
     def test_export_via_adapter_uses_v3_when_available(self, kb, tmp_path, sample_procedure):

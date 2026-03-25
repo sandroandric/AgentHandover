@@ -255,7 +255,7 @@ def build_mcp_server():
         monitor = _monitor()
         monitor.record_step(execution_id, step_id, actual_action or step_id)
         if status == "deviated" and notes:
-            record = monitor._active.get(execution_id)
+            record = monitor._active_executions.get(execution_id)
             if record:
                 record.deviations.append({
                     "step_id": step_id,
@@ -282,12 +282,13 @@ def build_mcp_server():
         else:
             record = monitor.complete_execution(execution_id)
 
-        # Trigger Skill improvement
+        # Trigger Skill improvement (singleton)
         improvements = []
         try:
-            from agenthandover_worker.skill_improver import SkillImprover
-            improver = SkillImprover(_kb())
-            improvements = improver.process_execution(record)
+            if "improver" not in _state:
+                from agenthandover_worker.skill_improver import SkillImprover
+                _state["improver"] = SkillImprover(_kb())
+            improvements = _state["improver"].process_execution(record)
         except Exception:
             logger.debug("Skill improvement failed", exc_info=True)
 

@@ -21,10 +21,10 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-PROCEDURE_SCHEMA_VERSION = "3.1.0"
+PROCEDURE_SCHEMA_VERSION = "3.2.0"
 
 # All accepted versions for backward compatibility
-_ACCEPTED_VERSIONS = frozenset(("1.0.0", "1.1.0", "2.0.0", "3.0.0", "3.1.0"))
+_ACCEPTED_VERSIONS = frozenset(("1.0.0", "1.1.0", "2.0.0", "3.0.0", "3.1.0", "3.2.0"))
 
 _WORKER_VERSION = "0.2.0"
 
