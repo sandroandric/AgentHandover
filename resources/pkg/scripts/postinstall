@@ -17,9 +17,10 @@ DATA_DIR="${USER_HOME}/Library/Application Support/agenthandover"
 LAUNCH_AGENTS="${USER_HOME}/Library/LaunchAgents"
 LIB_DIR="/usr/local/lib/agenthandover"
 
-# Create data directories
+# Create data directories (owned by the user, not root)
 mkdir -p "${DATA_DIR}/logs"
 mkdir -p "${DATA_DIR}/artifacts"
+chown -R "${CONSOLE_USER}" "${DATA_DIR}"
 
 # Write launchd plists with user-specific log paths
 # (cannot use static plists because log paths need the real user's home)
