@@ -592,6 +592,11 @@ struct OnboardingView: View {
 
                 VStack(alignment: .leading, spacing: 0) {
                     // Document title
+                    Text("ILLUSTRATIVE EXAMPLE")
+                        .font(.system(size: 9, weight: .bold, design: .monospaced))
+                        .foregroundColor(warmOrange)
+                        .tracking(1)
+                        .padding(.bottom, 4)
                     Text("Reddit Community Marketing")
                         .font(.system(size: 18, weight: .bold, design: .rounded))
                         .foregroundColor(darkNavy)

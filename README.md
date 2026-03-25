@@ -31,7 +31,7 @@ Not macros. Not screen recordings. Not a list of clicks. A complete understandin
 
 ## What a Skill Looks Like
 
-This is a real Skill generated from a few focus recording sessions:
+Here's an illustrative example of what a Skill looks like:
 
 ```
 Reddit Community Marketing
