@@ -65,7 +65,7 @@ Tone: casual | Sentences: short and punchy | Uses emoji
 ~15 min daily - 9-10am                     Confidence: 89%
 ```
 
-Not just steps. Strategy, decisions, guardrails, timing, and the user's actual voice -- so the agent doesn't just do the work, it does it the way you would.
+Skills follow the same format as Claude Code's native skills -- same frontmatter, same markdown structure -- but go further. Hand-written skills say "do X then Y." AgentHandover Skills include the strategy behind the steps, selection criteria, guardrails, your voice, and evidence-backed confidence from real observations. No hand-written skill has that.
 
 ## How It Works
 
