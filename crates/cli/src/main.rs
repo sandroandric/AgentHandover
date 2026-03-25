@@ -51,8 +51,9 @@ enum Commands {
         #[command(subcommand)]
         action: ConfigAction,
     },
-    /// List and view generated SOPs
-    Sops {
+    /// List and view generated Skills
+    #[command(alias = "sops")]
+    Skills {
         #[command(subcommand)]
         action: SopsAction,
     },
@@ -209,7 +210,7 @@ fn main() -> Result<()> {
             ConfigAction::Edit => commands::config::edit(),
             ConfigAction::Path => commands::config::path(),
         },
-        Commands::Sops { action } => match action {
+        Commands::Skills { action } => match action {
             SopsAction::List => commands::sops::list(),
             SopsAction::Show { slug } => commands::sops::show(&slug),
             SopsAction::Dir => commands::sops::dir(),

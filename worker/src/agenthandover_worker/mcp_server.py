@@ -93,8 +93,8 @@ def build_mcp_server():
     # ------------------------------------------------------------------
 
     @mcp.tool()
-    def list_ready_procedures() -> str:
-        """List all procedures ready for agent execution.
+    def list_ready_skills() -> str:
+        """List all Skills ready for agent execution.
 
         Returns only procedures that have passed all readiness gates
         (lifecycle=agent_ready, trust=execute, freshness check).
@@ -115,8 +115,8 @@ def build_mcp_server():
         return json.dumps(ready, indent=2)
 
     @mcp.tool()
-    def list_all_procedures() -> str:
-        """List ALL procedures with their lifecycle state.
+    def list_all_skills() -> str:
+        """List ALL Skills with their lifecycle state.
 
         Includes drafts, observed, reviewed, and agent_ready procedures.
         Use this for discovery — not all of these are ready for execution.
@@ -135,8 +135,8 @@ def build_mcp_server():
         return json.dumps(result, indent=2)
 
     @mcp.tool()
-    def get_procedure(slug: str) -> str:
-        """Get a full procedure by slug.
+    def get_skill(slug: str) -> str:
+        """Get a full Skill by slug.
 
         Returns the complete procedure including steps, strategy,
         selection criteria, guardrails, voice profile, and content templates.
@@ -149,8 +149,8 @@ def build_mcp_server():
         return json.dumps(proc, indent=2, default=str)
 
     @mcp.tool()
-    def search_procedures(query: str, limit: int = 5) -> str:
-        """Semantic search — find procedures by meaning, not just keywords.
+    def search_skills(query: str, limit: int = 5) -> str:
+        """Semantic search — find Skills by meaning, not just keywords.
 
         Use this when you know what KIND of task you need but not the exact
         procedure name. For example: "deploy to production" will find
@@ -214,7 +214,7 @@ def build_mcp_server():
 
     @mcp.resource("agenthandover://procedures/{slug}")
     def procedure_detail(slug: str) -> str:
-        """Full procedure as readable markdown."""
+        """Full Skill as readable markdown."""
         kb = _kb()
         proc = kb.get_procedure(slug)
         if proc is None:

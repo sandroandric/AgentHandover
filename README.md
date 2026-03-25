@@ -142,10 +142,10 @@ Exposes 5 tools:
 
 | Tool | What it does |
 |------|-------------|
-| `list_ready_procedures` | Skills ready for execution (all gates passed) |
-| `get_procedure(slug)` | Full Skill with steps, strategy, voice, guardrails |
-| `search_procedures(query)` | Semantic search -- find Skills by meaning |
-| `list_all_procedures` | All Skills including drafts |
+| `list_ready_skills` | Skills ready for execution (all gates passed) |
+| `get_skill(slug)` | Full Skill with steps, strategy, voice, guardrails |
+| `search_skills(query)` | Semantic search -- find Skills by meaning |
+| `list_all_skills` | All Skills including drafts |
 | `get_user_profile` | User's tools, working hours, writing style |
 
 ### Claude Code
@@ -330,9 +330,9 @@ Chrome Extension -----> Daemon (Rust) ---SQLite WAL---> Worker (Python)
 | `agenthandover stop all` | Stop services |
 | `agenthandover focus start "title"` | Record a workflow |
 | `agenthandover focus stop` | Stop recording |
-| `agenthandover sops list` | List all Skills |
-| `agenthandover sops approve <slug>` | Approve for agents |
-| `agenthandover sops promote <slug> <state>` | Promote lifecycle |
+| `agenthandover skills list` | List all Skills |
+| `agenthandover skills approve <slug>` | Approve for agents |
+| `agenthandover skills promote <slug> <state>` | Promote lifecycle |
 | `agenthandover connect <agent>` | Set up agent integration |
 | `agenthandover doctor` | Pre-flight health check |
 | `agenthandover watch` | Live dashboard |

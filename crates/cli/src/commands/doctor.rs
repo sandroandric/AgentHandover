@@ -234,6 +234,42 @@ pub fn run() -> Result<()> {
         );
     }
 
+    // Check 15: Ollama reachable
+    let ollama_ok = std::process::Command::new("curl")
+        .args(["-s", "-o", "/dev/null", "-w", "%{http_code}", "http://localhost:11434/"])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "200")
+        .unwrap_or(false);
+    if ollama_ok {
+        check_pass(&mut counts, "Ollama service");
+    } else {
+        check_fail(&mut counts, "Ollama service");
+        eprintln!("  Fix: Install Ollama from https://ollama.com and run it");
+    }
+
+    // Check 16: Required models pulled
+    if ollama_ok {
+        let models_output = std::process::Command::new("ollama")
+            .arg("list")
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+            .unwrap_or_default();
+
+        let required = [
+            ("qwen3.5:2b", "Screen annotation"),
+            ("qwen3.5:4b", "Skill generation"),
+            ("nomic-embed-text", "Semantic search"),
+        ];
+        for (model, purpose) in &required {
+            if models_output.contains(model) {
+                check_pass(&mut counts, &format!("Model {} ({})", model, purpose));
+            } else {
+                check_fail(&mut counts, &format!("Model {} ({})", model, purpose));
+                eprintln!("  Fix: ollama pull {}", model);
+            }
+        }
+    }
+
     // Summary
     println!();
     println!(
