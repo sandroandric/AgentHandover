@@ -66,6 +66,9 @@ _V3_SECTIONS = {
     # Style & voice capture (future fine-tuning / personalization)
     "voice_profile": dict,
     "content_samples": list,
+    # Execution feedback loop
+    "execution_stats": dict,
+    "observed_alternatives": list,
 }
 
 

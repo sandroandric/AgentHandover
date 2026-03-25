@@ -122,6 +122,22 @@ Everything AgentHandover learns lives in a local knowledge base on your machine.
 
 **Semantic search** -- Agents can search the knowledge base by meaning via the MCP server or REST API. "Find something about deploying" returns your staging deployment Skill even if it's titled "Push to Prod."
 
+## Execution Feedback Loop
+
+Most tools stop at "here's a procedure, good luck." AgentHandover closes the loop. When an agent executes a Skill, it reports back what happened -- and the Skill gets better.
+
+**How it works**: Every Skill includes an execution protocol. The agent calls `report_execution_start` before beginning, `report_step_result` after each step, and `report_execution_complete` when done. AgentHandover processes the results:
+
+- **Success** -- Confidence goes up. Freshness confirmed. Timing updated via exponential moving average.
+- **Deviation** -- The system tracks what the agent actually did vs. what was expected. After 2+ deviations on the same step, it suggests a decision branch.
+- **Failure** -- Confidence drops. After 3 failures in 7 days, the Skill auto-demotes from agent-ready.
+
+Skills don't just describe your workflows -- they learn from every execution and improve over time.
+
+### One-click agent pairing
+
+The menu bar app detects installed agents (Claude Code, Cursor, Windsurf) and connects them with one click -- writes the MCP config automatically. No terminal, no config files.
+
 ## Connect Your Agent
 
 ### MCP Server (recommended)
@@ -138,15 +154,18 @@ One config line, any agent. Works with Claude Code, Cursor, Windsurf, and any MC
 }
 ```
 
-Exposes 5 tools:
+Exposes 8 tools:
 
 | Tool | What it does |
 |------|-------------|
 | `list_ready_skills` | Skills ready for execution (all gates passed) |
-| `get_skill(slug)` | Full Skill with steps, strategy, voice, guardrails |
+| `get_skill(slug)` | Full Skill with steps, strategy, voice, guardrails + execution protocol |
 | `search_skills(query)` | Semantic search -- find Skills by meaning |
 | `list_all_skills` | All Skills including drafts |
 | `get_user_profile` | User's tools, working hours, writing style |
+| `report_execution_start(slug)` | Tell AgentHandover you're starting to execute a Skill |
+| `report_step_result(id, step)` | Report each step's outcome (completed or deviated) |
+| `report_execution_complete(id)` | Report final status -- triggers Skill improvement |
 
 ### Claude Code
 

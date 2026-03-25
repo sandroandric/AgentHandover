@@ -146,6 +146,21 @@ def build_mcp_server():
         proc = kb.get_procedure(slug)
         if proc is None:
             return json.dumps({"error": f"Procedure '{slug}' not found"})
+        # Append execution protocol so agents know how to report back
+        proc["execution_protocol"] = {
+            "instructions": (
+                "When executing this Skill, report your progress using the "
+                "AgentHandover MCP tools: call report_execution_start before "
+                "beginning, report_step_result after each step, and "
+                "report_execution_complete when finished. This improves "
+                "the Skill for future runs."
+            ),
+            "tools": [
+                "report_execution_start",
+                "report_step_result",
+                "report_execution_complete",
+            ],
+        }
         return json.dumps(proc, indent=2, default=str)
 
     @mcp.tool()
@@ -192,6 +207,95 @@ def build_mcp_server():
         """
         kb = _kb()
         return json.dumps(kb.get_profile(), indent=2, default=str)
+
+    # ------------------------------------------------------------------
+    # Execution reporting — agents call these during Skill execution
+    # ------------------------------------------------------------------
+
+    def _monitor():
+        if "monitor" not in _state:
+            from agenthandover_worker.execution_monitor import ExecutionMonitor
+            _state["monitor"] = ExecutionMonitor(_kb())
+        return _state["monitor"]
+
+    @mcp.tool()
+    def report_execution_start(slug: str, agent_id: str = "unknown") -> str:
+        """Report that you are starting to execute a Skill.
+
+        Call this BEFORE beginning execution. Returns an execution_id
+        to use in subsequent step reports.
+        """
+        monitor = _monitor()
+        execution_id = monitor.start_execution(slug, agent_id)
+        kb = _kb()
+        proc = kb.get_procedure(slug)
+        expected_steps = []
+        if proc:
+            for s in proc.get("steps", []):
+                expected_steps.append(s.get("step_id", s.get("action", "")[:40]))
+        return json.dumps({
+            "execution_id": execution_id,
+            "slug": slug,
+            "expected_steps": expected_steps,
+        })
+
+    @mcp.tool()
+    def report_step_result(
+        execution_id: str,
+        step_id: str,
+        status: str = "completed",
+        actual_action: str = "",
+        notes: str = "",
+    ) -> str:
+        """Report the result of a single step during Skill execution.
+
+        Call after each step. Set status to 'completed' or 'deviated'.
+        If deviated, describe what you actually did in actual_action.
+        """
+        monitor = _monitor()
+        monitor.record_step(execution_id, step_id, actual_action or step_id)
+        if status == "deviated" and notes:
+            record = monitor._active.get(execution_id)
+            if record:
+                record.deviations.append({
+                    "step_id": step_id,
+                    "detail": notes,
+                })
+        return json.dumps({"recorded": True, "step_id": step_id})
+
+    @mcp.tool()
+    def report_execution_complete(
+        execution_id: str,
+        status: str = "completed",
+        notes: str = "",
+    ) -> str:
+        """Report that Skill execution is finished.
+
+        Call when done. Status: 'completed', 'failed', or 'aborted'.
+        If failed, include the error in notes.
+        """
+        monitor = _monitor()
+        if status == "failed":
+            record = monitor.fail_execution(execution_id, notes or "unknown error")
+        elif status == "aborted":
+            record = monitor.abort_execution(execution_id)
+        else:
+            record = monitor.complete_execution(execution_id)
+
+        # Trigger Skill improvement
+        improvements = []
+        try:
+            from agenthandover_worker.skill_improver import SkillImprover
+            improver = SkillImprover(_kb())
+            improvements = improver.process_execution(record)
+        except Exception:
+            logger.debug("Skill improvement failed", exc_info=True)
+
+        return json.dumps({
+            "execution_id": execution_id,
+            "final_status": record.status.value if hasattr(record.status, 'value') else str(record.status),
+            "improvements": improvements,
+        })
 
     # ------------------------------------------------------------------
     # Resources — agents can read these for context
