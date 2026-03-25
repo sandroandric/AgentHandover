@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from unittest.mock import MagicMock
+from dataclasses import dataclass
+
 import pytest
 
 from agenthandover_worker.style_analyzer import (
@@ -11,6 +14,50 @@ from agenthandover_worker.style_analyzer import (
     merge_voice_profiles,
     aggregate_user_style,
 )
+
+
+# ---------------------------------------------------------------------------
+# Mock LLM reasoner
+# ---------------------------------------------------------------------------
+
+@dataclass
+class MockResult:
+    success: bool = True
+    value: dict | None = None
+    abstained: bool = False
+
+
+def make_mock_reasoner(response: dict) -> MagicMock:
+    """Create a mock LLMReasoner that returns the given dict."""
+    reasoner = MagicMock()
+    reasoner.reason_json.return_value = MockResult(
+        success=True,
+        value=response,
+    )
+    return reasoner
+
+
+CASUAL_PROFILE = {
+    "formality": "casual",
+    "tone": "friendly and enthusiastic",
+    "sentence_style": "short and punchy",
+    "vocabulary": "simple and direct",
+    "personality_markers": ["uses emoji", "exclamation marks", "informal contractions"],
+    "sample_phrases": ["great point!", "def try that"],
+    "would_say": "Hey love this approach!",
+    "would_never_say": "Upon further consideration, the methodology appears sound.",
+}
+
+FORMAL_PROFILE = {
+    "formality": "formal",
+    "tone": "professional and measured",
+    "sentence_style": "long and detailed",
+    "vocabulary": "technical and precise",
+    "personality_markers": ["hedging language", "passive voice", "no contractions"],
+    "sample_phrases": ["it appears that", "upon review"],
+    "would_say": "The analysis suggests a viable approach.",
+    "would_never_say": "lol yeah lets do it!!",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -25,51 +72,42 @@ class TestAnalyzeStyle:
     def test_too_short(self):
         assert analyze_style(["hi"]) == {}
 
-    def test_casual_text(self):
+    def test_no_reasoner_returns_empty(self):
+        texts = ["This is a long enough text sample for analysis purposes."]
+        result = analyze_style(texts, llm_reasoner=None)
+        assert result == {}
+
+    def test_with_reasoner_returns_profile(self):
+        reasoner = make_mock_reasoner(CASUAL_PROFILE)
         texts = [
-            "hey great point! I'm totally on board with this approach lol",
-            "yeah let's def do it, we can't wait any longer!!",
-            "I've been thinking about this and it's a no brainer :)",
+            "Hey great point! I'm totally on board with this approach lol",
+            "Yeah let's def do it, we can't wait any longer!!",
         ]
-        result = analyze_style(texts)
+        result = analyze_style(texts, llm_reasoner=reasoner)
         assert result["formality"] == "casual"
-        assert result["formality_score"] < 0
-        assert result["sample_count"] == 3
+        assert result["tone"] == "friendly and enthusiastic"
+        assert result["sample_count"] == 2
         assert result["word_count_analyzed"] > 0
+        assert result["style_confidence"] == "low"  # only 2 samples
 
-    def test_formal_text(self):
-        texts = [
-            "The proposal was reviewed by the committee and subsequently approved.",
-            "It appears to be the case that the implementation could be improved.",
-            "The results were analyzed by the research team and published accordingly.",
-        ]
-        result = analyze_style(texts)
-        assert result["formality"] in ("formal", "neutral")
-        assert result["formality_score"] >= -0.3
+    def test_confidence_moderate(self):
+        reasoner = make_mock_reasoner(CASUAL_PROFILE)
+        texts = [f"Sample text number {i} with enough content." for i in range(5)]
+        result = analyze_style(texts, llm_reasoner=reasoner)
+        assert result["style_confidence"] == "moderate"
 
-    def test_emoji_detection(self):
-        result = analyze_style(["great work on this one :) really happy with it lol"])
-        assert result["uses_emoji"] is True
+    def test_confidence_high(self):
+        reasoner = make_mock_reasoner(CASUAL_PROFILE)
+        texts = [f"Sample text number {i} with enough content." for i in range(12)]
+        result = analyze_style(texts, llm_reasoner=reasoner)
+        assert result["style_confidence"] == "high"
 
-    def test_no_emoji(self):
-        result = analyze_style(["The quarterly report has been submitted for review."])
-        assert result["uses_emoji"] is False
-
-    def test_sentence_length(self):
-        result = analyze_style(["Short. Very short. Tiny sentences. Yes. Ok. Done. Fine."])
-        assert result["avg_sentence_length"] < 8
-
-    def test_vocabulary_richness(self):
-        # Diverse vocabulary
-        result = analyze_style([
-            "The magnificent cathedral towered above the ancient cobblestone streets "
-            "while curious tourists photographed elaborate architectural details."
-        ])
-        assert result["vocabulary_richness"] > 0.5
-
-    def test_exclamation_rate(self):
-        result = analyze_style(["Wow this is great! Amazing work! Incredible results! So good overall!"])
-        assert result["exclamation_rate"] > 0
+    def test_llm_failure_returns_empty(self):
+        reasoner = MagicMock()
+        reasoner.reason_json.return_value = MockResult(success=False, value=None)
+        texts = ["Enough text for analysis here in this sample."]
+        result = analyze_style(texts, llm_reasoner=reasoner)
+        assert result == {}
 
 
 # ---------------------------------------------------------------------------
@@ -88,7 +126,6 @@ class TestExtractContentSamples:
         texts = [
             "This is a medium length text sample for testing purposes.",
             "Another sample text that should be included in the results.",
-            "A third piece of content that demonstrates style.",
         ]
         samples = extract_content_samples(texts, max_samples=2)
         assert len(samples) <= 2
@@ -100,7 +137,7 @@ class TestExtractContentSamples:
             "Same prefix text with different endings two.",
         ]
         samples = extract_content_samples(texts)
-        assert len(samples) == 1  # same prefix → deduped
+        assert len(samples) == 1
 
     def test_respects_max_samples(self):
         texts = [f"Unique text sample number {i} for testing." for i in range(20)]
@@ -119,61 +156,65 @@ class TestAnalyzeProcedureStyle:
         assert vp == {}
         assert cs == []
 
-    def test_with_content_produced(self):
+    def test_with_content_and_reasoner(self):
+        reasoner = make_mock_reasoner(CASUAL_PROFILE)
         proc = {
             "evidence": {
                 "extracted_evidence": {
                     "content_produced": [
                         {"type": "text_input", "full_value": "Hey this is a great idea! Let's do it :)"},
                         {"type": "text_input", "full_value": "Totally agree, we should move fast on this one!"},
+                        {"type": "text_input", "full_value": "Love the approach, shipping it today!"},
                     ],
                 },
             },
         }
-        vp, cs = analyze_procedure_style(proc)
-        assert vp.get("formality") in ("casual", "neutral")
+        vp, cs = analyze_procedure_style(proc, llm_reasoner=reasoner)
+        assert vp["formality"] == "casual"
+        assert vp["tone"] == "friendly and enthusiastic"
         assert len(cs) > 0
 
-    def test_uses_preview_fallback(self):
+    def test_no_reasoner_returns_empty(self):
         proc = {
             "evidence": {
                 "extracted_evidence": {
                     "content_produced": [
-                        {"type": "text_input", "value_preview": "This is a preview text that should be analyzed for style and tone characteristics."},
-                        {"type": "text_input", "value_preview": "Another preview text that adds enough content for the analyzer to work with properly."},
+                        {"type": "text_input", "full_value": "Some text here for analysis."},
                     ],
                 },
             },
         }
-        vp, cs = analyze_procedure_style(proc)
-        assert vp.get("word_count_analyzed", 0) > 0
+        vp, cs = analyze_procedure_style(proc, llm_reasoner=None)
+        assert vp == {}
 
     def test_merges_with_existing(self):
+        reasoner = make_mock_reasoner(CASUAL_PROFILE)
         proc = {
             "voice_profile": {
                 "formality": "casual",
-                "formality_score": -0.5,
-                "word_count_analyzed": 100,
+                "tone": "friendly",
                 "sample_count": 10,
-                "uses_emoji": True,
-                "avg_sentence_length": 8.0,
-                "vocabulary_richness": 0.6,
-                "exclamation_rate": 0.3,
-                "question_rate": 0.1,
-                "caps_rate": 0.01,
+                "word_count_analyzed": 200,
+                "personality_markers": ["uses humor"],
+                "sample_phrases": ["old phrase"],
+                "style_confidence": "moderate",
             },
             "evidence": {
                 "extracted_evidence": {
                     "content_produced": [
-                        {"type": "text_input", "full_value": "Another casual reply here with some more text to make it long enough! Love it :) Really great stuff here."},
-                        {"type": "text_input", "full_value": "Yeah totally agree with this approach, we should definitely try it out soon! Can't wait :D"},
+                        {"type": "text_input", "full_value": "Another casual reply here! Love it :) Really great stuff."},
+                        {"type": "text_input", "full_value": "Yeah totally agree, shipping it now!"},
+                        {"type": "text_input", "full_value": "Great work on this one, keep it up!"},
                     ],
                 },
             },
         }
-        vp, _ = analyze_procedure_style(proc)
-        # Should merge, cumulative word count
-        assert vp.get("word_count_analyzed", 0) > 100
+        vp, _ = analyze_procedure_style(proc, llm_reasoner=reasoner)
+        # Cumulative
+        assert vp["word_count_analyzed"] > 200
+        assert vp["sample_count"] > 10
+        # Merged markers
+        assert "uses humor" in vp["personality_markers"]
 
 
 # ---------------------------------------------------------------------------
@@ -183,48 +224,28 @@ class TestAnalyzeProcedureStyle:
 class TestMergeVoiceProfiles:
 
     def test_merge_empty(self):
-        assert merge_voice_profiles({}, {"formality": "casual"}) == {"formality": "casual"}
-        assert merge_voice_profiles({"formality": "formal"}, {}) == {"formality": "formal"}
+        assert merge_voice_profiles({}, CASUAL_PROFILE) == CASUAL_PROFILE
+        assert merge_voice_profiles(CASUAL_PROFILE, {}) == CASUAL_PROFILE
 
-    def test_weighted_merge(self):
-        old = {
-            "formality_score": -0.5,
-            "avg_sentence_length": 8.0,
-            "vocabulary_richness": 0.6,
-            "exclamation_rate": 0.3,
-            "question_rate": 0.1,
-            "caps_rate": 0.01,
-            "word_count_analyzed": 200,
-            "sample_count": 10,
-            "uses_emoji": True,
-        }
-        new = {
-            "formality_score": -0.4,
-            "avg_sentence_length": 10.0,
-            "vocabulary_richness": 0.65,
-            "exclamation_rate": 0.2,
-            "question_rate": 0.15,
-            "caps_rate": 0.02,
-            "word_count_analyzed": 100,
-            "sample_count": 5,
-            "uses_emoji": False,
-        }
+    def test_cumulative_counts(self):
+        old = {"sample_count": 10, "word_count_analyzed": 200, "personality_markers": ["humor"], "sample_phrases": ["old"]}
+        new = {"sample_count": 5, "word_count_analyzed": 100, "personality_markers": ["emoji"], "sample_phrases": ["new"]}
         merged = merge_voice_profiles(old, new)
-        assert merged["word_count_analyzed"] == 300
         assert merged["sample_count"] == 15
-        assert merged["uses_emoji"] is True  # OR
-        assert merged["style_confidence"] == "moderate"  # 15 samples
+        assert merged["word_count_analyzed"] == 300
+        assert "humor" in merged["personality_markers"]
+        assert "emoji" in merged["personality_markers"]
 
     def test_confidence_levels(self):
         low = merge_voice_profiles(
-            {"word_count_analyzed": 10, "sample_count": 2, "formality_score": 0, "avg_sentence_length": 10, "vocabulary_richness": 0.5, "exclamation_rate": 0, "question_rate": 0, "caps_rate": 0, "uses_emoji": False},
-            {"word_count_analyzed": 10, "sample_count": 2, "formality_score": 0, "avg_sentence_length": 10, "vocabulary_richness": 0.5, "exclamation_rate": 0, "question_rate": 0, "caps_rate": 0, "uses_emoji": False},
+            {"sample_count": 1, "word_count_analyzed": 10, "personality_markers": [], "sample_phrases": []},
+            {"sample_count": 1, "word_count_analyzed": 10, "personality_markers": [], "sample_phrases": []},
         )
         assert low["style_confidence"] == "low"
 
         high = merge_voice_profiles(
-            {"word_count_analyzed": 500, "sample_count": 15, "formality_score": 0, "avg_sentence_length": 10, "vocabulary_richness": 0.5, "exclamation_rate": 0, "question_rate": 0, "caps_rate": 0, "uses_emoji": False},
-            {"word_count_analyzed": 500, "sample_count": 10, "formality_score": 0, "avg_sentence_length": 10, "vocabulary_richness": 0.5, "exclamation_rate": 0, "question_rate": 0, "caps_rate": 0, "uses_emoji": False},
+            {"sample_count": 8, "word_count_analyzed": 500, "personality_markers": [], "sample_phrases": []},
+            {"sample_count": 5, "word_count_analyzed": 300, "personality_markers": [], "sample_phrases": []},
         )
         assert high["style_confidence"] == "high"
 
@@ -239,38 +260,23 @@ class TestAggregateUserStyle:
         assert aggregate_user_style([]) == {}
 
     def test_single_procedure(self):
-        procs = [{
-            "id": "test",
-            "voice_profile": {
-                "formality": "casual",
-                "formality_score": -0.4,
-                "word_count_analyzed": 100,
-                "sample_count": 5,
-                "avg_sentence_length": 8.0,
-                "vocabulary_richness": 0.6,
-                "exclamation_rate": 0.2,
-                "question_rate": 0.1,
-                "caps_rate": 0.01,
-                "uses_emoji": True,
-            },
-        }]
+        procs = [{"id": "test", "voice_profile": {**CASUAL_PROFILE, "sample_count": 5, "word_count_analyzed": 100}}]
         result = aggregate_user_style(procs)
         assert result["formality"] == "casual"
 
-    def test_multiple_procedures(self):
+    def test_multiple_procedures_with_contexts(self):
         procs = [
-            {"id": "reddit", "voice_profile": {"formality": "casual", "formality_score": -0.5, "word_count_analyzed": 200, "sample_count": 10, "avg_sentence_length": 8, "vocabulary_richness": 0.6, "exclamation_rate": 0.3, "question_rate": 0.1, "caps_rate": 0.01, "uses_emoji": True}},
-            {"id": "email", "voice_profile": {"formality": "formal", "formality_score": 0.4, "word_count_analyzed": 150, "sample_count": 8, "avg_sentence_length": 18, "vocabulary_richness": 0.7, "exclamation_rate": 0.05, "question_rate": 0.2, "caps_rate": 0.0, "uses_emoji": False}},
+            {"id": "reddit", "voice_profile": {**CASUAL_PROFILE, "sample_count": 10, "word_count_analyzed": 200}},
+            {"id": "email", "voice_profile": {**FORMAL_PROFILE, "sample_count": 8, "word_count_analyzed": 300}},
         ]
         result = aggregate_user_style(procs)
         assert "per_workflow" in result
         assert len(result["per_workflow"]) == 2
-        assert result["sample_count"] == 18
 
     def test_skips_empty_profiles(self):
         procs = [
             {"id": "no-text", "voice_profile": {}},
-            {"id": "has-text", "voice_profile": {"formality": "neutral", "formality_score": 0, "word_count_analyzed": 50, "sample_count": 3, "avg_sentence_length": 12, "vocabulary_richness": 0.5, "exclamation_rate": 0.1, "question_rate": 0.1, "caps_rate": 0, "uses_emoji": False}},
+            {"id": "has-text", "voice_profile": {**CASUAL_PROFILE, "sample_count": 3, "word_count_analyzed": 50}},
         ]
         result = aggregate_user_style(procs)
-        assert result.get("word_count_analyzed") == 50
+        assert result.get("sample_count") == 3

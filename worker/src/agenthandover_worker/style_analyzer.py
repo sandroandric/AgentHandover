@@ -1,141 +1,110 @@
 """Style and voice analyzer for user-produced text.
 
-Analyzes content_produced text samples to extract writing patterns,
-tone, and formality characteristics.  Populates the procedure's
-``voice_profile`` and ``content_samples`` fields for future
-fine-tuning and personalization.
+Uses the local LLM (Qwen) to analyze writing patterns, tone, and
+personality from user-produced text samples.  Populates the procedure's
+``voice_profile`` and ``content_samples`` fields.
 
-Pure Python — no ML dependencies.  Uses simple heuristics that are
-surprisingly effective for characterizing writing style:
-  * Sentence length distribution
-  * Vocabulary richness (type-token ratio)
-  * Formality score (contractions, pronouns, exclamation marks)
-  * Punctuation patterns
-  * Capitalization habits
+The LLM sees the actual text and understands nuance — sarcasm,
+enthusiasm, domain vocabulary, cultural tone — that regex heuristics
+miss entirely.  Fires when enough samples accumulate (3+).
 """
 
 from __future__ import annotations
 
+import json
 import logging
-import re
-from collections import Counter
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from agenthandover_worker.llm_reasoning import LLMReasoner
 
 logger = logging.getLogger(__name__)
 
-# Formality markers
-_INFORMAL_MARKERS = {
-    "contractions": re.compile(
-        r"\b(i'm|i've|i'll|i'd|we're|we've|we'll|they're|they've|"
-        r"you're|you've|you'll|he's|she's|it's|that's|there's|"
-        r"isn't|aren't|wasn't|weren't|don't|doesn't|didn't|"
-        r"won't|wouldn't|shouldn't|couldn't|can't|hasn't|haven't)\b",
-        re.IGNORECASE,
-    ),
-    "exclamations": re.compile(r"!"),
-    "ellipsis": re.compile(r"\.{3}|…"),
-    "emoji_like": re.compile(r"[:;][-']?[)(DPp/\\|]|<3|xD|lol|haha", re.IGNORECASE),
-    "first_person": re.compile(r"\b(I|me|my|mine|myself)\b"),
-}
 
-_FORMAL_MARKERS = {
-    "passive_voice": re.compile(
-        r"\b(is|are|was|were|be|been|being)\s+(being\s+)?\w+ed\b",
-        re.IGNORECASE,
-    ),
-    "hedging": re.compile(
-        r"\b(perhaps|possibly|arguably|it seems|appears to|"
-        r"may be|might be|could be|would suggest)\b",
-        re.IGNORECASE,
-    ),
-}
+# ---------------------------------------------------------------------------
+# LLM-driven style analysis
+# ---------------------------------------------------------------------------
 
-_SENTENCE_SPLIT = re.compile(r"[.!?]+\s+|\n\n+")
-_WORD_SPLIT = re.compile(r"\b\w+\b")
+_STYLE_PROMPT = """\
+Analyze the writing style of the following text samples from the same user.
+These are real examples of text they produced while working.
+
+TEXT SAMPLES:
+{samples}
+
+Respond with a JSON object describing their writing voice:
+
+{{
+  "formality": "<formal | neutral | casual>",
+  "tone": "<e.g. friendly, matter-of-fact, enthusiastic, dry, empathetic, professional>",
+  "sentence_style": "<e.g. short and punchy, long and detailed, mixed, fragmented>",
+  "vocabulary": "<e.g. simple and direct, technical, varied and rich, colloquial>",
+  "personality_markers": ["<list 2-4 distinctive traits, e.g. uses humor, asks rhetorical questions, hedges with maybe/perhaps, exclamation marks, emoji>"],
+  "sample_phrases": ["<2-3 short phrases that are most characteristic of their style>"],
+  "would_say": "<a single example sentence this person would naturally write>",
+  "would_never_say": "<a single example sentence that would feel wrong coming from this person>"
+}}
+
+Rules:
+- Base everything on the actual text samples, not assumptions
+- If the samples are too short or generic to characterize, set tone to "insufficient_data"
+- Be specific — "casual" is not enough, say "casual with dry humor and emoji"
+- personality_markers should be things an agent could actually replicate
+
+Respond with ONLY the JSON object."""
 
 
-def analyze_style(texts: list[str]) -> dict:
+def analyze_style(
+    texts: list[str],
+    llm_reasoner: "LLMReasoner | None" = None,
+) -> dict:
     """Analyze a collection of user-produced texts.
 
-    Args:
-        texts: List of text samples (from content_produced full_value).
-
-    Returns:
-        A voice_profile dict with style characteristics.
+    Uses LLM when available, returns empty dict if no reasoner
+    or insufficient text.
     """
     if not texts:
         return {}
 
     combined = " ".join(texts)
     if len(combined) < 50:
-        return {}  # Not enough text to analyze
-
-    # Sentence analysis
-    sentences = [s.strip() for s in _SENTENCE_SPLIT.split(combined) if s.strip()]
-    words = _WORD_SPLIT.findall(combined.lower())
-
-    if not words:
         return {}
 
-    word_count = len(words)
-    unique_words = len(set(words))
+    # Need the LLM for real analysis
+    if llm_reasoner is None:
+        logger.debug("No LLM reasoner — style analysis skipped")
+        return {}
 
-    # Sentence length
-    sentence_lengths = [len(_WORD_SPLIT.findall(s)) for s in sentences] if sentences else [0]
-    avg_sentence_length = sum(sentence_lengths) / max(len(sentence_lengths), 1)
+    # Format samples for the prompt
+    sample_text = ""
+    for i, t in enumerate(texts[:10], 1):
+        sample_text += f"\n[{i}] {t[:500]}"
 
-    # Type-token ratio (vocabulary richness)
-    ttr = unique_words / word_count if word_count > 0 else 0.0
+    prompt = _STYLE_PROMPT.format(samples=sample_text)
 
-    # Formality scoring
-    informal_count = 0
-    formal_count = 0
-    for name, pattern in _INFORMAL_MARKERS.items():
-        matches = len(pattern.findall(combined))
-        informal_count += matches
+    try:
+        result = llm_reasoner.reason_json(
+            prompt,
+            caller="style_analyzer",
+            think=False,
+        )
+        if result.success and result.value and isinstance(result.value, dict):
+            profile = result.value
+            # Add metadata
+            profile["word_count_analyzed"] = len(combined.split())
+            profile["sample_count"] = len(texts)
+            # Derive style_confidence from sample count
+            if len(texts) >= 10:
+                profile["style_confidence"] = "high"
+            elif len(texts) >= 3:
+                profile["style_confidence"] = "moderate"
+            else:
+                profile["style_confidence"] = "low"
+            return profile
+    except Exception:
+        logger.debug("LLM style analysis failed", exc_info=True)
 
-    for name, pattern in _FORMAL_MARKERS.items():
-        matches = len(pattern.findall(combined))
-        formal_count += matches
-
-    # Normalize by word count
-    informal_rate = informal_count / max(word_count, 1) * 100
-    formal_rate = formal_count / max(word_count, 1) * 100
-
-    # Formality score: -1 (very informal) to +1 (very formal)
-    if informal_rate + formal_rate > 0:
-        formality = (formal_rate - informal_rate) / (formal_rate + informal_rate)
-    else:
-        formality = 0.0
-
-    # Formality label
-    if formality > 0.3:
-        formality_label = "formal"
-    elif formality < -0.3:
-        formality_label = "casual"
-    else:
-        formality_label = "neutral"
-
-    # Punctuation patterns
-    exclamation_rate = combined.count("!") / max(len(sentences), 1)
-    question_rate = combined.count("?") / max(len(sentences), 1)
-    emoji_count = len(_INFORMAL_MARKERS["emoji_like"].findall(combined))
-
-    # Capitalization (are they a caps-lock person?)
-    upper_words = sum(1 for w in combined.split() if w.isupper() and len(w) > 1)
-    caps_rate = upper_words / max(word_count, 1)
-
-    return {
-        "formality": formality_label,
-        "formality_score": round(formality, 3),
-        "avg_sentence_length": round(avg_sentence_length, 1),
-        "vocabulary_richness": round(ttr, 3),
-        "word_count_analyzed": word_count,
-        "sample_count": len(texts),
-        "exclamation_rate": round(exclamation_rate, 2),
-        "question_rate": round(question_rate, 2),
-        "uses_emoji": emoji_count > 0,
-        "caps_rate": round(caps_rate, 3),
-    }
+    return {}
 
 
 def extract_content_samples(
@@ -147,24 +116,15 @@ def extract_content_samples(
     """Select representative text samples from user-produced content.
 
     Picks diverse samples that best represent the user's writing style.
-    Returns dicts with ``text`` and ``length`` fields.
     """
     if not texts:
         return []
 
-    # Filter to reasonable lengths
-    candidates = [
-        t for t in texts
-        if min_length <= len(t) <= max_length * 2
-    ]
-    if not candidates:
-        # Try with relaxed constraints
-        candidates = [t for t in texts if len(t) >= min_length]
-
+    candidates = [t for t in texts if len(t) >= min_length]
     if not candidates:
         return []
 
-    # Sort by length (prefer medium-length samples — most representative)
+    # Sort by length (prefer medium-length — most representative)
     candidates.sort(key=lambda t: abs(len(t) - 150))
 
     samples = []
@@ -173,12 +133,10 @@ def extract_content_samples(
     for text in candidates:
         if len(samples) >= max_samples:
             break
-        # Skip near-duplicates
         prefix = text[:30].lower()
         if prefix in seen_prefixes:
             continue
         seen_prefixes.add(prefix)
-
         samples.append({
             "text": text[:max_length],
             "length": len(text),
@@ -187,35 +145,32 @@ def extract_content_samples(
     return samples
 
 
-def analyze_procedure_style(procedure: dict) -> tuple[dict, list[dict]]:
+def analyze_procedure_style(
+    procedure: dict,
+    llm_reasoner: "LLMReasoner | None" = None,
+) -> tuple[dict, list[dict]]:
     """Extract style profile from a procedure's evidence.
 
-    Reads content_produced from extracted_evidence and analyzes
-    the user's writing patterns.
-
-    Returns:
-        (voice_profile, content_samples) tuple.
+    Reads content_produced and analyzes writing patterns via LLM.
     """
     evidence = procedure.get("evidence", {})
     extracted = evidence.get("extracted_evidence", {})
     content_items = extracted.get("content_produced", [])
 
-    # Collect full_value texts
     texts = []
     for item in content_items:
         full = item.get("full_value", "")
         if full and len(full) > 10:
             texts.append(full)
         else:
-            # Fallback to value_preview
             preview = item.get("value_preview", "")
             if preview and len(preview) > 10:
                 texts.append(preview)
 
-    voice_profile = analyze_style(texts)
+    voice_profile = analyze_style(texts, llm_reasoner=llm_reasoner)
     content_samples = extract_content_samples(texts)
 
-    # Cumulative: merge with existing voice_profile if present
+    # Merge with existing voice_profile if present
     existing_vp = procedure.get("voice_profile", {})
     if existing_vp and voice_profile:
         voice_profile = merge_voice_profiles(existing_vp, voice_profile)
@@ -226,54 +181,42 @@ def analyze_procedure_style(procedure: dict) -> tuple[dict, list[dict]]:
 def merge_voice_profiles(existing: dict, new: dict) -> dict:
     """Merge two voice profiles, strengthening confidence over sessions.
 
-    Weighted average based on sample counts — more data = stronger signal.
-    The ``style_confidence`` field tracks how reliable the profile is:
-    low (<5 samples), moderate (5-20), high (>20).
+    The LLM profile from the latest analysis takes precedence for
+    qualitative fields (tone, formality, personality_markers).
+    Cumulative fields (sample_count, word_count) are summed.
     """
     if not existing:
         return new
     if not new:
         return existing
 
-    old_n = existing.get("word_count_analyzed", 0)
-    new_n = new.get("word_count_analyzed", 0)
-    total_n = old_n + new_n
-    if total_n == 0:
-        return new
-
-    old_w = old_n / total_n
-    new_w = new_n / total_n
-
-    merged = {}
-
-    # Weighted average for numeric fields
-    for key in ("formality_score", "avg_sentence_length", "vocabulary_richness",
-                "exclamation_rate", "question_rate", "caps_rate"):
-        old_v = existing.get(key, 0.0)
-        new_v = new.get(key, 0.0)
-        merged[key] = round(old_v * old_w + new_v * new_w, 3)
+    merged = dict(new)  # Start with latest LLM analysis
 
     # Cumulative counts
-    merged["word_count_analyzed"] = total_n
-    total_samples = existing.get("sample_count", 0) + new.get("sample_count", 0)
+    merged["word_count_analyzed"] = (
+        existing.get("word_count_analyzed", 0) +
+        new.get("word_count_analyzed", 0)
+    )
+    total_samples = (
+        existing.get("sample_count", 0) +
+        new.get("sample_count", 0)
+    )
     merged["sample_count"] = total_samples
 
-    # Boolean OR
-    merged["uses_emoji"] = existing.get("uses_emoji", False) or new.get("uses_emoji", False)
+    # Merge personality markers (union, deduplicated)
+    old_markers = set(existing.get("personality_markers", []))
+    new_markers = set(new.get("personality_markers", []))
+    merged["personality_markers"] = list(old_markers | new_markers)[:6]
 
-    # Re-derive formality label from merged score
-    fs = merged["formality_score"]
-    if fs > 0.3:
-        merged["formality"] = "formal"
-    elif fs < -0.3:
-        merged["formality"] = "casual"
-    else:
-        merged["formality"] = "neutral"
+    # Merge sample phrases (keep latest + best from old)
+    old_phrases = existing.get("sample_phrases", [])
+    new_phrases = new.get("sample_phrases", [])
+    merged["sample_phrases"] = (new_phrases + old_phrases)[:4]
 
-    # Style confidence — strengthens with more data
-    if total_samples >= 20:
+    # Style confidence from cumulative sample count
+    if total_samples >= 10:
         merged["style_confidence"] = "high"
-    elif total_samples >= 5:
+    elif total_samples >= 3:
         merged["style_confidence"] = "moderate"
     else:
         merged["style_confidence"] = "low"
@@ -281,27 +224,31 @@ def merge_voice_profiles(existing: dict, new: dict) -> dict:
     return merged
 
 
-def aggregate_user_style(procedures: list[dict]) -> dict:
+def aggregate_user_style(
+    procedures: list[dict],
+    llm_reasoner: "LLMReasoner | None" = None,
+) -> dict:
     """Build a user-level style profile from all procedures.
 
-    Aggregates voice_profiles across all procedures weighted by
-    sample_count.  Returns a holistic profile suitable for profile.json.
+    Aggregates voice_profiles across all procedures.
+    If an LLM is available and there are enough profiles, asks
+    it to synthesize a holistic user voice description.
     """
     all_profiles = []
     for proc in procedures:
         vp = proc.get("voice_profile", {})
-        if vp and vp.get("word_count_analyzed", 0) > 0:
+        if vp and vp.get("sample_count", 0) > 0:
             all_profiles.append(vp)
 
     if not all_profiles:
         return {}
 
-    # Weighted merge across all procedures
+    # Merge all profiles
     result = all_profiles[0]
     for vp in all_profiles[1:]:
         result = merge_voice_profiles(result, vp)
 
-    # Add per-context breakdown
+    # Per-context breakdown
     contexts = []
     for proc in procedures:
         vp = proc.get("voice_profile", {})
@@ -309,6 +256,7 @@ def aggregate_user_style(procedures: list[dict]) -> dict:
             contexts.append({
                 "procedure": proc.get("id", ""),
                 "formality": vp.get("formality", "neutral"),
+                "tone": vp.get("tone", ""),
                 "sample_count": vp.get("sample_count", 0),
             })
 

@@ -98,24 +98,25 @@ def render_voice_style_section(procedure: dict) -> list[str]:
     lines.append("When producing text output for this workflow, match the user's writing style:")
     lines.append("")
 
-    if vp.get("formality"):
+    if vp.get("tone"):
+        lines.append(f"- **Tone**: {vp['tone']}")
+    elif vp.get("formality"):
         lines.append(f"- **Tone**: {vp['formality']}")
-    if vp.get("avg_sentence_length"):
-        length = vp["avg_sentence_length"]
-        if length < 10:
-            lines.append("- **Sentences**: short and punchy")
-        elif length > 20:
-            lines.append("- **Sentences**: longer, detailed")
-        else:
-            lines.append("- **Sentences**: medium length")
-    if vp.get("uses_emoji"):
-        lines.append("- **Emoji**: yes, the user uses emoji in this context")
-    if vp.get("exclamation_rate", 0) > 0.2:
-        lines.append("- **Exclamation marks**: frequent")
-    if vp.get("vocabulary_richness", 0) > 0.7:
-        lines.append("- **Vocabulary**: varied and rich")
-    elif vp.get("vocabulary_richness", 0) < 0.4:
-        lines.append("- **Vocabulary**: simple and direct")
+    if vp.get("sentence_style"):
+        lines.append(f"- **Sentences**: {vp['sentence_style']}")
+    if vp.get("vocabulary"):
+        lines.append(f"- **Vocabulary**: {vp['vocabulary']}")
+
+    markers = vp.get("personality_markers", [])
+    if markers:
+        lines.append(f"- **Personality**: {', '.join(markers)}")
+
+    would_say = vp.get("would_say", "")
+    if would_say:
+        lines.append(f"- **Would say**: \"{would_say}\"")
+    would_never = vp.get("would_never_say", "")
+    if would_never:
+        lines.append(f"- **Would never say**: \"{would_never}\"")
 
     # Content samples — concrete examples of how the user writes
     if samples:

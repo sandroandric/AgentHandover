@@ -4165,7 +4165,7 @@ def main(argv: list[str] | None = None) -> None:
 
     evidence_tracker = EvidenceTracker(knowledge_base=knowledge_base)
     lifecycle_manager = LifecycleManager(knowledge_base)
-    procedure_writer = ProcedureWriter(kb=knowledge_base, evidence=evidence_tracker, lifecycle_manager=lifecycle_manager, vector_kb=vector_kb)
+    procedure_writer = ProcedureWriter(kb=knowledge_base, evidence=evidence_tracker, lifecycle_manager=lifecycle_manager, vector_kb=vector_kb, llm_reasoner=llm_reasoner)
     kb_export_adapter = KnowledgeBaseExportAdapter(knowledge_base)
     # Build PrivacyZoneConfig from user's config.toml [privacy.zones]
     _pz_cfg = PrivacyZoneConfig()

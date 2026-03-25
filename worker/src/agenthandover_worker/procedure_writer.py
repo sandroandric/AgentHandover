@@ -31,11 +31,13 @@ class ProcedureWriter:
         evidence: EvidenceTracker,
         lifecycle_manager=None,
         vector_kb=None,
+        llm_reasoner=None,
     ) -> None:
         self._kb = kb
         self._evidence = evidence
         self._lifecycle = lifecycle_manager
         self._vector_kb = vector_kb
+        self._llm_reasoner = llm_reasoner
 
     def write_procedure(
         self,
@@ -297,10 +299,12 @@ class ProcedureWriter:
             logger.debug("Procedure embedding failed for %s", procedure.get("id"), exc_info=True)
 
     def _analyze_style(self, procedure: dict) -> None:
-        """Analyze user writing style and populate voice_profile + content_samples."""
+        """Analyze user writing style via LLM and populate voice_profile + content_samples."""
         try:
             from agenthandover_worker.style_analyzer import analyze_procedure_style
-            voice_profile, content_samples = analyze_procedure_style(procedure)
+            voice_profile, content_samples = analyze_procedure_style(
+                procedure, llm_reasoner=self._llm_reasoner,
+            )
             if voice_profile:
                 existing_vp = procedure.get("voice_profile", {})
                 existing_vp.update(voice_profile)
