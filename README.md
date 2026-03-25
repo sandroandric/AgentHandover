@@ -25,9 +25,9 @@
 
 You already know how to do your work. Your agents don't.
 
-AgentHandover watches you work on your Mac, understands what you're doing and *why*, and produces **Skills** -- structured playbooks that tell AI agents exactly what to do and how to do it. Each Skill contains the steps, the strategy behind them, decision logic, guardrails, and your writing voice. **Claude Code**, **OpenClaw**, **Codex**, or any MCP-compatible agent can pick up a Skill and execute the workflow the way you would.
+AgentHandover watches you work on your Mac, understands what you're doing and *why*, and produces **self-improving Skills** -- structured playbooks that tell AI agents exactly what to do and how to do it, and get better every time they're executed. Each Skill contains the steps, the strategy behind them, decision logic, guardrails, and your writing voice. When agents execute a Skill, they report back -- successes boost confidence, deviations become new decision branches, failures trigger corrections. **Claude Code**, **OpenClaw**, **Codex**, or any MCP-compatible agent can pick up a Skill and execute the workflow the way you would.
 
-Not macros. Not screen recordings. Not a list of clicks. A complete understanding of your work -- the kind of handoff you'd give a sharp new hire, except it writes itself.
+Not static playbooks. Self-improving ones.
 
 ## What a Skill Looks Like
 
