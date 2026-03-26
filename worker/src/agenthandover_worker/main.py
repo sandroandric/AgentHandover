@@ -1774,6 +1774,7 @@ def _process_focus_sessions_v2(
         procedure_dict["id"] = slug
         procedure_dict["title"] = title  # User's focus session title, not VLM's guess
         procedure_dict["source"] = "focus"
+        procedure_dict["lifecycle_state"] = "draft"  # Focus recordings start as draft, not observed
         if behavioral_synthesizer is not None:
             try:
                 # Build a single-demo observations list from the SOP steps
