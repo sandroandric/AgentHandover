@@ -1696,6 +1696,7 @@ def _process_focus_sessions_v2(
         sop_auto_approve=sop_auto_approve,
         procedure_writer=procedure_writer,
         kb_export_adapter=kb_export_adapter,
+        knowledge_base=knowledge_base,
     )
     if pending_export is not None:
         return pending_export
@@ -2084,6 +2085,7 @@ def _check_focus_answers(
     sop_auto_approve: bool = True,
     procedure_writer: "ProcedureWriter | None" = None,
     kb_export_adapter: "KnowledgeBaseExportAdapter | None" = None,
+    knowledge_base=None,
 ) -> int | None:
     """Check for pending focus Q&A answers and complete export if ready.
 
@@ -2138,6 +2140,14 @@ def _check_focus_answers(
             )
 
     sop_templates = [procedure_dict]
+
+    # Save enriched procedure to KB (answers merged)
+    if knowledge_base is not None:
+        try:
+            knowledge_base.save_procedure(procedure_dict)
+            logger.info("Saved Q&A-enriched procedure '%s' to KB", slug)
+        except Exception:
+            logger.debug("Failed to save Q&A-enriched procedure", exc_info=True)
 
     # Export
     exported = 0
