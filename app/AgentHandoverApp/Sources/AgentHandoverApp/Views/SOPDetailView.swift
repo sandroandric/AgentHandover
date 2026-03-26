@@ -726,18 +726,21 @@ struct SOPDetailView: View {
     // MARK: - File loading
 
     private func loadSkillFile() {
+        // Clear stale state first to prevent showing old content
+        fileExists = false
+        resolvedPath = nil
+        skillContent = nil
+
         let fm = FileManager.default
         for candidate in candidatePaths() {
             if fm.fileExists(atPath: candidate.path) {
                 fileExists = true
                 resolvedPath = candidate
                 skillContent = try? String(contentsOf: candidate, encoding: .utf8)
+                print("[SOPDetail] Loaded \(sop.slug) from \(candidate.lastPathComponent)")
                 return
             }
         }
-        fileExists = false
-        resolvedPath = nil
-        skillContent = nil
     }
 
     private func openInEditor() {
