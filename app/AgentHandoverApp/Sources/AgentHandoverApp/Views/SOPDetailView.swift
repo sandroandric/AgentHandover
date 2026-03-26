@@ -292,7 +292,7 @@ struct SOPDetailView: View {
                                                 .background(lightGray)
                                                 .cornerRadius(5)
                                         }
-                                        Text(step["action"] as? String ?? step["description"] as? String ?? "")
+                                        Text(step["action"] as? String ?? step["step"] as? String ?? step["description"] as? String ?? "")
                                             .font(.system(size: 12))
                                             .foregroundColor(darkNavy.opacity(0.85))
                                             .textSelection(.enabled)

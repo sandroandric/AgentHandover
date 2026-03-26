@@ -1797,6 +1797,7 @@ def _process_focus_sessions_v2(
         # --- Generate targeted questions via subprocess (crash-proof) ---
         questions = []
         if focus_questioner is not None:
+            logger.info("Focus Q&A: generating questions via subprocess...")
             try:
                 import subprocess as _sp
                 import tempfile as _tf
@@ -1906,9 +1907,8 @@ def _process_focus_sessions_v2(
                     _clear_focus_signal(signal_path)
                     return 0  # Don't export yet — wait for answers
             except Exception:
-                logger.debug(
-                    "Focus v2 question generation failed for '%s', "
-                    "proceeding without questions",
+                logger.warning(
+                    "Focus Q&A failed for '%s' — proceeding without questions",
                     title, exc_info=True,
                 )
 
