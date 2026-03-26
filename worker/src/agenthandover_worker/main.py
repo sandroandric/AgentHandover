@@ -864,7 +864,6 @@ def _write_sops_index(
         all_sops = [
             s for s in all_sops_raw
             if s.get("source", "") in _V2_SOURCES
-            and s.get("confidence", 0) > 0
         ]
 
         # draft_count and approved_count computed after dedup below
@@ -1772,12 +1771,23 @@ def _process_focus_sessions_v2(
                     title, exc_info=True,
                 )
 
-        # --- Generate targeted questions ---
+        # --- Generate targeted questions (with timeout protection) ---
         if focus_questioner is not None:
             try:
-                questions = focus_questioner.generate_questions(
-                    procedure_dict, result.sop,
-                )
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                    future = pool.submit(
+                        focus_questioner.generate_questions,
+                        procedure_dict, result.sop,
+                    )
+                    try:
+                        questions = future.result(timeout=60)  # 60s max
+                    except concurrent.futures.TimeoutError:
+                        logger.warning(
+                            "Focus Q&A timed out after 60s for '%s' — skipping questions",
+                            title,
+                        )
+                        questions = []
                 if questions:
                     from agenthandover_worker.focus_questioner import (
                         write_focus_questions,
@@ -1805,7 +1815,7 @@ def _process_focus_sessions_v2(
                             sop_template=procedure_dict,
                             confidence=procedure_dict.get(
                                 "confidence_avg",
-                                procedure_dict.get("confidence", 0.0),
+                                result.sop.get("confidence_avg", 0.5),
                             ),
                             source_id=session_id,
                             auto_approve=False,  # draft until answers
@@ -1832,7 +1842,7 @@ def _process_focus_sessions_v2(
                 title=title,
                 source="focus",
                 sop_template=procedure_dict,
-                confidence=procedure_dict.get("confidence_avg", procedure_dict.get("confidence", 0.0)),
+                confidence=procedure_dict.get("confidence_avg", result.sop.get("confidence_avg", 0.5)),
                 source_id=session_id,
                 auto_approve=sop_auto_approve,
             )
