@@ -703,6 +703,8 @@ def _vlm_sop_to_template(
         # Extract from steps
         seen: set[str] = set()
         for raw_step in vlm_sop.get("steps", []):
+            if isinstance(raw_step, str):
+                raw_step = {"action": raw_step}
             app = raw_step.get("app", "")
             if app and app not in seen:
                 apps_involved.append(app)
@@ -841,6 +843,8 @@ def _extract_selector_for_step(
         return None
 
     # What are we looking for?
+    if isinstance(raw_step, str):
+        raw_step = {"action": raw_step}
     action = raw_step.get("action", "").lower()
     location = raw_step.get("location", "").lower()
     input_val = raw_step.get("input", "")
