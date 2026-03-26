@@ -1787,14 +1787,65 @@ def _process_focus_sessions_v2(
                     title, exc_info=True,
                 )
 
-        # --- Focus Q&A disabled for v0.1 launch (causes worker hangs) ---
-        # TODO: Re-enable after fixing LLM timeout reliability on Python 3.14
+        # --- Generate targeted questions via subprocess (crash-proof) ---
         questions = []
-        if False and focus_questioner is not None:
+        if focus_questioner is not None:
             try:
-                questions = focus_questioner.generate_questions(
-                    procedure_dict, result.sop,
+                import subprocess as _sp
+                import tempfile as _tf
+
+                # Serialize inputs to a temp file
+                _qa_input = _tf.NamedTemporaryFile(
+                    mode="w", suffix=".json", delete=False,
                 )
+                import json as _json
+                _json.dump({
+                    "procedure": procedure_dict,
+                    "sop": result.sop,
+                }, _qa_input)
+                _qa_input.close()
+
+                _qa_output = _qa_input.name + ".out"
+
+                # Run Q&A generation in a separate process with hard 60s timeout
+                _qa_script = (
+                    "import json, sys; "
+                    "from agenthandover_worker.focus_questioner import FocusQuestioner; "
+                    "from agenthandover_worker.llm_reasoning import LLMReasoner, ReasoningConfig; "
+                    "from agenthandover_worker.vlm_queue import VLMFallbackQueue; "
+                    "data = json.load(open(sys.argv[1])); "
+                    "reasoner = LLMReasoner(config=ReasoningConfig(), vlm_queue=VLMFallbackQueue()); "
+                    "fq = FocusQuestioner(llm_reasoner=reasoner); "
+                    "qs = fq.generate_questions(data['procedure'], data['sop']); "
+                    "json.dump(qs, open(sys.argv[2], 'w'))"
+                )
+
+                _qa_result = _sp.run(
+                    [sys.executable, "-c", _qa_script, _qa_input.name, _qa_output],
+                    timeout=60,
+                    capture_output=True,
+                )
+
+                if _qa_result.returncode == 0:
+                    try:
+                        questions = _json.load(open(_qa_output))
+                    except Exception:
+                        questions = []
+                else:
+                    logger.debug(
+                        "Focus Q&A subprocess failed (exit %d): %s",
+                        _qa_result.returncode,
+                        _qa_result.stderr[:200] if _qa_result.stderr else "",
+                    )
+
+                # Cleanup temp files
+                import os
+                os.unlink(_qa_input.name)
+                try:
+                    os.unlink(_qa_output)
+                except FileNotFoundError:
+                    pass
+
                 if questions:
                     from agenthandover_worker.focus_questioner import (
                         write_focus_questions,
