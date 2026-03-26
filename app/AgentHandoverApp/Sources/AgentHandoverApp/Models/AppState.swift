@@ -304,6 +304,7 @@ final class AppState: ObservableObject {
         guard let data = try? Data(contentsOf: path),
               let signal = try? JSONDecoder().decode(FocusSessionSignalFile.self, from: data) else {
             focusSessionActive = false
+            focusSessionProcessing = false
             focusSessionTitle = ""
             focusSessionId = nil
             focusSessionStartedAt = nil
