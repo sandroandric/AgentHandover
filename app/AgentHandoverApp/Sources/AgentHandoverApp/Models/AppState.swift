@@ -112,7 +112,7 @@ final class AppState: ObservableObject {
     @Published var workerRunning = false
     @Published var extensionConnected = false
     @Published var health: ServiceHealth = .down
-    @Published var userStopped = false
+    @Published var userStopped = UserDefaults.standard.bool(forKey: "observingPaused")
 
     // Permissions
     @Published var accessibilityGranted = false
