@@ -60,7 +60,12 @@ struct MenuBarView: View {
                 delegate.showOnboarding(appState: appState)
             }
         }
-        // Q&A window is opened manually via the attention card — no auto-open
+        // Auto-open Q&A window when questions become available
+        .onChange(of: appState.focusQuestionsAvailable) { available in
+            if available {
+                openAndActivate("focus-qa")
+            }
+        }
         .onAppear {
             // Refresh immediately when user opens menu bar
             appState.refreshStatus()

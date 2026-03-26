@@ -1658,6 +1658,8 @@ def _process_focus_sessions_v2(
     kb_export_adapter: "KnowledgeBaseExportAdapter | None" = None,
     behavioral_synthesizer: "BehavioralSynthesizer | None" = None,
     focus_questioner: "FocusQuestioner | None" = None,
+    knowledge_base=None,
+    ollama_host: str = "http://localhost:11434",
 ) -> int:
     """Process completed focus recording sessions via v2 VLM pipeline.
 
@@ -1811,8 +1813,7 @@ def _process_focus_sessions_v2(
                 _qa_script_file = _tf.NamedTemporaryFile(
                     mode="w", suffix=".py", delete=False,
                 )
-                # Get Ollama host from the worker's config
-                _ollama_host = v2_cfg.get("ollama_host", "http://localhost:11434") if v2_cfg else "http://localhost:11434"
+                _ollama_host = ollama_host
 
                 _qa_script_file.write(
                     "import json, sys, os\n"
@@ -4955,6 +4956,8 @@ def main(argv: list[str] | None = None) -> None:
                         kb_export_adapter=kb_export_adapter,
                         behavioral_synthesizer=behavioral_synthesizer,
                         focus_questioner=focus_questioner_inst,
+                        knowledge_base=knowledge_base,
+                        ollama_host=v2_cfg.get("ollama_host", "http://localhost:11434") if v2_cfg else "http://localhost:11434",
                     )
                 else:
                     focus_sops = _process_focus_sessions(
