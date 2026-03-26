@@ -14,10 +14,7 @@
     <false/>
 
     <key>KeepAlive</key>
-    <dict>
-        <key>SuccessfulExit</key>
-        <false/>
-    </dict>
+    <false/>
 
     <key>ThrottleInterval</key>
     <integer>10</integer>
