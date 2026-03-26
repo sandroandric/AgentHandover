@@ -179,6 +179,11 @@ else
     echo "Then load in Chrome: chrome://extensions -> Load unpacked -> extension/dist"
 fi
 
+# Load launchd services (as the real user, not root)
+sudo -u "${CONSOLE_USER}" launchctl load "${LAUNCH_AGENTS}/com.agenthandover.daemon.plist" 2>/dev/null || true
+sudo -u "${CONSOLE_USER}" launchctl load "${LAUNCH_AGENTS}/com.agenthandover.worker.plist" 2>/dev/null || true
+echo "  Services loaded."
+
 # Launch the menu bar app (as the real user, not root)
 if [ -d "/Applications/AgentHandover.app" ]; then
     sudo -u "${CONSOLE_USER}" open /Applications/AgentHandover.app 2>/dev/null || true

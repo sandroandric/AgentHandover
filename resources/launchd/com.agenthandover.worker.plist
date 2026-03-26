@@ -22,7 +22,7 @@
     </dict>
 
     <key>ThrottleInterval</key>
-    <integer>10</integer>
+    <integer>3</integer>
 
     <key>ProcessType</key>
     <string>Background</string>

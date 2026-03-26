@@ -1811,14 +1811,18 @@ def _process_focus_sessions_v2(
                 _qa_script_file = _tf.NamedTemporaryFile(
                     mode="w", suffix=".py", delete=False,
                 )
+                # Get Ollama host from the worker's config
+                _ollama_host = v2_cfg.get("ollama_host", "http://localhost:11434") if v2_cfg else "http://localhost:11434"
+
                 _qa_script_file.write(
-                    "import json, sys\n"
+                    "import json, sys, os\n"
                     "from dataclasses import asdict\n"
                     "from agenthandover_worker.focus_questioner import FocusQuestioner\n"
                     "from agenthandover_worker.llm_reasoning import LLMReasoner, ReasoningConfig\n"
                     "from agenthandover_worker.vlm_queue import VLMFallbackQueue\n"
                     "data = json.load(open(sys.argv[1]))\n"
-                    "reasoner = LLMReasoner(config=ReasoningConfig(), vlm_queue=VLMFallbackQueue())\n"
+                    "host = os.environ.get('OLLAMA_HOST', 'http://localhost:11434')\n"
+                    "reasoner = LLMReasoner(config=ReasoningConfig(ollama_host=host), vlm_queue=VLMFallbackQueue())\n"
                     "fq = FocusQuestioner(llm_reasoner=reasoner)\n"
                     "qs = fq.generate_questions(data['procedure'], data['sop'])\n"
                     "out = [asdict(q) if hasattr(q, '__dataclass_fields__') else q for q in qs]\n"
@@ -1826,11 +1830,14 @@ def _process_focus_sessions_v2(
                 )
                 _qa_script_file.close()
 
-                # Run in separate process with 120s timeout
+                # Run in separate process with 120s timeout, passing Ollama host
+                _qa_env = dict(os.environ)
+                _qa_env["OLLAMA_HOST"] = _ollama_host
                 _qa_result = _sp.run(
                     [sys.executable, _qa_script_file.name, _qa_input.name, _qa_output],
                     timeout=120,
                     capture_output=True,
+                    env=_qa_env,
                 )
 
                 if _qa_result.returncode == 0:
@@ -1839,7 +1846,7 @@ def _process_focus_sessions_v2(
                     except Exception:
                         questions = []
                 else:
-                    logger.debug(
+                    logger.warning(
                         "Focus Q&A subprocess failed (exit %d): %s",
                         _qa_result.returncode,
                         _qa_result.stderr[:200] if _qa_result.stderr else "",
@@ -1900,6 +1907,13 @@ def _process_focus_sessions_v2(
                 )
 
         # --- Standard export path (no questions or questioner unavailable) ---
+
+        # Save procedure to KB so detail view can display steps/strategy
+        try:
+            knowledge_base.save_procedure(procedure_dict)
+            logger.info("Saved procedure '%s' to knowledge base", slug)
+        except Exception:
+            logger.debug("Failed to save procedure to KB", exc_info=True)
 
         # Save generated SOP to DB for review tracking
         try:
