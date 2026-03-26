@@ -865,18 +865,21 @@ struct OnboardingView: View {
                 permissionCard(
                     icon: "hand.raised.circle.fill",
                     title: "Accessibility",
-                    description: "Read window titles and UI elements",
+                    description: "Read window titles and UI elements. Add agenthandover-daemon from /usr/local/bin/",
                     granted: appState.accessibilityGranted,
                     action: {
-                        // Start daemon briefly - macOS will prompt for the daemon binary
+                        // Start daemon so macOS knows about the binary
                         ServiceController.startDaemon()
-                        // Also request for this app as fallback
+                        // Open Accessibility pane directly
+                        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
+                            NSWorkspace.shared.open(url)
+                        }
+                        // Also request for this app
                         PermissionChecker.requestAccessibility()
                         permissionCheckPending = true
-                        // Poll aggressively for a few seconds after granting
                         pollPermissionsAfterGrant()
                     },
-                    actionLabel: "Grant Access"
+                    actionLabel: "Open Settings"
                 )
 
                 // Screen Recording card
@@ -2115,7 +2118,25 @@ struct OnboardingView: View {
         ]
 
         DispatchQueue.global(qos: .userInitiated).async {
+            // Check which models are already pulled
+            let listProcess = Process()
+            listProcess.executableURL = URL(fileURLWithPath: ollamaPath)
+            listProcess.arguments = ["list"]
+            let listPipe = Pipe()
+            listProcess.standardOutput = listPipe
+            try? listProcess.run()
+            listProcess.waitUntilExit()
+            let installedModels = String(data: listPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+
             for (index, (model, purpose)) in models.enumerated() {
+                // Skip if already installed
+                if installedModels.contains(model) {
+                    DispatchQueue.main.async {
+                        vlmPullOutput = "[\(index + 1)/\(models.count)] \(model) already installed"
+                    }
+                    continue
+                }
+
                 DispatchQueue.main.async {
                     vlmPullOutput = "[\(index + 1)/\(models.count)] Pulling \(model) (\(purpose))..."
                 }
