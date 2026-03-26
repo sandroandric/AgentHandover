@@ -1846,7 +1846,7 @@ def _process_focus_sessions_v2(
                 _qa_env["OLLAMA_HOST"] = _ollama_host
                 _qa_result = _sp.run(
                     [sys.executable, _qa_script_file.name, _qa_input.name, _qa_output],
-                    timeout=180,
+                    timeout=300,
                     capture_output=True,
                     env=_qa_env,
                 )
