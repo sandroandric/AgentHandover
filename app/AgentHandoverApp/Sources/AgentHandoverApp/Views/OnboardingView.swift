@@ -868,13 +868,10 @@ struct OnboardingView: View {
                     description: "Read window titles and UI elements. Add agenthandover-daemon from /usr/local/bin/",
                     granted: appState.accessibilityGranted,
                     action: {
-                        // Start daemon so macOS knows about the binary
-                        ServiceController.startDaemon()
-                        // Open Accessibility pane directly
+                        // Open Accessibility pane — don't start daemon yet
                         if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
                             NSWorkspace.shared.open(url)
                         }
-                        // Also request for this app
                         PermissionChecker.requestAccessibility()
                         permissionCheckPending = true
                         pollPermissionsAfterGrant()
@@ -889,8 +886,7 @@ struct OnboardingView: View {
                     description: "Capture screenshots for AI analysis",
                     granted: appState.screenRecordingGranted,
                     action: {
-                        // Start daemon briefly so macOS knows which binary needs it
-                        ServiceController.startDaemon()
+                        // Open Screen Recording settings — don't start daemon yet
                         PermissionChecker.openScreenRecordingSettings()
                         permissionCheckPending = true
                         pollPermissionsAfterGrant()

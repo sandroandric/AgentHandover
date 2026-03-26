@@ -328,8 +328,17 @@ final class AppState: ObservableObject {
         }
 
         if file.status == "pending" {
+            let wasAvailable = focusQuestionsAvailable
             focusQuestionsAvailable = true
             focusQuestionsSlug = file.slug
+            // Auto-open Q&A window when questions first appear
+            if !wasAvailable {
+                DispatchQueue.main.async {
+                    NSApp.activate(ignoringOtherApps: true)
+                    // Post notification that MenuBarView listens for
+                    NotificationCenter.default.post(name: .focusQuestionsReady, object: nil)
+                }
+            }
         } else {
             focusQuestionsAvailable = false
             focusQuestionsSlug = ""
@@ -448,4 +457,8 @@ final class AppState: ObservableObject {
     private func isProcessRunning(pid: UInt32) -> Bool {
         kill(Int32(pid), 0) == 0
     }
+}
+
+extension Notification.Name {
+    static let focusQuestionsReady = Notification.Name("focusQuestionsReady")
 }

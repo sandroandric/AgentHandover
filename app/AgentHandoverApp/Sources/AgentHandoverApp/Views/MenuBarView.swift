@@ -66,6 +66,9 @@ struct MenuBarView: View {
                 openAndActivate("focus-qa")
             }
         }
+        .onReceive(NotificationCenter.default.publisher(for: .focusQuestionsReady)) { _ in
+            openAndActivate("focus-qa")
+        }
         .onAppear {
             // Refresh immediately when user opens menu bar
             appState.refreshStatus()

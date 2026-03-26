@@ -636,8 +636,18 @@ def _vlm_sop_to_template(
         if isinstance(raw_step, str):
             raw_step = {"action": raw_step}
 
+        # Qwen returns step descriptions in various field names
+        step_text = (
+            raw_step.get("action")
+            or raw_step.get("description")
+            or raw_step.get("step")
+            or raw_step.get("step_name")
+            or raw_step.get("name")
+            or raw_step.get("instruction")
+            or str(raw_step) if isinstance(raw_step, str) else "action"
+        )
         step = {
-            "step": raw_step.get("action", "action"),
+            "step": step_text,
             "target": raw_step.get("location", ""),
             "parameters": {},
             "confidence": confidence,
