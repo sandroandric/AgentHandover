@@ -10,12 +10,12 @@ struct SOPDetailView: View {
     @State private var fileExists = false
     @State private var resolvedPath: URL?
 
-    // Contra design tokens
-    private let darkNavy = Color(red: 0.09, green: 0.10, blue: 0.12)
+    // Contra design tokens (system-adaptive)
+    private let darkNavy = Color.primary
     private let warmOrange = Color(red: 0.92, green: 0.57, blue: 0.20)
     private let goldenYellow = Color(red: 1.0, green: 0.74, blue: 0.07)
-    private let warmCream = Color(red: 1.0, green: 0.96, blue: 0.88)
-    private let lightGray = Color(red: 0.96, green: 0.96, blue: 0.96)
+    private let warmCream = Color(nsColor: .windowBackgroundColor)
+    private let lightGray = Color(nsColor: .controlBackgroundColor)
     private let brightGreen = Color(red: 0.18, green: 0.80, blue: 0.34)
     private let cardRadius: CGFloat = 14
     private let contraBorder: CGFloat = 1.5
@@ -309,7 +309,7 @@ struct SOPDetailView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .background(
                             RoundedRectangle(cornerRadius: cardRadius)
-                                .fill(Color.white)
+                                .fill(Color(nsColor: .controlBackgroundColor))
                         )
                         .overlay(
                             RoundedRectangle(cornerRadius: cardRadius)
@@ -583,7 +583,7 @@ struct SOPDetailView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(
                 RoundedRectangle(cornerRadius: cardRadius)
-                    .fill(Color.white)
+                    .fill(Color(nsColor: .controlBackgroundColor))
             )
             .overlay(
                 RoundedRectangle(cornerRadius: cardRadius)

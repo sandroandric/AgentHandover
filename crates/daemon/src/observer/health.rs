@@ -17,7 +17,10 @@ pub struct HealthStatus {
 
 impl HealthStatus {
     pub fn is_healthy(&self) -> bool {
-        self.accessibility_permitted && self.disk_space_ok && self.artifact_dir_ok
+        self.accessibility_permitted
+            && self.screen_recording_permitted
+            && self.disk_space_ok
+            && self.artifact_dir_ok
     }
 }
 
@@ -149,10 +152,9 @@ fn get_process_memory_mb() -> Option<u64> {
 
 #[cfg(target_os = "macos")]
 pub fn is_accessibility_permitted() -> bool {
-    // AXIsProcessTrusted() can return false for bundled helpers on Tahoe
-    // even when permission is granted. Still use it as primary check
-    // since it works in most cases and doesn't trigger any prompts.
-    unsafe { accessibility_sys::AXIsProcessTrusted() }
+    crate::observation::snapshot()
+        .map(|snapshot| snapshot.accessibility_granted)
+        .unwrap_or(false)
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -161,8 +163,7 @@ pub fn is_accessibility_permitted() -> bool {
 }
 
 pub fn is_screen_recording_permitted() -> bool {
-    // Screen Recording is owned by the main app process.
-    // The daemon gets pixels via the capture socket.
-    // Permission checking is the app's responsibility.
-    true
+    crate::observation::snapshot()
+        .map(|snapshot| snapshot.screen_recording_granted)
+        .unwrap_or(false)
 }

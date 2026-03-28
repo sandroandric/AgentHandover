@@ -19,7 +19,7 @@ struct StatusDetailView: View {
                         HStack(spacing: 8) {
                             PermissionBadge(
                                 name: "Accessibility",
-                                granted: daemon.accessibility_permitted
+                                granted: appState.accessibilityGranted
                             )
                             PermissionBadge(
                                 name: "Screen Recording",

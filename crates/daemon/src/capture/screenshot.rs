@@ -62,5 +62,11 @@ pub fn has_screen_recording_permission() -> bool {
         "{}/Library/Application Support/agenthandover/capture.sock",
         home
     );
-    std::path::Path::new(&socket_path).exists()
+    if !std::path::Path::new(&socket_path).exists() {
+        return false;
+    }
+
+    crate::observation::snapshot()
+        .map(|snapshot| snapshot.screen_recording_granted)
+        .unwrap_or(false)
 }

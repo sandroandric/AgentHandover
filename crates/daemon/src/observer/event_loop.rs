@@ -168,33 +168,52 @@ pub async fn run_observer_loop(
                     }
                 }
 
-                // 1. Check for secure field — if focused, skip all capture.
-                // Uses the async version with spawn_blocking + 100ms timeout
-                // to prevent AX API deadlocks (Mach IPC hangs).
-                #[cfg(target_os = "macos")]
+                // 1. Pull app-owned observation state. The app is the sole
+                // TCC principal for Accessibility and Screen Recording.
+                let observation = crate::observation::snapshot();
+
+                // 2. Check for secure field — if focused, skip all capture.
+                if observation
+                    .as_ref()
+                    .map(|snapshot| {
+                        snapshot.accessibility_granted && snapshot.secure_field_focused
+                    })
+                    .unwrap_or(false)
                 {
-                    if crate::platform::accessibility::is_secure_field_focused_async().await {
-                        debug!("Secure field focused — skipping capture");
-                        continue;
-                    }
+                    debug!("Secure field focused — skipping capture");
+                    continue;
                 }
 
-                // 2. Get display topology
-                #[cfg(target_os = "macos")]
-                let display_topology = crate::platform::window_capture::get_display_topology();
-                #[cfg(not(target_os = "macos"))]
-                let display_topology: Vec<DisplayInfo> = vec![];
+                // 3. Observation metadata comes from the app-owned socket.
+                let display_topology = observation
+                    .as_ref()
+                    .map(|snapshot| snapshot.display_topology.clone())
+                    .unwrap_or_default();
 
                 let primary_display_id = display_topology
                     .first()
                     .map(|d| d.display_id.clone())
                     .unwrap_or_else(|| "unknown".to_string());
 
-                // 3. Get focused window
-                #[cfg(target_os = "macos")]
-                let window = crate::platform::window_capture::get_focused_window();
-                #[cfg(not(target_os = "macos"))]
-                let window: Option<WindowInfo> = None;
+                let window = observation
+                    .as_ref()
+                    .and_then(|snapshot| {
+                        if snapshot.accessibility_granted {
+                            snapshot.focused_window.clone()
+                        } else {
+                            None
+                        }
+                    });
+
+                let cursor_global_px = observation
+                    .as_ref()
+                    .and_then(|snapshot| {
+                        if snapshot.accessibility_granted {
+                            snapshot.cursor_global_px.clone()
+                        } else {
+                            None
+                        }
+                    });
 
                 // 4. Check for focus/title changes
                 let current_title = window.as_ref().map(|w| w.title.clone());
@@ -211,6 +230,7 @@ pub async fn run_observer_loop(
                             &window,
                             &display_topology,
                             &primary_display_id,
+                            cursor_global_px.clone(),
                         );
 
                         // Query AppleScript state for known native apps
@@ -266,6 +286,7 @@ pub async fn run_observer_loop(
                             &window,
                             &display_topology,
                             &primary_display_id,
+                            cursor_global_px.clone(),
                         );
                         tag_focus_session(&mut event, &active_focus_session_id);
                         redact_event(&mut event, &redactor);
@@ -325,6 +346,7 @@ pub async fn run_observer_loop(
                                 &window,
                                 &display_topology,
                                 &primary_display_id,
+                                cursor_global_px.clone(),
                             );
 
                             let mut focus_artifacts: Vec<ArtifactMeta> = vec![];
@@ -400,6 +422,7 @@ pub async fn run_observer_loop(
                         &window,
                         &display_topology,
                         &primary_display_id,
+                        cursor_global_px.clone(),
                     );
 
                     let mut dwell_artifacts: Vec<ArtifactMeta> = vec![];
@@ -470,6 +493,7 @@ pub async fn run_observer_loop(
                         &window,
                         &display_topology,
                         &primary_display_id,
+                        cursor_global_px.clone(),
                     );
 
                     let mut scroll_artifacts: Vec<ArtifactMeta> = vec![];
@@ -755,29 +779,14 @@ fn make_event(
     window: &Option<WindowInfo>,
     display_topology: &[DisplayInfo],
     primary_display_id: &str,
+    cursor_global_px: Option<CursorPosition>,
 ) -> Event {
     let display_ids_spanned = detect_spanning_displays(window, display_topology);
-
-    // Get cursor position from CoreGraphics.
-    #[cfg(target_os = "macos")]
-    let cursor_global_px = crate::platform::window_capture::get_cursor_position();
-    #[cfg(not(target_os = "macos"))]
-    let cursor_global_px: Option<CursorPosition> = None;
 
     // Determine ui_scale based on which display the cursor is on.
     let ui_scale = cursor_global_px
         .as_ref()
-        .and_then(|cursor| {
-            #[cfg(target_os = "macos")]
-            {
-                crate::platform::window_capture::get_ui_scale_for_position(cursor, display_topology)
-            }
-            #[cfg(not(target_os = "macos"))]
-            {
-                let _ = cursor;
-                None
-            }
-        });
+        .and_then(|cursor| ui_scale_for_position(cursor, display_topology));
 
     Event {
         id: Uuid::new_v4(),
@@ -792,6 +801,19 @@ fn make_event(
         metadata: serde_json::json!({}),
         display_ids_spanned,
     }
+}
+
+fn ui_scale_for_position(
+    cursor: &CursorPosition,
+    displays: &[DisplayInfo],
+) -> Option<f64> {
+    for display in displays {
+        let [dx, dy, dw, dh] = display.bounds_global_px;
+        if cursor.x >= dx && cursor.x < dx + dw && cursor.y >= dy && cursor.y < dy + dh {
+            return Some(display.scale_factor);
+        }
+    }
+    displays.first().map(|display| display.scale_factor)
 }
 
 /// Detect if a window spans multiple displays by checking if any of the

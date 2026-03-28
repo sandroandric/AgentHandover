@@ -41,12 +41,18 @@ final class ScreenCaptureService {
         }
         NSApp.activate(ignoringOtherApps: true)
 
-        _ = CGRequestScreenCaptureAccess()
+        // TCC registers the app for Screen Recording after its first capture
+        // attempt. CGDisplayCreateImage is the most reliable trigger — it
+        // works even without prior permission (unlike SCShareableContent which
+        // throws before reaching the capture call).
+        // DO NOT use CGRequestScreenCaptureAccess — it triggers stale prompts
+        // for previously-seen binaries from the same developer on Tahoe.
+        _ = CGDisplayCreateImage(CGMainDisplayID())
 
         // Tahoe can lag between the request call and the Settings pane showing
         // the new app entry. Poll preflight for a short bounded window before
         // deciding we need to send the user to System Settings manually.
-        for _ in 0..<12 {
+        for _ in 0..<20 {
             if hasPermission() {
                 if previousPolicy == .accessory {
                     NSApp.setActivationPolicy(.accessory)
@@ -60,6 +66,29 @@ final class ScreenCaptureService {
             NSApp.setActivationPolicy(.accessory)
         }
         return false
+    }
+
+    @available(macOS 14.0, *)
+    private func exerciseScreenCaptureKitRegistrationProbe() async {
+        guard let content = try? await SCShareableContent.excludingDesktopWindows(
+            false, onScreenWindowsOnly: true
+        ) else {
+            return
+        }
+        guard let display = content.displays.first else {
+            return
+        }
+
+        let filter = SCContentFilter(display: display, excludingWindows: [])
+        let config = SCStreamConfiguration()
+        config.width = max(display.width, 1)
+        config.height = max(display.height, 1)
+        config.pixelFormat = kCVPixelFormatType_32BGRA
+
+        _ = try? await SCScreenshotManager.captureImage(
+            contentFilter: filter,
+            configuration: config
+        )
     }
 
     // MARK: - ScreenCaptureKit (macOS 14+)

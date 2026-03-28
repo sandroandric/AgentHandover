@@ -82,10 +82,9 @@ async fn main() -> Result<()> {
         .expect("Failed to write daemon PID file");
     info!(path = %pid_path.display(), "PID file written");
 
-    // Do NOT prompt for permissions on startup. Permission requests are
-    // now triggered explicitly via the control socket (request_accessibility,
-    // request_screen_recording commands). This prevents surprise prompts
-    // when the daemon starts for focus recording, resume, or health checks.
+    // Do NOT prompt for permissions on startup. AgentHandover.app owns both
+    // Accessibility and Screen Recording and serves observation/capture data
+    // to the daemon over local sockets.
 
     let start_time = chrono::Utc::now();
 

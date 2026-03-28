@@ -3,10 +3,10 @@ import SwiftUI
 struct AgentConnectView: View {
     @StateObject private var detector = AgentDetector()
 
-    private let darkNavy = Color(red: 0.09, green: 0.10, blue: 0.12)
+    private let darkNavy = Color.primary
     private let warmOrange = Color(red: 0.92, green: 0.57, blue: 0.20)
     private let brightGreen = Color(red: 0.18, green: 0.80, blue: 0.34)
-    private let lightGray = Color(red: 0.96, green: 0.96, blue: 0.96)
+    private let lightGray = Color(nsColor: .controlBackgroundColor)
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -83,7 +83,7 @@ struct AgentConnectView: View {
                 .padding(.vertical, 6)
                 .background(
                     RoundedRectangle(cornerRadius: 8)
-                        .fill(darkNavy)
+                        .fill(Color.accentColor)
                 )
                 .buttonStyle(.plain)
             }
@@ -91,7 +91,7 @@ struct AgentConnectView: View {
         .padding(14)
         .background(
             RoundedRectangle(cornerRadius: 12)
-                .fill(agent.isConnected ? brightGreen.opacity(0.05) : Color.white)
+                .fill(agent.isConnected ? brightGreen.opacity(0.05) : Color(nsColor: .controlBackgroundColor))
         )
         .overlay(
             RoundedRectangle(cornerRadius: 12)

@@ -6,12 +6,15 @@ struct AgentHandoverApp: App {
     @AppStorage("hasCompletedOnboarding") private var hasCompletedOnboarding = false
 
     var body: some Scene {
-        MenuBarExtra {
+        MenuBarExtra(isInserted: $hasCompletedOnboarding) {
             MenuBarView()
                 .environmentObject(delegate.sharedAppState)
                 .environmentObject(delegate)
                 .onAppear {
-                    if !hasCompletedOnboarding && !delegate.hasTriggeredOnboarding {
+                    if !delegate.hasTriggeredOnboarding
+                        && (!delegate.sharedAppState.accessibilityGranted
+                            || !delegate.sharedAppState.screenRecordingGranted)
+                    {
                         delegate.hasTriggeredOnboarding = true
                         delegate.showOnboarding()
                     }
@@ -63,14 +66,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
 
     /// Screenshot capture server — serves pixels to the daemon via Unix socket.
     private let captureServer = ScreenCaptureServer()
+    /// Observation server — serves AX/window/display metadata to the daemon.
+    private let observationServer = ObservationServer()
+    private var runtimeBridgesStarted = false
+
+    private var onboardingNeeded: Bool {
+        !UserDefaults.standard.bool(forKey: "hasCompletedOnboarding")
+            || !PermissionChecker.allPermissionsGranted()
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // Start the capture server so the daemon can request screenshots.
-        // This must run before services start.
-        captureServer.start()
-
-        if !UserDefaults.standard.bool(forKey: "hasCompletedOnboarding") {
+        if onboardingNeeded {
             hasTriggeredOnboarding = true
+
+            // Keep onboarding isolated from any stale helper runtime so macOS
+            // always attributes permission prompts to AgentHandover itself.
+            ServiceController.stopAll()
+            ServiceController.prepareForAppOwnedPermissionRequest()
+            ServiceController.removeNativeMessagingHostManifest()
 
             // Show in dock during onboarding
             NSApp.setActivationPolicy(.regular)
@@ -84,6 +97,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         } else {
             // Keep the bundle a normal app principal for TCC purposes, but
             // present it as a menu bar app once onboarding is already done.
+            ServiceController.installNativeMessagingHostManifest()
+            startRuntimeBridges()
             hideFromDock()
 
             // Onboarding done — start services if user hasn't paused
@@ -99,20 +114,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         // Don't create duplicates
         if onboardingWindow != nil { return }
 
+        // Re-entering onboarding should also clear any stale daemon process so
+        // the permission steps stay app-owned even after upgrades or crashes.
+        ServiceController.stopAll()
+        ServiceController.prepareForAppOwnedPermissionRequest()
+        ServiceController.removeNativeMessagingHostManifest()
+
         let onboardingView = OnboardingView(onComplete: { [weak self] in
             UserDefaults.standard.set(true, forKey: "hasCompletedOnboarding")
+            ServiceController.installNativeMessagingHostManifest()
+            self?.startRuntimeBridges()
+            let userPaused = UserDefaults.standard.bool(forKey: "observingPaused")
+            if !userPaused {
+                ServiceController.startAll()
+            }
             self?.onboardingWindow?.close()
             self?.onboardingWindow = nil
             self?.hideFromDock()
         })
         .environmentObject(sharedAppState)
-        .frame(width: 620, height: 720)
+        .frame(width: 660, height: 820)
 
         let hostingController = NSHostingController(rootView: onboardingView)
         let window = NSWindow(contentViewController: hostingController)
         window.title = "AgentHandover Setup"
-        window.styleMask = [.titled, .closable, .miniaturizable]
-        window.setContentSize(NSSize(width: 620, height: 720))
+        window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
+        window.setContentSize(NSSize(width: 660, height: 820))
+        window.minSize = NSSize(width: 620, height: 720)
         window.center()
         window.isReleasedWhenClosed = false
 
@@ -125,5 +153,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
 
     func hideFromDock() {
         NSApp.setActivationPolicy(.accessory)
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        stopRuntimeBridges()
+    }
+
+    private func startRuntimeBridges() {
+        guard !runtimeBridgesStarted else { return }
+        captureServer.start()
+        observationServer.start()
+        runtimeBridgesStarted = true
+    }
+
+    private func stopRuntimeBridges() {
+        ServiceController.stopAll()
+        captureServer.stop()
+        observationServer.stop()
+        runtimeBridgesStarted = false
     }
 }

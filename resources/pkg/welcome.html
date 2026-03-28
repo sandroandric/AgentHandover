@@ -3,13 +3,27 @@
 <head>
 <meta charset="utf-8">
 <style>
-body { font-family: -apple-system, sans-serif; padding: 24px; color: #18191F; line-height: 1.7; }
+html, body {
+  background: #ffffff;
+  color: #18191F;
+  -webkit-user-select: none;
+  user-select: none;
+}
+body { font-family: -apple-system, sans-serif; padding: 24px; line-height: 1.7; }
 h1 { font-size: 24px; font-weight: 800; margin-bottom: 4px; }
 .tagline { font-size: 16px; font-weight: 600; color: #EA9134; margin-bottom: 16px; }
 p { font-size: 14px; color: #555; }
 .what { background: #FFF5E0; border-radius: 8px; padding: 16px; margin-top: 16px; border: 1.5px solid #EA913440; }
 .what ul { margin: 8px 0 0 0; padding-left: 20px; }
 .what li { font-size: 13px; color: #333; margin-bottom: 4px; }
+::selection { background: #EA9134; color: #ffffff; }
+@media (prefers-color-scheme: dark) {
+  html, body { background: #111214; color: #F7F7F7; }
+  .tagline { color: #FFBD12; }
+  p { color: #D6D6D6; }
+  .what { background: #1B1D22; border-color: #EA913466; }
+  .what li { color: #EFEFEF; }
+}
 </style>
 </head>
 <body>

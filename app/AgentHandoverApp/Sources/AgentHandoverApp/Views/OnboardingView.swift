@@ -62,6 +62,13 @@ struct OnboardingView: View {
     @State private var useCustomModels = false
     @State private var customAnnotationModel = "qwen3.5:2b"
     @State private var customSOPModel = "qwen3.5:4b"
+    @State private var ollamaInstalled = false
+    @State private var ollamaRunning = false
+    @State private var ollamaHasRequiredModels = false
+    @State private var remoteConfigSaved = false
+    @State private var vlmStateRefreshing = false
+    @State private var vlmStatusMessage = ""
+    @State private var hasSeededVLMFromConfig = false
 
     // Focus recording from onboarding
     @State private var firstRecordingTitle: String = ""
@@ -103,6 +110,13 @@ struct OnboardingView: View {
         currentStep == 0
     }
 
+    /// Longer setup screens need the full vertical lane between progress and
+    /// footer so their inner ScrollViews can actually scroll instead of being
+    /// squeezed by surrounding spacers.
+    private var usesTopAlignedStepLayout: Bool {
+        currentStep >= 6
+    }
+
     var body: some View {
         ZStack {
             // Background: solid orange for welcome, white for content screens, cream for ready
@@ -120,13 +134,14 @@ struct OnboardingView: View {
                     .padding(.top, 20)
                     .padding(.horizontal, 44)
 
-                Spacer()
-
                 // Current step content
                 stepContent(for: currentStep)
                     .padding(.horizontal, 44)
-
-                Spacer()
+                    .frame(
+                        maxWidth: .infinity,
+                        maxHeight: .infinity,
+                        alignment: usesTopAlignedStepLayout ? .top : .center
+                    )
 
                 // Navigation
                 navigationBar
@@ -136,6 +151,25 @@ struct OnboardingView: View {
         }
         .onAppear {
             resolveExtensionPath()
+            seedVLMStateFromConfigIfNeeded()
+            refreshVLMSetupState(force: currentStep == 6)
+        }
+        .onChange(of: currentStep) { newStep in
+            if newStep == 6 {
+                seedVLMStateFromConfigIfNeeded()
+                refreshVLMSetupState(force: true)
+            }
+
+            if newStep >= 7 {
+                ServiceController.installNativeMessagingHostManifest()
+            } else {
+                ServiceController.removeNativeMessagingHostManifest()
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            if currentStep == 6 {
+                refreshVLMSetupState(force: true)
+            }
         }
     }
 
@@ -245,12 +279,12 @@ struct OnboardingView: View {
                         "Next",
                         icon: "arrow.right",
                         style: .darkFilled,
-                        disabled: !appState.vlmAvailable
+                        disabled: !onboardingVLMReady
                     ) {
                         withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) { currentStep += 1 }
                     }
 
-                    if !appState.vlmAvailable {
+                    if !onboardingVLMReady {
                         Text("Set up an AI model above to continue")
                             .font(.system(size: 12, weight: .medium, design: .rounded))
                             .foregroundColor(warmOrange)
@@ -375,12 +409,7 @@ struct OnboardingView: View {
     /// Loads the mascot image with multiple fallback strategies.
     @ViewBuilder
     private func mascotImage(height: CGFloat) -> some View {
-        if let nsImg = Bundle.module.image(forResource: "mascot") {
-            Image(nsImage: nsImg)
-                .resizable()
-                .aspectRatio(contentMode: .fit)
-                .frame(height: height)
-        } else if let nsImg = NSImage(named: "mascot") {
+        if let nsImg = onboardingMascotImage() {
             Image(nsImage: nsImg)
                 .resizable()
                 .aspectRatio(contentMode: .fit)
@@ -392,6 +421,38 @@ struct OnboardingView: View {
                 .foregroundColor(.white)
                 .frame(height: height)
         }
+    }
+
+    private func onboardingMascotImage() -> NSImage? {
+        if let image = NSImage(named: "mascot") {
+            return image
+        }
+
+        let bundleNames = [
+            "AgentHandoverApp_AgentHandoverApp.bundle",
+            "AgentHandover_AgentHandoverApp.bundle",
+        ]
+
+        let candidateBundles: [Bundle] = [
+            Bundle.main,
+            Bundle(for: OnboardingViewHost.self),
+        ] + bundleNames.compactMap { name in
+            guard let resourceURL = Bundle.main.resourceURL else { return nil }
+            let bundleURL = resourceURL.appendingPathComponent(name)
+            return Bundle(url: bundleURL)
+        }
+
+        for bundle in candidateBundles {
+            if let image = bundle.image(forResource: "mascot") {
+                return image
+            }
+            if let url = bundle.url(forResource: "mascot", withExtension: "png"),
+               let image = NSImage(contentsOf: url) {
+                return image
+            }
+        }
+
+        return nil
     }
 
     // MARK: - Screen 1: Welcome (SOLID ORANGE BACKGROUND)
@@ -878,16 +939,15 @@ struct OnboardingView: View {
     @State private var probingPermission: PermissionKind? = nil
     @State private var awaitingSettingsReturn: PermissionKind? = nil
     @State private var screenRecordingNeedsRestart = false
-    private let captureClient = CaptureAgentClient()
+    @State private var screenRecordingNeedsManualSettings = false
 
     private var accessibilityStep: some View {
         singlePermissionStep(
             icon: "hand.raised.circle.fill",
             title: "Enable Accessibility",
             description: "AgentHandover reads window titles and UI elements to understand your workflow.",
-            instruction: "Toggle on AgentHandoverDaemon in the list",
+            instruction: "Toggle on AgentHandover in the list",
             granted: appState.accessibilityGranted,
-            settingsUrl: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
             isScreenRecording: false
         )
     }
@@ -901,9 +961,68 @@ struct OnboardingView: View {
             description: "AgentHandover captures screenshots to analyze what you see on screen.",
             instruction: "Toggle on AgentHandover in the list",
             granted: appState.screenRecordingGranted,
-            settingsUrl: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture",
             isScreenRecording: true
         )
+    }
+
+    private var resolvedAnnotationModel: String {
+        let custom = customAnnotationModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        return useCustomModels && !custom.isEmpty ? custom : "qwen3.5:2b"
+    }
+
+    private var resolvedSOPModel: String {
+        let custom = customSOPModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        return useCustomModels && !custom.isEmpty ? custom : "qwen3.5:4b"
+    }
+
+    private var requiredLocalModels: [String] {
+        Array(Set([resolvedAnnotationModel, resolvedSOPModel, "nomic-embed-text"])).sorted()
+    }
+
+    private var localVLMReady: Bool {
+        ollamaInstalled && ollamaRunning && ollamaHasRequiredModels
+    }
+
+    private var cloudVLMReady: Bool {
+        remoteConfigSaved || apiKeyValid == true
+    }
+
+    private var onboardingVLMReady: Bool {
+        vlmMode == .cloud ? cloudVLMReady : localVLMReady
+    }
+
+    private var hasOllamaAppBundle: Bool {
+        FileManager.default.fileExists(atPath: "/Applications/Ollama.app")
+    }
+
+    private var vlmModeSwitcher: some View {
+        HStack(spacing: 10) {
+            vlmModeButton(.local)
+            vlmModeButton(.cloud)
+        }
+        .frame(maxWidth: 280)
+    }
+
+    private func vlmModeButton(_ mode: VLMMode) -> some View {
+        let selected = vlmMode == mode
+        return Button {
+            vlmMode = mode
+        } label: {
+            Text(mode.rawValue)
+                .font(.system(size: 13, weight: .bold, design: .rounded))
+                .foregroundColor(selected ? .white : darkNavy)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 10)
+                .background(
+                    RoundedRectangle(cornerRadius: 12)
+                        .fill(selected ? darkNavy : Color.white)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12)
+                        .stroke(selected ? darkNavy : darkNavy.opacity(0.2), lineWidth: contraBorder)
+                )
+        }
+        .buttonStyle(.plain)
     }
 
     /// Shared view for a single permission step.
@@ -913,7 +1032,6 @@ struct OnboardingView: View {
         description: String,
         instruction: String,
         granted: Bool,
-        settingsUrl: String,
         isScreenRecording: Bool
     ) -> some View {
         let permission: PermissionKind = isScreenRecording ? .screenRecording : .accessibility
@@ -936,44 +1054,44 @@ struct OnboardingView: View {
                 description: instruction,
                 granted: granted,
                 action: {
-                    openPermissionSettings(url: settingsUrl, isScreenRecording: isScreenRecording)
+                    openPermissionSettings(isScreenRecording: isScreenRecording)
                 },
-                actionLabel: isProbing ? "Starting..." : "Open Settings"
+                actionLabel: isProbing ? "Starting..." : permissionActionLabel(
+                    permission: permission,
+                    granted: granted
+                )
             )
 
-            if !granted {
-                if screenRecordingNeedsRestart && isScreenRecording {
-                    // macOS requires app restart for Screen Recording to take effect
-                    Button(action: { restartApp() }) {
-                        HStack(spacing: 7) {
-                            Image(systemName: "arrow.triangle.2.circlepath")
-                                .font(.system(size: 11))
-                            Text("Restart AgentHandover to apply")
-                                .font(.system(size: 12, weight: .medium))
-                                .foregroundColor(warmOrange)
-                        }
+            if screenRecordingNeedsRestart && isScreenRecording {
+                Button(action: { restartApp() }) {
+                    HStack(spacing: 7) {
+                        Image(systemName: "arrow.triangle.2.circlepath")
+                            .font(.system(size: 11))
+                        Text("Restart AgentHandover to apply")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundColor(warmOrange)
                     }
-                    .buttonStyle(.plain)
-                    .padding(.top, 4)
-                } else {
-                    Button(action: { recheckPermission(permission) }) {
-                        HStack(spacing: 7) {
-                            if isProbing {
-                                ProgressView()
-                                    .controlSize(.small)
-                            } else {
-                                Image(systemName: "arrow.clockwise")
-                                    .font(.system(size: 11))
-                            }
-                            Text(isProbing ? "Checking..." : "I've granted it - recheck")
-                                .font(.system(size: 12, weight: .medium))
-                                .foregroundColor(darkNavy.opacity(0.6))
-                        }
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(isProbing)
-                    .padding(.top, 4)
                 }
+                .buttonStyle(.plain)
+                .padding(.top, 4)
+            } else if !granted {
+                Button(action: { recheckPermission(permission) }) {
+                    HStack(spacing: 7) {
+                        if isProbing {
+                            ProgressView()
+                                .controlSize(.small)
+                        } else {
+                            Image(systemName: "arrow.clockwise")
+                                .font(.system(size: 11))
+                        }
+                        Text(isProbing ? "Checking..." : "I've granted it - recheck")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundColor(darkNavy.opacity(0.6))
+                    }
+                }
+                .buttonStyle(.plain)
+                .disabled(isProbing)
+                .padding(.top, 4)
             }
 
             HStack(spacing: 7) {
@@ -997,37 +1115,46 @@ struct OnboardingView: View {
     }
 
     /// Open Settings for a specific permission.
-    /// For Screen Recording: trigger the app-owned grant flow first, then
-    /// only fall back to Settings if macOS still needs a manual toggle.
-    /// For Accessibility: just open Settings directly (daemon registers on first real use).
-    private func openPermissionSettings(url: String, isScreenRecording: Bool = false) {
+    /// For Screen Recording: first trigger the app-owned grant flow. Only on a
+    /// second explicit click do we deep-link to Settings as a manual fallback.
+    /// For Accessibility: request from the app principal and let macOS drive
+    /// the Settings experience for AgentHandover itself.
+    private func openPermissionSettings(isScreenRecording: Bool = false) {
         let permission: PermissionKind = isScreenRecording ? .screenRecording : .accessibility
         guard probingPermission != permission else { return }
         probingPermission = permission
 
         Task { @MainActor in
             if isScreenRecording {
-                let granted = await PermissionChecker.requestScreenRecordingAndOpenSettingsIfNeeded()
-                appState.screenRecordingGranted = granted
-                screenRecordingNeedsRestart = false
-                probingPermission = nil
-                awaitingSettingsReturn = granted ? nil : .screenRecording
-            } else {
-                // Accessibility should feel immediate. Open Settings right away,
-                // then bring the daemon up in the background so its entry can
-                // register in the list without freezing the onboarding UI.
-                awaitingSettingsReturn = .accessibility
-                probingPermission = nil
-                if let settingsUrl = URL(string: url) {
-                    NSWorkspace.shared.open(settingsUrl)
+                if screenRecordingNeedsManualSettings {
+                    ServiceController.prepareForAppOwnedPermissionRequest()
+                    PermissionChecker.openScreenRecordingSettings()
+                    awaitingSettingsReturn = .screenRecording
+                    probingPermission = nil
+                    return
                 }
 
-                Task { @MainActor in
-                    await ensureDaemonRunning()
-                    if CaptureAgentClient.socketResponsive() {
-                        _ = await captureClient.requestAccessibility()
-                    }
+                let granted = await PermissionChecker.requestScreenRecordingAndOpenSettingsIfNeeded()
+                if granted {
+                    let status = await PermissionChecker.resolveScreenRecordingStatus(
+                        timeoutNanoseconds: 1_500_000_000
+                    )
+                    appState.screenRecordingGranted = status.granted
+                    screenRecordingNeedsRestart = status.granted && !status.captureReady
+                    screenRecordingNeedsManualSettings = false
+                    awaitingSettingsReturn = status.granted ? nil : .screenRecording
+                } else {
+                    appState.screenRecordingGranted = false
+                    screenRecordingNeedsRestart = false
+                    screenRecordingNeedsManualSettings = true
+                    awaitingSettingsReturn = .screenRecording
                 }
+                probingPermission = nil
+            } else {
+                let granted = await PermissionChecker.requestAccessibilityAndOpenSettingsIfNeeded()
+                appState.accessibilityGranted = granted
+                probingPermission = nil
+                awaitingSettingsReturn = granted ? nil : .accessibility
             }
         }
     }
@@ -1044,21 +1171,6 @@ struct OnboardingView: View {
         }
     }
 
-    /// Start the daemon and wait for the control socket to appear.
-    private func ensureDaemonRunning() async {
-        if captureClient.isAvailable { return }
-        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
-            DispatchQueue.global(qos: .userInitiated).async {
-                ServiceController.startDaemon()
-                for _ in 0..<20 {
-                    if CaptureAgentClient.socketResponsive() { break }
-                    Thread.sleep(forTimeInterval: 0.25)
-                }
-                cont.resume()
-            }
-        }
-    }
-
     /// Recheck a single permission without cross-contaminating the other screen.
     private func recheckPermission(
         _ permission: PermissionKind,
@@ -1070,40 +1182,15 @@ struct OnboardingView: View {
         Task { @MainActor in
             switch permission {
             case .screenRecording:
-                // Only attempt a real capture after TCC says the app is already granted.
-                if PermissionChecker.isScreenRecordingGranted() {
-                    let service = ScreenCaptureService()
-                    if let _ = await service.captureMainDisplay() {
-                        appState.screenRecordingGranted = true
-                        screenRecordingNeedsRestart = false
-                    } else {
-                        appState.screenRecordingGranted = false
-                        screenRecordingNeedsRestart = returnedFromSettings
-                    }
-                } else {
-                    appState.screenRecordingGranted = false
-                    screenRecordingNeedsRestart = false
-                }
+                let status = await PermissionChecker.resolveScreenRecordingStatus(
+                    timeoutNanoseconds: returnedFromSettings ? 5_000_000_000 : 1_500_000_000
+                )
+                appState.screenRecordingGranted = status.granted
+                screenRecordingNeedsRestart = status.granted && !status.captureReady
+                screenRecordingNeedsManualSettings = !status.granted
 
             case .accessibility:
-                // Daemon owns this; restart it so fresh TCC state is reflected
-                // in the control socket status before we update onboarding UI.
-                await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
-                    DispatchQueue.global(qos: .userInitiated).async {
-                        ServiceController.stopDaemon()
-                        ServiceController.waitForDaemonExit(timeoutSeconds: 3)
-                        ServiceController.startDaemon()
-                        for _ in 0..<20 {
-                            if CaptureAgentClient.socketResponsive() { break }
-                            Thread.sleep(forTimeInterval: 0.25)
-                        }
-                        cont.resume()
-                    }
-                }
-
-                if let status = await captureClient.getStatus() {
-                    appState.accessibilityGranted = status.accessibilityPermitted
-                }
+                appState.accessibilityGranted = PermissionChecker.isAccessibilityGranted()
             }
 
             if probingPermission == permission {
@@ -1181,40 +1268,51 @@ struct OnboardingView: View {
         )
     }
 
+    private func permissionActionLabel(permission: PermissionKind, granted: Bool) -> String {
+        guard !granted else { return "Granted" }
+        switch permission {
+        case .accessibility:
+            return "Open Settings"
+        case .screenRecording:
+            return screenRecordingNeedsManualSettings ? "Open Settings" : "Grant Access"
+        }
+    }
+
     // MARK: - Screen 7: VLM Setup (Required, WHITE BACKGROUND)
 
     private var vlmSetupStep: some View {
-        VStack(spacing: 18) {
-            Image(systemName: "brain.head.profile")
-                .font(.system(size: 40, weight: .medium))
-                .foregroundColor(darkNavy)
+        ScrollView(showsIndicators: false) {
+            VStack(spacing: 18) {
+                Image(systemName: "brain.head.profile")
+                    .font(.system(size: 40, weight: .medium))
+                    .foregroundColor(darkNavy)
 
-            Text("Set up your AI")
-                .font(titleFont)
-                .foregroundColor(darkNavy)
+                Text("Set up your AI")
+                    .font(titleFont)
+                    .foregroundColor(darkNavy)
 
-            Text("A small AI model runs on your Mac to understand what\u{2019}s on your screen.")
-                .font(bodyFont)
-                .foregroundColor(darkNavy.opacity(0.5))
-                .multilineTextAlignment(.center)
-                .lineSpacing(5)
-                .frame(maxWidth: 440)
+                Text("Choose a local or cloud AI model to understand what\u{2019}s on your screen.")
+                    .font(bodyFont)
+                    .foregroundColor(darkNavy.opacity(0.5))
+                    .multilineTextAlignment(.center)
+                    .lineSpacing(5)
+                    .frame(maxWidth: 440)
 
-            if appState.vlmAvailable {
-                PermissionStatusBadge(
-                    granted: true,
-                    grantedLabel: "AI Model Ready",
-                    deniedLabel: ""
-                )
-            } else {
-                // Local / Cloud toggle
-                Picker("Mode", selection: $vlmMode) {
-                    ForEach(VLMMode.allCases, id: \.self) { mode in
-                        Text(mode.rawValue).tag(mode)
-                    }
+                if onboardingVLMReady {
+                    PermissionStatusBadge(
+                        granted: true,
+                        grantedLabel: vlmMode == .cloud ? "Cloud AI Ready" : "Local AI Ready",
+                        deniedLabel: ""
+                    )
                 }
-                .pickerStyle(.segmented)
-                .frame(maxWidth: 240)
+
+                vlmModeSwitcher
+
+                if vlmStateRefreshing {
+                    ProgressView("Checking AI setup...")
+                        .font(.system(size: 12, weight: .medium, design: .rounded))
+                        .tint(warmOrange)
+                }
 
                 if vlmMode == .cloud {
                     cloudVLMContent
@@ -1222,15 +1320,15 @@ struct OnboardingView: View {
                     localVLMContent
                 }
             }
+            .frame(maxWidth: 520)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
 
     // MARK: - Local VLM Content
 
     private var localVLMContent: some View {
         VStack(spacing: 12) {
-            let ollamaInstalled = isOllamaInstalled()
-
             if ollamaInstalled {
                 PermissionStatusBadge(
                     granted: true,
@@ -1238,7 +1336,72 @@ struct OnboardingView: View {
                     deniedLabel: ""
                 )
 
-                if vlmPullInProgress {
+                if !ollamaRunning {
+                    VStack(spacing: 10) {
+                        Text("Open Ollama once to start the local AI service")
+                            .font(.system(size: 13, weight: .semibold, design: .rounded))
+                            .foregroundColor(darkNavy)
+
+                        Text(hasOllamaAppBundle
+                            ? "After a fresh install, Ollama usually needs one launch before AgentHandover can pull models."
+                            : "If you installed Ollama through Homebrew, run `ollama serve` once before pulling models.")
+                            .font(.system(size: 12))
+                            .foregroundColor(darkNavy.opacity(0.5))
+                            .multilineTextAlignment(.center)
+                            .frame(maxWidth: 360)
+
+                        HStack(spacing: 10) {
+                            if hasOllamaAppBundle {
+                                Button("Open Ollama") {
+                                    launchOllamaApp()
+                                }
+                                .font(.system(size: 14, weight: .bold, design: .rounded))
+                                .foregroundColor(.white)
+                                .padding(.horizontal, 18)
+                                .padding(.vertical, 10)
+                                .background(
+                                    RoundedRectangle(cornerRadius: contraRadius)
+                                        .fill(darkNavy)
+                                )
+                                .buttonStyle(.plain)
+                            }
+
+                            Button("Recheck") {
+                                refreshVLMSetupState(force: true)
+                            }
+                            .font(.system(size: 13, weight: .bold, design: .rounded))
+                            .foregroundColor(darkNavy)
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 10)
+                            .background(
+                                RoundedRectangle(cornerRadius: contraRadius)
+                                    .fill(Color.white)
+                            )
+                            .overlay(
+                                RoundedRectangle(cornerRadius: contraRadius)
+                                    .stroke(darkNavy, lineWidth: contraBorder)
+                            )
+                            .buttonStyle(.plain)
+                        }
+
+                        if !vlmStatusMessage.isEmpty {
+                            Text(vlmStatusMessage)
+                                .font(.system(size: 11))
+                                .foregroundColor(darkNavy.opacity(0.45))
+                                .multilineTextAlignment(.center)
+                        }
+                    }
+                    .padding(20)
+                    .background(
+                        RoundedRectangle(cornerRadius: contraRadius)
+                            .fill(Color.white)
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: contraRadius)
+                            .stroke(darkNavy, lineWidth: contraBorder)
+                    )
+                    .frame(maxWidth: 440)
+                } else if vlmPullInProgress {
                     VStack(spacing: 8) {
                         ProgressView()
                             .progressViewStyle(.circular)
@@ -1256,10 +1419,19 @@ struct OnboardingView: View {
                 } else {
                     VStack(alignment: .leading, spacing: 10) {
                         HStack(spacing: 8) {
-                            Image(systemName: "arrow.down.circle.fill")
+                            Image(systemName: ollamaHasRequiredModels ? "checkmark.circle.fill" : "arrow.down.circle.fill")
+                                .foregroundColor(ollamaHasRequiredModels ? brightGreen : warmOrange)
+                                .font(.system(size: 16))
+                            Text(ollamaHasRequiredModels ? "Required local models are already available." : "~6 GB download \u{00B7} Runs on Apple Silicon")
+                                .font(.system(size: 13, weight: .medium))
+                                .foregroundColor(darkNavy.opacity(0.5))
+                        }
+
+                        HStack(spacing: 8) {
+                            Image(systemName: "bolt.circle.fill")
                                 .foregroundColor(warmOrange)
                                 .font(.system(size: 16))
-                            Text("~6 GB download \u{00B7} Runs on Apple Silicon")
+                            Text("Pulling models only works while the Ollama app is open.")
                                 .font(.system(size: 13, weight: .medium))
                                 .foregroundColor(darkNavy.opacity(0.5))
                         }
@@ -1296,7 +1468,7 @@ struct OnboardingView: View {
                                 .stroke(enableImageEmbeddings ? warmOrange.opacity(0.5) : darkNavy.opacity(0.1), lineWidth: 1)
                         )
 
-                        Button("Pull All Models") {
+                        Button(ollamaHasRequiredModels ? "Refresh Models" : "Pull All Models") {
                             pullOllamaModel()
                         }
                         .font(.system(size: 14, weight: .bold, design: .rounded))
@@ -1309,8 +1481,22 @@ struct OnboardingView: View {
                         )
                         .buttonStyle(.plain)
 
-                        // Custom model option
-                        DisclosureGroup(isExpanded: $useCustomModels) {
+                        Button {
+                            useCustomModels.toggle()
+                        } label: {
+                            HStack(spacing: 8) {
+                                Image(systemName: useCustomModels ? "chevron.down.circle.fill" : "chevron.right.circle")
+                                    .foregroundColor(warmOrange)
+                                Text(useCustomModels ? "Hide custom models" : "Use different models")
+                                    .font(.system(size: 12, weight: .medium, design: .rounded))
+                                    .foregroundColor(darkNavy.opacity(0.65))
+                                Spacer()
+                            }
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+
+                        if useCustomModels {
                             VStack(alignment: .leading, spacing: 8) {
                                 HStack(spacing: 8) {
                                     Text("Annotation:")
@@ -1353,12 +1539,13 @@ struct OnboardingView: View {
                                     .foregroundColor(darkNavy.opacity(0.4))
                             }
                             .padding(.top, 6)
-                        } label: {
-                            Text("Use different models")
-                                .font(.system(size: 12, weight: .medium, design: .rounded))
-                                .foregroundColor(darkNavy.opacity(0.5))
                         }
-                        .tint(warmOrange)
+
+                        if !vlmStatusMessage.isEmpty {
+                            Text(vlmStatusMessage)
+                                .font(.system(size: 11))
+                                .foregroundColor(darkNavy.opacity(0.45))
+                        }
                     }
                     .padding(20)
                     .background(
@@ -1395,6 +1582,13 @@ struct OnboardingView: View {
                     Text("Or install via: brew install ollama")
                         .font(.system(size: 11, design: .monospaced))
                         .foregroundColor(darkNavy.opacity(0.4))
+
+                    Button("I've installed Ollama — recheck") {
+                        refreshVLMSetupState(force: true)
+                    }
+                    .font(.system(size: 12, weight: .semibold, design: .rounded))
+                    .foregroundColor(darkNavy.opacity(0.7))
+                    .buttonStyle(.plain)
                 }
                 .padding(20)
                 .background(
@@ -1556,7 +1750,8 @@ struct OnboardingView: View {
                 apiKeyValidating = false
                 apiKeyValid = stored
                 if stored && !apiKeyInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    appState.vlmAvailable = true
+                    remoteConfigSaved = true
+                    appState.vlmAvailable = onboardingVLMReady
                 }
             }
         }
@@ -1609,66 +1804,67 @@ struct OnboardingView: View {
     // MARK: - Screen 8: Browser Extension (Optional, Load Unpacked, WHITE BACKGROUND)
 
     private var chromeExtensionStep: some View {
-        VStack(spacing: sectionSpacing) {
-            HStack(spacing: 10) {
-                Text("Browser workflows")
-                    .font(titleFont)
-                    .foregroundColor(darkNavy)
+        ScrollView(showsIndicators: false) {
+            VStack(spacing: sectionSpacing) {
+                HStack(spacing: 10) {
+                    Text("Browser workflows")
+                        .font(titleFont)
+                        .foregroundColor(darkNavy)
 
-                Text("Optional")
-                    .font(.system(size: 10, weight: .bold, design: .rounded))
-                    .tracking(0.5)
-                    .textCase(.uppercase)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 5)
-                    .background(
-                        Capsule().fill(darkNavy.opacity(0.08))
-                    )
-                    .foregroundColor(darkNavy.opacity(0.4))
+                    Text("Optional")
+                        .font(.system(size: 10, weight: .bold, design: .rounded))
+                        .tracking(0.5)
+                        .textCase(.uppercase)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 5)
+                        .background(
+                            Capsule().fill(darkNavy.opacity(0.08))
+                        )
+                        .foregroundColor(darkNavy.opacity(0.4))
+                }
+
+                HStack(spacing: 14) {
+                    Image(systemName: "globe.badge.chevron.backward")
+                        .font(.system(size: 22, weight: .medium))
+                        .foregroundColor(darkNavy)
+                        .frame(width: 40)
+
+                    Text("Adds CSS selectors, form field names, and page structure to your procedures -making browser automation more precise.")
+                        .font(bodyFont)
+                        .foregroundColor(darkNavy.opacity(0.6))
+                        .lineSpacing(5)
+                }
+                .padding(20)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(
+                    RoundedRectangle(cornerRadius: contraRadius)
+                        .fill(Color.white)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: contraRadius)
+                        .stroke(darkNavy, lineWidth: contraBorder)
+                )
+
+                if appState.extensionConnected {
+                    extensionConnectedView
+                } else if !extensionPath.isEmpty {
+                    extensionReadyView
+                } else {
+                    extensionNotFoundView
+                }
+
+                HStack(spacing: 6) {
+                    Image(systemName: "info.circle")
+                        .font(.system(size: 11))
+                        .foregroundColor(darkNavy.opacity(0.3))
+                    Text("Works with Chrome, Brave, and Edge")
+                        .font(captionFont)
+                        .foregroundColor(darkNavy.opacity(0.4))
+                }
             }
-
-            // What the extension does
-            HStack(spacing: 14) {
-                Image(systemName: "globe.badge.chevron.backward")
-                    .font(.system(size: 22, weight: .medium))
-                    .foregroundColor(darkNavy)
-                    .frame(width: 40)
-
-                Text("Adds CSS selectors, form field names, and page structure to your procedures -making browser automation more precise.")
-                    .font(bodyFont)
-                    .foregroundColor(darkNavy.opacity(0.6))
-                    .lineSpacing(5)
-            }
-            .padding(20)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(
-                RoundedRectangle(cornerRadius: contraRadius)
-                    .fill(Color.white)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: contraRadius)
-                    .stroke(darkNavy, lineWidth: contraBorder)
-            )
-
-            // Connection status and install instructions
-            if appState.extensionConnected {
-                extensionConnectedView
-            } else if !extensionPath.isEmpty {
-                extensionReadyView
-            } else {
-                extensionNotFoundView
-            }
-
-            // Supported browsers note
-            HStack(spacing: 6) {
-                Image(systemName: "info.circle")
-                    .font(.system(size: 11))
-                    .foregroundColor(darkNavy.opacity(0.3))
-                Text("Works with Chrome, Brave, and Edge")
-                    .font(captionFont)
-                    .foregroundColor(darkNavy.opacity(0.4))
-            }
+            .frame(maxWidth: 520)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
 
     // Extension already connected
@@ -1704,9 +1900,9 @@ struct OnboardingView: View {
         VStack(alignment: .leading, spacing: 14) {
             // Status header
             HStack(spacing: 8) {
-                Image(systemName: "checkmark.circle.fill")
+                Image(systemName: "puzzlepiece.extension.fill")
                     .font(.system(size: 18))
-                    .foregroundColor(brightGreen)
+                    .foregroundColor(warmOrange)
                 Text("Extension ready to install")
                     .font(.system(size: 15, weight: .bold, design: .rounded))
                     .foregroundColor(darkNavy)
@@ -1816,11 +2012,11 @@ struct OnboardingView: View {
         .padding(20)
         .background(
             RoundedRectangle(cornerRadius: contraRadius)
-                .fill(Color.white)
+                .fill(warmOrange.opacity(0.05))
         )
         .overlay(
             RoundedRectangle(cornerRadius: contraRadius)
-                .stroke(brightGreen, lineWidth: contraBorder)
+                .stroke(warmOrange, lineWidth: contraBorder)
         )
     }
 
@@ -1885,7 +2081,7 @@ struct OnboardingView: View {
                 readinessChip(
                     icon: "brain.head.profile",
                     label: "AI Model",
-                    ok: appState.vlmAvailable
+                    ok: onboardingVLMReady
                 )
                 readinessChip(
                     icon: "globe",
@@ -1913,7 +2109,7 @@ struct OnboardingView: View {
                 let isDisabled = firstRecordingTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                     || !appState.accessibilityGranted
                     || !appState.screenRecordingGranted
-                    || !appState.vlmAvailable
+                    || !onboardingVLMReady
 
                 Button {
                     startServicesAndRecord()
@@ -2227,19 +2423,35 @@ struct OnboardingView: View {
     }
 
     private func isOllamaInstalled() -> Bool {
-        let paths = [
-            "/usr/local/bin/ollama",
-            "/opt/homebrew/bin/ollama",
-        ]
-        return paths.contains { FileManager.default.fileExists(atPath: $0) }
+        findOllamaPath() != nil
     }
 
     private func findOllamaPath() -> String? {
         let paths = [
             "/usr/local/bin/ollama",
             "/opt/homebrew/bin/ollama",
+            "/Applications/Ollama.app/Contents/Resources/ollama",
         ]
-        return paths.first { FileManager.default.fileExists(atPath: $0) }
+        if let knownPath = paths.first(where: { FileManager.default.fileExists(atPath: $0) }) {
+            return knownPath
+        }
+
+        let whichProcess = Process()
+        whichProcess.executableURL = URL(fileURLWithPath: "/usr/bin/which")
+        whichProcess.arguments = ["ollama"]
+        let outputPipe = Pipe()
+        whichProcess.standardOutput = outputPipe
+
+        do {
+            try whichProcess.run()
+            whichProcess.waitUntilExit()
+            guard whichProcess.terminationStatus == 0 else { return nil }
+            let output = String(data: outputPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return (output?.isEmpty == false) ? output : nil
+        } catch {
+            return nil
+        }
     }
 
     private func modelRow(_ name: String, _ size: String, _ description: String) -> some View {
@@ -2354,7 +2566,124 @@ struct OnboardingView: View {
             DispatchQueue.main.async {
                 vlmPullInProgress = false
                 vlmPullOutput = "All models downloaded successfully!"
-                appState.vlmAvailable = true
+                refreshVLMSetupState(force: true)
+            }
+        }
+    }
+
+    private func seedVLMStateFromConfigIfNeeded() {
+        guard !hasSeededVLMFromConfig else { return }
+        hasSeededVLMFromConfig = true
+        appState.refreshStatus()
+        if appState.vlmMode == "remote" {
+            vlmMode = .cloud
+            remoteConsentGiven = true
+            remoteConfigSaved = appState.vlmProvider != nil || appState.vlmAvailable
+        } else {
+            vlmMode = .local
+        }
+        if let providerRaw = appState.vlmProvider, let provider = RemoteProvider(rawValue: providerRaw) {
+            selectedProvider = provider
+        }
+    }
+
+    private func refreshVLMSetupState(force: Bool = false) {
+        guard force || currentStep == 6 else { return }
+        let requiredModels = requiredLocalModels.map(canonicalModelName)
+        vlmStateRefreshing = true
+        appState.refreshStatus()
+        remoteConfigSaved = appState.vlmMode == "remote" && (appState.vlmProvider != nil || appState.vlmAvailable)
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            let ollamaPath = findOllamaPath()
+            let installed = ollamaPath != nil
+            var running = false
+            var hasRequiredModels = false
+            var statusMessage = ""
+
+            if let ollamaPath {
+                switch queryOllamaModels(at: ollamaPath) {
+                case .success(let installedModels):
+                    running = true
+                    let missingModels = requiredModels.filter { !installedModels.contains($0) }
+                    hasRequiredModels = missingModels.isEmpty
+                    if missingModels.isEmpty {
+                        statusMessage = "Local setup looks good."
+                    } else if installedModels.isEmpty {
+                        statusMessage = "Ollama is running, but no models are downloaded yet."
+                    } else {
+                        statusMessage = "Missing: " + missingModels.joined(separator: ", ")
+                    }
+                case .failure:
+                    statusMessage = hasOllamaAppBundle
+                        ? "Open Ollama once to start the local AI service, then recheck."
+                        : "Run `ollama serve` in Terminal, then recheck."
+                }
+            } else {
+                statusMessage = "Download and install Ollama to run models locally."
+            }
+
+            Task { @MainActor in
+                self.ollamaInstalled = installed
+                self.ollamaRunning = running
+                self.ollamaHasRequiredModels = hasRequiredModels
+                self.vlmStatusMessage = statusMessage
+                self.vlmStateRefreshing = false
+                self.appState.vlmAvailable = self.onboardingVLMReady
+            }
+        }
+    }
+
+    private func queryOllamaModels(at ollamaPath: String) -> Result<Set<String>, Error> {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: ollamaPath)
+        process.arguments = ["list"]
+        let outputPipe = Pipe()
+        process.standardOutput = outputPipe
+        process.standardError = outputPipe
+
+        do {
+            try process.run()
+            process.waitUntilExit()
+            guard process.terminationStatus == 0 else {
+                return .failure(NSError(domain: "OllamaList", code: Int(process.terminationStatus)))
+            }
+
+            let output = String(data: outputPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+            let modelNames = Set(
+                output
+                    .components(separatedBy: "\n")
+                    .dropFirst()
+                    .compactMap { line -> String? in
+                        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+                        guard !trimmed.isEmpty else { return nil }
+                        guard let rawName = trimmed.components(separatedBy: .whitespaces).first else { return nil }
+                        return canonicalModelName(rawName)
+                    }
+            )
+            return .success(modelNames)
+        } catch {
+            return .failure(error)
+        }
+    }
+
+    private func canonicalModelName(_ name: String) -> String {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.hasSuffix(":latest") {
+            return String(trimmed.dropLast(":latest".count))
+        }
+        return trimmed
+    }
+
+    private func launchOllamaApp() {
+        let appURL = URL(fileURLWithPath: "/Applications/Ollama.app")
+        guard FileManager.default.fileExists(atPath: appURL.path) else { return }
+
+        let config = NSWorkspace.OpenConfiguration()
+        config.activates = true
+        NSWorkspace.shared.openApplication(at: appURL, configuration: config) { _, _ in
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                refreshVLMSetupState(force: true)
             }
         }
     }
@@ -2481,6 +2810,8 @@ struct KeychainHelper {
         return string
     }
 }
+
+private final class OnboardingViewHost {}
 
 struct PermissionStatusBadge: View {
     let granted: Bool

@@ -1,6 +1,11 @@
 import SwiftUI
 
 struct MenuBarView: View {
+    private enum PermissionRepairKind {
+        case accessibility
+        case screenRecording
+    }
+
     @EnvironmentObject var appState: AppState
     @EnvironmentObject var delegate: AppDelegate
     @AppStorage("hasCompletedOnboarding") private var hasCompletedOnboarding = false
@@ -16,7 +21,8 @@ struct MenuBarView: View {
     @State private var elapsedSeconds: Int = 0
     @State private var showMoreActions = false
     @State private var wasPausedBeforeFocus = false
-    @State private var openedScreenRecordingSettings = false
+    @State private var openedPermissionSettings: PermissionRepairKind?
+    @State private var screenRecordingNeedsManualSettings = false
 
     // Record button idle pulse
     @State private var idlePulse = false
@@ -72,13 +78,17 @@ struct MenuBarView: View {
             openAndActivate("focus-qa")
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
-            // Recheck Screen Recording after returning from Settings.
-            // App owns this permission directly; avoid forcing fresh capture
-            // attempts before TCC says the grant exists.
-            if openedScreenRecordingSettings && !appState.screenRecordingGranted {
-                openedScreenRecordingSettings = false
+            if let pendingPermission = openedPermissionSettings {
+                openedPermissionSettings = nil
                 Task {
-                    appState.screenRecordingGranted = PermissionChecker.isScreenRecordingGranted()
+                    switch pendingPermission {
+                    case .accessibility:
+                        appState.accessibilityGranted = PermissionChecker.isAccessibilityGranted()
+                    case .screenRecording:
+                        let granted = await refreshScreenRecordingGrant()
+                        appState.screenRecordingGranted = granted
+                        screenRecordingNeedsManualSettings = !granted
+                    }
                 }
             }
         }
@@ -139,14 +149,14 @@ struct MenuBarView: View {
         .padding(.vertical, 14)
         .background(Color.primary.opacity(0.03))
 
-        // Screen Recording missing banner
-        if hasCompletedOnboarding && !appState.screenRecordingGranted {
-            Button(action: { ensureDaemonAndOpenScreenRecording() }) {
+        // Permission missing banner
+        if hasCompletedOnboarding && (!appState.accessibilityGranted || !appState.screenRecordingGranted) {
+            Button(action: { repairPermissions() }) {
                 HStack(spacing: 8) {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .font(.system(size: 12))
                         .foregroundColor(warmOrange)
-                    Text("Screen Recording not granted - recordings may fail")
+                    Text(permissionBannerText)
                         .font(.system(size: 11, weight: .medium))
                         .foregroundColor(darkNavy.opacity(0.7))
                     Spacer()
@@ -194,6 +204,16 @@ struct MenuBarView: View {
             return "Capturing - worker starting"
         }
         return "Services not running"
+    }
+
+    private var permissionBannerText: String {
+        if !appState.accessibilityGranted && !appState.screenRecordingGranted {
+            return "Accessibility and Screen Recording not granted"
+        }
+        if !appState.accessibilityGranted {
+            return "Accessibility not granted - observation may fail"
+        }
+        return "Screen Recording not granted - recordings may fail"
     }
 
     // MARK: - Today Card
@@ -404,13 +424,13 @@ struct MenuBarView: View {
                         .textFieldStyle(.roundedBorder)
                         .font(.system(size: 12))
 
-                    // Screen Recording gate
-                    if !appState.screenRecordingGranted {
+                    // Permission gate
+                    if !appState.accessibilityGranted || !appState.screenRecordingGranted {
                         HStack(spacing: 6) {
                             Image(systemName: "exclamationmark.triangle.fill")
                                 .font(.system(size: 10))
                                 .foregroundColor(warmOrange)
-                            Text("Screen Recording required for workflow capture")
+                            Text(recordPermissionMessage)
                                 .font(.system(size: 10))
                                 .foregroundColor(warmOrange)
                         }
@@ -427,9 +447,8 @@ struct MenuBarView: View {
 
                         Spacer()
 
-                        if !appState.screenRecordingGranted {
-                            // Primary: fix permission
-                            Button(action: { ensureDaemonAndOpenScreenRecording() }) {
+                        if !appState.accessibilityGranted || !appState.screenRecordingGranted {
+                            Button(action: { repairPermissions() }) {
                                 Text("Grant Permission")
                                     .font(.system(size: 12, weight: .medium))
                                     .padding(.horizontal, 14)
@@ -438,15 +457,6 @@ struct MenuBarView: View {
                                     .foregroundColor(.white)
                                     .cornerRadius(6)
                             }
-
-                            // Secondary: proceed anyway with warning
-                            Button(action: { startFocusSession(title: focusSessionTitle) }) {
-                                Text("Record anyway")
-                                    .font(.system(size: 11))
-                                    .foregroundColor(.secondary)
-                            }
-                            .disabled(focusSessionTitle.trimmingCharacters(in: .whitespaces).isEmpty)
-                            .help("May fail to produce a workflow without Screen Recording")
                         } else {
                             Button(action: { startFocusSession(title: focusSessionTitle) }) {
                                 HStack(spacing: 4) {
@@ -473,8 +483,8 @@ struct MenuBarView: View {
                 )
                 .overlay(
                     RoundedRectangle(cornerRadius: cardRadius)
-                        .stroke(appState.screenRecordingGranted ? darkNavy.opacity(0.12) : warmOrange.opacity(0.3), lineWidth: contraBorder)
-                )
+                        .stroke((appState.screenRecordingGranted && appState.accessibilityGranted) ? darkNavy.opacity(0.12) : warmOrange.opacity(0.3), lineWidth: contraBorder)
+                    )
             } else if appState.focusSessionProcessing {
                 // Focus session stopped, worker is processing
                 HStack(spacing: 10) {
@@ -580,6 +590,17 @@ struct MenuBarView: View {
                     .foregroundColor(.secondary)
                 }
                 .buttonStyle(.plain)
+            } else if !appState.accessibilityGranted || !appState.screenRecordingGranted {
+                Button(action: { repairPermissions() }) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.system(size: 8))
+                        Text("Fix Setup")
+                            .font(.system(size: 11))
+                    }
+                    .foregroundColor(warmOrange)
+                }
+                .buttonStyle(.plain)
             } else {
                 Button(action: {
                     appState.userStopped = false
@@ -658,14 +679,66 @@ struct MenuBarView: View {
         }
     }
 
-    /// Request Screen Recording from the app principal, then open Settings if
-    /// the user still needs to toggle permission manually.
-    private func ensureDaemonAndOpenScreenRecording() {
-        Task {
-            let granted = await PermissionChecker.requestScreenRecordingAndOpenSettingsIfNeeded()
-            appState.screenRecordingGranted = granted
-            openedScreenRecordingSettings = !granted
+    private var recordPermissionMessage: String {
+        if !appState.accessibilityGranted && !appState.screenRecordingGranted {
+            return "Accessibility and Screen Recording are required"
         }
+        if !appState.accessibilityGranted {
+            return "Accessibility required for workflow capture"
+        }
+        return "Screen Recording required for workflow capture"
+    }
+
+    private func repairPermissions() {
+        if !appState.accessibilityGranted {
+            requestAccessibilityIfNeeded()
+        } else if !appState.screenRecordingGranted {
+            requestScreenRecordingIfNeeded()
+        } else if !hasCompletedOnboarding {
+            delegate.showOnboarding()
+        }
+    }
+
+    private func requestAccessibilityIfNeeded() {
+        Task {
+            let granted = await PermissionChecker.requestAccessibilityAndOpenSettingsIfNeeded()
+            appState.accessibilityGranted = granted
+            openedPermissionSettings = granted ? nil : .accessibility
+        }
+    }
+
+    /// Request Screen Recording from the app principal, then open Settings if
+    /// the user explicitly asks for a manual fallback.
+    private func requestScreenRecordingIfNeeded() {
+        Task {
+            if screenRecordingNeedsManualSettings {
+                ServiceController.prepareForAppOwnedPermissionRequest()
+                PermissionChecker.openScreenRecordingSettings()
+                openedPermissionSettings = .screenRecording
+                return
+            }
+
+            let granted = await PermissionChecker.requestScreenRecordingAndOpenSettingsIfNeeded()
+            if granted {
+                let status = await PermissionChecker.resolveScreenRecordingStatus(
+                    timeoutNanoseconds: 1_500_000_000
+                )
+                appState.screenRecordingGranted = status.granted
+                screenRecordingNeedsManualSettings = !status.granted
+                openedPermissionSettings = status.granted ? nil : .screenRecording
+            } else {
+                appState.screenRecordingGranted = false
+                screenRecordingNeedsManualSettings = true
+                openedPermissionSettings = .screenRecording
+            }
+        }
+    }
+
+    private func refreshScreenRecordingGrant() async -> Bool {
+        let status = await PermissionChecker.resolveScreenRecordingStatus(
+            timeoutNanoseconds: 5_000_000_000
+        )
+        return status.granted
     }
 
     private func startFocusSession(title: String) {

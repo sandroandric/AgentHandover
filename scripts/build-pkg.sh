@@ -15,19 +15,17 @@ mkdir -p "${PKG_ROOT}/usr/local/lib/agenthandover/extension"
 mkdir -p "${PKG_ROOT}/usr/local/lib/agenthandover/launchd"
 mkdir -p "${PKG_ROOT}/Applications"
 
-# Daemon helper .app bundle path. Even though the main app owns Screen Recording,
-# the helper still runs more reliably on Tahoe when packaged as a real app bundle.
-DAEMON_APP="${PKG_ROOT}/Applications/AgentHandover.app/Contents/Helpers/AgentHandoverDaemon.app"
-DAEMON_APP_MACOS="${DAEMON_APP}/Contents/MacOS"
+# Daemon lives OUTSIDE the app bundle so codesign --deep doesn't register
+# it as a second TCC principal. The app owns Screen Recording; the daemon
+# must be invisible to TCC's bundle scan.
+DAEMON_EXEC="${PKG_ROOT}/usr/local/lib/agenthandover/ah-observer"
 
 # Copy binaries
 echo "Staging binaries..."
-# CLI goes to /usr/local/bin as a plain binary (no TCC needed)
 cp "${REPO_ROOT}/target/universal-release/agenthandover" "${PKG_ROOT}/usr/local/bin/"
-# Daemon goes into a helper .app bundle for TCC visibility
-mkdir -p "${DAEMON_APP_MACOS}"
-cp "${REPO_ROOT}/target/universal-release/agenthandover-daemon" "${DAEMON_APP_MACOS}/"
-cp "${REPO_ROOT}/resources/daemon-app/Info.plist" "${DAEMON_APP}/Contents/Info.plist"
+# Cargo produces agenthandover-daemon; install as ah-observer to avoid
+# macOS TCC caching the old "agenthandover-daemon" identity.
+cp "${REPO_ROOT}/target/universal-release/agenthandover-daemon" "${DAEMON_EXEC}"
 
 # Copy extension
 echo "Staging extension..."
@@ -88,15 +86,20 @@ if [ -f "${APP_BINARY}" ]; then
     # Copy SPM resource bundle + icon to Contents/Resources
     RESOURCES_DIR="${PKG_ROOT}/Applications/AgentHandover.app/Contents/Resources"
     mkdir -p "${RESOURCES_DIR}"
-    RESOURCE_BUNDLE="${REPO_ROOT}/app/AgentHandoverApp/.build/release/AgentHandoverApp_AgentHandoverApp.bundle"
-    if [ -d "${RESOURCE_BUNDLE}" ]; then
+    found_resource_bundle=false
+    for RESOURCE_BUNDLE in "${REPO_ROOT}"/app/AgentHandoverApp/.build/release/*.bundle; do
+        [ -d "${RESOURCE_BUNDLE}" ] || continue
         cp -R "${RESOURCE_BUNDLE}" "${RESOURCES_DIR}/"
-        echo "  App resource bundle included."
+        found_resource_bundle=true
+        echo "  App resource bundle included: $(basename "${RESOURCE_BUNDLE}")"
         # Copy icon to top-level Resources for Finder/Dock
         if [ -f "${RESOURCE_BUNDLE}/AppIcon.icns" ]; then
             cp "${RESOURCE_BUNDLE}/AppIcon.icns" "${RESOURCES_DIR}/AppIcon.icns"
             echo "  App icon included."
         fi
+    done
+    if [ "${found_resource_bundle}" = false ]; then
+        echo "  Warning: no SPM resource bundle found for AgentHandoverApp."
     fi
 fi
 
@@ -112,9 +115,9 @@ fi
 if [ -n "${CODESIGN_IDENTITY}" ]; then
     echo "Codesigning binaries with: ${CODESIGN_IDENTITY}"
     # Sign individual binaries first
+    # Sign app binary and CLI with Developer ID
     for binary in \
         "${PKG_ROOT}/usr/local/bin/agenthandover" \
-        "${DAEMON_APP_MACOS}/agenthandover-daemon" \
         "${PKG_ROOT}/Applications/AgentHandover.app/Contents/MacOS/AgentHandover"; do
         if [ -f "${binary}" ]; then
             codesign --force --options runtime --timestamp \
@@ -122,11 +125,26 @@ if [ -n "${CODESIGN_IDENTITY}" ]; then
             echo "  Signed: $(basename "${binary}")"
         fi
     done
-    # Sign the daemon helper .app bundle (must happen after its binary is signed)
-    if [ -d "${DAEMON_APP}" ]; then
+
+    # Sign daemon with Developer ID but use a DIFFERENT identifier so
+    # TCC doesn't associate it with the old "ah-observer" principal.
+    # The app now owns all TCC permissions; the daemon is just a helper.
+    if [ -f "${DAEMON_EXEC}" ]; then
         codesign --force --options runtime --timestamp \
-            --sign "${CODESIGN_IDENTITY}" "${DAEMON_APP}"
-        echo "  Signed bundle: AgentHandoverDaemon.app"
+            --identifier "com.agenthandover.observer" \
+            --sign "${CODESIGN_IDENTITY}" "${DAEMON_EXEC}"
+        echo "  Signed: ah-observer (as com.agenthandover.observer)"
+    fi
+
+    # Sign the entire .app bundle (binds Info.plist to the signature).
+    # This is REQUIRED for macOS Tahoe TCC — without bundle-level signing,
+    # the app won't appear in Screen Recording settings even if the inner
+    # binary is signed. --deep signs all nested bundles too.
+    if [ -d "${PKG_ROOT}/Applications/AgentHandover.app" ]; then
+        codesign --force --deep --options runtime --timestamp \
+            --sign "${CODESIGN_IDENTITY}" \
+            "${PKG_ROOT}/Applications/AgentHandover.app"
+        echo "  Signed bundle: AgentHandover.app (deep)"
     fi
 else
     echo "Warning: No Developer ID Application certificate found. Binaries unsigned."

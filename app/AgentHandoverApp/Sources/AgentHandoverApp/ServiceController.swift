@@ -3,26 +3,23 @@ import AppKit
 
 /// Controls AgentHandover services.
 ///
-/// **Daemon**: Launched as an app bundle via `open` / `NSWorkspace`.
-/// This keeps the helper in a normal user-session app context on Tahoe,
-/// which is more reliable for Accessibility and background lifecycle.
+/// **Daemon**: Launched as a plain helper executable inside the main app
+/// bundle. The main app owns all TCC-sensitive permissions, so the daemon
+/// should not exist as a second macOS app principal at all.
 ///
 /// **Worker**: Managed via launchd (no TCC requirements).
 final class ServiceController {
 
     static let workerLabel = "com.agenthandover.worker"
 
-    /// Path to the daemon app bundle inside the main app.
-    static var daemonAppURL: URL {
-        let mainApp = Bundle.main.bundleURL
-        return mainApp
-            .appendingPathComponent("Contents/Helpers/AgentHandoverDaemon.app")
+    /// Path to the daemon executable. Lives OUTSIDE the app bundle so
+    /// codesign --deep doesn't register it as a second TCC principal.
+    static var daemonExecutableURL: URL {
+        URL(fileURLWithPath: "/usr/local/lib/agenthandover/ah-observer")
     }
 
-    /// Path to the daemon executable (for PID checking).
     private static var daemonExecPath: String {
-        daemonAppURL
-            .appendingPathComponent("Contents/MacOS/agenthandover-daemon").path
+        daemonExecutableURL.path
     }
 
     private static var uid: uid_t { getuid() }
@@ -33,39 +30,60 @@ final class ServiceController {
             .appendingPathComponent("Library/LaunchAgents")
     }
 
+    private static var nativeMessagingManifestTargets: [(supportRoot: URL, manifestURL: URL)] {
+        let appSupport = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support")
+        let relativeRoots = [
+            "Google/Chrome",
+            "Chromium",
+            "BraveSoftware/Brave-Browser",
+            "Microsoft Edge",
+            "Arc/User Data",
+        ]
+
+        return relativeRoots.map { relativeRoot in
+            let supportRoot = appSupport.appendingPathComponent(relativeRoot)
+            let manifestURL = supportRoot
+                .appendingPathComponent("NativeMessagingHosts")
+                .appendingPathComponent("com.agenthandover.host.json")
+            return (supportRoot, manifestURL)
+        }
+    }
+
+    /// The daemon must never launch until the user has completed onboarding
+    /// and AgentHandover.app itself already owns both TCC permissions.
+    private static func daemonLaunchAllowed() -> Bool {
+        UserDefaults.standard.bool(forKey: "hasCompletedOnboarding")
+            && PermissionChecker.allPermissionsGranted()
+    }
+
     // MARK: - Daemon (app-launched)
 
-    /// Start daemon as an app bundle. Returns true if process is running.
+    /// Start daemon as a detached helper executable. Returns true if process is running.
     @discardableResult
     static func startDaemon() -> Bool {
+        guard daemonLaunchAllowed() else {
+            return false
+        }
+
         // Check if already running
         if isDaemonRunning() { return true }
 
-        // Launch as an app bundle so the helper runs in a normal
-        // user-session context instead of as a raw path-executed binary.
-        let config = NSWorkspace.OpenConfiguration()
-        config.activates = false  // background, no dock icon
-        config.addsToRecentItems = false
+        let process = Process()
+        process.executableURL = daemonExecutableURL
+        process.arguments = []
+        process.standardInput = FileHandle.nullDevice
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
 
-        let semaphore = DispatchSemaphore(value: 0)
-        var launched = false
-
-        NSWorkspace.shared.openApplication(
-            at: daemonAppURL,
-            configuration: config
-        ) { app, error in
-            launched = error == nil
-            semaphore.signal()
-        }
-
-        // Wait up to 5 seconds for launch
-        _ = semaphore.wait(timeout: .now() + 5.0)
-
-        // Give daemon time to initialize
-        if launched {
+        do {
+            try process.run()
             Thread.sleep(forTimeInterval: 0.5)
+            return isDaemonRunning()
+        } catch {
+            NSLog("ServiceController: failed to launch daemon executable %@ (%@)", daemonExecPath, error.localizedDescription)
+            return false
         }
-        return launched || isDaemonRunning()
     }
 
     /// Stop daemon by sending SIGTERM to its process.
@@ -81,7 +99,7 @@ final class ServiceController {
         }
         // Fallback: check by process name
         let result = shell("/bin/ps", args: ["-ax", "-o", "pid,comm"])
-        return result.contains("agenthandover-daemon")
+        return result.contains("ah-observer")
     }
 
     /// Read the daemon's PID from its PID file.
@@ -144,6 +162,74 @@ final class ServiceController {
         startWorker()
     }
 
+    /// Quiesce any daemon process/job before app-owned permission requests.
+    ///
+    /// Screen Recording and Accessibility must be attributed to AgentHandover
+    /// itself. If a legacy daemon process is still around from an older build
+    /// or a stale launchd registration, stop it before asking TCC.
+    static func prepareForAppOwnedPermissionRequest() {
+        stopDaemon()
+        waitForDaemonExit(timeoutSeconds: 2)
+        bootout(label: "com.agenthandover.daemon")
+        disable(label: "com.agenthandover.daemon")
+        _ = shell("/usr/bin/killall", args: ["ah-observer"])
+    }
+
+    /// Remove native host registration while onboarding/permissions are active.
+    /// This prevents an already-installed browser extension from respawning the
+    /// daemon and surfacing it as a second TCC principal during setup.
+    static func removeNativeMessagingHostManifest() {
+        for (_, manifestURL) in nativeMessagingManifestTargets {
+            try? FileManager.default.removeItem(at: manifestURL)
+        }
+    }
+
+    /// Reinstall the native messaging host manifest once onboarding has
+    /// progressed to extension setup or has fully completed.
+    @discardableResult
+    static func installNativeMessagingHostManifest() -> Bool {
+        let manifest: [String: Any] = [
+            "name": "com.agenthandover.host",
+            "description": "AgentHandover native messaging host",
+            "path": daemonExecPath,
+            "type": "stdio",
+            "args": ["--native-messaging"],
+            "allowed_origins": [
+                "chrome-extension://knldjmfmopnpolahpmmgbagdohdnhkik/",
+            ],
+        ]
+
+        let fileManager = FileManager.default
+        let targets = nativeMessagingManifestTargets.filter { supportRoot, _ in
+            fileManager.fileExists(atPath: supportRoot.path)
+        }
+
+        guard !targets.isEmpty else {
+            NSLog("ServiceController: no supported Chromium browser support roots found for native host install")
+            return false
+        }
+
+        do {
+            let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted])
+            var installedAny = false
+
+            for (_, manifestURL) in targets {
+                let manifestDir = manifestURL.deletingLastPathComponent()
+                try fileManager.createDirectory(
+                    at: manifestDir,
+                    withIntermediateDirectories: true
+                )
+                try data.write(to: manifestURL, options: .atomic)
+                installedAny = true
+            }
+
+            return installedAny
+        } catch {
+            NSLog("ServiceController: failed to write native host manifests (%@)", error.localizedDescription)
+            return false
+        }
+    }
+
     // MARK: - Launchd (worker only)
 
     private static func bootstrapIfNeeded(label: String) {
@@ -158,6 +244,10 @@ final class ServiceController {
 
     private static func bootout(label: String) {
         launchctl(["bootout", "\(guiDomain)/\(label)"])
+    }
+
+    private static func disable(label: String) {
+        launchctl(["disable", "\(guiDomain)/\(label)"])
     }
 
     static func isJobRunning(label: String) -> Bool {

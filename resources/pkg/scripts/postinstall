@@ -13,6 +13,7 @@ USER_HOME=$(dscl . -read /Users/"${CONSOLE_USER}" NFSHomeDirectory 2>/dev/null |
 if [ -z "$USER_HOME" ] || [ ! -d "$USER_HOME" ]; then
     USER_HOME=$(eval echo ~"$CONSOLE_USER")
 fi
+CONSOLE_UID=$(id -u "${CONSOLE_USER}" 2>/dev/null || echo "501")
 DATA_DIR="${USER_HOME}/Library/Application Support/agenthandover"
 LAUNCH_AGENTS="${USER_HOME}/Library/LaunchAgents"
 LIB_DIR="/usr/local/lib/agenthandover"
@@ -63,21 +64,21 @@ json_export = false
 TOML
 fi
 
-# Install Chrome native messaging host manifest
-NM_DIR="${USER_HOME}/Library/Application Support/Google/Chrome/NativeMessagingHosts"
-mkdir -p "${NM_DIR}"
-cat > "${NM_DIR}/com.agenthandover.host.json" << JSON
-{
-    "name": "com.agenthandover.host",
-    "description": "AgentHandover native messaging host",
-    "path": "/Applications/AgentHandover.app/Contents/Helpers/AgentHandoverDaemon.app/Contents/MacOS/agenthandover-daemon",
-    "type": "stdio",
-    "args": ["--native-messaging"],
-    "allowed_origins": [
-        "chrome-extension://knldjmfmopnpolahpmmgbagdohdnhkik/"
-    ]
-}
-JSON
+# Remove any stale Chromium-family native host manifest. The app now installs
+# these only when the extension step is reached or onboarding is already
+# complete, so the daemon cannot be spawned during first-run permission setup.
+for browser_dir in \
+    "Google/Chrome" \
+    "Chromium" \
+    "BraveSoftware/Brave-Browser" \
+    "Microsoft Edge" \
+    "Arc/User Data"; do
+    BROWSER_ROOT="${USER_HOME}/Library/Application Support/${browser_dir}"
+    if [ -d "${BROWSER_ROOT}" ]; then
+        mkdir -p "${BROWSER_ROOT}/NativeMessagingHosts"
+        rm -f "${BROWSER_ROOT}/NativeMessagingHosts/com.agenthandover.host.json"
+    fi
+done
 
 # Set up Python virtual environment for worker.
 # The worker is required for VLM annotation and SOP generation — without it,
@@ -156,8 +157,14 @@ else
 fi
 
 # Set proper permissions
-chmod 755 /Applications/AgentHandover.app/Contents/Helpers/AgentHandoverDaemon.app/Contents/MacOS/agenthandover-daemon
+chmod 755 /usr/local/lib/agenthandover/ah-observer
 chmod 755 /usr/local/bin/agenthandover
+
+# Clear stale daemon TCC identity so users only ever see AgentHandover in
+# System Settings going forward. This does not reset the main app grant.
+sudo -u "${CONSOLE_USER}" tccutil reset ScreenCapture com.agenthandover.daemon 2>/dev/null || true
+sudo -u "${CONSOLE_USER}" tccutil reset Accessibility com.agenthandover.daemon 2>/dev/null || true
+sudo -u "${CONSOLE_USER}" launchctl disable "gui/${CONSOLE_UID}/com.agenthandover.daemon" 2>/dev/null || true
 
 # Only reset onboarding on FRESH install (data dir didn't exist before)
 if [ ! -f "${DATA_DIR}/config.toml.bak" ]; then
@@ -188,10 +195,8 @@ else
 fi
 
 # Register launchd services (RunAtLoad=false, so they won't start yet)
-# The app starts them via kickstart when the user clicks "Start Observing"
+# Only the worker uses launchd now. The daemon is started directly by the app.
 # Use modern launchctl bootstrap (load/unload deprecated on macOS 13+)
-CONSOLE_UID=$(id -u "${CONSOLE_USER}")
-sudo -u "${CONSOLE_USER}" launchctl bootstrap "gui/${CONSOLE_UID}" "${LAUNCH_AGENTS}/com.agenthandover.daemon.plist" 2>/dev/null || true
 sudo -u "${CONSOLE_USER}" launchctl bootstrap "gui/${CONSOLE_UID}" "${LAUNCH_AGENTS}/com.agenthandover.worker.plist" 2>/dev/null || true
 echo "  Services registered (will start when app launches)."
 

@@ -114,7 +114,7 @@ final class AppState: ObservableObject {
     @Published var health: ServiceHealth = .down
     @Published var userStopped = UserDefaults.standard.bool(forKey: "observingPaused")
 
-    // Permissions — updated via control socket or daemon status file.
+    // Permissions — app-owned and checked directly by AgentHandover.app.
     @Published var accessibilityGranted = false
     @Published var screenRecordingGranted = false
 
@@ -276,27 +276,10 @@ final class AppState: ObservableObject {
             return
         }
 
-        // Check 3: native messaging manifest exists (extension infrastructure is set up,
-        // even if no heartbeat yet - e.g. user just loaded extension but hasn't opened a tab)
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        let nmPaths = [
-            home.appendingPathComponent("Library/Application Support/Google/Chrome/NativeMessagingHosts/com.agenthandover.host.json"),
-            home.appendingPathComponent("Library/Application Support/Chromium/NativeMessagingHosts/com.agenthandover.host.json"),
-            home.appendingPathComponent("Library/Application Support/BraveSoftware/Brave-Browser/NativeMessagingHosts/com.agenthandover.host.json"),
-            home.appendingPathComponent("Library/Application Support/Microsoft Edge/NativeMessagingHosts/com.agenthandover.host.json"),
-        ]
-        let manifestInstalled = nmPaths.contains { FileManager.default.fileExists(atPath: $0.path) }
-
-        // Also check if the extension dist files exist (loaded unpacked)
-        let extensionLoaded = extensionHeartbeat != nil || manifestInstalled
-
-        if extensionLoaded {
-            // Extension infrastructure is set up but not actively connected yet.
-            // Show as connected during onboarding since the user did their part.
-            extensionConnected = true
-        } else {
-            extensionConnected = false
-        }
+        // Native messaging manifests can be installed by the pkg without the
+        // browser extension actually being loaded. Treat only a live heartbeat
+        // or fresh daemon message as a true browser-extension connection.
+        extensionConnected = false
     }
 
     private func readFocusSession() {
@@ -406,7 +389,8 @@ final class AppState: ObservableObject {
         } else if !daemonRunning && !workerRunning {
             newHealth = .down
         } else {
-            let hasWarnings = !(daemonStatus?.permissions_ok ?? true)
+            let hasWarnings = !accessibilityGranted
+                || !screenRecordingGranted
                 || (workerStatus?.consecutive_errors ?? 0) > 0
                 || !daemonRunning || !workerRunning
                 || vlmBacklogged
@@ -418,18 +402,8 @@ final class AppState: ObservableObject {
     // MARK: - Permissions
 
     private func checkPermissions() {
-        // Screen Recording: app owns this permission directly.
-        // CGPreflightScreenCaptureAccess checks the calling process (this app),
-        // which is the correct TCC principal on Tahoe.
+        accessibilityGranted = PermissionChecker.isAccessibilityGranted()
         screenRecordingGranted = PermissionChecker.isScreenRecordingGranted()
-
-        // Accessibility: daemon owns this (reads window titles).
-        // Trust daemon status when available.
-        if let status = daemonStatus {
-            accessibilityGranted = status.accessibility_permitted
-        }
-        // Without daemon status: leave permissions unchanged (default false).
-        // They'll be updated when the daemon runs and writes its status.
     }
 
     // MARK: - Helpers

@@ -131,39 +131,29 @@ struct ErrorResponse {
 // ---------------------------------------------------------------------------
 
 /// Check if accessibility permission is currently granted.
-/// Uses the same functional test as the health module.
 fn check_accessibility() -> bool {
-    crate::observer::health::is_accessibility_permitted()
+    crate::observation::snapshot()
+        .map(|snapshot| snapshot.accessibility_granted)
+        .unwrap_or(false)
 }
 
-/// Register the daemon for accessibility in TCC without showing a prompt.
-/// The Swift UI opens the specific Settings pane — we don't want macOS
-/// to also pop up a generic Privacy dialog (which shows both permissions).
+/// Accessibility is owned by the main app process.
+/// The daemon keeps this command as a compatibility no-op so older clients
+/// receive a sensible current-state response instead of failing outright.
 fn request_accessibility_with_prompt() -> bool {
-    #[cfg(target_os = "macos")]
-    {
-        // Just check — don't prompt. AXIsProcessTrusted() registers the
-        // binary's CDHash in TCC without opening System Settings.
-        unsafe { accessibility_sys::AXIsProcessTrusted() }
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        true
-    }
+    check_accessibility()
 }
 
 /// Check if screen recording permission is currently granted.
-/// The daemon no longer owns Screen Recording — the Swift app does.
-/// Always returns true; the app handles TCC via its own capture socket.
 fn check_screen_recording() -> bool {
-    true
+    crate::observation::snapshot()
+        .map(|snapshot| snapshot.screen_recording_granted)
+        .unwrap_or(false)
 }
 
 /// Request screen recording permission.
-/// This is a no-op for the daemon — the Swift app owns Screen Recording
-/// permission and serves pixels via the capture socket.
 fn request_screen_recording() -> bool {
-    true
+    check_screen_recording()
 }
 
 // ---------------------------------------------------------------------------
