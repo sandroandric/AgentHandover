@@ -183,7 +183,7 @@ def _make_mock_sop_generator(success=True, title="Test Task"):
     """Create a mock SOPGenerator."""
     generator = MagicMock(spec=SOPGenerator)
 
-    def mock_generate(timeline, title_arg):
+    def mock_generate(timeline, title_arg, behavioral_context=None):
         if not success:
             return GeneratedSOP(
                 sop={}, success=False, error="Mock failure"

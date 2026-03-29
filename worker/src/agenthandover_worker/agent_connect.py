@@ -16,10 +16,11 @@ from pathlib import Path
 
 
 def _get_kb_root() -> Path:
-    """Resolve knowledge base root."""
-    import platform
-    if platform.system() == "Darwin":
-        return Path.home() / "Library" / "Application Support" / "agenthandover" / "knowledge"
+    """Resolve knowledge base root.
+
+    Must match ``knowledge_base.DEFAULT_KNOWLEDGE_DIR`` so we read the same
+    directory that the worker writes to.
+    """
     return Path.home() / ".agenthandover" / "knowledge"
 
 
@@ -43,8 +44,11 @@ def _load_procedures() -> list[dict]:
 def connect_claude_code() -> None:
     """Set up Claude Code integration.
 
-    Skills are already written by claude_skill_writer.py.
-    This creates a meta-index skill and prints instructions.
+    Creates:
+    1. Individual /slash-commands per agent_ready procedure with full
+       execution instructions (steps, strategy, guardrails, reporting).
+    2. A meta-index /agenthandover-list command that lists all skills.
+    3. Removes stale commands for procedures that are no longer agent_ready.
     """
     skills_dir = Path.home() / ".claude" / "commands"
     skills_dir.mkdir(parents=True, exist_ok=True)
@@ -52,14 +56,118 @@ def connect_claude_code() -> None:
     procedures = _load_procedures()
     ready = [p for p in procedures if p.get("lifecycle_state") == "agent_ready"]
 
-    # Generate index skill
+    # Track which command files we write so we can clean up stale ones
+    written_files: set[str] = {"agenthandover-list.md"}
+
+    # Write individual slash commands per procedure
+    for proc in ready:
+        slug = proc.get("id", "?")
+        title = proc.get("title", "Untitled")
+        desc = proc.get("description", "")
+        strategy = proc.get("strategy", "")
+        steps = proc.get("steps", [])
+        constraints = proc.get("constraints", {})
+        guardrails = constraints.get("guardrails", [])
+        vp = proc.get("voice_profile", {})
+        inputs = proc.get("inputs", [])
+        clarifications = proc.get("agent_clarifications", {})
+
+        cmd_lines = [
+            "---",
+            f"description: {title}",
+            "---",
+            "",
+            f"# {title}",
+            "",
+        ]
+
+        if desc:
+            cmd_lines.append(f"{desc}")
+            cmd_lines.append("")
+
+        if strategy:
+            cmd_lines.append(f"## Strategy")
+            cmd_lines.append(f"{strategy}")
+            cmd_lines.append("")
+
+        if steps:
+            cmd_lines.append("## Steps")
+            cmd_lines.append("")
+            for i, s in enumerate(steps, 1):
+                action = s.get("action", s.get("description", ""))
+                target = s.get("target", "")
+                verify = s.get("verify", "")
+                line = f"{i}. {action}"
+                if target:
+                    line += f" (target: {target})"
+                cmd_lines.append(line)
+                if verify:
+                    cmd_lines.append(f"   - Verify: {verify}")
+            cmd_lines.append("")
+
+        if inputs:
+            cmd_lines.append("## Required Inputs")
+            cmd_lines.append("")
+            for inp in inputs:
+                name = inp if isinstance(inp, str) else inp.get("name", "")
+                is_cred = not isinstance(inp, str) and inp.get("is_credential", False)
+                label = f"**{name}**" + (" (credential)" if is_cred else "")
+                cmd_lines.append(f"- {label}")
+            cmd_lines.append("")
+
+        if guardrails:
+            cmd_lines.append("## Guardrails")
+            cmd_lines.append("")
+            for g in guardrails:
+                cmd_lines.append(f"- {g}")
+            cmd_lines.append("")
+
+        if clarifications:
+            cmd_lines.append("## User Preferences (from Q&A)")
+            cmd_lines.append("")
+            if isinstance(clarifications, list):
+                for item in clarifications:
+                    q = item.get("question", "")
+                    a = item.get("answer", "")
+                    if q and a:
+                        cmd_lines.append(f"- **{q}**: {a}")
+            elif isinstance(clarifications, dict):
+                for q, a in clarifications.items():
+                    cmd_lines.append(f"- **{q}**: {a}")
+            cmd_lines.append("")
+
+        if vp and vp.get("formality"):
+            cmd_lines.append(f"## Voice")
+            cmd_lines.append(f"Tone: {vp.get('formality', 'neutral')}")
+            cmd_lines.append("")
+
+        # Execution protocol — tells the agent to report back via MCP
+        cmd_lines.extend([
+            "## Execution Protocol",
+            "",
+            "If you have access to the AgentHandover MCP server, report your progress:",
+            f"1. Call `report_execution_start` with slug `{slug}` before starting",
+            "2. Call `report_step_result` after completing each step",
+            "3. Call `report_execution_complete` when finished",
+            "",
+            "This feedback loop improves the skill for future runs.",
+            "",
+            "---",
+            f"*Learned by AgentHandover. Refresh with `agenthandover connect claude-code`*",
+        ])
+
+        filename = f"ah-{slug}.md"
+        written_files.add(filename)
+        (skills_dir / filename).write_text("\n".join(cmd_lines), encoding="utf-8")
+
+    # Generate index command
     index_path = skills_dir / "agenthandover-list.md"
-    lines = [
+    index_lines = [
         "---",
-        "description: List all AgentHandover procedures available for execution",
+        "description: List all AgentHandover skills available for execution",
         "---",
         "",
-        "# Available AgentHandover Procedures",
+        "# Available AgentHandover Skills",
         "",
     ]
 
@@ -68,27 +176,32 @@ def connect_claude_code() -> None:
             slug = proc.get("id", "?")
             title = proc.get("title", "Untitled")
             desc = proc.get("description", "")[:100]
-            lines.append(f"- **{title}** (`/{slug}`): {desc}")
+            index_lines.append(f"- **{title}** (`/ah-{slug}`): {desc}")
     else:
-        lines.append("No agent-ready procedures yet. AgentHandover is still learning your workflows.")
-        lines.append("")
-        lines.append("Once procedures are approved, they will appear here as /slash-commands.")
+        index_lines.append("No agent-ready skills yet. AgentHandover is still learning your workflows.")
+        index_lines.append("")
+        index_lines.append("Record a Focus Session to teach it a workflow, then approve the draft.")
 
-    lines.append("")
-    lines.append("---")
-    lines.append("*Generated by AgentHandover. Run `agenthandover connect claude-code` to refresh.*")
+    index_lines.append("")
+    index_lines.append("---")
+    index_lines.append("*Generated by AgentHandover. Run `agenthandover connect claude-code` to refresh.*")
 
-    index_path.write_text("\n".join(lines), encoding="utf-8")
+    index_path.write_text("\n".join(index_lines), encoding="utf-8")
 
-    print(f"Claude Code integration ready.")
+    # Clean up stale command files from previous runs
+    for f in skills_dir.glob("ah-*.md"):
+        if f.name not in written_files:
+            f.unlink(missing_ok=True)
+
+    print("Claude Code integration ready.")
     print(f"  Skills directory: {skills_dir}")
     print(f"  Index: {index_path}")
     print(f"  Procedures available: {len(ready)}")
     print()
     if ready:
-        print("Your procedures are available as /slash-commands:")
+        print("Your skills are available as /slash-commands:")
         for proc in ready:
-            print(f"  /{proc.get('id', '?')} — {proc.get('title', '')}")
+            print(f"  /ah-{proc.get('id', '?')} — {proc.get('title', '')}")
     print()
     print("For richer integration, add the MCP server:")
     print("  agenthandover connect mcp")

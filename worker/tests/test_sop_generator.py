@@ -584,8 +584,8 @@ class TestSOPGeneratorConfig:
     def test_defaults(self):
         cfg = SOPGeneratorConfig()
         assert cfg.model == "qwen3.5:4b"
-        assert cfg.num_predict == 8000
-        assert cfg.timeout == 600.0
+        assert cfg.num_predict == 12000
+        assert cfg.timeout == 1800.0
 
     def test_custom(self):
         cfg = SOPGeneratorConfig(model="custom:1b", num_predict=4000)

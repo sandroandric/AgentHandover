@@ -165,6 +165,14 @@ fi
 chmod 755 /usr/local/lib/agenthandover/ah-observer
 chmod 755 /usr/local/bin/agenthandover
 
+# Symlink worker entry points to /usr/local/bin/ so agents and CLI can find them.
+# These are Python scripts installed in the venv — the symlinks make them PATH-accessible.
+for cmd in agenthandover-mcp agenthandover-connect agenthandover-worker; do
+    if [ -x "${LIB_DIR}/venv/bin/${cmd}" ]; then
+        ln -sf "${LIB_DIR}/venv/bin/${cmd}" "/usr/local/bin/${cmd}"
+    fi
+done
+
 # Clear stale daemon TCC identity so users only ever see AgentHandover in
 # System Settings going forward. This does not reset the main app grant.
 sudo -u "${CONSOLE_USER}" tccutil reset ScreenCapture com.agenthandover.daemon 2>/dev/null || true

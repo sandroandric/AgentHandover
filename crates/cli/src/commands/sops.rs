@@ -67,94 +67,110 @@ fn write_trigger(filename: &str, payload: &serde_json::Value) -> Result<PathBuf>
 
 pub fn list() -> Result<()> {
     let dir = sops_dir();
-    let dir_exists = dir.exists();
 
-    // Collect exported (on-disk) SOP slugs
-    let mut exported_slugs: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut sop_files: Vec<std::fs::DirEntry> = Vec::new();
+    // Build a set of approved/agent_ready slugs from sops-index.json.
+    // Only SOPs tracked in the index are shown — legacy passive files on disk
+    // that predate the index are hidden.
+    let index = read_sops_index();
+    let index_entries: Vec<serde_json::Value> = index
+        .as_ref()
+        .and_then(|idx| idx.get("sops"))
+        .and_then(|s| s.as_array())
+        .cloned()
+        .unwrap_or_default();
 
-    if dir_exists {
-        sop_files = std::fs::read_dir(&dir)?
-            .filter_map(|e| e.ok())
-            .filter(|e| {
-                e.path().extension().map_or(false, |ext| ext == "md")
-                    && e.file_name().to_string_lossy().starts_with("sop.")
-            })
-            .collect();
-        sop_files.sort_by_key(|e| e.file_name());
-
-        for entry in &sop_files {
-            let name_str = entry.file_name().to_string_lossy().to_string();
-            if let Some(slug) = name_str.strip_prefix("sop.").and_then(|s| s.strip_suffix(".md")) {
-                exported_slugs.insert(slug.to_string());
-            }
-        }
-    }
-
-    // Collect draft SOPs from sops-index.json (not yet exported to disk)
-    let draft_entries = entries_with_status("draft");
-    // Filter to drafts whose slug is NOT already on disk
-    let new_drafts: Vec<&serde_json::Value> = draft_entries
+    // Approved/agent_ready SOPs (shown as full skills)
+    let approved: Vec<&serde_json::Value> = index_entries
         .iter()
-        .filter(|e| {
-            let slug = e.get("slug").and_then(|v| v.as_str()).unwrap_or("");
-            !slug.is_empty() && !exported_slugs.contains(slug)
+        .filter(|s| {
+            let status = s.get("status").and_then(|v| v.as_str()).unwrap_or("");
+            status == "approved" || status == "agent_ready"
         })
         .collect();
 
-    if sop_files.is_empty() && new_drafts.is_empty() {
-        println!("No SOPs generated yet.");
-        println!("SOPs appear once the system detects repeated workflow patterns.");
+    // Draft SOPs (shown separately)
+    let drafts: Vec<&serde_json::Value> = index_entries
+        .iter()
+        .filter(|s| s.get("status").and_then(|v| v.as_str()) == Some("draft"))
+        .collect();
+
+    if approved.is_empty() && drafts.is_empty() {
+        println!("No skills yet.");
+        println!("Record a Focus Session to teach AgentHandover a workflow.");
         return Ok(());
     }
 
-    let total = sop_files.len() + new_drafts.len();
-    println!("Generated SOPs ({}):", total);
-    println!("{}", "-".repeat(60));
+    // Show approved skills
+    if !approved.is_empty() {
+        println!("Skills ({}):", approved.len());
+        println!("{}", "-".repeat(60));
+        for entry in &approved {
+            let slug = entry.get("slug").and_then(|v| v.as_str()).unwrap_or("?");
+            let title = entry
+                .get("short_title")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .or_else(|| entry.get("title").and_then(|v| v.as_str()))
+                .unwrap_or("Untitled");
+            let confidence = entry
+                .get("confidence")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0);
+            let lifecycle = entry
+                .get("lifecycle_state")
+                .and_then(|v| v.as_str())
+                .unwrap_or("approved");
+            let source = entry
+                .get("source")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            let source_label = if source == "focus" { "Focus" } else { "Auto" };
 
-    // Show exported SOPs
-    for entry in &sop_files {
-        let name = entry.file_name();
-        let name_str = name.to_string_lossy();
-        let slug = name_str
-            .strip_prefix("sop.")
-            .and_then(|s| s.strip_suffix(".md"))
-            .unwrap_or(&name_str);
+            // Check if exported to disk
+            let on_disk = dir.join(format!("sop.{}.md", slug)).exists();
+            let disk_badge = if on_disk { "" } else { " [pending export]" };
 
-        let title = std::fs::read_to_string(entry.path())
-            .ok()
-            .and_then(|content| {
-                content
-                    .lines()
-                    .find(|l| l.starts_with("# "))
-                    .map(|l| l[2..].trim().to_string())
-            })
-            .unwrap_or_else(|| slug.replace('-', " "));
-
-        let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
-        println!("  {} -- {} ({} bytes)", slug, title, size);
+            println!(
+                "  {} -- {} ({}, {:.0}%, {}){}",
+                slug.bold(),
+                title,
+                source_label,
+                confidence * 100.0,
+                lifecycle.green(),
+                disk_badge,
+            );
+        }
     }
 
-    // Show draft SOPs (from sops-index.json, not yet on disk)
-    for entry in &new_drafts {
-        let slug = entry.get("slug").and_then(|v| v.as_str()).unwrap_or("?");
-        let title = entry
-            .get("short_title")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
-            .or_else(|| entry.get("title").and_then(|v| v.as_str()))
-            .unwrap_or("Untitled");
-        let confidence = entry
-            .get("confidence")
-            .and_then(|v| v.as_f64())
-            .unwrap_or(0.0);
-        println!(
-            "  {} -- {} (conf {:.0}%) {}",
-            slug,
-            title,
-            confidence * 100.0,
-            "[draft]".yellow()
-        );
+    // Show drafts awaiting review
+    if !drafts.is_empty() {
+        if !approved.is_empty() {
+            println!();
+        }
+        println!("Drafts awaiting review ({}):", drafts.len());
+        println!("{}", "-".repeat(60));
+        for entry in &drafts {
+            let slug = entry.get("slug").and_then(|v| v.as_str()).unwrap_or("?");
+            let title = entry
+                .get("short_title")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .or_else(|| entry.get("title").and_then(|v| v.as_str()))
+                .unwrap_or("Untitled");
+            let confidence = entry
+                .get("confidence")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0);
+            println!(
+                "  {} -- {} (conf {:.0}%) {}",
+                slug,
+                title,
+                confidence * 100.0,
+                "[draft]".yellow()
+            );
+        }
+        println!();
+        println!("Approve a draft:  agenthandover sops approve <slug>");
     }
 
     Ok(())

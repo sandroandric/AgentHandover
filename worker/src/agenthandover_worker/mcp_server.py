@@ -31,10 +31,11 @@ logger = logging.getLogger(__name__)
 
 
 def _get_kb_root() -> Path:
-    """Resolve the knowledge base root directory."""
-    import platform
-    if platform.system() == "Darwin":
-        return Path.home() / "Library" / "Application Support" / "agenthandover" / "knowledge"
+    """Resolve the knowledge base root directory.
+
+    Must match ``knowledge_base.DEFAULT_KNOWLEDGE_DIR`` so we read the same
+    directory that the worker writes to.
+    """
     return Path.home() / ".agenthandover" / "knowledge"
 
 

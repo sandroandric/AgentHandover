@@ -1,11 +1,14 @@
 use agenthandover_daemon::observer::event_loop::{ObserverConfig, run_observer_loop};
 use tokio::sync::{mpsc, watch};
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 #[tokio::test]
 async fn test_observer_loop_starts_and_stops() {
     let (tx, mut rx) = mpsc::channel(100);
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let capture_paused = Arc::new(AtomicBool::new(false));
 
     let config = ObserverConfig {
         poll_interval: Duration::from_millis(50),
@@ -14,7 +17,7 @@ async fn test_observer_loop_starts_and_stops() {
 
     // Run the loop for a short time then signal shutdown
     let handle = tokio::spawn(async move {
-        run_observer_loop(config, tx, shutdown_rx, None).await
+        run_observer_loop(config, tx, shutdown_rx, None, capture_paused).await
     });
 
     // Let it run briefly

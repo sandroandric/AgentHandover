@@ -202,7 +202,9 @@ class TestParseTimestamp:
 
 class TestDetectEdgeCase:
 
-    def test_app_switch(self):
+    def test_app_switch_falls_through_to_llm(self):
+        """App switches no longer short-circuit — they fall through to LLM diff
+        for richer action descriptions (changed 2026-03-28)."""
         prev = _make_event("e1", "2026-03-03T09:14:50.000Z", ANN_CHROME_GITHUB)
         curr = _make_event("e2", "2026-03-03T09:14:55.000Z", ANN_FINDER)
         config = DiffConfig()
@@ -212,10 +214,8 @@ class TestDetectEdgeCase:
             ANN_CHROME_GITHUB, ANN_FINDER,
             config,
         )
-        assert result is not None
-        assert result["diff_type"] == "app_switch"
-        assert result["from_app"] == "Google Chrome"
-        assert result["to_app"] == "Finder"
+        # App switches now return None so they get full LLM analysis
+        assert result is None
 
     def test_session_gap(self):
         prev = _make_event("e1", "2026-03-03T09:00:00.000Z", ANN_CHROME_GITHUB)
@@ -330,15 +330,17 @@ class TestFormatAnnotation:
 
 class TestFrameDiffer:
 
-    def test_edge_case_app_switch(self):
+    def test_app_switch_goes_to_llm(self):
+        """App switches now fall through to LLM diff for richer analysis.
+        Without Ollama, falls back to a failed marker."""
         differ = FrameDiffer()
         prev = _make_event("e1", "2026-03-03T09:14:50.000Z", ANN_CHROME_GITHUB)
         curr = _make_event("e2", "2026-03-03T09:14:55.000Z", ANN_FINDER)
 
         result = differ.diff_pair(prev, curr)
-        assert result.diff["diff_type"] == "app_switch"
-        assert result.inference_time_seconds == 0.0
-        assert differ.stats["edge_cases"] == 1
+        # Without LLM available, should get a failed marker (not an edge case)
+        assert result.diff["diff_type"] in ("action", "diff_failed")
+        assert differ.stats["edge_cases"] == 0
 
     def test_edge_case_session_gap(self):
         differ = FrameDiffer(DiffConfig(session_gap_seconds=600))

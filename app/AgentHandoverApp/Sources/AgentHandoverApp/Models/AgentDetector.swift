@@ -12,9 +12,17 @@ struct DetectedAgent: Identifiable {
 class AgentDetector: ObservableObject {
     @Published var agents: [DetectedAgent] = []
 
-    private let mcpEntry: [String: Any] = [
-        "command": "agenthandover-mcp"
-    ]
+    private var mcpEntry: [String: Any] {
+        // Use the full path to the MCP server binary so agents can find it
+        // even if the venv bin dir is not in PATH.
+        let candidates = [
+            "/usr/local/bin/agenthandover-mcp",
+            "/usr/local/lib/agenthandover/venv/bin/agenthandover-mcp",
+        ]
+        let resolved = candidates.first { FileManager.default.isExecutableFile(atPath: $0) }
+            ?? "agenthandover-mcp" // bare name as last resort
+        return ["command": resolved]
+    }
 
     func detect() {
         var detected: [DetectedAgent] = []
