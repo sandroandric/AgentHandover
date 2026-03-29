@@ -19,36 +19,71 @@ class AgentDetector: ObservableObject {
     func detect() {
         var detected: [DetectedAgent] = []
         let home = FileManager.default.homeDirectoryForCurrentUser
+        let fm = FileManager.default
 
-        // Claude Code
-        let claudeConfig = home.appendingPathComponent(".claude/settings.json")
-        detected.append(DetectedAgent(
-            id: "claude-code",
-            name: "Claude Code",
-            icon: "terminal",
-            configPath: claudeConfig,
-            isConnected: isAgentConnected(at: claudeConfig)
-        ))
+        // Claude Code — installed if ~/.claude/ exists
+        let claudeDir = home.appendingPathComponent(".claude")
+        let claudeConfig = claudeDir.appendingPathComponent("settings.json")
+        if fm.fileExists(atPath: claudeDir.path) {
+            detected.append(DetectedAgent(
+                id: "claude-code",
+                name: "Claude Code",
+                icon: "terminal",
+                configPath: claudeConfig,
+                isConnected: isAgentConnected(at: claudeConfig)
+            ))
+        }
 
-        // Cursor
-        let cursorConfig = home.appendingPathComponent(".cursor/mcp.json")
-        detected.append(DetectedAgent(
-            id: "cursor",
-            name: "Cursor",
-            icon: "cursorarrow.click",
-            configPath: cursorConfig,
-            isConnected: isAgentConnected(at: cursorConfig)
-        ))
+        // Cursor — installed if ~/.cursor/ exists
+        let cursorDir = home.appendingPathComponent(".cursor")
+        let cursorConfig = cursorDir.appendingPathComponent("mcp.json")
+        if fm.fileExists(atPath: cursorDir.path) {
+            detected.append(DetectedAgent(
+                id: "cursor",
+                name: "Cursor",
+                icon: "cursorarrow.click",
+                configPath: cursorConfig,
+                isConnected: isAgentConnected(at: cursorConfig)
+            ))
+        }
 
-        // Windsurf
-        let windsurfConfig = home.appendingPathComponent(".windsurf/mcp.json")
-        detected.append(DetectedAgent(
-            id: "windsurf",
-            name: "Windsurf",
-            icon: "wind",
-            configPath: windsurfConfig,
-            isConnected: isAgentConnected(at: windsurfConfig)
-        ))
+        // Windsurf — installed if ~/.windsurf/ exists
+        let windsurfDir = home.appendingPathComponent(".windsurf")
+        let windsurfConfig = windsurfDir.appendingPathComponent("mcp.json")
+        if fm.fileExists(atPath: windsurfDir.path) {
+            detected.append(DetectedAgent(
+                id: "windsurf",
+                name: "Windsurf",
+                icon: "wind",
+                configPath: windsurfConfig,
+                isConnected: isAgentConnected(at: windsurfConfig)
+            ))
+        }
+
+        // Codex — installed if codex CLI exists
+        if fm.fileExists(atPath: "/usr/local/bin/codex") || fm.fileExists(atPath: "/opt/homebrew/bin/codex") {
+            let codexConfig = home.appendingPathComponent(".codex/mcp.json")
+            detected.append(DetectedAgent(
+                id: "codex",
+                name: "Codex",
+                icon: "chevron.left.forwardslash.chevron.right",
+                configPath: codexConfig,
+                isConnected: isAgentConnected(at: codexConfig)
+            ))
+        }
+
+        // OpenClaw — installed if ~/.openclaw/ exists
+        let openclawDir = home.appendingPathComponent(".openclaw")
+        if fm.fileExists(atPath: openclawDir.path) {
+            let openclawConfig = openclawDir.appendingPathComponent("workspace")
+            detected.append(DetectedAgent(
+                id: "openclaw",
+                name: "OpenClaw",
+                icon: "pawprint.fill",
+                configPath: openclawConfig,
+                isConnected: fm.fileExists(atPath: openclawConfig.path)
+            ))
+        }
 
         agents = detected
     }

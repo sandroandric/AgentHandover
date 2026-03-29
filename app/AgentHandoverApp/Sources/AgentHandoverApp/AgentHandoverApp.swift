@@ -6,7 +6,7 @@ struct AgentHandoverApp: App {
     @AppStorage("hasCompletedOnboarding") private var hasCompletedOnboarding = false
 
     var body: some Scene {
-        MenuBarExtra(isInserted: $hasCompletedOnboarding) {
+        MenuBarExtra {
             MenuBarView()
                 .environmentObject(delegate.sharedAppState)
                 .environmentObject(delegate)
@@ -72,33 +72,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
 
     private var onboardingNeeded: Bool {
         !UserDefaults.standard.bool(forKey: "hasCompletedOnboarding")
-            || !PermissionChecker.allPermissionsGranted()
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Always start capture + observation servers so the daemon can
+        // request screenshots at any point — during onboarding or after.
+        startRuntimeBridges()
+
         if onboardingNeeded {
             hasTriggeredOnboarding = true
-
-            // Keep onboarding isolated from any stale helper runtime so macOS
-            // always attributes permission prompts to AgentHandover itself.
-            ServiceController.stopAll()
-            ServiceController.prepareForAppOwnedPermissionRequest()
-            ServiceController.removeNativeMessagingHostManifest()
 
             // Show in dock during onboarding
             NSApp.setActivationPolicy(.regular)
 
-            // Create the onboarding window directly — don't wait for SwiftUI
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                Task { @MainActor [weak self] in
-                    self?.showOnboarding()
-                }
+            // Clean up stale helper state on a background thread
+            // so it doesn't block the onboarding window.
+            DispatchQueue.global(qos: .utility).async {
+                ServiceController.stopAll()
+                ServiceController.prepareForAppOwnedPermissionRequest()
+                ServiceController.removeNativeMessagingHostManifest()
+            }
+
+            // Show onboarding immediately
+            DispatchQueue.main.async { [weak self] in
+                self?.showOnboarding()
             }
         } else {
             // Keep the bundle a normal app principal for TCC purposes, but
             // present it as a menu bar app once onboarding is already done.
             ServiceController.installNativeMessagingHostManifest()
-            startRuntimeBridges()
             hideFromDock()
 
             // Onboarding done — start services if user hasn't paused
@@ -114,23 +116,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         // Don't create duplicates
         if onboardingWindow != nil { return }
 
-        // Re-entering onboarding should also clear any stale daemon process so
-        // the permission steps stay app-owned even after upgrades or crashes.
-        ServiceController.stopAll()
-        ServiceController.prepareForAppOwnedPermissionRequest()
-        ServiceController.removeNativeMessagingHostManifest()
-
         let onboardingView = OnboardingView(onComplete: { [weak self] in
             UserDefaults.standard.set(true, forKey: "hasCompletedOnboarding")
-            ServiceController.installNativeMessagingHostManifest()
-            self?.startRuntimeBridges()
-            let userPaused = UserDefaults.standard.bool(forKey: "observingPaused")
-            if !userPaused {
-                ServiceController.startAll()
-            }
+            // Default to paused — user chooses "Observe Me" or "Record" explicitly
+            UserDefaults.standard.set(true, forKey: "observingPaused")
+            self?.sharedAppState.userStopped = true
             self?.onboardingWindow?.close()
             self?.onboardingWindow = nil
             self?.hideFromDock()
+            // Install NM manifest on background (no services started yet)
+            DispatchQueue.global(qos: .utility).async {
+                ServiceController.installNativeMessagingHostManifest()
+            }
         })
         .environmentObject(sharedAppState)
         .frame(width: 660, height: 820)

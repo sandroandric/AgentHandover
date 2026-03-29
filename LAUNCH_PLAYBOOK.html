@@ -1,0 +1,1309 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AgentHandover - Launch Day Playbook</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+
+  :root {
+    --bg: #fafaf9;
+    --surface: #ffffff;
+    --surface-hover: #f5f5f4;
+    --border: #e7e5e4;
+    --border-light: #f0eeec;
+    --text: #1c1917;
+    --text-secondary: #57534e;
+    --text-muted: #a8a29e;
+    --accent: #3b82f6;
+    --accent-light: #eff6ff;
+    --green: #16a34a;
+    --green-light: #f0fdf4;
+    --green-border: #bbf7d0;
+    --amber: #d97706;
+    --amber-light: #fffbeb;
+    --amber-border: #fde68a;
+    --red: #dc2626;
+    --red-light: #fef2f2;
+    --red-border: #fecaca;
+    --purple: #7c3aed;
+    --purple-light: #f5f3ff;
+    --purple-border: #ddd6fe;
+    --cyan: #0891b2;
+    --cyan-light: #ecfeff;
+    --cyan-border: #a5f3fc;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.65;
+    font-size: 15px;
+    padding: 0;
+  }
+
+  .container {
+    max-width: 900px;
+    margin: 0 auto;
+    padding: 48px 32px 80px;
+  }
+
+  /* Header */
+  .header {
+    text-align: center;
+    margin-bottom: 56px;
+    padding-bottom: 40px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .header h1 {
+    font-size: 32px;
+    font-weight: 700;
+    letter-spacing: -0.5px;
+    margin-bottom: 8px;
+  }
+
+  .header .subtitle {
+    font-size: 16px;
+    color: var(--text-secondary);
+    font-weight: 400;
+  }
+
+  .header .tagline {
+    margin-top: 20px;
+    padding: 16px 24px;
+    background: var(--accent-light);
+    border-radius: 10px;
+    font-size: 15px;
+    color: var(--accent);
+    font-weight: 500;
+    display: inline-block;
+  }
+
+  /* Navigation */
+  .toc {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 24px 28px;
+    margin-bottom: 48px;
+  }
+
+  .toc h2 {
+    font-size: 13px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--text-muted);
+    margin-bottom: 14px;
+    font-weight: 600;
+  }
+
+  .toc-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px 24px;
+  }
+
+  .toc a {
+    color: var(--text-secondary);
+    text-decoration: none;
+    font-size: 14px;
+    padding: 4px 0;
+    display: block;
+    transition: color 0.15s;
+  }
+
+  .toc a:hover { color: var(--accent); }
+
+  .toc a .num {
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
+    margin-right: 6px;
+    font-size: 13px;
+  }
+
+  /* Sections */
+  .section {
+    margin-bottom: 48px;
+  }
+
+  .section h2 {
+    font-size: 22px;
+    font-weight: 700;
+    letter-spacing: -0.3px;
+    margin-bottom: 20px;
+    padding-bottom: 12px;
+    border-bottom: 2px solid var(--text);
+  }
+
+  .section h3 {
+    font-size: 17px;
+    font-weight: 600;
+    margin-top: 28px;
+    margin-bottom: 12px;
+    color: var(--text);
+  }
+
+  .section h4 {
+    font-size: 15px;
+    font-weight: 600;
+    margin-top: 20px;
+    margin-bottom: 8px;
+    color: var(--text-secondary);
+  }
+
+  p { margin-bottom: 12px; color: var(--text-secondary); }
+  p strong { color: var(--text); font-weight: 600; }
+
+  /* Cards */
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 20px 24px;
+    margin-bottom: 12px;
+    transition: border-color 0.15s;
+  }
+
+  .card:hover { border-color: #d6d3d1; }
+
+  .card-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 10px;
+  }
+
+  .card-header .icon {
+    width: 36px;
+    height: 36px;
+    border-radius: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 16px;
+    flex-shrink: 0;
+  }
+
+  .card-header h4 {
+    margin: 0;
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--text);
+  }
+
+  .card-header .badge {
+    font-size: 11px;
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: 4px;
+    margin-left: auto;
+    flex-shrink: 0;
+  }
+
+  .card p:last-child { margin-bottom: 0; }
+
+  /* Badges */
+  .badge-green { background: var(--green-light); color: var(--green); border: 1px solid var(--green-border); }
+  .badge-amber { background: var(--amber-light); color: var(--amber); border: 1px solid var(--amber-border); }
+  .badge-red { background: var(--red-light); color: var(--red); border: 1px solid var(--red-border); }
+  .badge-purple { background: var(--purple-light); color: var(--purple); border: 1px solid var(--purple-border); }
+  .badge-cyan { background: var(--cyan-light); color: var(--cyan); border: 1px solid var(--cyan-border); }
+
+  .icon-green { background: var(--green-light); }
+  .icon-amber { background: var(--amber-light); }
+  .icon-red { background: var(--red-light); }
+  .icon-purple { background: var(--purple-light); }
+  .icon-cyan { background: var(--cyan-light); }
+  .icon-blue { background: var(--accent-light); }
+
+  /* Timeline */
+  .timeline-item {
+    display: grid;
+    grid-template-columns: 120px 1fr;
+    gap: 20px;
+    padding: 20px 0;
+    border-bottom: 1px solid var(--border-light);
+  }
+
+  .timeline-item:last-child { border-bottom: none; }
+
+  .timeline-time {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--accent);
+    padding-top: 2px;
+  }
+
+  .timeline-content h4 {
+    margin: 0 0 6px;
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--text);
+  }
+
+  .timeline-content p {
+    font-size: 14px;
+    margin-bottom: 6px;
+  }
+
+  /* Subreddit table */
+  .sub-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 16px 0;
+    font-size: 14px;
+  }
+
+  .sub-table th {
+    text-align: left;
+    padding: 10px 14px;
+    background: var(--surface-hover);
+    font-weight: 600;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--text-muted);
+    border-bottom: 2px solid var(--border);
+  }
+
+  .sub-table td {
+    padding: 12px 14px;
+    border-bottom: 1px solid var(--border-light);
+    color: var(--text-secondary);
+    vertical-align: top;
+  }
+
+  .sub-table tr:hover td { background: var(--surface-hover); }
+
+  .sub-name {
+    font-weight: 600;
+    color: var(--text);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 13px;
+  }
+
+  .sub-members {
+    font-size: 12px;
+    color: var(--text-muted);
+  }
+
+  .promo-tag {
+    display: inline-block;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 2px 7px;
+    border-radius: 4px;
+  }
+
+  .promo-yes { background: var(--green-light); color: var(--green); }
+  .promo-limited { background: var(--amber-light); color: var(--amber); }
+  .promo-strict { background: var(--red-light); color: var(--red); }
+
+  /* Callouts */
+  .callout {
+    padding: 16px 20px;
+    border-radius: 8px;
+    margin: 16px 0;
+    font-size: 14px;
+  }
+
+  .callout-blue {
+    background: var(--accent-light);
+    border-left: 3px solid var(--accent);
+  }
+
+  .callout-green {
+    background: var(--green-light);
+    border-left: 3px solid var(--green);
+  }
+
+  .callout-amber {
+    background: var(--amber-light);
+    border-left: 3px solid var(--amber);
+  }
+
+  .callout-red {
+    background: var(--red-light);
+    border-left: 3px solid var(--red);
+  }
+
+  .callout p { color: inherit; margin-bottom: 4px; }
+  .callout p:last-child { margin-bottom: 0; }
+
+  /* Code blocks */
+  code {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 13px;
+    background: var(--surface-hover);
+    padding: 2px 6px;
+    border-radius: 4px;
+    color: var(--text);
+  }
+
+  pre {
+    background: #1c1917;
+    color: #e7e5e4;
+    padding: 16px 20px;
+    border-radius: 8px;
+    overflow-x: auto;
+    margin: 12px 0;
+    font-size: 13px;
+    line-height: 1.6;
+  }
+
+  pre code {
+    background: none;
+    padding: 0;
+    color: inherit;
+  }
+
+  /* Hooks grid */
+  .hooks-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+    margin: 16px 0;
+  }
+
+  .hook {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px 16px;
+    font-size: 14px;
+    font-style: italic;
+    color: var(--text-secondary);
+  }
+
+  .hook .use-on {
+    font-style: normal;
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-top: 6px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    font-weight: 600;
+  }
+
+  /* Checklist */
+  .checklist {
+    list-style: none;
+    padding: 0;
+    margin: 12px 0;
+  }
+
+  .checklist li {
+    padding: 8px 0 8px 28px;
+    position: relative;
+    font-size: 14px;
+    color: var(--text-secondary);
+    border-bottom: 1px solid var(--border-light);
+  }
+
+  .checklist li:last-child { border-bottom: none; }
+
+  .checklist li::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 10px;
+    width: 16px;
+    height: 16px;
+    border: 2px solid var(--border);
+    border-radius: 4px;
+  }
+
+  /* Directory list */
+  .dir-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+    margin: 12px 0;
+  }
+
+  .dir-item {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px 16px;
+  }
+
+  .dir-item .name {
+    font-weight: 600;
+    font-size: 14px;
+    color: var(--text);
+  }
+
+  .dir-item .desc {
+    font-size: 12px;
+    color: var(--text-muted);
+    margin-top: 2px;
+  }
+
+  /* Responsive */
+  @media (max-width: 640px) {
+    .container { padding: 24px 16px 48px; }
+    .toc-grid { grid-template-columns: 1fr; }
+    .hooks-grid { grid-template-columns: 1fr; }
+    .dir-grid { grid-template-columns: 1fr; }
+    .timeline-item { grid-template-columns: 1fr; }
+    .timeline-time { margin-bottom: 4px; }
+    .sub-table { font-size: 13px; }
+    .sub-table th, .sub-table td { padding: 8px 10px; }
+  }
+</style>
+</head>
+<body>
+
+<div class="container">
+
+  <!-- Header -->
+  <div class="header">
+    <h1>AgentHandover Launch Day Playbook</h1>
+    <div class="subtitle">Concentrated single-day virality. Every action fires the same day.</div>
+    <div class="tagline">"OpenClaw does the work. AgentHandover teaches it yours."</div>
+  </div>
+
+  <!-- TOC -->
+  <div class="toc">
+    <h2>Contents</h2>
+    <div class="toc-grid">
+      <a href="#leverage"><span class="num">01</span> The OpenClaw Leverage Play</a>
+      <a href="#timeline"><span class="num">02</span> Launch Day Timeline</a>
+      <a href="#producthunt"><span class="num">03</span> ProductHunt Strategy</a>
+      <a href="#hackernews"><span class="num">04</span> Hacker News (Show HN)</a>
+      <a href="#twitter"><span class="num">05</span> X / Twitter Strategy</a>
+      <a href="#reddit"><span class="num">06</span> Reddit: Full Subreddit Guide</a>
+      <a href="#discord"><span class="num">07</span> Discord Servers</a>
+      <a href="#newsletters"><span class="num">08</span> Newsletters & Aggregators</a>
+      <a href="#directories"><span class="num">09</span> AI & Startup Directories</a>
+      <a href="#communities"><span class="num">10</span> Dev Communities & Forums</a>
+      <a href="#hooks"><span class="num">11</span> Viral Hooks</a>
+      <a href="#prep"><span class="num">12</span> Pre-Launch Prep Checklist</a>
+      <a href="#paid"><span class="num">13</span> Paid Options (Small Budget)</a>
+      <a href="#risks"><span class="num">14</span> Risk Mitigation & FAQ</a>
+    </div>
+  </div>
+
+  <!-- 01: OpenClaw Leverage -->
+  <div class="section" id="leverage">
+    <h2>01 &mdash; The OpenClaw Leverage Play</h2>
+    <p>OpenClaw went viral through a well-timed Hacker News post, prominent devs tweeting about it, and the shareability of "talk to an AI agent through WhatsApp." It crossed 247K GitHub stars in under two months.</p>
+    <p>AgentHandover can ride this wave because:</p>
+    <div class="card">
+      <p><strong>Warm audience.</strong> Every OpenClaw user immediately needs a way to teach it their workflows. That is literally what you built. The OpenClaw community (GitHub Discussions, Discord, Reddit, Twitter) is your #1 target.</p>
+    </div>
+    <div class="card">
+      <p><strong>Zero-friction integration.</strong> <code>agenthandover connect openclaw</code> is a single command. Skills auto-sync. Nothing to configure. This makes the "try it" barrier almost nonexistent.</p>
+    </div>
+    <div class="card">
+      <p><strong>Narrative hook.</strong> "OpenClaw does the work. AgentHandover teaches it yours." This frames you as the essential companion to the biggest open-source AI project of the year.</p>
+    </div>
+    <div class="callout callout-blue">
+      <p><strong>High-leverage move:</strong> Reach out to Peter Steinberger (OpenClaw creator) before launch with a short, respectful DM about the integration. Even a retweet from him puts you in front of the entire OpenClaw audience instantly.</p>
+    </div>
+  </div>
+
+  <!-- 02: Timeline -->
+  <div class="section" id="timeline">
+    <h2>02 &mdash; Launch Day Timeline</h2>
+    <p>All times Pacific. The goal: overlapping waves so people see AgentHandover on multiple platforms simultaneously, creating the perception of "this is everywhere."</p>
+
+    <div class="timeline-item">
+      <div class="timeline-time">12:00 AM</div>
+      <div class="timeline-content">
+        <h4>ProductHunt goes live</h4>
+        <p>PH page should be scheduled ahead of time. Post the X/Twitter thread at 12:03 AM (catches global audience; Europe is waking up).</p>
+        <p>DM 5-10 people you know who are active on PH to leave early genuine comments (not upvote requests).</p>
+      </div>
+    </div>
+
+    <div class="timeline-item">
+      <div class="timeline-time">7:00 AM</div>
+      <div class="timeline-content">
+        <h4>Show HN goes live</h4>
+        <p>Post at 7 AM PT (engineers check HN before standup). Add your first comment immediately (60-word TL;DR + one question).</p>
+        <p>Have 5-10 real HN users ready to check it out organically in the first 30 minutes.</p>
+      </div>
+    </div>
+
+    <div class="timeline-item">
+      <div class="timeline-time">7:30 AM</div>
+      <div class="timeline-content">
+        <h4>Reddit Tier 1 posts go out</h4>
+        <p>Stagger by 15-20 min: r/LocalLLaMA first, then r/MachineLearning, then r/ClaudeAI. Each post tailored differently.</p>
+      </div>
+    </div>
+
+    <div class="timeline-item">
+      <div class="timeline-time">8:30 AM</div>
+      <div class="timeline-content">
+        <h4>Reddit Tier 2 + Discord</h4>
+        <p>r/selfhosted, r/macapps, r/SideProject, r/artificial. Post in Discord servers (MCP Community, OpenClaw, Ollama).</p>
+      </div>
+    </div>
+
+    <div class="timeline-item">
+      <div class="timeline-time">9:00 AM</div>
+      <div class="timeline-content">
+        <h4>Dev blogs go live</h4>
+        <p>Publish technical post on dev.to and Hashnode. Submit to newsletters (TLDR, Ben's Bites, PulseMCP).</p>
+      </div>
+    </div>
+
+    <div class="timeline-item">
+      <div class="timeline-time">9 AM - 1 PM</div>
+      <div class="timeline-content">
+        <h4>Engage, engage, engage</h4>
+        <p><strong>Reply to every comment on every platform within 10 minutes.</strong> This is the single highest-leverage activity of the day. On X, your reply to someone's reply is weighted 150x more than a like. On HN, active threads stay on the front page. On PH, response time affects ranking.</p>
+      </div>
+    </div>
+
+    <div class="timeline-item">
+      <div class="timeline-time">2:00 PM</div>
+      <div class="timeline-content">
+        <h4>Second X post + Reddit Tier 3</h4>
+        <p>Different angle (architecture diagram, specific workflow example, or a GIF). Post to r/singularity, r/ChatGPT, r/opensource, r/startups.</p>
+      </div>
+    </div>
+
+    <div class="timeline-item">
+      <div class="timeline-time">3:00 PM</div>
+      <div class="timeline-content">
+        <h4>Directories blitz</h4>
+        <p>Submit to all AI tool directories and startup directories (see sections 09-10).</p>
+      </div>
+    </div>
+
+    <div class="timeline-item">
+      <div class="timeline-time">5:00 PM</div>
+      <div class="timeline-content">
+        <h4>Indie Hackers + communities</h4>
+        <p>Post on Indie Hackers, Lobsters (if you have access), WIP.co, Makerlog.</p>
+      </div>
+    </div>
+
+    <div class="timeline-item">
+      <div class="timeline-time">6:00 PM</div>
+      <div class="timeline-content">
+        <h4>Evening social proof</h4>
+        <p>Share milestones on X: PH ranking, GitHub stars, HN points. Post a "behind the scenes" or "lessons learned" angle. Reply to everything you missed.</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- 03: ProductHunt -->
+  <div class="section" id="producthunt">
+    <h2>03 &mdash; ProductHunt Strategy</h2>
+
+    <h3>Timing</h3>
+    <p><strong>Best days:</strong> Tuesday through Thursday. Given your "this week" window, aim for <strong>Tuesday March 31</strong> or <strong>Wednesday April 1</strong>.</p>
+
+    <div class="callout callout-amber">
+      <p><strong>Algorithm change for 2026:</strong> PH now hand-picks which products hit the homepage based on usefulness, novelty, craft, and creativity. The algorithm rewards steady engagement throughout the day, not upvote spikes. Upvotes from active PH users weigh more than from new/inactive accounts. PH filters upvote rings and sudden spikes.</p>
+    </div>
+
+    <h3>What to prepare</h3>
+    <ul class="checklist">
+      <li><strong>Tagline</strong> (60 chars): "Watch you work. Teach your agents. Self-improving Skills."</li>
+      <li><strong>Description:</strong> Lead with the problem (agents are powerful but clueless about your workflows), then solution, then OpenClaw connection.</li>
+      <li><strong>Maker comment:</strong> Your personal story. Be vulnerable. "I was writing the same Claude Code skills over and over, and they kept going stale..."</li>
+      <li><strong>Gallery:</strong> 3-5 images. Menu bar app screenshot, Skill format example, architecture diagram, before/after (hand-written vs. generated skill).</li>
+      <li><strong>PH-only perk:</strong> Early adopter badge, founding user status, priority feature requests.</li>
+    </ul>
+
+    <h3>Day-of tactics</h3>
+    <p>Answer every comment in under 10 minutes for the first 4 hours. Pin the most interesting/funny one. Offer a PH-exclusive perk. Sync the X thread and tag @producthunt.</p>
+  </div>
+
+  <!-- 04: Hacker News -->
+  <div class="section" id="hackernews">
+    <h2>04 &mdash; Hacker News (Show HN)</h2>
+    <p><strong>This is probably your highest-leverage free channel.</strong> OpenClaw's breakout started here.</p>
+
+    <h3>Title</h3>
+    <p>Factual, technical, no hype. Include "local" and "Mac" (HN loves local-first and privacy):</p>
+    <pre><code>Show HN: AgentHandover -- learns your Mac workflows, produces self-improving agent Skills (all local)</code></pre>
+
+    <h3>First comment (post immediately)</h3>
+    <p>60-word TL;DR + one question to seed discussion:</p>
+    <div class="card">
+      <p style="font-style: italic; font-size: 14px;">"I built this because I kept hand-writing Claude Code skills that went stale. AgentHandover watches me work, extracts the strategy/guardrails/voice, and produces Skills that improve from execution feedback. Runs an 11-stage local pipeline (Qwen + nomic-embed). Curious: how are others handling the gap between what agents can do and teaching them your specific workflows?"</p>
+    </div>
+
+    <h3>What HN cares about</h3>
+    <div class="card">
+      <p><strong>Privacy:</strong> Everything local, no telemetry, encryption at rest, screenshots deleted after annotation.</p>
+      <p><strong>Technical depth:</strong> 11-stage pipeline, Rust daemon, Python worker, Qwen VLM, vector embeddings, perceptual hashing.</p>
+      <p><strong>The novel bit:</strong> Self-improving feedback loop where execution results improve the Skills over time.</p>
+      <p><strong>Source available:</strong> BSL 1.1 (not OSI-approved; be upfront, explain why).</p>
+    </div>
+
+    <div class="callout callout-red">
+      <p><strong>Critical velocity:</strong> You need 8-10 genuine upvotes and 2-3 thoughtful comments in the first 30 minutes. Every 45 minutes the gravity multiplier increases, so early momentum is everything. Have a small group of real HN users (private Slack/Discord, not public Twitter) ready to check it out.</p>
+    </div>
+
+    <div class="callout callout-red">
+      <p><strong>What will kill you on HN:</strong> Marketing language. Buzzwords without substance. Not being transparent about the BSL 1.1 license. Public "upvote my post" calls (shadow-bans those IPs).</p>
+    </div>
+
+    <h3>Best posting window</h3>
+    <p><strong>Tue-Thu 7:00-9:00 AM PT</strong> (engineers check before standup). Alternatively, Sun 6-9 PM PT if you want low competition, but weekday is better for overall volume.</p>
+  </div>
+
+  <!-- 05: Twitter -->
+  <div class="section" id="twitter">
+    <h2>05 &mdash; X / Twitter Strategy</h2>
+
+    <div class="callout callout-blue">
+      <p><strong>Key algorithm facts for 2026:</strong> Text-only posts outperform video by 30% on X (the only major platform where this is true). A reply that gets a reply from you is weighted +75, vs +0.5 for a like. That's 150x more powerful. Conversation depth is king.</p>
+    </div>
+
+    <h3>Thread #1 (post at 12:03 AM PT)</h3>
+    <div class="card">
+      <h4 style="margin-top: 0;">Tweet 1 (hook)</h4>
+      <p style="font-style: italic;">"I've been watching AI agents try to do my work for months. They're powerful but clueless about MY workflows. So I built something: AgentHandover watches you work on your Mac, understands what you're doing and why, and produces self-improving Skills that agents like OpenClaw and Claude Code can execute."</p>
+      <h4>Tweet 2: The problem</h4>
+      <p>Agents are generic. Hand-written skills go stale. You end up rewriting instructions every time something changes.</p>
+      <h4>Tweet 3: The solution + example</h4>
+      <p>Show the Skill format from your README. The visual of a structured Skill is compelling and shareable.</p>
+      <h4>Tweet 4: How it works</h4>
+      <p>11-stage pipeline, local/private, Qwen VLM. Technical credibility without jargon.</p>
+      <h4>Tweet 5: Self-improving loop</h4>
+      <p>Execution feedback. Successes boost confidence. Deviations become new branches. Failures auto-demote. This is the genuinely novel bit.</p>
+      <h4>Tweet 6: OpenClaw integration</h4>
+      <p><code>agenthandover connect openclaw</code>. One command. Skills auto-sync. Tag @OpenClaw / Peter Steinberger.</p>
+      <h4>Tweet 7: CTA</h4>
+      <p>GitHub link + ProductHunt link. Simple.</p>
+    </div>
+
+    <h3>Thread #2 (post at 2:00 PM PT)</h3>
+    <p>Different angle. Ideas: the architecture ASCII diagram, a specific workflow example ("I recorded myself doing code review for 3 sessions. AgentHandover produced a Skill with my checklist, tone, and guardrails."), or a "what I learned building this" narrative.</p>
+
+    <h3>Hashtags and tags</h3>
+    <p><code>#buildinpublic</code> <code>#opensource</code> <code>#aiagents</code> <code>#mcp</code>. Tag @AnthropicAI, @OpenClaw, @producthunt.</p>
+
+    <h3>All day: reply to everything</h3>
+    <p>The algorithm rewards you massively for replying to replies. Every conversation thread you participate in pushes your content to the replier's network.</p>
+  </div>
+
+  <!-- 06: Reddit -->
+  <div class="section" id="reddit">
+    <h2>06 &mdash; Reddit: Full Subreddit Guide</h2>
+
+    <div class="callout callout-amber">
+      <p><strong>Reddit golden rule:</strong> Each subreddit gets a DIFFERENT post, tailored to what that community cares about. Never cross-post identical text. Be in the comments replying to questions within minutes. Reddit AI communities punish hype: be factual, technical, honest.</p>
+    </div>
+
+    <h3>Tier 1: Post First (7:30 AM PT)</h3>
+    <table class="sub-table">
+      <thead>
+        <tr>
+          <th>Subreddit</th>
+          <th>Self-Promo Rules</th>
+          <th>Your Angle</th>
+          <th>Post Format</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>
+            <span class="sub-name">r/LocalLLaMA</span><br>
+            <span class="sub-members">700K+ members</span>
+          </td>
+          <td><span class="promo-tag promo-limited">10% rule</span><br>Direct links OK, no sensationalized titles. Must be related to LLMs. Genuine projects welcome if you provide value.</td>
+          <td>Lead with <strong>"runs Qwen 3.5 locally via Ollama, zero cloud APIs"</strong>. This community cares deeply about local inference and privacy. Mention the VLM annotation pipeline, nomic-embed-text, optional SigLIP.</td>
+          <td>Text post with technical details. Include model sizes (2.7GB + 3.4GB + 274MB). Link to repo.</td>
+        </tr>
+        <tr>
+          <td>
+            <span class="sub-name">r/MachineLearning</span><br>
+            <span class="sub-members">3.2M+ members</span>
+          </td>
+          <td><span class="promo-tag promo-strict">Strict</span><br>Has periodic "[D] Self-Promotion Thread" for sharing projects. Outside these threads, promotional content is removed unless genuinely community-interesting. Open-source projects with benchmarks get better reception.</td>
+          <td>Use the <strong>[P] Project</strong> tag. Lead with the technical pipeline: VLM annotation, semantic clustering, behavioral synthesis, voice analysis. Frame it as a research-adjacent system.</td>
+          <td>Wait for a self-promotion thread, OR post as [P] with heavy technical detail. Include architecture diagram.</td>
+        </tr>
+        <tr>
+          <td>
+            <span class="sub-name">r/ClaudeAI</span><br>
+            <span class="sub-members">612K members</span>
+          </td>
+          <td><span class="promo-tag promo-limited">Limited</span><br>Projects that integrate with Claude are generally welcome. Community focused on Claude usage and tools.</td>
+          <td>Lead with <strong>Claude Code integration</strong>. Skills appear as /slash-commands. Show how <code>agenthandover connect claude-code</code> works. Mention the MCP server with 8 tools.</td>
+          <td>Text post: "I built a tool that watches you work and generates Claude Code skills automatically." Demo-oriented.</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h3>Tier 2: Post Next (8:30 AM PT)</h3>
+    <table class="sub-table">
+      <thead>
+        <tr>
+          <th>Subreddit</th>
+          <th>Self-Promo Rules</th>
+          <th>Your Angle</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>
+            <span class="sub-name">r/selfhosted</span><br>
+            <span class="sub-members">500K+ members</span>
+          </td>
+          <td><span class="promo-tag promo-limited">In context</span><br>Self-promo allowed if genuinely self-hostable. Provide GitHub link and clear install instructions. Be responsive.</td>
+          <td><strong>"100% local, no cloud, no telemetry, encryption at rest."</strong> This crowd lives for this. Mention Homebrew install, source build instructions, configurable retention.</td>
+        </tr>
+        <tr>
+          <td>
+            <span class="sub-name">r/macapps</span><br>
+            <span class="sub-members">180K+ members</span>
+          </td>
+          <td><span class="promo-tag promo-limited">Limited</span><br>Generally open to developers sharing Mac apps. Focus on the app itself, not marketing.</td>
+          <td><strong>Menu bar app angle.</strong> SwiftUI, lives in your menu bar, one-click recording, daily digest, workflow browser. Focus on the Mac-native UX.</td>
+        </tr>
+        <tr>
+          <td>
+            <span class="sub-name">r/artificial</span><br>
+            <span class="sub-members">1M+ members</span>
+          </td>
+          <td><span class="promo-tag promo-yes">Lenient</span><br>More lenient than most AI subs. AI product posts and announcements are common. Lower signal-to-noise.</td>
+          <td>Frame it broadly: <strong>"Teaching AI agents your workflows by watching you work."</strong> More accessible, less technical.</td>
+        </tr>
+        <tr>
+          <td>
+            <span class="sub-name">r/SideProject</span><br>
+            <span class="sub-members">503K members</span>
+          </td>
+          <td><span class="promo-tag promo-yes">Welcome</span><br>Explicitly welcomes project sharing. But frame it as "seeking feedback" not pure promotion.</td>
+          <td><strong>Builder story.</strong> "I built this as a solo dev, here's what it does, would love feedback." Show the journey.</td>
+        </tr>
+        <tr>
+          <td>
+            <span class="sub-name">r/programming</span><br>
+            <span class="sub-members">6M+ members</span>
+          </td>
+          <td><span class="promo-tag promo-strict">Strict</span><br>Very strict about self-promo. Blog posts about technical implementation are better received than product announcements.</td>
+          <td>Only post here if you have a <strong>technical blog post</strong> (dev.to or your own) about the architecture. "How I built an 11-stage pipeline in Rust + Python to teach AI agents." Link to the article, not the repo.</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h3>Tier 3: Afternoon Wave (2:00 PM PT)</h3>
+    <table class="sub-table">
+      <thead>
+        <tr>
+          <th>Subreddit</th>
+          <th>Self-Promo Rules</th>
+          <th>Your Angle</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>
+            <span class="sub-name">r/singularity</span><br>
+            <span class="sub-members">1.5M members</span>
+          </td>
+          <td><span class="promo-tag promo-strict">No self-promo</span><br>Explicitly: "Self-promotion/Advertisement posts will not be tolerated." Discussion posts about AI agents are fine.</td>
+          <td>Do NOT post your product directly. Instead, post a <strong>discussion</strong>: "What if AI agents could learn your workflows by watching you?" and include AgentHandover as a reference in a comment. Or wait for an agent-related thread and comment.</td>
+        </tr>
+        <tr>
+          <td>
+            <span class="sub-name">r/ChatGPT</span><br>
+            <span class="sub-members">6M+ members</span>
+          </td>
+          <td><span class="promo-tag promo-limited">Thread-based</span><br>Project sharing often directed to dedicated threads, but separate project posts sometimes get traction.</td>
+          <td>Keep it practical and broad. "This tool watches you work and writes instructions so AI agents can do it for you." Less technical, more "wow" factor.</td>
+        </tr>
+        <tr>
+          <td>
+            <span class="sub-name">r/opensource</span><br>
+            <span class="sub-members">210K members</span>
+          </td>
+          <td><span class="promo-tag promo-limited">Limited OK</span><br>Open-source projects generally welcome. Be transparent about BSL 1.1 license.</td>
+          <td>Lead with the <strong>source-available angle</strong>. BSL 1.1 converting to Apache 2.0 in 2030. Local-first. Community discussion about licensing is fine here.</td>
+        </tr>
+        <tr>
+          <td>
+            <span class="sub-name">r/startups</span><br>
+            <span class="sub-members">1.5M+ members</span>
+          </td>
+          <td><span class="promo-tag promo-limited">Context-dependent</span><br>Product stories and launch stories are welcome if they provide value to other founders.</td>
+          <td><strong>Launch story angle.</strong> "Solo dev launching AgentHandover this week after months of building." Frame it as a founder journey.</td>
+        </tr>
+        <tr>
+          <td>
+            <span class="sub-name">r/Entrepreneur</span><br>
+            <span class="sub-members">4.9M members</span>
+          </td>
+          <td><span class="promo-tag promo-limited">Limited</span><br>Value-first posts work. "Here's how I built X" does better than "check out my product."</td>
+          <td><strong>"How I'm automating workflows with AI agents."</strong> Frame around business productivity and delegation.</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h3>Bonus subreddits (comment in relevant threads rather than creating new posts)</h3>
+    <table class="sub-table">
+      <thead>
+        <tr>
+          <th>Subreddit</th>
+          <th>Strategy</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><span class="sub-name">r/OpenClaw</span></td>
+          <td>If this exists, post about the integration directly. This is the warmest possible audience.</td>
+        </tr>
+        <tr>
+          <td><span class="sub-name">r/Ollama</span></td>
+          <td>You use their models. Comment in threads about Qwen or local VLM use cases.</td>
+        </tr>
+        <tr>
+          <td><span class="sub-name">r/MCP</span></td>
+          <td>Your MCP server with 8 tools is directly relevant. Share it as an MCP server showcase.</td>
+        </tr>
+        <tr>
+          <td><span class="sub-name">r/AutomateYourself</span></td>
+          <td>Workflow automation crowd. The "watch and learn" concept fits perfectly.</td>
+        </tr>
+        <tr>
+          <td><span class="sub-name">r/productivityApps</span></td>
+          <td>Frame as a productivity multiplier. "Record once, delegate forever."</td>
+        </tr>
+        <tr>
+          <td><span class="sub-name">r/ChatGPTCoding</span></td>
+          <td>Developer-focused. Show how it integrates with coding agents.</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- 07: Discord -->
+  <div class="section" id="discord">
+    <h2>07 &mdash; Discord Servers</h2>
+    <p>Post a short intro (2-3 sentences + GitHub link) in the appropriate channel (#show-and-tell, #projects, #tools, etc.).</p>
+
+    <div class="card">
+      <div class="card-header">
+        <div class="icon icon-purple">M</div>
+        <h4>MCP Community Discord</h4>
+        <span class="badge badge-green">11,800+ members</span>
+      </div>
+      <p>AgentHandover IS an MCP server. This is a direct-fit audience. Post in the community Discord, not the contributor one (unless you're a contributor). Share the 8-tool MCP interface.</p>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <div class="icon icon-red">O</div>
+        <h4>OpenClaw Discord</h4>
+        <span class="badge badge-green">Top priority</span>
+      </div>
+      <p>If it exists, this is your #1 warm audience. Post the integration: <code>agenthandover connect openclaw</code> and show what a synced Skill looks like.</p>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <div class="icon icon-cyan">O</div>
+        <h4>Ollama Discord</h4>
+        <span class="badge badge-amber">Good fit</span>
+      </div>
+      <p>You use Qwen 3.5 (2b + 4b) and nomic-embed-text via Ollama. Share as a real-world use case of local VLM inference for workflow understanding.</p>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <div class="icon icon-blue">A</div>
+        <h4>Anthropic / Claude Community</h4>
+        <span class="badge badge-amber">Good fit</span>
+      </div>
+      <p>Claude Code integration, MCP server, /slash-commands. Show the developer experience.</p>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <div class="icon icon-green">I</div>
+        <h4>Indie Hackers Discord</h4>
+        <span class="badge badge-amber">Good fit</span>
+      </div>
+      <p>Launch story. "Solo dev shipping AgentHandover today, here's what it does." Builder community loves launch energy.</p>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <div class="icon icon-amber">M</div>
+        <h4>Mac Power Users / Mac Dev communities</h4>
+        <span class="badge badge-cyan">Niche</span>
+      </div>
+      <p>SwiftUI menu bar app, macOS-native, Apple Silicon optimized (MLX backend option). If you can find Mac developer Discords, this is a good niche audience.</p>
+    </div>
+  </div>
+
+  <!-- 08: Newsletters -->
+  <div class="section" id="newsletters">
+    <h2>08 &mdash; Newsletters & Aggregators</h2>
+    <p>Submit on launch day morning. These are free submissions. Even one pickup can drive thousands of visits.</p>
+
+    <div class="dir-grid">
+      <div class="dir-item">
+        <div class="name">TLDR Newsletter</div>
+        <div class="desc">Huge dev audience. Submit via tldr.tech form. Free.</div>
+      </div>
+      <div class="dir-item">
+        <div class="name">Ben's Bites</div>
+        <div class="desc">AI-focused newsletter, massive subscriber base. bensbites.com</div>
+      </div>
+      <div class="dir-item">
+        <div class="name">PulseMCP</div>
+        <div class="desc">MCP-specific newsletter. Already covered OpenClaw going viral. pulsemcp.com</div>
+      </div>
+      <div class="dir-item">
+        <div class="name">Hacker Newsletter</div>
+        <div class="desc">Curates top HN posts weekly. If you hit HN front page, you may get in. hackernewsletter.com</div>
+      </div>
+      <div class="dir-item">
+        <div class="name">The Rundown AI</div>
+        <div class="desc">AI newsletter. Submit your launch. therundown.ai</div>
+      </div>
+      <div class="dir-item">
+        <div class="name">Console.dev</div>
+        <div class="desc">Curates developer tools weekly. Excellent for OSS/source-available projects.</div>
+      </div>
+      <div class="dir-item">
+        <div class="name">Changelog</div>
+        <div class="desc">Open source news. changelog.com. Submit via their news form.</div>
+      </div>
+      <div class="dir-item">
+        <div class="name">Import AI</div>
+        <div class="desc">AI/ML newsletter by Jack Clark. importai.net</div>
+      </div>
+      <div class="dir-item">
+        <div class="name">AlphaSignal</div>
+        <div class="desc">AI/ML newsletter focused on research and tools. alphasignal.ai</div>
+      </div>
+      <div class="dir-item">
+        <div class="name">TLDR AI (separate)</div>
+        <div class="desc">TLDR's AI-specific variant. Different submission from main TLDR.</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 09: Directories -->
+  <div class="section" id="directories">
+    <h2>09 &mdash; AI & Startup Directories</h2>
+    <p>All free to submit. Lower urgency than the channels above, but they provide long-tail visibility and SEO backlinks.</p>
+
+    <h3>AI Tool Directories</h3>
+    <div class="dir-grid">
+      <div class="dir-item">
+        <div class="name">Futurepedia</div>
+        <div class="desc">Largest AI tool directory. 4,000+ curated tools. futurepedia.io</div>
+      </div>
+      <div class="dir-item">
+        <div class="name">There's An AI For That</div>
+        <div class="desc">Popular AI discovery platform. theresanaiforthat.com</div>
+      </div>
+      <div class="dir-item">
+        <div class="name">AIxploria</div>
+        <div class="desc">8,800+ tools listed. Free submission. aixploria.com</div>
+      </div>
+      <div class="dir-item">
+        <div class="name">AI Tools Directory</div>
+        <div class="desc">Free submission and browsing. aitools-directory.com</div>
+      </div>
+      <div class="dir-item">
+        <div class="name">TopTools.ai</div>
+        <div class="desc">AI tool directory with submission. toptools.ai</div>
+      </div>
+      <div class="dir-item">
+        <div class="name">PoweredbyAI</div>
+        <div class="desc">Large AI tools list. poweredbyai.app</div>
+      </div>
+      <div class="dir-item">
+        <div class="name">AIToolboard</div>
+        <div class="desc">"Get listed in minutes." aitoolboard.com</div>
+      </div>
+      <div class="dir-item">
+        <div class="name">AI Tools Directory (.com)</div>
+        <div class="desc">Another established directory. aitoolsdirectory.com</div>
+      </div>
+    </div>
+
+    <h3>Startup & Dev Tool Directories</h3>
+    <div class="dir-grid">
+      <div class="dir-item">
+        <div class="name">AlternativeTo</div>
+        <div class="desc">List as an alternative to screen recorders or workflow tools. alternativeto.net</div>
+      </div>
+      <div class="dir-item">
+        <div class="name">SaaSHub</div>
+        <div class="desc">Software alternative discovery. saashub.com</div>
+      </div>
+      <div class="dir-item">
+        <div class="name">Microlaunch</div>
+        <div class="desc">Launches for indie makers. microlaunch.net</div>
+      </div>
+      <div class="dir-item">
+        <div class="name">BetaList</div>
+        <div class="desc">Early-stage startups. betalist.com</div>
+      </div>
+      <div class="dir-item">
+        <div class="name">Launching Next</div>
+        <div class="desc">Startup directory. launchingnext.com</div>
+      </div>
+      <div class="dir-item">
+        <div class="name">SideProjectors</div>
+        <div class="desc">Side project marketplace/directory. sideprojectors.com</div>
+      </div>
+      <div class="dir-item">
+        <div class="name">Startupbase</div>
+        <div class="desc">Startup listing. startupbase.io</div>
+      </div>
+      <div class="dir-item">
+        <div class="name">Awesome lists on GitHub</div>
+        <div class="desc">PR to awesome-mcp, awesome-ai-agents, awesome-openclaw lists.</div>
+      </div>
+    </div>
+
+    <div class="callout callout-green">
+      <p><strong>Comprehensive list:</strong> <a href="https://startupproject.org/resources/places-to-launch/" style="color: var(--green);">startupproject.org/resources/places-to-launch</a> has 150+ directories and <a href="https://www.indiehackers.com/post/ive-built-a-huge-list-of-261-free-launch-platforms-and-directories-where-you-can-submit-your-startup-b1e856991d" style="color: var(--green);">this Indie Hackers post</a> has 261 free platforms. Work through these after the high-priority channels are covered.</p>
+    </div>
+  </div>
+
+  <!-- 10: Dev Communities -->
+  <div class="section" id="communities">
+    <h2>10 &mdash; Dev Communities & Forums</h2>
+
+    <div class="card">
+      <div class="card-header">
+        <div class="icon icon-green">D</div>
+        <h4>dev.to</h4>
+        <span class="badge badge-green">Free</span>
+      </div>
+      <p>Write a technical post: "How I built an 11-stage pipeline to teach AI agents my workflows." Publish on launch day morning. dev.to has high SEO and gets cross-posted to Google Discover.</p>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <div class="icon icon-blue">H</div>
+        <h4>Hashnode</h4>
+        <span class="badge badge-green">Free</span>
+      </div>
+      <p>Cross-publish the same technical post. Hashnode audiences skew developer and early-adopter.</p>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <div class="icon icon-red">L</div>
+        <h4>Lobsters (lobste.rs)</h4>
+        <span class="badge badge-amber">Invite-only</span>
+      </div>
+      <p>HN-quality audience with less noise. If you have an account or know someone who can invite you, post here. Technically rigorous community, lead with the Rust + Python architecture.</p>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <div class="icon icon-amber">I</div>
+        <h4>Indie Hackers</h4>
+        <span class="badge badge-green">Free</span>
+      </div>
+      <p>Post a "Show IH" with your builder story. Also post a launch milestone update. The audience is makers and founders; they love authentic launch stories.</p>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <div class="icon icon-purple">W</div>
+        <h4>WIP.co / Makerlog</h4>
+        <span class="badge badge-green">Free</span>
+      </div>
+      <p>Log your launch publicly as a maker milestone. Small but engaged builder communities.</p>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <div class="icon icon-cyan">H</div>
+        <h4>Hacker Noon</h4>
+        <span class="badge badge-green">Free</span>
+      </div>
+      <p>Submit a technical article. Takes editorial review but provides strong visibility if accepted.</p>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <div class="icon icon-green">G</div>
+        <h4>GitHub "awesome" lists</h4>
+        <span class="badge badge-green">Free (PR)</span>
+      </div>
+      <p>Submit PRs to: <strong>awesome-mcp</strong>, <strong>awesome-openclaw</strong>, <strong>awesome-ai-agents</strong>, <strong>awesome-mac</strong>, <strong>awesome-selfhosted</strong>. These get ongoing traffic and establish legitimacy.</p>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <div class="icon icon-blue">S</div>
+        <h4>Stacker News</h4>
+        <span class="badge badge-green">Free</span>
+      </div>
+      <p>HN-style community with micropayments for upvotes. Engaged, spam-resistant. Good for developer tools.</p>
+    </div>
+  </div>
+
+  <!-- 11: Viral Hooks -->
+  <div class="section" id="hooks">
+    <h2>11 &mdash; Viral Hooks</h2>
+    <p>Use different hooks on different platforms. Pick 2-3 for each channel.</p>
+
+    <div class="hooks-grid">
+      <div class="hook">
+        "Work once, hand over forever."
+        <div class="use-on">Use on: PH tagline, X bio, everywhere</div>
+      </div>
+      <div class="hook">
+        "Your agents are powerful but clueless about your workflows."
+        <div class="use-on">Use on: X thread opener, PH description</div>
+      </div>
+      <div class="hook">
+        "Not static playbooks. Self-improving ones."
+        <div class="use-on">Use on: HN comment, technical posts</div>
+      </div>
+      <div class="hook">
+        "I recorded myself doing code review for 3 sessions. AgentHandover now runs it with my exact checklist, tone, and guardrails."
+        <div class="use-on">Use on: Reddit, X thread, demos</div>
+      </div>
+      <div class="hook">
+        "11 stages between your screen and an agent-ready Skill. Zero cloud APIs."
+        <div class="use-on">Use on: HN, r/LocalLLaMA, technical audiences</div>
+      </div>
+      <div class="hook">
+        "OpenClaw does the work. AgentHandover teaches it yours."
+        <div class="use-on">Use on: OpenClaw communities, X</div>
+      </div>
+      <div class="hook">
+        "It watched me reply to Reddit for a week. Then it wrote a Skill that matches my voice so well I can't tell the difference."
+        <div class="use-on">Use on: Reddit, X (creepy/cool factor)</div>
+      </div>
+      <div class="hook">
+        "Every screenshot is deleted after the AI reads it. Only structured text survives. No telemetry. Ever."
+        <div class="use-on">Use on: r/selfhosted, r/privacy, HN</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 12: Checklist -->
+  <div class="section" id="prep">
+    <h2>12 &mdash; Pre-Launch Prep Checklist</h2>
+    <p>Everything to have ready before launch day.</p>
+
+    <h3>Assets to prepare</h3>
+    <ul class="checklist">
+      <li><strong>ProductHunt page:</strong> Tagline, description, 3-5 images, maker comment draft. Schedule to go live at midnight PT.</li>
+      <li><strong>Show HN post:</strong> Title + first comment (60-word TL;DR) pre-written and saved.</li>
+      <li><strong>X thread:</strong> 7 tweets pre-written, ready to copy-paste at 12:03 AM PT.</li>
+      <li><strong>Reddit posts:</strong> At minimum Tier 1 (3 posts), ideally Tier 2 (4+ more), each tailored to the subreddit.</li>
+      <li><strong>Dev.to / Hashnode article:</strong> Technical post written, saved as draft, ready to publish.</li>
+      <li><strong>One-paragraph pitch:</strong> For Discord servers and newsletter submissions.</li>
+      <li><strong>GitHub README:</strong> Polished, with all links working. Add PH badge placeholder.</li>
+      <li><strong>5-10 real HN users:</strong> Privately ask them to check out the Show HN in the first 30 minutes. Not "upvote this" but "I'd love your honest take."</li>
+      <li><strong>5-10 active PH users:</strong> Same approach: ask for genuine comments, not manufactured upvotes.</li>
+    </ul>
+
+    <h3>FAQ to have ready (you'll get these)</h3>
+    <div class="card">
+      <h4 style="margin-top: 0;">"How is this different from screen recording + ChatGPT?"</h4>
+      <p>11-stage intelligence pipeline. Self-improving feedback loop from execution results. Behavioral synthesis across multiple sessions. Voice analysis per workflow. Semantic dedup so it won't create duplicate Skills. No prompt engineering can replicate cross-session behavioral analysis.</p>
+    </div>
+    <div class="card">
+      <h4 style="margin-top: 0;">"Is this open source?"</h4>
+      <p>BSL 1.1. Source available, non-commercial use allowed. Converts to Apache 2.0 on 2030-03-25. Be transparent: "I chose BSL because I want the code inspectable and the project sustainable. It converts to Apache 2.0 in four years."</p>
+    </div>
+    <div class="card">
+      <h4 style="margin-top: 0;">"Does it work on Linux/Windows?"</h4>
+      <p>Mac only for now. Be honest. "Mac first because screen capture + menu bar UX is best here. Linux is on the roadmap." Don't overpromise timelines.</p>
+    </div>
+    <div class="card">
+      <h4 style="margin-top: 0;">"Privacy? You're recording my screen?"</h4>
+      <p>Screenshots are temporary, deleted after VLM annotation. Only structured text survives. Auto-redaction of API keys/passwords/credit cards. Encryption at rest (XChaCha20-Poly1305). No telemetry. Everything local. This is a strength, not a weakness.</p>
+    </div>
+    <div class="card">
+      <h4 style="margin-top: 0;">"Why not just write skills manually?"</h4>
+      <p>Hand-written skills say "do X then Y." AgentHandover Skills include strategy, selection criteria, guardrails, voice, and evidence-backed confidence from real observations. Plus they self-improve from execution feedback. Manual skills go stale; these don't.</p>
+    </div>
+  </div>
+
+  <!-- 13: Paid -->
+  <div class="section" id="paid">
+    <h2>13 &mdash; Paid Options (Small Budget)</h2>
+    <p>If you have $50-500 to spend, here's where it goes furthest.</p>
+
+    <div class="card">
+      <div class="card-header">
+        <div class="icon icon-blue">X</div>
+        <h4>X Promoted Post</h4>
+        <span class="badge badge-cyan">$50-100</span>
+      </div>
+      <p>Boost your launch thread to followers of AI/developer accounts. Target followers of @AnthropicAI, @OpenAI, Peter Steinberger's account, etc.</p>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <div class="icon icon-amber">R</div>
+        <h4>Reddit Promoted Post</h4>
+        <span class="badge badge-cyan">$50-100</span>
+      </div>
+      <p>Target r/LocalLLaMA, r/MachineLearning. Reddit ads in niche subreddits are surprisingly cheap and well-targeted.</p>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <div class="icon icon-green">N</div>
+        <h4>Newsletter Sponsorship</h4>
+        <span class="badge badge-cyan">$100-500</span>
+      </div>
+      <p>One mention in TLDR, Ben's Bites, or PulseMCP can drive thousands of visits. PulseMCP is particularly good since they already covered the OpenClaw wave.</p>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <div class="icon icon-purple">P</div>
+        <h4>PH Launch Services</h4>
+        <span class="badge badge-cyan">$200-500</span>
+      </div>
+      <p>Services like LaunchPedia or OpenHunts coordinate engagement from active PH users. Mixed reputation but can boost rankings. Use with caution given PH's anti-gaming filters.</p>
+    </div>
+  </div>
+
+  <!-- 14: Risks -->
+  <div class="section" id="risks">
+    <h2>14 &mdash; Risk Mitigation</h2>
+
+    <div class="callout callout-red">
+      <p><strong>HN License Debate.</strong> BSL 1.1 will get scrutinized on HN. It is not OSI-approved. Have your talking points ready and be honest. This is not a dealbreaker if you're transparent about it. Many HN users respect the pragmatism of BSL.</p>
+    </div>
+
+    <div class="callout callout-amber">
+      <p><strong>"Just use screen recording + Claude."</strong> Your answer: 11-stage pipeline, cross-session behavioral synthesis, self-improving feedback loop, voice analysis, semantic dedup. No prompt engineering can replicate what requires multiple observations across days. This isn't a wrapper; it's an intelligence pipeline.</p>
+    </div>
+
+    <div class="callout callout-amber">
+      <p><strong>Mac Only.</strong> Acknowledge it openly. Don't apologize. "Mac first because the screen capture + menu bar UX is best here. Linux is on the roadmap." Honesty about scope earns respect.</p>
+    </div>
+
+    <div class="callout callout-green">
+      <p><strong>Privacy Concerns.</strong> Lead with your privacy section. Screenshots deleted after annotation. Auto-redaction. Encryption at rest. No telemetry. This is actually your competitive advantage against any cloud-based alternative. Lean into it hard.</p>
+    </div>
+
+    <h3>The compounding effect</h3>
+    <p>The reason everything fires on the same day: someone sees it on HN, checks X, sees it trending there too, checks PH, it's climbing there. Three platforms trending simultaneously is greater than one platform at 3x the engagement. The perception of "this is everywhere" is itself the trigger for sharing.</p>
+
+    <h3>Your one job on launch day</h3>
+    <p><strong>Reply to everything.</strong> Every HN comment, every Reddit reply, every X mention, every PH comment. The algorithms on every platform reward active conversation. This is not optional. Block out the entire day.</p>
+  </div>
+
+</div>
+</body>
+</html>

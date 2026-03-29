@@ -50,21 +50,11 @@ final class ServiceController {
         }
     }
 
-    /// The daemon must never launch until the user has completed onboarding
-    /// and AgentHandover.app itself already owns both TCC permissions.
-    private static func daemonLaunchAllowed() -> Bool {
-        UserDefaults.standard.bool(forKey: "hasCompletedOnboarding")
-            && PermissionChecker.allPermissionsGranted()
-    }
-
     // MARK: - Daemon (app-launched)
 
     /// Start daemon as a detached helper executable. Returns true if process is running.
     @discardableResult
     static func startDaemon() -> Bool {
-        guard daemonLaunchAllowed() else {
-            return false
-        }
 
         // Check if already running
         if isDaemonRunning() { return true }

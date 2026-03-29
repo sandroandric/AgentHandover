@@ -39,7 +39,7 @@ class SOPGeneratorConfig:
     model: str = "qwen3.5:4b"
     ollama_host: str = "http://localhost:11434"
     num_predict: int = 8000
-    timeout: float = 600.0  # 10 minutes for 4B thinking on large timelines
+    timeout: float = 1800.0  # 30 min — 16GB machines need 10+ min per call
     max_timeline_frames: int = 20  # Cap frames sent to SOP gen to keep prompt manageable
 
 
@@ -1087,7 +1087,7 @@ def _call_ollama(
     host: str = "http://localhost:11434",
     num_predict: int = 8000,
     system: str = "",
-    timeout: float = 180.0,
+    timeout: float = 1800.0,
     think: bool = True,
     format_json: bool = False,
 ) -> tuple[str, float]:

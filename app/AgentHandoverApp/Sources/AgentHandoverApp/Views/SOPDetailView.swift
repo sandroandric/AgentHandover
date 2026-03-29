@@ -267,6 +267,9 @@ struct SOPDetailView: View {
                         .lineSpacing(4)
                 }
 
+                // --- Enriched procedure data ---
+                procedureEnrichmentSections(json)
+
                 // Steps
                 if let steps = json["steps"] as? [[String: Any]], !steps.isEmpty {
                     VStack(alignment: .leading, spacing: 10) {
@@ -382,6 +385,226 @@ struct SOPDetailView: View {
                     .textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
             }
+        }
+    }
+
+    // MARK: - Enriched procedure sections
+
+    /// Renders enriched data from the procedure JSON (strategy, outcome, clarifications)
+    /// above the step list.  Each section only appears when its data is non-empty.
+    @ViewBuilder
+    private func procedureEnrichmentSections(_ json: [String: Any]) -> some View {
+        let strategy = (json["strategy"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let outcome  = (json["outcome"]  as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let clarifications = json["agent_clarifications"] as? [[String: Any]] ?? []
+        let selectionCriteria = json["selection_criteria"] as? [[String: Any]] ?? []
+        let contentTemplates = json["content_templates"] as? [[String: Any]] ?? []
+        let inputs = json["inputs"] as? [[String: Any]] ?? []
+        let appsInvolved = json["apps_involved"] as? [String] ?? []
+
+        let hasContent = !strategy.isEmpty || !outcome.isEmpty || !clarifications.isEmpty
+            || !selectionCriteria.isEmpty || !contentTemplates.isEmpty
+            || !inputs.isEmpty || !appsInvolved.isEmpty
+
+        if hasContent {
+            VStack(alignment: .leading, spacing: 16) {
+
+                // Strategy
+                if !strategy.isEmpty {
+                    enrichmentCard(
+                        title: "Strategy",
+                        icon: "lightbulb",
+                        iconColor: goldenYellow,
+                        content: strategy
+                    )
+                }
+
+                // Outcome
+                if !outcome.isEmpty {
+                    enrichmentCard(
+                        title: "What this achieves",
+                        icon: "checkmark.seal",
+                        iconColor: brightGreen,
+                        content: outcome
+                    )
+                }
+
+                // Agent clarifications (Q&A)
+                if !clarifications.isEmpty {
+                    VStack(alignment: .leading, spacing: 10) {
+                        sectionHeader("Your answers", icon: "bubble.left.and.bubble.right", color: warmOrange)
+
+                        VStack(alignment: .leading, spacing: 12) {
+                            ForEach(Array(clarifications.enumerated()), id: \.offset) { _, qa in
+                                let question = qa["question"] as? String ?? ""
+                                let answer   = qa["answer"]   as? String ?? ""
+                                if !question.isEmpty {
+                                    VStack(alignment: .leading, spacing: 4) {
+                                        HStack(alignment: .top, spacing: 6) {
+                                            Text("Q")
+                                                .font(.system(size: 10, weight: .bold, design: .rounded))
+                                                .foregroundColor(.white)
+                                                .frame(width: 18, height: 18)
+                                                .background(Circle().fill(warmOrange.opacity(0.7)))
+                                            Text(question)
+                                                .font(.system(size: 12, weight: .medium))
+                                                .foregroundColor(darkNavy.opacity(0.7))
+                                                .textSelection(.enabled)
+                                                .fixedSize(horizontal: false, vertical: true)
+                                                .lineSpacing(2)
+                                        }
+                                        if !answer.isEmpty {
+                                            HStack(alignment: .top, spacing: 6) {
+                                                Text("A")
+                                                    .font(.system(size: 10, weight: .bold, design: .rounded))
+                                                    .foregroundColor(.white)
+                                                    .frame(width: 18, height: 18)
+                                                    .background(Circle().fill(brightGreen.opacity(0.7)))
+                                                Text(answer)
+                                                    .font(.system(size: 12))
+                                                    .foregroundColor(darkNavy.opacity(0.85))
+                                                    .textSelection(.enabled)
+                                                    .fixedSize(horizontal: false, vertical: true)
+                                                    .lineSpacing(2)
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 12)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(
+                            RoundedRectangle(cornerRadius: cardRadius)
+                                .fill(lightGray)
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: cardRadius)
+                                .stroke(darkNavy.opacity(0.12), lineWidth: contraBorder)
+                        )
+                    }
+                }
+
+                // Selection criteria
+                if !selectionCriteria.isEmpty {
+                    VStack(alignment: .leading, spacing: 8) {
+                        sectionHeader("Decision criteria", icon: "arrow.triangle.branch", color: warmOrange)
+                        ForEach(Array(selectionCriteria.enumerated()), id: \.offset) { _, criterion in
+                            if let text = criterion["criterion"] as? String, !text.isEmpty {
+                                HStack(alignment: .top, spacing: 8) {
+                                    Image(systemName: "diamond.fill")
+                                        .font(.system(size: 6))
+                                        .foregroundColor(warmOrange)
+                                        .padding(.top, 4)
+                                    Text(text)
+                                        .font(.system(size: 12))
+                                        .foregroundColor(darkNavy.opacity(0.7))
+                                        .fixedSize(horizontal: false, vertical: true)
+                                }
+                            }
+                        }
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 12)
+                    .background(RoundedRectangle(cornerRadius: cardRadius).fill(lightGray))
+                    .overlay(RoundedRectangle(cornerRadius: cardRadius).stroke(darkNavy.opacity(0.12), lineWidth: contraBorder))
+                }
+
+                // Content templates
+                if !contentTemplates.isEmpty {
+                    VStack(alignment: .leading, spacing: 8) {
+                        sectionHeader("Patterns learned", icon: "doc.text", color: goldenYellow)
+                        ForEach(Array(contentTemplates.enumerated()), id: \.offset) { _, tmpl in
+                            if let template = tmpl["template"] as? String, !template.isEmpty {
+                                Text(template)
+                                    .font(.system(size: 12))
+                                    .foregroundColor(darkNavy.opacity(0.7))
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 12)
+                    .background(RoundedRectangle(cornerRadius: cardRadius).fill(lightGray))
+                    .overlay(RoundedRectangle(cornerRadius: cardRadius).stroke(darkNavy.opacity(0.12), lineWidth: contraBorder))
+                }
+
+                // Variables/Inputs
+                if !inputs.isEmpty {
+                    VStack(alignment: .leading, spacing: 8) {
+                        sectionHeader("Variables", icon: "curlybraces", color: brightGreen)
+                        ForEach(Array(inputs.enumerated()), id: \.offset) { _, input in
+                            let name = input["name"] as? String ?? ""
+                            let desc = input["description"] as? String ?? ""
+                            let isCredential = input["credential"] as? Bool ?? false
+                            if !name.isEmpty {
+                                HStack(alignment: .top, spacing: 8) {
+                                    Image(systemName: isCredential ? "lock.fill" : "number")
+                                        .font(.system(size: 10))
+                                        .foregroundColor(isCredential ? .red : brightGreen)
+                                        .frame(width: 14)
+                                    VStack(alignment: .leading, spacing: 1) {
+                                        Text(name)
+                                            .font(.system(size: 12, weight: .medium))
+                                            .foregroundColor(darkNavy)
+                                        if !desc.isEmpty {
+                                            Text(desc)
+                                                .font(.system(size: 11))
+                                                .foregroundColor(darkNavy.opacity(0.5))
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 12)
+                    .background(RoundedRectangle(cornerRadius: cardRadius).fill(lightGray))
+                    .overlay(RoundedRectangle(cornerRadius: cardRadius).stroke(darkNavy.opacity(0.12), lineWidth: contraBorder))
+                }
+
+                // Apps involved
+                if !appsInvolved.isEmpty {
+                    VStack(alignment: .leading, spacing: 8) {
+                        sectionHeader("Apps used", icon: "square.grid.2x2", color: .blue)
+                        HStack(spacing: 8) {
+                            ForEach(appsInvolved, id: \.self) { app in
+                                Text(app)
+                                    .font(.system(size: 11, weight: .medium))
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 4)
+                                    .background(Capsule().fill(Color.blue.opacity(0.1)))
+                                    .foregroundColor(.blue)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// A simple card for a single text block (strategy, outcome, etc.).
+    private func enrichmentCard(title: String, icon: String, iconColor: Color, content: String) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            sectionHeader(title, icon: icon, color: iconColor)
+            Text(content)
+                .font(.system(size: 12))
+                .foregroundColor(darkNavy.opacity(0.8))
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+                .lineSpacing(3)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(
+                    RoundedRectangle(cornerRadius: cardRadius)
+                        .fill(lightGray)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: cardRadius)
+                        .stroke(darkNavy.opacity(0.12), lineWidth: contraBorder)
+                )
         }
     }
 

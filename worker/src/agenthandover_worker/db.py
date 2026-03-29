@@ -128,18 +128,46 @@ class WorkerDB:
         return results
 
     def get_focus_session_events(self, session_id: str) -> list[dict]:
-        """Return all events tagged with the given focus session ID.
-
-        Events are identified by a ``focus_session_id`` key in their
-        ``metadata_json`` column.  Ordered by timestamp ascending.
+        """Return all events tagged with the given focus session ID,
+        PLUS any ClipboardChange events that occurred during the same
+        time window (clipboard events aren't tagged with session_id
+        because they're emitted from a separate monitor).
         """
+        # Get tagged focus events
         cur = self._conn.execute(
             "SELECT * FROM events "
             "WHERE json_extract(metadata_json, '$.focus_session_id') = ? "
             "ORDER BY timestamp ASC",
             (session_id,),
         )
-        return self._rows_to_dicts(cur.fetchall())
+        tagged = self._rows_to_dicts(cur.fetchall())
+        if not tagged:
+            return tagged
+
+        # Find the time window of the focus session
+        first_ts = tagged[0].get("timestamp", "")
+        last_ts = tagged[-1].get("timestamp", "")
+        if not first_ts or not last_ts:
+            return tagged
+
+        # Fetch clipboard events in that window (they have empty metadata)
+        cur2 = self._conn.execute(
+            "SELECT * FROM events "
+            "WHERE json_extract(kind_json, '$.type') = 'ClipboardChange' "
+            "  AND timestamp >= ? AND timestamp <= ? "
+            "  AND json_extract(metadata_json, '$.focus_session_id') IS NULL "
+            "ORDER BY timestamp ASC",
+            (first_ts, last_ts),
+        )
+        clipboard_events = self._rows_to_dicts(cur2.fetchall())
+
+        if not clipboard_events:
+            return tagged
+
+        # Merge and sort by timestamp
+        all_events = tagged + clipboard_events
+        all_events.sort(key=lambda e: e.get("timestamp", ""))
+        return all_events
 
     # ------------------------------------------------------------------
     # Scene Annotations (v2 pipeline)

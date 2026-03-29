@@ -72,7 +72,7 @@ class ReasoningConfig:
     model: str = "qwen3.5:4b"
     ollama_host: str = "http://localhost:11434"
     num_predict: int = 4000
-    timeout: float = 300.0
+    timeout: float = 1800.0
     think: bool = True
 
 

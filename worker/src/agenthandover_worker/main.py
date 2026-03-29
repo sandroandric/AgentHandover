@@ -1877,7 +1877,7 @@ def _process_focus_sessions_v2(
                 _qa_env["OLLAMA_HOST"] = _ollama_host
                 _qa_result = _sp.run(
                     [sys.executable, _qa_script_file.name, _qa_input.name, _qa_output],
-                    timeout=600,  # 10 min — larger context (16K) makes Qwen slower
+                    timeout=1800,  # 30 min — 16GB machines can take 10+ min per Qwen call
                     capture_output=True,
                     env=_qa_env,
                 )

@@ -61,7 +61,12 @@ retention_days_episodes = 90
 [export]
 adapter = "openclaw"
 json_export = false
+
+[embedding]
+model = "nomic-embed-text"
+image_embeddings = true
 TOML
+    chown "${CONSOLE_USER}" "${DATA_DIR}/config.toml"
 fi
 
 # Remove any stale Chromium-family native host manifest. The app now installs

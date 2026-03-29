@@ -292,7 +292,16 @@ class FocusQuestioner:
 
             cat = q.category.lower().replace(" ", "_")
 
-            # Known categories merge into specific procedure fields
+            # Always store in agent_clarifications so the UI shows all answers
+            clarifications = proc.setdefault("agent_clarifications", [])
+            clarifications.append({
+                "category": q.category,
+                "question": q.question,
+                "answer": answer,
+                "context": q.context,
+            })
+
+            # Additionally merge into specific procedure fields by category
             if cat in ("credentials", "access", "login", "auth", "permissions"):
                 self._merge_credentials(proc, answer, q)
             elif cat in ("strategy", "goal", "purpose", "approach"):
@@ -303,15 +312,6 @@ class FocusQuestioner:
                 self._merge_verification(proc, answer)
             elif cat in ("scope", "scheduling", "recurrence", "frequency"):
                 self._merge_scope(proc, answer)
-            else:
-                # Open-ended category — store as agent clarification
-                clarifications = proc.setdefault("agent_clarifications", [])
-                clarifications.append({
-                    "category": q.category,
-                    "question": q.question,
-                    "answer": answer,
-                    "context": q.context,
-                })
 
         return proc
 

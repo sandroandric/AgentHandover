@@ -9,6 +9,7 @@ struct MenuBarView: View {
     @EnvironmentObject var appState: AppState
     @EnvironmentObject var delegate: AppDelegate
     @AppStorage("hasCompletedOnboarding") private var hasCompletedOnboarding = false
+    @StateObject private var agentDetector = AgentDetector()
     @Environment(\.openWindow) private var openWindow
 
     // Focus recording state
@@ -21,6 +22,7 @@ struct MenuBarView: View {
     @State private var elapsedSeconds: Int = 0
     @State private var showMoreActions = false
     @State private var wasPausedBeforeFocus = false
+    @State private var qaWindowShown = false
     @State private var openedPermissionSettings: PermissionRepairKind?
     @State private var screenRecordingNeedsManualSettings = false
 
@@ -28,7 +30,7 @@ struct MenuBarView: View {
     @State private var idlePulse = false
 
     // Contra design tokens
-    private let darkNavy = Color(red: 0.09, green: 0.10, blue: 0.12)
+    private let darkNavy = Color.primary
     private let warmOrange = Color(red: 0.92, green: 0.57, blue: 0.20)
     private let goldenYellow = Color(red: 1.0, green: 0.74, blue: 0.07)
     private let cardRadius: CGFloat = 14
@@ -41,9 +43,6 @@ struct MenuBarView: View {
 
             // Main content area
             VStack(spacing: 12) {
-                // Today's progress card
-                todayCard
-
                 // Attention items (questions, drafts)
                 if hasAttentionItems {
                     attentionSection
@@ -54,6 +53,9 @@ struct MenuBarView: View {
 
                 // Quick links grid
                 quickLinksGrid
+
+                // Connected agents
+                agentsSection
 
                 // Footer: services + quit
                 footerSection
@@ -68,14 +70,19 @@ struct MenuBarView: View {
                 delegate.showOnboarding()
             }
         }
-        // Auto-open Q&A window when questions become available
-        .onChange(of: appState.focusQuestionsAvailable) { available in
-            if available {
+        // Auto-open Q&A window when new questions appear.
+        // Uses NotificationCenter (not .onChange) because the menu bar view
+        // may not be rendered when questions arrive.
+        .onReceive(NotificationCenter.default.publisher(for: .focusQuestionsReady)) { _ in
+            if !qaWindowShown {
+                qaWindowShown = true
                 openAndActivate("focus-qa")
             }
         }
-        .onReceive(NotificationCenter.default.publisher(for: .focusQuestionsReady)) { _ in
-            openAndActivate("focus-qa")
+        .onChange(of: appState.focusQuestionsAvailable) { available in
+            if !available {
+                qaWindowShown = false
+            }
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             if let pendingPermission = openedPermissionSettings {
@@ -95,6 +102,7 @@ struct MenuBarView: View {
         .onAppear {
             // Refresh immediately when user opens menu bar
             appState.refreshStatus()
+            agentDetector.detect()
             if !hasCompletedOnboarding && delegate.pendingOnboarding {
                 delegate.pendingOnboarding = false
                 delegate.showOnboarding()
@@ -273,13 +281,28 @@ struct MenuBarView: View {
     // MARK: - Attention Section
 
     private var hasAttentionItems: Bool {
-        appState.focusQuestionsAvailable || appState.sopDraftCount > 0
+        questionsActuallyPending || appState.sopDraftCount > 0
+    }
+
+    /// Check if questions file actually exists with pending status,
+    /// not just the stale appState value which may lag behind.
+    private var questionsActuallyPending: Bool {
+        guard appState.focusQuestionsAvailable else { return false }
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let path = home.appendingPathComponent(
+            "Library/Application Support/agenthandover/focus-questions.json")
+        guard let data = try? Data(contentsOf: path),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let status = json["status"] as? String else {
+            return false
+        }
+        return status == "pending"
     }
 
     private var attentionSection: some View {
         VStack(spacing: 6) {
             // Focus Q&A pending
-            if appState.focusQuestionsAvailable {
+            if questionsActuallyPending {
                 Button(action: { openAndActivate("focus-qa") }) {
                     HStack(spacing: 10) {
                         ZStack {
@@ -527,7 +550,7 @@ struct MenuBarView: View {
                                 .font(.system(size: 15))
                                 .foregroundColor(.red)
                         }
-                        Text("Record a Workflow")
+                        Text("Record a Focus Session")
                             .font(.system(size: 13, weight: .medium))
                         Spacer()
                         Image(systemName: "chevron.right")
@@ -570,21 +593,59 @@ struct MenuBarView: View {
         }
     }
 
+    // MARK: - Connected Agents
+
+    private var agentsSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Agents")
+                .font(.system(size: 10, weight: .bold, design: .rounded))
+                .foregroundColor(.secondary)
+                .padding(.leading, 2)
+
+            ForEach(agentDetector.agents) { agent in
+                HStack(spacing: 8) {
+                    Image(systemName: agent.icon)
+                        .font(.system(size: 11))
+                        .foregroundColor(agent.isConnected ? .green : .secondary)
+                        .frame(width: 16)
+                    Text(agent.name)
+                        .font(.system(size: 12))
+                    Spacer()
+                    if agent.isConnected {
+                        Text("Connected")
+                            .font(.system(size: 10))
+                            .foregroundColor(.green)
+                    } else {
+                        Button("Connect") {
+                            agentDetector.connect(agent)
+                        }
+                        .font(.system(size: 10, weight: .medium))
+                        .buttonStyle(.plain)
+                        .foregroundColor(.blue)
+                    }
+                }
+                .padding(.vertical, 2)
+            }
+        }
+        .padding(.top, 4)
+    }
+
     // MARK: - Footer
 
     private var footerSection: some View {
         HStack(spacing: 0) {
-            // Service toggle
-            if appState.daemonRunning || appState.workerRunning {
+            // Service toggle — based on user intent, not process state.
+            // Daemon may be running for focus processing even when paused.
+            if !appState.userStopped {
                 Button(action: {
                     appState.userStopped = true
                     UserDefaults.standard.set(true, forKey: "observingPaused")
                     ServiceController.stopAll()
                 }) {
                     HStack(spacing: 4) {
-                        Image(systemName: "pause.fill")
+                        Image(systemName: "eye.slash.fill")
                             .font(.system(size: 8))
-                        Text("Pause")
+                        Text("Stop Observing")
                             .font(.system(size: 11))
                     }
                     .foregroundColor(.secondary)
@@ -608,9 +669,9 @@ struct MenuBarView: View {
                     ServiceController.startAll()
                 }) {
                     HStack(spacing: 4) {
-                        Image(systemName: "play.fill")
+                        Image(systemName: "eye.fill")
                             .font(.system(size: 8))
-                        Text("Start")
+                        Text("Observe Me")
                             .font(.system(size: 11))
                     }
                     .foregroundColor(.blue)
@@ -757,11 +818,9 @@ struct MenuBarView: View {
         ]
         writeFocusSignalFile(signal)
 
-        // Start daemon on background thread to avoid freezing the UI
-        if !appState.daemonRunning {
-            DispatchQueue.global(qos: .userInitiated).async {
-                ServiceController.startDaemon()
-            }
+        // Always ensure daemon is running (startDaemon is a no-op if already alive)
+        DispatchQueue.global(qos: .userInitiated).async {
+            ServiceController.startDaemon()
         }
 
         focusSessionId = sessionId
@@ -797,14 +856,10 @@ struct MenuBarView: View {
         ]
         writeFocusSignalFile(signal)
 
-        // Stop daemon and start worker on background thread to avoid UI freeze.
-        // Wait for daemon PID to exit before starting worker so the SQLite
-        // WAL is fully flushed (not a fixed sleep — polls actual process state).
+        // Keep daemon running (don't kill it — killing and restarting was
+        // causing missed recordings). Start worker to process the session.
         let restorePaused = wasPausedBeforeFocus
         DispatchQueue.global(qos: .userInitiated).async {
-            ServiceController.stopDaemon()
-            // Poll until daemon process is gone (up to 5s), then start worker
-            ServiceController.waitForDaemonExit(timeoutSeconds: 5)
             ServiceController.startWorker()
 
             if restorePaused {
@@ -818,6 +873,11 @@ struct MenuBarView: View {
         elapsedTimer?.invalidate()
         elapsedTimer = nil
         isRecording = false
+
+        // Show "Analyzing..." immediately so the user knows it's working
+        appState.focusSessionProcessing = true
+        appState.focusSessionTitle = focusSessionTitle
+
         focusSessionId = nil
         recordingStartTime = nil
         focusSessionTitle = ""

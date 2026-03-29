@@ -133,6 +133,7 @@ struct OnboardingView: View {
                 progressBar
                     .padding(.top, 20)
                     .padding(.horizontal, 44)
+                    .padding(.bottom, 16)
 
                 // Current step content
                 stepContent(for: currentStep)
@@ -275,6 +276,17 @@ struct OnboardingView: View {
             case 6:
                 // VLM Setup -- blocked until model ready
                 VStack(spacing: 4) {
+                    if onboardingVLMReady {
+                        HStack(spacing: 6) {
+                            Image(systemName: "checkmark.circle.fill")
+                                .foregroundColor(.green)
+                            Text("AI models ready")
+                                .font(.system(size: 13, weight: .bold, design: .rounded))
+                                .foregroundColor(.green)
+                        }
+                        .padding(.bottom, 4)
+                    }
+
                     contraButton(
                         "Next",
                         icon: "arrow.right",
@@ -1853,11 +1865,17 @@ struct OnboardingView: View {
                     extensionNotFoundView
                 }
 
+                Text("We recommend setting up the extension now. It won't be detected here -- just proceed with Next once installed, or Skip to set it up later.")
+                    .font(.system(size: 11))
+                    .foregroundColor(darkNavy.opacity(0.5))
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 440)
+
                 HStack(spacing: 6) {
                     Image(systemName: "info.circle")
                         .font(.system(size: 11))
                         .foregroundColor(darkNavy.opacity(0.3))
-                    Text("Works with Chrome, Brave, and Edge")
+                    Text("Works with Chrome, Brave, Edge, and any Chromium-based browser")
                         .font(captionFont)
                         .foregroundColor(darkNavy.opacity(0.4))
                 }
@@ -2063,11 +2081,11 @@ struct OnboardingView: View {
     // MARK: - Screen 9: Ready -- First Recording (WARM CREAM BACKGROUND)
 
     private var readyStep: some View {
-        VStack(spacing: 20) {
+        VStack(spacing: 24) {
             // Small mascot at top
             mascotImage(height: 64)
 
-            Text("Let\u{2019}s go")
+            Text("You\u{2019}re all set!")
                 .font(.system(size: 32, weight: .black, design: .rounded))
                 .foregroundColor(darkNavy)
 
@@ -2083,111 +2101,64 @@ struct OnboardingView: View {
                     label: "AI Model",
                     ok: onboardingVLMReady
                 )
-                readinessChip(
-                    icon: "globe",
-                    label: "Extension",
-                    ok: appState.extensionConnected,
-                    optional: true
-                )
             }
 
-            // Main recording card
+            // Instructions card
             VStack(spacing: 16) {
-                Text("Teach your agent something")
+                Text("How to use AgentHandover")
                     .font(.system(size: 18, weight: .bold, design: .rounded))
                     .foregroundColor(darkNavy)
 
-                Text("What task should your agent learn first?")
-                    .font(bodyFont)
-                    .foregroundColor(darkNavy.opacity(0.5))
-
-                TextField("e.g. Morning standup prep, deploy to staging, process invoices...", text: $firstRecordingTitle)
-                    .textFieldStyle(.roundedBorder)
-                    .font(bodyFont)
-                    .frame(maxWidth: 340)
-
-                let isDisabled = firstRecordingTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                    || !appState.accessibilityGranted
-                    || !appState.screenRecordingGranted
-                    || !onboardingVLMReady
-
-                Button {
-                    startServicesAndRecord()
-                } label: {
-                    HStack(spacing: 10) {
-                        ZStack {
-                            // Pulse ring
-                            Circle()
-                                .fill(Color.white.opacity(0.3))
-                                .frame(width: 22, height: 22)
-                                .scaleEffect(recordPulse ? 1.4 : 1.0)
-                                .opacity(recordPulse ? 0.0 : 0.5)
-
-                            // Solid red dot
-                            Circle()
-                                .fill(Color.white)
-                                .frame(width: 11, height: 11)
-                        }
-                        Text("Start Recording")
-                            .font(.system(size: 15, weight: .bold, design: .rounded))
-                    }
-                    .padding(.horizontal, 28)
-                    .padding(.vertical, 13)
-                    .background(
-                        RoundedRectangle(cornerRadius: contraRadius)
-                            .fill(isDisabled ? darkNavy.opacity(0.12) : Color.red)
+                VStack(alignment: .leading, spacing: 12) {
+                    instructionRow(
+                        icon: "record.circle",
+                        iconColor: .red,
+                        title: "Focus Session",
+                        description: "Record one specific task. Click Stop when done."
                     )
-                    .foregroundColor(isDisabled ? darkNavy.opacity(0.3) : .white)
+                    instructionRow(
+                        icon: "eye.fill",
+                        iconColor: warmOrange,
+                        title: "Observe Me",
+                        description: "Learns patterns silently in the background over time."
+                    )
+
+                    Text("Always click Stop when you finish a focus session -- otherwise it keeps recording.")
+                        .font(.system(size: 11))
+                        .foregroundColor(warmOrange.opacity(0.8))
+                        .padding(.top, 4)
                 }
-                .buttonStyle(.plain)
-                .disabled(isDisabled)
-                .onAppear {
-                    withAnimation(.easeInOut(duration: 1.5).repeatForever(autoreverses: false)) {
-                        recordPulse = true
-                    }
-                }
+                .frame(maxWidth: 400, alignment: .leading)
             }
             .padding(24)
             .frame(maxWidth: .infinity)
             .background(
                 RoundedRectangle(cornerRadius: contraRadius)
-                    .fill(Color.white)
+                    .fill(Color(nsColor: .controlBackgroundColor))
             )
             .overlay(
                 RoundedRectangle(cornerRadius: contraRadius)
-                    .stroke(darkNavy, lineWidth: contraBorder)
+                    .stroke(Color.primary.opacity(0.2), lineWidth: contraBorder)
             )
 
-            // Secondary: Just start observing (disabled without Screen Recording)
-            Button("Or start observing \u{2192}") {
-                startServicesOnly()
-            }
-            .foregroundColor(darkNavy.opacity(appState.screenRecordingGranted ? 0.5 : 0.2))
-            .buttonStyle(.plain)
-            .font(.system(size: 13, weight: .semibold, design: .rounded))
-            .disabled(!appState.screenRecordingGranted)
-
-            // Tertiary: Just close, start later
-            Button("I'll start later") {
-                UserDefaults.standard.set(true, forKey: "observingPaused")
-                appState.userStopped = true
+            // Single CTA: close onboarding and show menu bar
+            Button {
                 onComplete?()
-                // Brief delay so the menu bar icon appears before the window closes
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                    // Flash the menu bar icon to draw attention
-                    NSApp.activate(ignoringOtherApps: true)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
                     NSApplication.shared.keyWindow?.close()
                 }
+            } label: {
+                Text("Open Menu Bar")
+                    .font(.system(size: 15, weight: .bold, design: .rounded))
+                    .padding(.horizontal, 32)
+                    .padding(.vertical, 13)
+                    .background(
+                        RoundedRectangle(cornerRadius: contraRadius)
+                            .fill(darkNavy)
+                    )
+                    .foregroundColor(.white)
             }
-            .foregroundColor(darkNavy.opacity(0.3))
             .buttonStyle(.plain)
-            .font(.system(size: 12, design: .rounded))
-
-            if serviceStartFailed {
-                Text("Services may not have started. Check agenthandover status in Terminal.")
-                    .font(captionFont)
-                    .foregroundColor(.red)
-            }
 
             HStack(spacing: 4) {
                 Image(systemName: "menubar.rectangle")
@@ -2221,34 +2192,64 @@ struct OnboardingView: View {
         )
     }
 
+    private func instructionRow(icon: String, iconColor: Color, title: String, description: String) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: icon)
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundColor(iconColor)
+                .frame(width: 24, height: 24)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.system(size: 14, weight: .bold, design: .rounded))
+                    .foregroundColor(darkNavy)
+                Text(description)
+                    .font(.system(size: 12))
+                    .foregroundColor(darkNavy.opacity(0.6))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
     // MARK: - Actions
 
     private func startServicesOnly() {
-        let ok = ServiceController.startAll()
-        if ok {
-            onComplete?()
-            NSApplication.shared.keyWindow?.close()
-        } else {
-            serviceStartFailed = true
+        DispatchQueue.global(qos: .userInitiated).async {
+            let ok = ServiceController.startAll()
+            DispatchQueue.main.async {
+                if ok {
+                    onComplete?()
+                    NSApplication.shared.keyWindow?.close()
+                } else {
+                    serviceStartFailed = true
+                }
+            }
         }
     }
 
     private func startServicesAndRecord() {
-        let ok = ServiceController.startAll()
-        if ok {
-            // Write focus-session.json to trigger a recording
-            let sessionId = UUID().uuidString
-            let signal: [String: Any] = [
-                "session_id": sessionId,
-                "title": firstRecordingTitle.trimmingCharacters(in: .whitespacesAndNewlines),
-                "started_at": ISO8601DateFormatter().string(from: Date()),
-                "status": "recording",
-            ]
-            writeFocusSignalFile(signal)
-            onComplete?()
-            NSApplication.shared.keyWindow?.close()
-        } else {
-            serviceStartFailed = true
+        let title = firstRecordingTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // Write focus signal BEFORE starting services (daemon picks it up on first loop)
+        let sessionId = UUID().uuidString
+        let signal: [String: Any] = [
+            "session_id": sessionId,
+            "title": title,
+            "started_at": ISO8601DateFormatter().string(from: Date()),
+            "status": "recording",
+        ]
+        writeFocusSignalFile(signal)
+
+        // Start services on background thread to avoid freezing the UI
+        DispatchQueue.global(qos: .userInitiated).async {
+            let ok = ServiceController.startAll()
+            DispatchQueue.main.async {
+                if ok {
+                    onComplete?()
+                    NSApplication.shared.keyWindow?.close()
+                } else {
+                    serviceStartFailed = true
+                }
+            }
         }
     }
 

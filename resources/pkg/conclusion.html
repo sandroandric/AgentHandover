@@ -3,12 +3,21 @@
 <head>
 <meta charset="utf-8">
 <style>
-body { font-family: -apple-system, sans-serif; padding: 24px; color: #18191F; line-height: 1.7; }
+body { font-family: -apple-system, sans-serif; padding: 24px; color: #18191F; line-height: 1.7; background: #ffffff; }
 h1 { font-size: 24px; font-weight: 800; }
 p { font-size: 14px; color: #555; }
 .next { background: #FFF5E0; border-radius: 8px; padding: 16px; margin-top: 16px; border: 1.5px solid #EA913440; }
 .next strong { color: #18191F; }
 .next p { margin: 6px 0 0 0; font-size: 13px; }
+@media (prefers-color-scheme: dark) {
+  body { background: #1C1C1E; color: #F5F5F5; }
+  h1 { color: #FFFFFF; }
+  p { color: #D6D6D6; }
+  .next { background: #2C2C2E; border-color: #EA913466; }
+  .next strong { color: #F5F5F5; }
+  .next p { color: #E5E5E5; }
+  ::selection { background: #FFBD12; color: #1C1C1E; }
+}
 </style>
 </head>
 <body>
