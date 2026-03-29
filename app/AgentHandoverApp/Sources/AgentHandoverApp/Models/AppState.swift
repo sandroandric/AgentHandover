@@ -314,17 +314,32 @@ final class AppState: ObservableObject {
             let wasAvailable = focusQuestionsAvailable
             focusQuestionsAvailable = true
             focusQuestionsSlug = file.slug
-            // Auto-open Q&A window when questions first appear
+            // Auto-open Q&A window ONCE when questions first appear
             if !wasAvailable {
                 DispatchQueue.main.async {
                     NSApp.activate(ignoringOtherApps: true)
-                    // Post notification that MenuBarView listens for
+                    if let app = NSApp as? NSApplication {
+                        for window in app.windows {
+                            if window.title == "Focus Q&A" {
+                                window.makeKeyAndOrderFront(nil)
+                                window.orderFrontRegardless()
+                                return
+                            }
+                        }
+                    }
+                    // Window not open yet — post notification for SwiftUI to open it
                     NotificationCenter.default.post(name: .focusQuestionsReady, object: nil)
                 }
             }
         } else {
             focusQuestionsAvailable = false
             focusQuestionsSlug = ""
+            // Close the Q&A window if it's open and questions are done
+            DispatchQueue.main.async {
+                for window in NSApp.windows where window.title == "Focus Q&A" {
+                    window.close()
+                }
+            }
         }
     }
 

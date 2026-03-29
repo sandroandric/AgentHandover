@@ -37,10 +37,12 @@ class FocusProcessor:
         annotator: SceneAnnotator,
         differ: FrameDiffer,
         sop_generator: SOPGenerator,
+        behavioral_synthesizer: "BehavioralSynthesizer | None" = None,
     ) -> None:
         self.annotator = annotator
         self.differ = differ
         self.sop_generator = sop_generator
+        self.behavioral_synthesizer = behavioral_synthesizer
 
     def process_session(
         self,
@@ -121,9 +123,44 @@ class FocusProcessor:
             len(timeline), len(events),
         )
 
-        # Step 4: Generate SOP
-        result = self.sop_generator.generate_from_focus(timeline, title)
+        # Step 4: Behavioral pre-analysis (optional, informs SOP generation)
+        behavioral_context = ""
+        if self.behavioral_synthesizer is not None:
+            try:
+                from agenthandover_worker.sop_generator import _generate_slug
+                pre_procedure = {"title": title, "steps": [], "source": "focus"}
+                timeline_obs = [
+                    [{"action": f.get("annotation", {}).get("task_context", {}).get("what_doing", "")}
+                     for f in timeline if f.get("annotation")]
+                ]
+                insights = self.behavioral_synthesizer.synthesize(
+                    _generate_slug(title), pre_procedure, timeline_obs,
+                    force=True,
+                )
+                if insights.strategy:
+                    behavioral_context = f"User intent: {insights.strategy}\n"
+                    if insights.selection_criteria:
+                        behavioral_context += (
+                            "Selection criteria: "
+                            + ", ".join(c.criterion for c in insights.selection_criteria)
+                            + "\n"
+                        )
+                    logger.info(
+                        "Focus v2 session '%s': behavioral pre-analysis complete",
+                        title,
+                    )
+            except Exception:
+                logger.debug(
+                    "Behavioral pre-analysis failed for '%s'", title, exc_info=True,
+                )
+
+        # Step 5: Generate SOP (with behavioral context if available)
+        result = self.sop_generator.generate_from_focus(
+            timeline, title,
+            behavioral_context=behavioral_context,
+        )
         return result
+
 
     # ------------------------------------------------------------------
     # Step 0a: Filter own events

@@ -12,7 +12,7 @@
 //! - Server closes the connection after the response
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
@@ -64,6 +64,9 @@ pub struct ControlContext {
     pub event_counter: Arc<AtomicU64>,
     /// Mutable daemon state (focus session, capture paused).
     pub state: Arc<tokio::sync::Mutex<DaemonState>>,
+    /// Atomic capture-paused flag shared with the observer event loop.
+    /// The control API sets this; the observer reads it each tick.
+    pub capture_paused: Arc<AtomicBool>,
     /// Shutdown receiver — when `true`, the server should exit.
     pub shutdown_rx: watch::Receiver<bool>,
 }
@@ -176,8 +179,8 @@ async fn handle_command(cmd: Command, ctx: &ControlContext) -> String {
                 session_id: fs.session_id.clone(),
                 title: fs.title.clone(),
             });
-            let capture_active = !state.capture_paused;
             drop(state);
+            let capture_active = !ctx.capture_paused.load(Ordering::Acquire);
 
             let resp = StatusResponse {
                 ok: true,
@@ -310,6 +313,8 @@ async fn handle_command(cmd: Command, ctx: &ControlContext) -> String {
             let mut state = ctx.state.lock().await;
             state.capture_paused = true;
             drop(state);
+            // Atomic flag — observer loop reads this each tick without locking
+            ctx.capture_paused.store(true, Ordering::Release);
 
             info!("Capture paused via control API");
             let resp = SimpleOkResponse { ok: true };
@@ -322,6 +327,7 @@ async fn handle_command(cmd: Command, ctx: &ControlContext) -> String {
             let mut state = ctx.state.lock().await;
             state.capture_paused = false;
             drop(state);
+            ctx.capture_paused.store(false, Ordering::Release);
 
             info!("Capture resumed via control API");
             let resp = SimpleOkResponse { ok: true };
@@ -505,6 +511,7 @@ mod tests {
             start_time: Utc::now(),
             event_counter: Arc::new(AtomicU64::new(42)),
             state,
+            capture_paused: Arc::new(AtomicBool::new(false)),
             shutdown_rx,
         };
         (ctx, shutdown_tx)

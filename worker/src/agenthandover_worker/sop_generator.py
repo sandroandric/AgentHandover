@@ -38,7 +38,7 @@ class SOPGeneratorConfig:
 
     model: str = "qwen3.5:4b"
     ollama_host: str = "http://localhost:11434"
-    num_predict: int = 8000
+    num_predict: int = 12000
     timeout: float = 1800.0  # 30 min — 16GB machines need 10+ min per call
     max_timeline_frames: int = 20  # Cap frames sent to SOP gen to keep prompt manageable
 
@@ -132,9 +132,12 @@ filepath, password (always sensitive=true), selection (one of a set)
 - Ignore any frames where the user is configuring the recording tool \
 (e.g., AgentHandover settings, starting/stopping recording, checking daemon \
 status). Focus only on the actual task being performed.
-- Pay attention to [Clipboard] metadata on frames — it indicates the user \
-copied content. Include copy-paste as explicit steps (e.g., 'Copy the \
-domain name from the website' then 'Paste into the Google Doc').
+- IMPORTANT: Frames marked with ">>> COPY ACTION" indicate the user \
+copied content to the clipboard. You MUST include these as explicit \
+steps: one step for the Copy action (what was copied and from where) \
+and a subsequent step for the Paste action (where it was pasted). \
+Example: 'Copy the domain name from the registrar page' followed by \
+'Paste the domain name into the DNS settings field'.
 
 Respond with ONLY the JSON object."""
 
@@ -334,11 +337,22 @@ def _format_timeline_entry(
             lines.append("  [No visible change]")
 
     # Clipboard context (attached by FocusProcessor._attach_clipboard_context)
+    # Rendered as a prominent top-level marker so Qwen treats it as an
+    # explicit COPY action that must become a step in the SOP.
     if clipboard_context and isinstance(clipboard_context, dict):
         byte_size = clipboard_context.get("byte_size", 0)
         content_types = clipboard_context.get("content_types", [])
+        preview = clipboard_context.get("content_preview", "")
         types_str = ", ".join(str(t) for t in content_types) if content_types else "unknown"
-        lines.append(f"  [Clipboard: copied {byte_size} bytes ({types_str})]")
+        lines.append(
+            f"  >>> COPY ACTION: User copied content to clipboard "
+            f"({byte_size} bytes, {types_str})"
+        )
+        if preview:
+            lines.append(f'  >>> Copied text: "{preview[:200]}"')
+        lines.append(
+            "  >>> (Include this as a Copy step and a subsequent Paste step in the SOP)"
+        )
 
     return "\n".join(lines)
 
@@ -1085,7 +1099,7 @@ def _call_ollama(
     model: str,
     prompt: str,
     host: str = "http://localhost:11434",
-    num_predict: int = 8000,
+    num_predict: int = 12000,
     system: str = "",
     timeout: float = 1800.0,
     think: bool = True,
@@ -1113,7 +1127,7 @@ def _call_ollama(
             "num_predict": num_predict,
             # Ollama defaults to 4096 context which truncates our prompts.
             # 16K accommodates timeline (~4-6K) + output (8K) comfortably.
-            "num_ctx": 16384,
+            "num_ctx": 24576,
             # Lower temperature for reliable JSON output.
             # Ollama defaults to 0.8 which is too creative for structured data.
             "temperature": 0.3,
@@ -1164,6 +1178,7 @@ class SOPGenerator:
         self,
         timeline: list[dict],
         title: str,
+        behavioral_context: str = "",
     ) -> GeneratedSOP:
         """Generate a SOP from a focus recording session.
 
@@ -1204,6 +1219,10 @@ class SOPGenerator:
 
         # Build prompt
         prompt = _build_focus_prompt(title, meaningful)
+
+        # Inject behavioral context if available (pre-analysis of user intent)
+        if behavioral_context:
+            prompt += f"\n\nBEHAVIORAL CONTEXT (use this to understand the user's intent and filter noise like ads, notifications, or unrelated content):\n{behavioral_context}\n"
 
         # Call VLM
         try:

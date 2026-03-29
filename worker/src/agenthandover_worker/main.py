@@ -32,7 +32,7 @@ from agenthandover_worker.negative_demo import NegativeDemoPruner
 from agenthandover_worker.export_adapter import SOPExportAdapter
 from agenthandover_worker.openclaw_writer import OpenClawWriter
 from agenthandover_worker.scene_annotator import AnnotationConfig, SceneAnnotator
-from agenthandover_worker.sop_generator import SOPGenerator, SOPGeneratorConfig
+from agenthandover_worker.sop_generator import SOPGenerator, SOPGeneratorConfig, _generate_slug
 from agenthandover_worker.sop_linter import lint_sop
 from agenthandover_worker.task_segmenter import TaskSegmenter, SegmenterConfig
 from agenthandover_worker.scheduler import IdleJobGate, SchedulerConfig
@@ -1885,13 +1885,38 @@ def _process_focus_sessions_v2(
                 if _qa_result.returncode == 0:
                     try:
                         questions = _json.load(open(_qa_output))
-                    except Exception:
+                        logger.info(
+                            "Focus Q&A subprocess completed: %d question(s)",
+                            len(questions),
+                        )
+                    except FileNotFoundError:
+                        logger.warning(
+                            "Focus Q&A subprocess exited 0 but output file "
+                            "not found: %s — stderr: %s",
+                            _qa_output,
+                            (_qa_result.stderr or b"")[:500].decode(
+                                "utf-8", errors="replace"
+                            ),
+                        )
+                        questions = []
+                    except Exception as _qa_parse_err:
+                        logger.warning(
+                            "Focus Q&A subprocess exited 0 but output "
+                            "unreadable (%s): %s — stderr: %s",
+                            type(_qa_parse_err).__name__,
+                            _qa_parse_err,
+                            (_qa_result.stderr or b"")[:500].decode(
+                                "utf-8", errors="replace"
+                            ),
+                        )
                         questions = []
                 else:
                     logger.warning(
                         "Focus Q&A subprocess failed (exit %d): %s",
                         _qa_result.returncode,
-                        _qa_result.stderr[:200] if _qa_result.stderr else "",
+                        (_qa_result.stderr or b"")[:500].decode(
+                            "utf-8", errors="replace"
+                        ),
                     )
 
                 # Cleanup temp files
@@ -4706,6 +4731,7 @@ def main(argv: list[str] | None = None) -> None:
             annotator=scene_annotator,
             differ=frame_differ,
             sop_generator=sop_generator,
+            behavioral_synthesizer=behavioral_synthesizer,
         )
 
         # Task segmenter for passive discovery (CPU-only, no GPU)

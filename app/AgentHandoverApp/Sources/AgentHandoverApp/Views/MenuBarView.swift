@@ -71,17 +71,9 @@ struct MenuBarView: View {
             }
         }
         // Auto-open Q&A window when new questions appear.
-        // Uses NotificationCenter (not .onChange) because the menu bar view
-        // may not be rendered when questions arrive.
         .onReceive(NotificationCenter.default.publisher(for: .focusQuestionsReady)) { _ in
-            if !qaWindowShown {
-                qaWindowShown = true
+            if questionsActuallyPending {
                 openAndActivate("focus-qa")
-            }
-        }
-        .onChange(of: appState.focusQuestionsAvailable) { available in
-            if !available {
-                qaWindowShown = false
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
@@ -819,8 +811,17 @@ struct MenuBarView: View {
         writeFocusSignalFile(signal)
 
         // Always ensure daemon is running (startDaemon is a no-op if already alive)
+        // Then resume capture in case daemon was paused.
         DispatchQueue.global(qos: .userInitiated).async {
             ServiceController.startDaemon()
+            // Give the daemon a moment to bind its control socket
+            Thread.sleep(forTimeInterval: 0.5)
+            // Resume capture so the observer loop emits events during recording,
+            // even if the user was previously paused.
+            let client = CaptureAgentClient()
+            Task { @MainActor in
+                let _ = await client.resumeCapture()
+            }
         }
 
         focusSessionId = sessionId
@@ -856,13 +857,22 @@ struct MenuBarView: View {
         ]
         writeFocusSignalFile(signal)
 
-        // Keep daemon running (don't kill it — killing and restarting was
-        // causing missed recordings). Start worker to process the session.
+        // Start worker to process the session.
+        // If user was paused before recording, send pause_capture to the
+        // daemon so it stays alive (future recordings need it) but stops
+        // emitting passive events.  If user was observing, keep capturing.
         let restorePaused = wasPausedBeforeFocus
         DispatchQueue.global(qos: .userInitiated).async {
             ServiceController.startWorker()
 
             if restorePaused {
+                // User was paused — tell daemon to pause capture instead
+                // of killing it.  The daemon stays alive for future focus
+                // recordings but emits zero passive events.
+                let client = CaptureAgentClient()
+                Task { @MainActor in
+                    let _ = await client.pauseCapture()
+                }
                 DispatchQueue.main.async {
                     self.appState.userStopped = true
                     UserDefaults.standard.set(true, forKey: "observingPaused")

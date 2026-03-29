@@ -6,6 +6,7 @@ use agenthandover_storage::artifact_store::{ArtifactMeta, ArtifactStore};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio::time;
@@ -68,11 +69,17 @@ impl Default for ObserverConfig {
 
 /// The observer event loop — runs as an async task.
 /// Polls OS state at regular intervals and emits events.
+///
+/// When `capture_paused` is `true` AND there is no active focus recording
+/// session, the loop skips all event capture (DwellSnapshot, AppSwitch,
+/// WindowTitleChange, etc.).  Focus recordings always run regardless of
+/// the pause flag so the user can record a session while normally paused.
 pub async fn run_observer_loop(
     config: ObserverConfig,
     tx: mpsc::Sender<ObserverMessage>,
     mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
     artifact_store: Option<Arc<ArtifactStore>>,
+    capture_paused: Arc<AtomicBool>,
 ) -> Result<()> {
     info!("Observer event loop starting");
 
@@ -152,6 +159,15 @@ pub async fn run_observer_loop(
                             active_focus_session_id = None;
                         }
                     }
+                }
+
+                // If capture is paused and no active focus recording, skip
+                // all event capture this tick. Focus recordings always run
+                // regardless of pause state (the user explicitly pressed Record).
+                if capture_paused.load(Ordering::Acquire)
+                    && active_focus_session_id.is_none()
+                {
+                    continue;
                 }
 
                 // Reset screenshot counter every minute

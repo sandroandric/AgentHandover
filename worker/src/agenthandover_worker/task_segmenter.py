@@ -806,10 +806,12 @@ class TaskSegmenter:
                     stored = self._vector_kb.upsert_batch(
                         items, embeddings=valid_embs,
                     )
-                    if stored:
-                        logger.debug("Stored %d annotation vectors in KB", stored)
+                    logger.info(
+                        "Vector KB: %d/%d annotation embeddings stored",
+                        stored, len(items),
+                    )
                 except Exception:
-                    logger.debug("Vector KB storage failed", exc_info=True)
+                    logger.warning("Vector KB storage failed", exc_info=True)
 
         except ConnectionError as exc:
             logger.warning("Embedding failed (Ollama not reachable): %s", exc)

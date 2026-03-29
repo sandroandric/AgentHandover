@@ -46,7 +46,7 @@ class AnnotationConfig:
 
     model: str = "qwen3.5:2b"
     ollama_host: str = "http://localhost:11434"
-    num_predict: int = 800
+    num_predict: int = 1500
     stale_skip_count: int = 3
     sliding_window_size: int = 3
     sliding_window_max_age_sec: int = 600
@@ -76,23 +76,31 @@ SYSTEM_PROMPT = (
 )
 
 ANNOTATION_PROMPT_TEMPLATE = """\
-Analyze this screenshot and extract the following information as JSON:
+Analyze this screenshot and extract DETAILED information as JSON.
+Be specific — include exact text, names, email addresses, URLs, numbers, and values visible on screen.
 
 {{
-  "app": "<application name visible on screen>",
-  "location": "<URL, file path, or app-specific location>",
+  "app": "<exact application name visible on screen>",
+  "location": "<full URL, file path, or app-specific location/page>",
   "visible_content": {{
     "headings": ["<main headings or titles visible>"],
-    "labels": ["<form labels, button text, menu items>"],
-    "values": ["<filled form values, selected options, typed text>"]
+    "labels": ["<form labels, button text, menu items, tab names>"],
+    "values": ["<ALL filled form values: email addresses, names, typed text, selected options, prices, dates, counts>"]
   }},
   "ui_state": {{
-    "active_element": "<what element has focus or was just interacted with>",
-    "modals_or_popups": "<any overlays, dropdowns, or dialogs visible>",
-    "scroll_position": "<top, middle, bottom, or specific>"
+    "active_element": "<what element has focus — include the exact text/value in it>",
+    "modals_or_popups": "<any overlays, dropdowns, or dialogs visible — include their content>",
+    "scroll_position": "<top, middle, bottom>"
+  }},
+  "key_text": {{
+    "email_addresses": ["<any email addresses visible on screen>"],
+    "urls": ["<any URLs or links visible>"],
+    "names": ["<people names, company names, product names>"],
+    "typed_text": "<exact text the user is typing or has typed in any input field>",
+    "selected_text": "<any highlighted or selected text>"
   }},
   "task_context": {{
-    "what_doing": "<one sentence: what task is the user performing right now>",
+    "what_doing": "<one detailed sentence: what specific task is the user performing — include names, recipients, subjects>",
     "likely_next": "<one sentence: what will the user probably do next>",
     "is_workflow": <true if this is a structured, repeatable task; false for browsing/chatting/reading>
   }}
@@ -277,7 +285,7 @@ def _call_ollama_vlm(
     image_path: str | Path | None = None,
     image_base64: str | None = None,
     host: str = "http://localhost:11434",
-    num_predict: int = 800,
+    num_predict: int = 1500,
     system: str = "",
     timeout: float = 60.0,
 ) -> tuple[str, float]:
@@ -302,6 +310,7 @@ def _call_ollama_vlm(
         "think": False,
         "options": {
             "num_predict": num_predict,
+            "num_ctx": 8192,
         },
     }
 

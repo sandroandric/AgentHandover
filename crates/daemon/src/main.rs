@@ -2,7 +2,7 @@ use anyhow::Result;
 use chrono::Timelike;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use tokio::sync::{mpsc, watch};
 use tracing::{info, warn, error};
 use tracing_subscriber::EnvFilter;
@@ -198,6 +198,10 @@ async fn main() -> Result<()> {
     // Shared mutable daemon state for the control API
     let shared_state = Arc::new(tokio::sync::Mutex::new(DaemonState::new()));
 
+    // Atomic capture-paused flag shared between control API and observer loop.
+    // The control API sets it; the observer reads it each tick.
+    let capture_paused = Arc::new(AtomicBool::new(false));
+
     // Spawn Unix domain socket control server
     let control_status_dir = agenthandover_common::status::status_dir();
     let control_handle = tokio::spawn(agenthandover_daemon::control::serve(ControlContext {
@@ -205,6 +209,7 @@ async fn main() -> Result<()> {
         start_time,
         event_counter: Arc::clone(&event_counter),
         state: Arc::clone(&shared_state),
+        capture_paused: Arc::clone(&capture_paused),
         shutdown_rx: shutdown_tx.subscribe(),
     }));
 
@@ -489,7 +494,7 @@ async fn main() -> Result<()> {
     };
 
     // Run observer loop (blocks until shutdown)
-    let observer_result = run_observer_loop(config, tx, shutdown_rx, artifact_store).await;
+    let observer_result = run_observer_loop(config, tx, shutdown_rx, artifact_store, capture_paused).await;
 
     // Abort background tasks
     native_handle.abort();
