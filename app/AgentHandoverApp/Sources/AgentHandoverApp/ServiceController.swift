@@ -83,9 +83,22 @@ final class ServiceController {
     }
 
     /// Check if the daemon process is running.
+    ///
+    /// Validates the PID file by checking that the process at that PID is
+    /// actually `ah-observer`, not a recycled PID from an unrelated process.
     static func isDaemonRunning() -> Bool {
-        if let pid = daemonPid() {
-            return kill(pid, 0) == 0
+        if let pid = daemonPid(), kill(pid, 0) == 0 {
+            // Verify the PID is actually ah-observer, not a recycled PID
+            let result = shell("/bin/ps", args: ["-p", "\(pid)", "-o", "comm="])
+            if result.contains("ah-observer") {
+                return true
+            }
+            // Stale PID file — remove it
+            let home = FileManager.default.homeDirectoryForCurrentUser
+            let pidPath = home.appendingPathComponent(
+                "Library/Application Support/agenthandover/daemon.pid")
+            try? FileManager.default.removeItem(at: pidPath)
+            return false
         }
         // Fallback: check by process name
         let result = shell("/bin/ps", args: ["-ax", "-o", "pid,comm"])
