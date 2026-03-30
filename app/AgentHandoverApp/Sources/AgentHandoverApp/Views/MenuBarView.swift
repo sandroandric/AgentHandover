@@ -575,12 +575,16 @@ struct MenuBarView: View {
         LazyVGrid(columns: [
             GridItem(.flexible()),
             GridItem(.flexible()),
+            GridItem(.flexible()),
         ], spacing: 8) {
             QuickLink(icon: "tray.full", label: "Workflows", badge: appState.sopTotalCount) {
                 openAndActivate("workflows")
             }
             QuickLink(icon: "calendar.badge.clock", label: "Digest") {
                 openAndActivate("daily-digest")
+            }
+            QuickLink(icon: "questionmark.circle", label: "FAQ") {
+                openAndActivate("faq")
             }
         }
     }
@@ -931,11 +935,11 @@ struct MenuBarView: View {
         openWindow(id: windowId)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
             NSApp.activate(ignoringOtherApps: true)
+            let knownTitles: Set<String> = [
+                "Workflows", "Review Queue", "Daily Digest", "Focus Q&A", "FAQ",
+            ]
             for window in NSApp.windows {
-                if window.title == "Workflows"
-                    || window.title == "Review Queue"
-                    || window.title == "Daily Digest"
-                    || window.title == "Focus Q&A" {
+                if knownTitles.contains(window.title) {
                     window.makeKeyAndOrderFront(nil)
                     window.orderFrontRegardless()
                     break

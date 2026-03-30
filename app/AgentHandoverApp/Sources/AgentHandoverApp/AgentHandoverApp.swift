@@ -49,6 +49,12 @@ struct AgentHandoverApp: App {
         }
         .defaultSize(width: 560, height: 620)
         .windowResizability(.contentMinSize)
+
+        Window("FAQ", id: "faq") {
+            FAQView()
+        }
+        .defaultSize(width: 560, height: 700)
+        .windowResizability(.contentMinSize)
     }
 }
 
