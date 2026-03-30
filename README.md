@@ -206,7 +206,7 @@ curl -X POST http://localhost:9477/search/semantic \
 
 ### Download and run
 
-Download the latest `.pkg` from [**Releases**](https://github.com/sandroandric/OpenMimic/releases) and double-click.
+Download the latest `.pkg` from [**Releases**](https://github.com/sandroandric/AgentHandover/releases) and double-click.
 
 The onboarding app walks you through: permissions, AI model downloads (Qwen for screen understanding and Skill generation, nomic-embed-text for semantic search, optional SigLIP for image embeddings), Chrome extension, and your first recording.
 
@@ -242,7 +242,7 @@ brew install --HEAD agenthandover
 ### Source build (Rust, Node.js 18+, Python 3.11+)
 
 ```bash
-git clone https://github.com/sandroandric/OpenMimic.git && cd OpenMimic
+git clone https://github.com/sandroandric/AgentHandover.git && cd AgentHandover
 just build-all
 ./scripts/setup.sh
 ```
