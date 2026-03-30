@@ -838,6 +838,52 @@ def _derive_short_title(title: str) -> str:
     return short.rstrip(".,;:")
 
 
+def _embed_in_vector_kb(
+    vector_kb,
+    source_type: str,
+    source_id: str,
+    text: str,
+) -> None:
+    """Embed a piece of content in the vector KB if available.
+
+    Silent no-op if vector_kb is None or embedding fails.
+    """
+    if vector_kb is None or not text:
+        return
+    try:
+        vector_kb.upsert(source_type, source_id, text[:4000])
+    except Exception:
+        logger.debug("Embedding failed for %s/%s", source_type, source_id, exc_info=True)
+
+
+def _embed_procedure(vector_kb, procedure: dict) -> None:
+    """Embed a procedure's title + description + steps into the vector KB."""
+    if vector_kb is None:
+        return
+    slug = procedure.get("id", procedure.get("slug", ""))
+    if not slug:
+        return
+
+    # Build a rich text representation for semantic search
+    parts = []
+    title = procedure.get("title", "")
+    if title:
+        parts.append(title)
+    desc = procedure.get("description", "")
+    if desc:
+        parts.append(desc)
+    strategy = procedure.get("strategy", "")
+    if strategy:
+        parts.append(f"Strategy: {strategy}")
+    for step in procedure.get("steps", []):
+        action = step.get("action", step.get("description", ""))
+        if action:
+            parts.append(action)
+
+    text = "\n".join(parts)
+    _embed_in_vector_kb(vector_kb, "procedure", slug, text)
+
+
 def _write_sops_index(
     db: WorkerDB,
     knowledge_base: "KnowledgeBase | None" = None,
@@ -1677,6 +1723,7 @@ def _process_focus_sessions_v2(
     behavioral_synthesizer: "BehavioralSynthesizer | None" = None,
     focus_questioner: "FocusQuestioner | None" = None,
     knowledge_base=None,
+    vector_kb=None,
     ollama_host: str = "http://localhost:11434",
 ) -> int:
     """Process completed focus recording sessions via v2 VLM pipeline.
@@ -1710,6 +1757,7 @@ def _process_focus_sessions_v2(
         procedure_writer=procedure_writer,
         kb_export_adapter=kb_export_adapter,
         knowledge_base=knowledge_base,
+        vector_kb=vector_kb,
     )
     if pending_export is not None:
         return pending_export
@@ -1977,6 +2025,7 @@ def _process_focus_sessions_v2(
         try:
             knowledge_base.save_procedure(procedure_dict)
             logger.info("Saved procedure '%s' to knowledge base", slug)
+            _embed_procedure(vector_kb, procedure_dict)
         except Exception:
             logger.debug("Failed to save procedure to KB", exc_info=True)
 
@@ -2141,6 +2190,7 @@ def _check_focus_answers(
     procedure_writer: "ProcedureWriter | None" = None,
     kb_export_adapter: "KnowledgeBaseExportAdapter | None" = None,
     knowledge_base=None,
+    vector_kb=None,
 ) -> int | None:
     """Check for pending focus Q&A answers and complete export if ready.
 
@@ -2201,6 +2251,7 @@ def _check_focus_answers(
         try:
             knowledge_base.save_procedure(procedure_dict)
             logger.info("Saved Q&A-enriched procedure '%s' to KB", slug)
+            _embed_procedure(vector_kb, procedure_dict)
         except Exception:
             logger.debug("Failed to save Q&A-enriched procedure", exc_info=True)
 
@@ -2951,6 +3002,7 @@ def _process_approval_triggers(
     index_generator: "IndexGenerator",
     procedure_writer: "ProcedureWriter | None" = None,
     kb_export_adapter: "KnowledgeBaseExportAdapter | None" = None,
+    vector_kb=None,
 ) -> None:
     """Check for and process an approve-trigger.json file.
 
@@ -3011,6 +3063,7 @@ def _process_approval_triggers(
                             kb_export_adapter=kb_export_adapter,
                         )
                         logger.info("Approved and exported SOP %s", sop_id)
+                        _embed_procedure(vector_kb, sop_template)
                 else:
                     logger.warning(
                         "Approved SOP %s but could not load template for export",
@@ -4947,6 +5000,21 @@ def main(argv: list[str] | None = None) -> None:
         # immediately sees the latest data (including any new fields).
         _write_sops_index(db, knowledge_base, force=True)
 
+        # Embed all existing KB procedures at startup (idempotent — skips unchanged)
+        if vector_kb is not None:
+            try:
+                all_procs = knowledge_base.list_procedures()
+                embedded = 0
+                for proc in all_procs:
+                    full = knowledge_base.get_procedure(proc.get("id", ""))
+                    if full:
+                        _embed_procedure(vector_kb, full)
+                        embedded += 1
+                if embedded:
+                    logger.info("Embedded %d existing procedure(s) in vector KB", embedded)
+            except Exception:
+                logger.debug("Startup procedure embedding failed", exc_info=True)
+
         while not shutdown_flag[0]:
             # Reset vector KB embedding budget each cycle
             if vector_kb is not None:
@@ -4975,6 +5043,7 @@ def main(argv: list[str] | None = None) -> None:
                     index_generator=index_generator,
                     procedure_writer=procedure_writer,
                     kb_export_adapter=kb_export_adapter,
+                    vector_kb=vector_kb,
                 )
                 _process_failed_query_trigger(db)
                 _process_search_trigger(activity_searcher)
@@ -5031,6 +5100,7 @@ def main(argv: list[str] | None = None) -> None:
                         behavioral_synthesizer=behavioral_synthesizer,
                         focus_questioner=focus_questioner_inst,
                         knowledge_base=knowledge_base,
+                        vector_kb=vector_kb,
                         ollama_host=v2_cfg.get("ollama_host", "http://localhost:11434") if v2_cfg else "http://localhost:11434",
                     )
                 else:
@@ -5381,12 +5451,35 @@ def main(argv: list[str] | None = None) -> None:
                                 _daily_summary.task_count,
                                 _daily_summary.active_hours,
                             )
+                            # Embed daily summary for semantic search
+                            _embed_in_vector_kb(
+                                vector_kb, "daily_summary", yesterday_str,
+                                f"Daily summary for {yesterday_str}: "
+                                f"{_daily_summary.task_count} tasks, "
+                                f"{_daily_summary.active_hours:.1f} active hours. "
+                                + " ".join(
+                                    t.get("intent", "")
+                                    for t in getattr(_daily_summary, "tasks", [])
+                                    if t.get("intent")
+                                )[:2000],
+                            )
                             # Update profile + patterns periodically
                             summaries_count = len(
                                 knowledge_base.list_daily_summaries(limit=5)
                             )
                             if summaries_count >= 3:
                                 profile_builder.update_profile()
+                                # Embed updated profile
+                                try:
+                                    profile = knowledge_base.get_profile()
+                                    if profile:
+                                        import json as _json
+                                        _embed_in_vector_kb(
+                                            vector_kb, "profile", "user",
+                                            _json.dumps(profile, default=str)[:4000],
+                                        )
+                                except Exception:
+                                    logger.debug("Profile embedding failed", exc_info=True)
                                 # Refresh activity classifier with updated profile
                                 if activity_classifier is not None:
                                     try:
