@@ -220,18 +220,27 @@ struct DailyDigestView: View {
     }
 
     private func sectionItemRow(_ item: [String: String]) -> some View {
-        HStack(spacing: 8) {
+        let title = item["title"]
+            ?? item["intent"]
+            ?? item["app"]
+            ?? item["name"]
+        let detail = item["detail"]
+            ?? item["apps"]
+            ?? item["task_count"].map { "\($0) tasks" }
+            ?? item["duration_minutes"].map { "\($0) min" }
+
+        return HStack(spacing: 8) {
             Circle()
                 .fill(warmOrange)
                 .frame(width: 6, height: 6)
 
             VStack(alignment: .leading, spacing: 1) {
-                if let title = item["title"] {
+                if let title, !title.isEmpty {
                     Text(title)
                         .font(.system(size: 12, weight: .semibold))
                         .foregroundColor(darkNavy)
                 }
-                if let detail = item["detail"] {
+                if let detail, !detail.isEmpty {
                     Text(detail)
                         .font(.system(size: 11))
                         .foregroundColor(darkNavy.opacity(0.5))
