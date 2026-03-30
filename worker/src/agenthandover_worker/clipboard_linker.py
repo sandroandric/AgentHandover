@@ -1,0 +1,187 @@
+"""Clipboard Copy-Paste Linker — match paste hashes to copy hashes.
+
+Implements section 5.7 of the AgentHandover spec: identify clipboard
+copy-paste pairs by matching SHA-256 content hashes within a
+configurable time window (default 30 minutes).
+
+Event format (from daemon's event model):
+- ``ClipboardChange`` events have ``metadata_json`` containing
+  ``{"content_hash": "sha256...", "content_types": [...], "byte_size": N}``
+- ``PasteDetected`` events have ``metadata_json`` containing
+  ``{"content_hash": "sha256...", "target_app": "..."}``
+- ``kind_json`` contains the event kind, e.g.
+  ``{"ClipboardChange": {}}`` or ``{"PasteDetected": {}}``
+- ``timestamp`` is ISO 8601 format
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+from dataclasses import dataclass
+from datetime import datetime
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class ClipboardLink:
+    """A matched copy-paste pair."""
+
+    copy_event_id: str
+    paste_event_id: str
+    content_hash: str
+    time_delta_seconds: float
+
+
+class ClipboardLinker:
+    """Scan events for copy-paste pairs based on hash matching within a time window.
+
+    Parameters
+    ----------
+    window_minutes:
+        Maximum elapsed time (in minutes) between a copy and a paste
+        for the pair to be linked.  Default 30 minutes.
+    """
+
+    def __init__(self, window_minutes: float = 30.0) -> None:
+        self.window_minutes = window_minutes
+
+    def find_links(self, events: list[dict]) -> list[ClipboardLink]:
+        """Scan *events* chronologically and return copy-paste links.
+
+        For each ``PasteDetected`` event whose ``content_hash`` matches
+        a prior ``ClipboardChange`` event within the time window, a
+        ``ClipboardLink`` is emitted.  When multiple copies share the
+        same hash, the most recent copy before the paste is linked.
+        """
+        if not events:
+            return []
+
+        # Map content_hash -> list of (event_id, timestamp, content_length) ordered by time
+        # We store all copies so we can pick the most recent one for a paste
+        copy_index: dict[str, list[tuple[str, datetime, int]]] = {}
+        links: list[ClipboardLink] = []
+
+        for event in events:
+            kind = self._extract_kind(event)
+            ts = self._parse_timestamp(event)
+            eid = event.get("id", "")
+
+            if kind == "ClipboardChange":
+                content_hash = self._extract_hash(event)
+                if content_hash and ts:
+                    content_length = self._extract_content_length(event)
+                    copy_index.setdefault(content_hash, []).append((eid, ts, content_length))
+
+            elif kind == "PasteDetected":
+                content_hash = self._extract_hash(event)
+                if not content_hash or not ts:
+                    continue
+
+                copies = copy_index.get(content_hash)
+                if not copies:
+                    continue
+
+                paste_length = self._extract_content_length(event)
+
+                # Find the most recent copy that is within the time window
+                best_copy: tuple[str, datetime] | None = None
+                for copy_eid, copy_ts, copy_len in reversed(copies):
+                    delta = (ts - copy_ts).total_seconds()
+                    if delta < 0:
+                        # Paste before copy — skip
+                        continue
+                    if delta <= self.window_minutes * 60:
+                        # Secondary verification: if both have content_length,
+                        # they should match (skip with warning if they differ)
+                        if paste_length > 0 and copy_len > 0:
+                            if abs(paste_length - copy_len) > max(paste_length, copy_len) * 0.1:
+                                logger.warning(
+                                    "Hash match but content_length mismatch: "
+                                    "copy=%d paste=%d (copy_eid=%s, paste_eid=%s)",
+                                    copy_len, paste_length, copy_eid, eid,
+                                )
+                                continue
+                        best_copy = (copy_eid, copy_ts, copy_len)
+                        break
+
+                if best_copy is not None:
+                    copy_eid, copy_ts, _ = best_copy
+                    delta_seconds = (ts - copy_ts).total_seconds()
+                    links.append(
+                        ClipboardLink(
+                            copy_event_id=copy_eid,
+                            paste_event_id=eid,
+                            content_hash=content_hash,
+                            time_delta_seconds=delta_seconds,
+                        )
+                    )
+
+        return links
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _extract_kind(event: dict) -> str:
+        """Extract the event kind name from ``kind_json``.
+
+        ``kind_json`` is expected to be a JSON string like
+        ``'{"ClipboardChange": {}}'``.  Returns the top-level key.
+        """
+        kind_json = event.get("kind_json", "")
+        if not kind_json:
+            return ""
+
+        try:
+            parsed = json.loads(kind_json) if isinstance(kind_json, str) else kind_json
+        except (json.JSONDecodeError, TypeError):
+            return ""
+
+        if isinstance(parsed, dict) and parsed:
+            return next(iter(parsed))
+        return ""
+
+    @staticmethod
+    def _extract_content_length(event: dict) -> int:
+        """Extract ``byte_size`` from ``metadata_json``, returning 0 if absent."""
+        metadata_json = event.get("metadata_json", "")
+        if not metadata_json:
+            return 0
+
+        try:
+            metadata = json.loads(metadata_json) if isinstance(metadata_json, str) else metadata_json
+        except (json.JSONDecodeError, TypeError):
+            return 0
+
+        byte_size = metadata.get("byte_size", 0)
+        try:
+            return int(byte_size)
+        except (TypeError, ValueError):
+            return 0
+
+    @staticmethod
+    def _extract_hash(event: dict) -> str:
+        """Extract ``content_hash`` from ``metadata_json``."""
+        metadata_json = event.get("metadata_json", "")
+        if not metadata_json:
+            return ""
+
+        try:
+            metadata = json.loads(metadata_json) if isinstance(metadata_json, str) else metadata_json
+        except (json.JSONDecodeError, TypeError):
+            return ""
+
+        return metadata.get("content_hash", "")
+
+    @staticmethod
+    def _parse_timestamp(event: dict) -> datetime | None:
+        raw = event.get("timestamp")
+        if not raw or not isinstance(raw, str):
+            return None
+        try:
+            return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            return None

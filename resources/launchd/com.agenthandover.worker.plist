@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.agenthandover.worker</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/lib/agenthandover/venv/bin/python</string>
+        <string>-m</string>
+        <string>agenthandover_worker</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>KeepAlive</key>
+    <false/>
+
+    <key>ThrottleInterval</key>
+    <integer>3</integer>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+
+    <key>LowPriorityBackgroundIO</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/tmp/com.agenthandover.worker.stdout.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/tmp/com.agenthandover.worker.stderr.log</string>
+
+    <key>WorkingDirectory</key>
+    <string>/usr/local/lib/agenthandover</string>
+</dict>
+</plist>

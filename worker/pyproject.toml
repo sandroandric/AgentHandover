@@ -1,0 +1,51 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "agenthandover-worker"
+version = "0.1.0"
+description = "AgentHandover worker — episode building, semantic translation, SOP induction"
+requires-python = ">=3.11"
+dependencies = ["prefixspan>=0.5.2", "pyyaml>=6.0"]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0", "pytest-cov"]
+vlm-apple = ["mlx-vlm>=0.1"]
+vlm-cpu = ["llama-cpp-python>=0.2"]
+vlm-ollama = ["ollama>=0.3"]
+vlm-openai = ["openai>=1.0"]
+vlm-anthropic = ["anthropic>=0.39"]
+vlm-google = ["google-genai>=1.0"]
+vlm-remote = ["openai>=1.0", "anthropic>=0.39", "google-genai>=1.0"]
+vlm = [
+    "mlx-vlm>=0.1; platform_machine == 'arm64' and sys_platform == 'darwin'",
+    "llama-cpp-python>=0.2; platform_machine != 'arm64' or sys_platform != 'darwin'",
+]
+embeddings-apple = [
+    "mlx-embeddings>=0.0.4; platform_machine == 'arm64' and sys_platform == 'darwin'",
+]
+mcp = ["mcp>=1.0"]
+vlm-all = [
+    "mlx-vlm>=0.1; platform_machine == 'arm64' and sys_platform == 'darwin'",
+    "llama-cpp-python>=0.2",
+    "ollama>=0.3",
+    "openai>=1.0",
+    "anthropic>=0.39",
+    "google-genai>=1.0",
+    "mlx-embeddings>=0.0.4; platform_machine == 'arm64' and sys_platform == 'darwin'",
+]
+
+[project.scripts]
+agenthandover-worker = "agenthandover_worker.main:main"
+agenthandover-setup-vlm = "agenthandover_worker.setup_vlm:main"
+agenthandover-mcp = "agenthandover_worker.mcp_server:main"
+agenthandover-connect = "agenthandover_worker.agent_connect:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/agenthandover_worker"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "tests"]
+markers = ["eval: evaluation harness and scorecard tests"]

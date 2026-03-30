@@ -1,0 +1,24 @@
+[package]
+name = "agenthandover-storage"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+agenthandover-common = { path = "../common" }
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+zstd = "0.13"
+chacha20poly1305 = "0.10"
+sha2 = "0.10"
+hex = "0.4"
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"
+regex = "1"

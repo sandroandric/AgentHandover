@@ -1,0 +1,874 @@
+"""Tests for SKILL.md Export Adapter.
+
+Tests cover:
+- write_sop() produces correct markdown format
+- File naming: SKILL.<slug>.md
+- Index file generation
+- Steps formatting with selectors
+- Input variables section
+- Enhanced SOPs include task_description + execution_overview
+- list_sops() returns correct inventory
+- Round-trip: write then list
+- Edge cases: empty steps, missing fields, special characters in title
+"""
+
+from __future__ import annotations
+
+import tempfile
+from pathlib import Path
+
+import pytest
+
+from agenthandover_worker.skill_md_writer import SkillMdWriter
+
+
+def _make_sop_template(**overrides) -> dict:
+    """Create a standard SOP template dict for testing."""
+    template = {
+        "slug": "file-expense-report",
+        "title": "File Expense Report",
+        "steps": [
+            {
+                "step": "click",
+                "target": "New Report button",
+                "selector": "#new-report-btn",
+                "parameters": {"app_id": "com.chrome.Chrome"},
+                "confidence": 0.92,
+                "pre_state": {"app_id": "com.chrome.Chrome", "url": "https://expenses.example.com"},
+            },
+            {
+                "step": "type",
+                "target": "Amount field",
+                "selector": "input[name=amount]",
+                "parameters": {"value": "42.50"},
+                "confidence": 0.88,
+                "pre_state": {},
+            },
+            {
+                "step": "click",
+                "target": "Submit button",
+                "selector": "#submit-btn",
+                "parameters": {},
+                "confidence": 0.95,
+                "pre_state": {},
+            },
+        ],
+        "variables": [
+            {"name": "amount", "type": "number", "example": "42.50"},
+            {"name": "category", "type": "enum", "example": "Travel", "choices": ["Travel", "Office", "Food"]},
+        ],
+        "confidence_avg": 0.9167,
+        "episode_count": 5,
+        "apps_involved": ["com.chrome.Chrome"],
+        "preconditions": ["app_open:com.chrome.Chrome", "url_open:https://expenses.example.com"],
+        "postconditions": ["final_action:click"],
+        "exceptions_seen": [],
+    }
+    template.update(overrides)
+    return template
+
+
+class TestSkillMdWriter:
+    def setup_method(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.writer = SkillMdWriter(workspace_dir=self.tmpdir)
+
+    def test_write_sop_creates_file(self):
+        template = _make_sop_template()
+        path = self.writer.write_sop(template)
+        assert path.exists()
+        assert path.name == "SKILL.file-expense-report.md"
+
+    def test_write_sop_content_has_title(self):
+        template = _make_sop_template()
+        path = self.writer.write_sop(template)
+        content = path.read_text()
+        assert content.startswith("# File Expense Report")
+
+    def test_write_sop_content_has_steps(self):
+        template = _make_sop_template()
+        path = self.writer.write_sop(template)
+        content = path.read_text()
+        assert "## Steps" in content
+        assert "**Click New Report button**" in content
+        assert "**Type Amount field**" in content
+        assert "**Click Submit button**" in content
+
+    def test_write_sop_content_has_selectors(self):
+        template = _make_sop_template()
+        path = self.writer.write_sop(template)
+        content = path.read_text()
+        assert "`#new-report-btn`" in content
+        assert "`input[name=amount]`" in content
+
+    def test_write_sop_content_has_variables(self):
+        template = _make_sop_template()
+        path = self.writer.write_sop(template)
+        content = path.read_text()
+        assert "## Input Variables" in content
+        assert "{{amount}}" in content
+        assert "{{category}}" in content
+
+    def test_write_sop_content_has_metadata(self):
+        template = _make_sop_template()
+        path = self.writer.write_sop(template)
+        content = path.read_text()
+        assert "## Metadata" in content
+        assert "Confidence: 0.92" in content
+        assert "Observed: 5 time(s)" in content
+        assert "Schema: 2.0.0" in content
+
+    def test_write_sop_content_has_when_to_use(self):
+        template = _make_sop_template()
+        path = self.writer.write_sop(template)
+        content = path.read_text()
+        assert "## When to Use" in content
+        assert "com.chrome.Chrome" in content
+        assert "https://expenses.example.com" in content
+
+    def test_write_all_sops_creates_index(self):
+        templates = [
+            _make_sop_template(),
+            _make_sop_template(slug="submit-form", title="Submit Form", episode_count=3),
+        ]
+        paths = self.writer.write_all_sops(templates)
+        assert len(paths) == 2
+
+        index_path = self.writer.skills_dir / "SKILLS-INDEX.md"
+        assert index_path.exists()
+        content = index_path.read_text()
+        assert "# Skills Index" in content
+        assert "file-expense-report" in content
+        assert "submit-form" in content
+
+    def test_list_sops_returns_correct_inventory(self):
+        template = _make_sop_template()
+        self.writer.write_sop(template)
+
+        sops = self.writer.list_sops()
+        assert len(sops) == 1
+        assert sops[0]["slug"] == "file-expense-report"
+        assert sops[0]["title"] == "File Expense Report"
+        assert sops[0]["size_bytes"] > 0
+
+    def test_list_sops_empty_dir(self):
+        assert self.writer.list_sops() == []
+
+    def test_roundtrip_write_then_list(self):
+        templates = [
+            _make_sop_template(),
+            _make_sop_template(slug="login-workflow", title="Login Workflow"),
+        ]
+        self.writer.write_all_sops(templates)
+
+        sops = self.writer.list_sops()
+        slugs = {s["slug"] for s in sops}
+        assert "file-expense-report" in slugs
+        assert "login-workflow" in slugs
+
+    def test_enhanced_sop_includes_task_description(self):
+        template = _make_sop_template(
+            task_description="This workflow files an expense report in the company's internal system."
+        )
+        path = self.writer.write_sop(template)
+        content = path.read_text()
+        assert "This workflow files an expense report" in content
+
+    def test_enhanced_sop_includes_execution_overview(self):
+        template = _make_sop_template(
+            execution_overview={
+                "goal": "Submit a new expense report",
+                "prerequisites": "Must be logged into the expense portal",
+                "success_criteria": "Report appears in pending queue",
+            }
+        )
+        path = self.writer.write_sop(template)
+        content = path.read_text()
+        assert "## Execution Overview" in content
+        assert "Submit a new expense report" in content
+        assert "Must be logged into the expense portal" in content
+
+    def test_empty_steps_sop(self):
+        template = _make_sop_template(steps=[])
+        path = self.writer.write_sop(template)
+        content = path.read_text()
+        assert "## Steps" in content
+        # Should still have metadata
+        assert "## Metadata" in content
+
+    def test_missing_fields_handled(self):
+        """Minimal SOP template with only required fields."""
+        template = {"slug": "minimal", "title": "Minimal SOP"}
+        path = self.writer.write_sop(template)
+        content = path.read_text()
+        assert "# Minimal SOP" in content
+        assert "## Steps" in content
+
+    def test_special_characters_in_title(self):
+        template = _make_sop_template(
+            slug="upload-file-csv",
+            title="Upload File (*.csv) & Submit"
+        )
+        path = self.writer.write_sop(template)
+        content = path.read_text()
+        assert "# Upload File (*.csv) & Submit" in content
+
+    def test_focus_recording_source_metadata(self):
+        template = _make_sop_template(
+            source="focus_recording",
+            episode_count=1,
+        )
+        path = self.writer.write_sop(template)
+        content = path.read_text()
+        assert "Focus recording" in content
+
+    def test_file_naming_slugification(self):
+        template = _make_sop_template(slug="My Complex_Slug with SPACES!")
+        path = self.writer.write_sop(template)
+        # Should be lowercased and hyphenated
+        assert "SKILL." in path.name
+        assert path.name.endswith(".md")
+        # No spaces or uppercase in the slug portion
+        slug_part = path.stem[6:]  # Remove "SKILL."
+        assert " " not in slug_part
+
+    def test_get_sops_dir(self):
+        expected = Path(self.tmpdir).resolve() / "skills"
+        assert self.writer.get_sops_dir() == expected
+
+    def test_write_all_sops_empty_removes_stale_index(self):
+        """When called with empty list, stale SKILLS-INDEX.md should be removed."""
+        # First, create an index by writing some SOPs
+        templates = [
+            _make_sop_template(),
+            _make_sop_template(slug="second-sop", title="Second SOP"),
+        ]
+        self.writer.write_all_sops(templates)
+        index_path = self.writer.skills_dir / "SKILLS-INDEX.md"
+        assert index_path.exists()
+
+        # Now call with empty list — index should be cleaned up
+        self.writer.write_all_sops([])
+        assert not index_path.exists()
+
+    def test_write_all_sops_empty_no_crash_without_index(self):
+        """Empty call when no index exists should not crash."""
+        result = self.writer.write_all_sops([])
+        assert result == []
+
+    def test_write_metadata(self):
+        path = self.writer.write_metadata("test_meta", {"key": "value"})
+        assert path.exists()
+        import json
+        data = json.loads(path.read_text())
+        assert data["key"] == "value"
+        assert "generated_at" in data
+
+
+def _make_v2_sop_template(**overrides) -> dict:
+    """Create a v2 SOP template (from VLM pipeline) for testing."""
+    template = {
+        "slug": "deploy-feature-staging",
+        "title": "Deploy Feature to Staging",
+        "source": "v2_focus_recording",
+        "steps": [
+            {
+                "step": "Review code changes",
+                "target": "",
+                "selector": None,
+                "parameters": {
+                    "app": "VS Code",
+                    "location": "~/agenthandover/worker/main.py",
+                    "verify": "git status shows expected files changed",
+                },
+                "confidence": 0.85,
+                "pre_state": {},
+            },
+            {
+                "step": "Run unit tests",
+                "target": "",
+                "selector": None,
+                "parameters": {
+                    "app": "VS Code → Terminal",
+                    "input": "pytest tests/ -v",
+                    "verify": "Output shows all tests passed",
+                },
+                "confidence": 0.90,
+                "pre_state": {},
+            },
+            {
+                "step": "Commit and push",
+                "target": "",
+                "selector": None,
+                "parameters": {
+                    "app": "VS Code → Terminal",
+                    "input": "git add -A && git commit -m '{{commit_message}}'",
+                    "verify": "Push completes without errors",
+                },
+                "confidence": 0.88,
+                "pre_state": {},
+            },
+        ],
+        "variables": [
+            {
+                "name": "commit_message",
+                "type": "string",
+                "example": "feat: add scene annotator",
+                "description": "Descriptive commit message",
+            },
+            {
+                "name": "staging_url",
+                "type": "string",
+                "example": "staging-api.agenthandover.dev",
+                "description": "Staging base URL",
+            },
+        ],
+        "confidence_avg": 0.82,
+        "episode_count": 1,
+        "apps_involved": ["VS Code", "Chrome"],
+        "preconditions": ["Repository access with push permissions", "CI/CD pipeline configured"],
+        "task_description": "This workflow deploys a new feature from local development to staging.",
+        "execution_overview": {
+            "when_to_use": "New feature branch is ready for staging",
+            "success_criteria": "All CI jobs pass; staging health endpoint returns healthy",
+            "common_errors": "CI fails on test job; Staging health returns old version",
+        },
+        "confidence_breakdown": {
+            "demo_count": 0.15,
+            "step_consistency": 0.30,
+            "annotation_quality": 0.17,
+            "variable_detection": 0.10,
+            "focus_bonus": 0.10,
+            "reasons": ["demos=1", "focus_recording_bonus"],
+        },
+    }
+    template.update(overrides)
+    return template
+
+
+class TestSkillMdWriterV2:
+    """Tests for v2 (VLM pipeline) SOP rendering."""
+
+    def setup_method(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.writer = SkillMdWriter(workspace_dir=self.tmpdir)
+
+    def test_v2_detected_by_source(self):
+        template = _make_v2_sop_template()
+        assert self.writer._is_v2_sop(template)
+
+    def test_v1_not_detected_as_v2(self):
+        template = _make_sop_template()
+        assert not self.writer._is_v2_sop(template)
+
+    def test_v2_has_description_section(self):
+        template = _make_v2_sop_template()
+        path = self.writer.write_sop(template)
+        content = path.read_text()
+        assert "## Description" in content
+        assert "deploys a new feature" in content
+
+    def test_v2_has_when_to_use(self):
+        template = _make_v2_sop_template()
+        path = self.writer.write_sop(template)
+        content = path.read_text()
+        assert "## When to Use" in content
+        assert "New feature branch is ready" in content
+
+    def test_v2_has_before_you_start(self):
+        template = _make_v2_sop_template()
+        path = self.writer.write_sop(template)
+        content = path.read_text()
+        assert "## Before You Start" in content
+        assert "Repository access" in content
+        assert "CI/CD pipeline" in content
+
+    def test_v2_steps_have_semantic_fields(self):
+        template = _make_v2_sop_template()
+        path = self.writer.write_sop(template)
+        content = path.read_text()
+        # Step headings
+        assert "### Step 1:" in content
+        assert "### Step 2:" in content
+        assert "### Step 3:" in content
+        # Semantic fields
+        assert "- **Action**:" in content
+        assert "- **App**: VS Code" in content
+        assert "_Verify:" in content
+
+    def test_v2_step_input_rendered(self):
+        template = _make_v2_sop_template()
+        path = self.writer.write_sop(template)
+        content = path.read_text()
+        assert "- **Input**: `pytest tests/ -v`" in content
+
+    def test_v2_step_location_rendered(self):
+        template = _make_v2_sop_template()
+        path = self.writer.write_sop(template)
+        content = path.read_text()
+        assert "- **Location**: `~/agenthandover/worker/main.py`" in content
+
+    def test_v2_success_criteria(self):
+        template = _make_v2_sop_template()
+        path = self.writer.write_sop(template)
+        content = path.read_text()
+        assert "## Success Criteria" in content
+        assert "CI jobs pass" in content
+
+    def test_v2_variables_table(self):
+        template = _make_v2_sop_template()
+        path = self.writer.write_sop(template)
+        content = path.read_text()
+        assert "## Variables" in content
+        assert "| Variable |" in content
+        assert "{{commit_message}}" in content
+        assert "feat: add scene annotator" in content
+
+    def test_v2_common_errors(self):
+        template = _make_v2_sop_template()
+        path = self.writer.write_sop(template)
+        content = path.read_text()
+        assert "## Common Errors" in content
+        assert "CI fails on test job" in content
+
+    def test_v2_metadata_focus_mode(self):
+        template = _make_v2_sop_template(source="v2_focus_recording")
+        path = self.writer.write_sop(template)
+        content = path.read_text()
+        assert "## Metadata" in content
+        assert "Mode: Focus Recording" in content
+
+    def test_v2_metadata_passive_mode(self):
+        template = _make_v2_sop_template(source="v2_passive_discovery")
+        path = self.writer.write_sop(template)
+        content = path.read_text()
+        assert "Mode: Passive Discovery" in content
+
+    def test_v2_metadata_demonstrations(self):
+        template = _make_v2_sop_template(episode_count=3)
+        path = self.writer.write_sop(template)
+        content = path.read_text()
+        assert "3 demonstration(s)" in content
+
+    def test_v2_metadata_apps_listed(self):
+        template = _make_v2_sop_template()
+        path = self.writer.write_sop(template)
+        content = path.read_text()
+        assert "Apps: VS Code, Chrome" in content
+
+    def test_v2_no_dom_hints_when_no_selectors(self):
+        template = _make_v2_sop_template()
+        path = self.writer.write_sop(template)
+        content = path.read_text()
+        assert "## DOM Hints" not in content
+
+    def test_v2_dom_hints_when_selectors_present(self):
+        template = _make_v2_sop_template()
+        template["steps"][0]["selector"] = "#review-btn"
+        path = self.writer.write_sop(template)
+        content = path.read_text()
+        assert "## DOM Hints" in content
+        assert "<details>" in content
+        assert "`#review-btn`" in content
+
+    def test_v2_empty_task_description_no_section(self):
+        template = _make_v2_sop_template(task_description="")
+        path = self.writer.write_sop(template)
+        content = path.read_text()
+        assert "## Description" not in content
+
+    def test_v2_no_prerequisites_no_section(self):
+        template = _make_v2_sop_template(preconditions=[])
+        path = self.writer.write_sop(template)
+        content = path.read_text()
+        assert "## Before You Start" not in content
+
+    def test_v2_no_variables_no_section(self):
+        template = _make_v2_sop_template()
+        template["variables"] = []
+        path = self.writer.write_sop(template)
+        content = path.read_text()
+        assert "## Variables" not in content
+
+    def test_v2_index_includes_v2_sops(self):
+        templates = [_make_v2_sop_template()]
+        self.writer.write_all_sops(templates)
+        index_path = self.writer.skills_dir / "SKILLS-INDEX.md"
+        assert index_path.exists()
+        content = index_path.read_text()
+        assert "deploy-feature-staging" in content
+
+    def test_v2_mixed_v1_v2_export(self):
+        """Both v1 and v2 SOPs export correctly side by side."""
+        templates = [
+            _make_sop_template(),
+            _make_v2_sop_template(),
+        ]
+        paths = self.writer.write_all_sops(templates)
+        assert len(paths) == 2
+
+        v1_content = paths[0].read_text()
+        v2_content = paths[1].read_text()
+
+        # v1 uses numbered list steps
+        assert "1. **Click" in v1_content
+        # v2 uses ### Step N: headings
+        assert "### Step 1:" in v2_content
+
+
+# ------------------------------------------------------------------
+# DOM Hints with timeline
+# ------------------------------------------------------------------
+
+
+class TestDomHintsWithTimeline:
+    """Test _collect_dom_hints and _extract_page_interactive_elements with timeline data."""
+
+    def test_hints_from_step_selectors(self) -> None:
+        steps = [
+            {"step": "Click Submit", "selector": "[aria-label='Submit']"},
+            {"step": "Type query", "selector": "#search-input"},
+            {"step": "Navigate", "selector": None},
+        ]
+        hints = SkillMdWriter._collect_dom_hints(steps)
+        assert len(hints) == 2
+        assert "Step 1" in hints[0]
+        assert "Submit" in hints[0]
+        assert "Step 2" in hints[1]
+        assert "#search-input" in hints[1]
+
+    def test_hints_with_timeline_interactive_elements(self) -> None:
+        from agenthandover_worker.skill_md_writer import _extract_page_interactive_elements
+
+        timeline = [{
+            "dom_nodes": [
+                {"tag": "button", "text": "Submit", "ariaLabel": "Submit form"},
+                {"tag": "input", "type": "text", "id": "search-box", "role": "textbox"},
+                {"tag": "a", "text": "Home", "id": "nav-home"},
+                {"tag": "div", "text": "Not interactive"},  # Should be excluded
+            ],
+        }]
+        elements = _extract_page_interactive_elements(timeline)
+        assert len(elements) == 3  # button, input, a — not div
+        assert any("Submit form" in e for e in elements)  # aria-label preferred
+        assert any("search-box" in e for e in elements)  # id
+        assert any("nav-home" in e for e in elements)  # id
+
+    def test_hints_empty_when_no_dom(self) -> None:
+        steps: list[dict] = [{"step": "action", "selector": None}]
+        hints = SkillMdWriter._collect_dom_hints(steps, timeline=None)
+        assert hints == []
+
+    def test_combined_step_selectors_and_page_elements(self) -> None:
+        steps = [
+            {"step": "Click Submit", "selector": "[aria-label='Submit']"},
+        ]
+        timeline = [{
+            "dom_nodes": [
+                {"tag": "button", "text": "Reset", "ariaLabel": "Reset form"},
+                {"tag": "input", "type": "email", "id": "email-input", "role": "textbox"},
+            ],
+        }]
+        hints = SkillMdWriter._collect_dom_hints(steps, timeline=timeline)
+        # Should have: step selector + empty line + header + 2 elements
+        assert any("Step 1" in h for h in hints)
+        assert any("Interactive elements" in h for h in hints)
+        assert len(hints) >= 4  # step + empty + header + at least 2 elements
+
+    def test_v2_sop_with_dom_hints_rendered(self, tmp_path: Path) -> None:
+        """Full integration: v2 SOP with _timeline renders DOM Hints section."""
+        writer = SkillMdWriter(tmp_path)
+        sop = {
+            "slug": "test-dom-hints",
+            "title": "Test DOM Hints",
+            "steps": [
+                {
+                    "step": "Click Search",
+                    "target": "https://example.com",
+                    "selector": "#search-btn",
+                    "parameters": {"app": "Chrome", "location": "https://example.com"},
+                    "confidence": 0.9,
+                    "pre_state": {},
+                },
+            ],
+            "variables": [],
+            "confidence_avg": 0.9,
+            "episode_count": 1,
+            "abs_support": 1,
+            "apps_involved": ["Chrome"],
+            "preconditions": [],
+            "task_description": "Test task",
+            "execution_overview": {},
+            "source": "v2_focus_recording",
+            "_timeline": [{
+                "dom_nodes": [
+                    {"tag": "button", "text": "Search", "id": "search-btn"},
+                    {"tag": "input", "type": "text", "ariaLabel": "Search query", "role": "textbox"},
+                ],
+            }],
+        }
+        path = writer.write_sop(sop)
+        content = path.read_text()
+        assert "## DOM Hints (Optional)" in content
+        assert "<details>" in content
+        assert "#search-btn" in content
+
+    def test_page_elements_deduplicates(self) -> None:
+        """Same element appearing in multiple timeline entries is only listed once."""
+        from agenthandover_worker.skill_md_writer import _extract_page_interactive_elements
+
+        timeline = [
+            {"dom_nodes": [{"tag": "button", "text": "Save", "id": "save-btn"}]},
+            {"dom_nodes": [{"tag": "button", "text": "Save", "id": "save-btn"}]},
+        ]
+        elements = _extract_page_interactive_elements(timeline)
+        assert elements.count("#save-btn") == 1
+
+    def test_page_elements_capped_at_20(self) -> None:
+        """Interactive elements list is capped at 20."""
+        from agenthandover_worker.skill_md_writer import _extract_page_interactive_elements
+
+        nodes = [
+            {"tag": "button", "text": f"Button {i}", "id": f"btn-{i}"}
+            for i in range(30)
+        ]
+        timeline = [{"dom_nodes": nodes}]
+        elements = _extract_page_interactive_elements(timeline)
+        # _extract_page_interactive_elements returns all, cap is in _collect_dom_hints
+        # But we can test that the function works with many elements
+        assert len(elements) == 30  # All unique, no cap in extractor itself
+
+        # Cap is applied in _collect_dom_hints
+        steps: list[dict] = []
+        hints = SkillMdWriter._collect_dom_hints(steps, timeline=timeline)
+        # header + 20 elements = 21 (with possible empty line)
+        page_elem_count = sum(1 for h in hints if h.startswith("`"))
+        assert page_elem_count <= 20
+
+
+# ------------------------------------------------------------------
+# Item 24: Outcome, Before You Start, per-step verify
+# ------------------------------------------------------------------
+
+
+class TestOutcomeAndBeforeYouStart:
+    """Tests for the Outcome, Before You Start, and per-step verify rendering."""
+
+    def setup_method(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.writer = SkillMdWriter(workspace_dir=self.tmpdir)
+
+    def test_skill_md_renders_outcome_block(self):
+        """SKILL.md output includes '## Outcome' when outcome is present."""
+        template = _make_v2_sop_template(
+            outcome="The feature is deployed to staging and health checks pass.",
+        )
+        path = self.writer.write_sop(template)
+        content = path.read_text()
+        assert "## Outcome" in content
+        assert "deployed to staging" in content
+        # Outcome should appear before Description
+        outcome_pos = content.index("## Outcome")
+        if "## Description" in content:
+            desc_pos = content.index("## Description")
+            assert outcome_pos < desc_pos
+
+    def test_skill_md_renders_prerequisites_block(self):
+        """SKILL.md output includes '## Before You Start' section."""
+        template = _make_v2_sop_template(
+            preconditions=["Git installed", "SSH key configured"],
+        )
+        path = self.writer.write_sop(template)
+        content = path.read_text()
+        assert "## Before You Start" in content
+        assert "- Git installed" in content
+        assert "- SSH key configured" in content
+
+    def test_skill_md_renders_step_verify(self):
+        """Each step's verify is rendered as italicized line."""
+        template = _make_v2_sop_template()
+        path = self.writer.write_sop(template)
+        content = path.read_text()
+        # Verify lines should be italicized (_Verify: ..._)
+        assert "_Verify: git status shows expected files changed_" in content
+        assert "_Verify: Output shows all tests passed_" in content
+        assert "_Verify: Push completes without errors_" in content
+
+    def test_skill_md_graceful_without_outcome(self):
+        """Older SOPs without outcome still render fine — no crash, no empty section."""
+        template = _make_v2_sop_template()
+        # Ensure no outcome key
+        template.pop("outcome", None)
+        path = self.writer.write_sop(template)
+        content = path.read_text()
+        assert "## Outcome" not in content
+        # Everything else still works
+        assert "## Steps" in content
+        assert "## Metadata" in content
+
+    def test_skill_md_empty_outcome_not_rendered(self):
+        """An empty outcome string should not produce a section."""
+        template = _make_v2_sop_template(outcome="")
+        path = self.writer.write_sop(template)
+        content = path.read_text()
+        assert "## Outcome" not in content
+
+    def test_skill_md_no_before_you_start_when_empty(self):
+        """No 'Before You Start' section when preconditions is empty."""
+        template = _make_v2_sop_template(preconditions=[])
+        path = self.writer.write_sop(template)
+        content = path.read_text()
+        assert "## Before You Start" not in content
+
+
+# ------------------------------------------------------------------
+# Item 25: Typed variable rendering
+# ------------------------------------------------------------------
+
+
+class TestTypedVariableRendering:
+    """Tests for typed variable table in SKILL.md rendering."""
+
+    def setup_method(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.writer = SkillMdWriter(workspace_dir=self.tmpdir)
+
+    def test_skill_md_renders_variable_table(self):
+        """v2 SKILL.md should render a rich variable table with Type and Required columns."""
+        template = _make_v2_sop_template()
+        template["variables"] = [
+            {
+                "name": "email_address",
+                "type": "email",
+                "example": "user@example.com",
+                "description": "The email to search for",
+                "required": True,
+                "sensitive": False,
+            },
+            {
+                "name": "search_query",
+                "type": "text",
+                "example": "blue widgets",
+                "description": "What to search for",
+                "required": True,
+                "sensitive": False,
+            },
+        ]
+        path = self.writer.write_sop(template)
+        content = path.read_text()
+
+        # Table header
+        assert "| Variable | Type | Required | Description | Example |" in content
+        # Rows
+        assert "| `email_address` | email | Yes |" in content
+        assert "| `search_query` | text | Yes |" in content
+        assert "user@example.com" in content
+
+    def test_skill_md_sensitive_variable_warning(self):
+        """Sensitive variables produce a warning note."""
+        template = _make_v2_sop_template()
+        template["variables"] = [
+            {
+                "name": "api_key",
+                "type": "password",
+                "example": "sk-...",
+                "description": "API authentication key",
+                "required": True,
+                "sensitive": True,
+            },
+            {
+                "name": "query",
+                "type": "text",
+                "example": "test",
+                "description": "Search query",
+                "required": False,
+                "sensitive": False,
+            },
+        ]
+        path = self.writer.write_sop(template)
+        content = path.read_text()
+
+        # Sensitive warning for api_key
+        assert "**api_key**: Sensitive" in content
+        assert "do not log or display" in content
+        # No warning for query
+        assert "**query**: Sensitive" not in content
+
+    def test_skill_md_legacy_variables_fallback(self):
+        """Old-format variables (plain strings) still render gracefully."""
+        template = _make_v2_sop_template()
+        template["variables"] = ["search_query", "date_range"]
+        path = self.writer.write_sop(template)
+        content = path.read_text()
+
+        assert "## Variables" in content
+        assert "| `search_query` | text | Yes |" in content
+        assert "| `date_range` | text | Yes |" in content
+
+    def test_skill_md_legacy_dict_without_type(self):
+        """Old dicts with only name/description/example still render."""
+        template = _make_v2_sop_template()
+        template["variables"] = [
+            {"name": "amount", "description": "Dollar amount", "example": "$42.50"},
+        ]
+        path = self.writer.write_sop(template)
+        content = path.read_text()
+
+        # Should default type to text
+        assert "| `amount` | text | Yes | Dollar amount | $42.50 |" in content
+
+    def test_skill_md_optional_variable(self):
+        """Variable with required=False renders 'No'."""
+        template = _make_v2_sop_template()
+        template["variables"] = [
+            {
+                "name": "notes",
+                "type": "text",
+                "example": "optional notes",
+                "description": "Additional notes",
+                "required": False,
+                "sensitive": False,
+            },
+        ]
+        path = self.writer.write_sop(template)
+        content = path.read_text()
+        assert "| `notes` | text | No |" in content
+
+    def test_v1_sop_legacy_string_variables(self):
+        """v1 SOPs with plain string variables render correctly."""
+        template = _make_sop_template()
+        template["variables"] = ["query", "date"]
+        path = self.writer.write_sop(template)
+        content = path.read_text()
+        assert "## Input Variables" in content
+        assert "`{{query}}`: text" in content
+        assert "`{{date}}`: text" in content
+
+    def test_v1_sop_sensitive_variable(self):
+        """v1 SOPs with sensitive variables show warning inline."""
+        template = _make_sop_template()
+        template["variables"] = [
+            {
+                "name": "token",
+                "type": "password",
+                "example": "sk-...",
+                "sensitive": True,
+            },
+        ]
+        path = self.writer.write_sop(template)
+        content = path.read_text()
+        assert "Sensitive" in content
+        assert "do not log or display" in content
+
+    def test_string_type_normalised_to_text_in_v2(self):
+        """Legacy 'string' type is displayed as 'text' in v2 rendering."""
+        template = _make_v2_sop_template()
+        template["variables"] = [
+            {"name": "foo", "type": "string", "description": "A var", "example": "bar"},
+        ]
+        path = self.writer.write_sop(template)
+        content = path.read_text()
+        assert "| `foo` | text |" in content
+        # Verify 'string' does not appear in the Variables section
+        var_section = content.split("## Variables")[1].split("##")[0]
+        assert "string" not in var_section

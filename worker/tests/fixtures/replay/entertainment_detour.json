@@ -1,0 +1,261 @@
+{
+  "description": "Afternoon coding session with entertainment detours: VS Code work, Netflix break, VS Code resume, YouTube music in background, VS Code continues. Tests classification of work vs noise with media-specific noise patterns interleaved with productive coding.",
+  "events": [
+    {
+      "id": "evt-001",
+      "timestamp": "2026-03-10T15:00:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Writing backend API code", "is_workflow": true, "likely_next": "Implement endpoint"},
+        "visual_context": {"active_app": "VS Code", "location": "file:///Users/dev/project/src/api/routes.py"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "VS Code", "title": "VS Code - routes.py"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.90, 0.00, 0.10, 0.00]
+    },
+    {
+      "id": "evt-002",
+      "timestamp": "2026-03-10T15:03:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Writing backend API code", "is_workflow": true, "likely_next": "Add request validation"},
+        "visual_context": {"active_app": "VS Code", "location": "file:///Users/dev/project/src/api/routes.py"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "VS Code", "title": "VS Code - routes.py"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.91, 0.00, 0.09, 0.00]
+    },
+    {
+      "id": "evt-003",
+      "timestamp": "2026-03-10T15:06:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Writing backend API code", "is_workflow": true, "likely_next": "Write database query"},
+        "visual_context": {"active_app": "VS Code", "location": "file:///Users/dev/project/src/api/models.py"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "VS Code", "title": "VS Code - models.py"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.89, 0.01, 0.10, 0.00]
+    },
+    {
+      "id": "evt-004",
+      "timestamp": "2026-03-10T15:09:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Writing backend API code", "is_workflow": true, "likely_next": "Run tests"},
+        "visual_context": {"active_app": "VS Code", "location": "file:///Users/dev/project/src/api/models.py"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "VS Code", "title": "VS Code - models.py"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.90, 0.00, 0.10, 0.00]
+    },
+    {
+      "id": "evt-005",
+      "timestamp": "2026-03-10T15:12:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Watching Netflix", "is_workflow": false, "likely_next": "Continue watching"},
+        "visual_context": {"active_app": "Chrome", "location": "https://www.netflix.com/watch/81234567"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "Netflix - The Office S03E07"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.00, 0.10, 0.00, 0.90]
+    },
+    {
+      "id": "evt-006",
+      "timestamp": "2026-03-10T15:15:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Watching Netflix", "is_workflow": false, "likely_next": "Continue watching"},
+        "visual_context": {"active_app": "Chrome", "location": "https://www.netflix.com/watch/81234567"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "Netflix - The Office S03E07"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.00, 0.08, 0.02, 0.90]
+    },
+    {
+      "id": "evt-007",
+      "timestamp": "2026-03-10T15:18:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Watching Netflix", "is_workflow": false, "likely_next": "Return to coding"},
+        "visual_context": {"active_app": "Chrome", "location": "https://www.netflix.com/watch/81234567"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "Netflix - The Office S03E07"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.02, 0.08, 0.00, 0.90]
+    },
+    {
+      "id": "evt-008",
+      "timestamp": "2026-03-10T15:21:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Writing backend API code", "is_workflow": true, "likely_next": "Debug failing test"},
+        "visual_context": {"active_app": "VS Code", "location": "file:///Users/dev/project/src/api/routes.py"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "VS Code", "title": "VS Code - routes.py"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.90, 0.00, 0.10, 0.00]
+    },
+    {
+      "id": "evt-009",
+      "timestamp": "2026-03-10T15:24:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Writing backend API code", "is_workflow": true, "likely_next": "Fix assertion error"},
+        "visual_context": {"active_app": "VS Code", "location": "file:///Users/dev/project/tests/test_routes.py"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "VS Code", "title": "VS Code - test_routes.py"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.89, 0.01, 0.10, 0.00]
+    },
+    {
+      "id": "evt-010",
+      "timestamp": "2026-03-10T15:27:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Writing backend API code", "is_workflow": true, "likely_next": "Run tests again"},
+        "visual_context": {"active_app": "VS Code", "location": "file:///Users/dev/project/tests/test_routes.py"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "VS Code", "title": "VS Code - Terminal - pytest"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.91, 0.00, 0.09, 0.00]
+    },
+    {
+      "id": "evt-011",
+      "timestamp": "2026-03-10T15:29:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Writing backend API code", "is_workflow": true, "likely_next": "Commit changes"},
+        "visual_context": {"active_app": "VS Code", "location": "file:///Users/dev/project/src/api/routes.py"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "VS Code", "title": "VS Code - Git: Stage Changes"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.90, 0.00, 0.10, 0.00]
+    },
+    {
+      "id": "evt-012",
+      "timestamp": "2026-03-10T15:31:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Playing music on YouTube", "is_workflow": false, "likely_next": "Listen while coding"},
+        "visual_context": {"active_app": "Chrome", "location": "https://www.youtube.com/watch?v=music_playlist_1"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "YouTube - Lo-fi Beats to Code To"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.05, 0.10, 0.00, 0.85]
+    },
+    {
+      "id": "evt-013",
+      "timestamp": "2026-03-10T15:33:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Playing music on YouTube", "is_workflow": false, "likely_next": "Switch back to code"},
+        "visual_context": {"active_app": "Chrome", "location": "https://www.youtube.com/watch?v=music_playlist_1"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "YouTube - Lo-fi Beats to Code To"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.05, 0.08, 0.02, 0.85]
+    },
+    {
+      "id": "evt-014",
+      "timestamp": "2026-03-10T15:35:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Playing music on YouTube", "is_workflow": false, "likely_next": "Return to coding"},
+        "visual_context": {"active_app": "Chrome", "location": "https://www.youtube.com/watch?v=music_playlist_1"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "YouTube - Lo-fi Beats to Code To"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.04, 0.10, 0.01, 0.85]
+    },
+    {
+      "id": "evt-015",
+      "timestamp": "2026-03-10T15:37:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Writing backend API code", "is_workflow": true, "likely_next": "Implement error handling"},
+        "visual_context": {"active_app": "VS Code", "location": "file:///Users/dev/project/src/api/errors.py"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "VS Code", "title": "VS Code - errors.py"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.90, 0.00, 0.10, 0.00]
+    },
+    {
+      "id": "evt-016",
+      "timestamp": "2026-03-10T15:40:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Writing backend API code", "is_workflow": true, "likely_next": "Add custom exception classes"},
+        "visual_context": {"active_app": "VS Code", "location": "file:///Users/dev/project/src/api/errors.py"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "VS Code", "title": "VS Code - errors.py"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.91, 0.00, 0.09, 0.00]
+    },
+    {
+      "id": "evt-017",
+      "timestamp": "2026-03-10T15:43:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Writing backend API code", "is_workflow": true, "likely_next": "Write error handler tests"},
+        "visual_context": {"active_app": "VS Code", "location": "file:///Users/dev/project/tests/test_errors.py"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "VS Code", "title": "VS Code - test_errors.py"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.89, 0.01, 0.10, 0.00]
+    },
+    {
+      "id": "evt-018",
+      "timestamp": "2026-03-10T15:45:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Writing backend API code", "is_workflow": true, "likely_next": "Push to remote"},
+        "visual_context": {"active_app": "VS Code", "location": "file:///Users/dev/project/tests/test_errors.py"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "VS Code", "title": "VS Code - Terminal - All tests passed"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.90, 0.00, 0.10, 0.00]
+    }
+  ],
+  "ground_truth": {
+    "classification": [
+      {"event_id": "evt-001", "label": "work", "activity_type": "work", "reason": "VS Code backend API coding"},
+      {"event_id": "evt-002", "label": "work", "activity_type": "work", "reason": "VS Code backend API coding"},
+      {"event_id": "evt-003", "label": "work", "activity_type": "work", "reason": "VS Code backend API coding"},
+      {"event_id": "evt-004", "label": "work", "activity_type": "work", "reason": "VS Code backend API coding"},
+      {"event_id": "evt-005", "label": "noise", "activity_type": "entertainment", "reason": "Netflix streaming"},
+      {"event_id": "evt-006", "label": "noise", "activity_type": "entertainment", "reason": "Netflix streaming"},
+      {"event_id": "evt-007", "label": "noise", "activity_type": "entertainment", "reason": "Netflix streaming"},
+      {"event_id": "evt-008", "label": "work", "activity_type": "work", "reason": "VS Code backend API coding resumed"},
+      {"event_id": "evt-009", "label": "work", "activity_type": "work", "reason": "VS Code test debugging"},
+      {"event_id": "evt-010", "label": "work", "activity_type": "work", "reason": "VS Code test running"},
+      {"event_id": "evt-011", "label": "work", "activity_type": "work", "reason": "VS Code git staging"},
+      {"event_id": "evt-012", "label": "noise", "activity_type": "entertainment", "reason": "YouTube music playback"},
+      {"event_id": "evt-013", "label": "noise", "activity_type": "entertainment", "reason": "YouTube music playback"},
+      {"event_id": "evt-014", "label": "noise", "activity_type": "entertainment", "reason": "YouTube music playback"},
+      {"event_id": "evt-015", "label": "work", "activity_type": "work", "reason": "VS Code error handling implementation"},
+      {"event_id": "evt-016", "label": "work", "activity_type": "work", "reason": "VS Code error handling implementation"},
+      {"event_id": "evt-017", "label": "work", "activity_type": "work", "reason": "VS Code error handler tests"},
+      {"event_id": "evt-018", "label": "work", "activity_type": "work", "reason": "VS Code test execution"}
+    ]
+  }
+}

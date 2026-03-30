@@ -1,0 +1,157 @@
+# config.example.toml — AgentHandover configuration
+# Copy to the OS-appropriate location:
+#   macOS:   ~/Library/Application Support/agenthandover/config.toml
+#   Linux:   ~/.config/agenthandover/config.toml
+
+[observer]
+t_dwell_seconds = 3
+t_scroll_read_seconds = 8
+capture_screenshots = true
+screenshot_max_per_minute = 20
+multi_monitor_mode = "focused_window"
+screenshot_format = "jpeg"       # "jpeg" (half-res, recommended) or "png" (full-res)
+screenshot_quality = 70          # JPEG quality 1-100 (only used for jpeg format)
+screenshot_scale = 0.5           # 0.5 = half resolution (recommended for VLM)
+dhash_threshold = 10             # perceptual hash dedup threshold (lower = stricter)
+
+[privacy]
+enable_inline_secret_redaction = true
+enable_clipboard_preview = false
+clipboard_preview_max_chars = 200
+secure_field_drop = true
+
+[browser]
+extension_id = "knldjmfmopnpolahpmmgbagdohdnhkik"
+native_host_name = "com.agenthandover.host"
+deny_network_egress = true
+
+[storage]
+retention_days_raw = 14
+retention_days_episodes = 90
+sqlite_wal_mode = true
+vacuum_min_free_gb = 5
+vacuum_safety_multiplier = 2.5
+
+[idle_jobs]
+require_ac_power = true
+min_battery_percent = 50
+max_cpu_percent = 30
+max_temp_c = 80
+run_window_local_time = "01:00-05:00"
+
+[vlm]
+enabled = true
+max_jobs_per_day = 50
+max_queue_size = 500
+job_ttl_days = 7
+max_compute_minutes_per_day = 20
+# backend = "mlx-vlm"         # "mlx-vlm", "llama-cpp-python", "ollama", "openai-compat", "mock"
+# model_name = "mlx-community/llava-1.5-7b-4bit"
+# timeout_seconds = 120
+# --- llama-cpp-python specific ---
+# model_path = "/path/to/model.gguf"
+# clip_model_path = "/path/to/clip-model.gguf"
+# n_ctx = 2048
+# --- ollama specific ---
+# ollama_host = "http://localhost:11434"
+# --- openai-compat specific ---
+# api_key = ""                 # or set AGENTHANDOVER_API_KEY / OPENAI_API_KEY env var
+# base_url = ""                # for local providers (vLLM, LM Studio, etc.)
+# --- remote mode (cloud APIs) ---
+# mode = "local"               # "local" (default) or "remote" (cloud API)
+# provider = "openai"          # "openai" | "anthropic" | "google"
+# model = "gpt-4o-mini"        # provider-specific model name
+# api_key_env = "OPENAI_API_KEY"  # env var name (NEVER store keys directly!)
+# --- v2 scene annotation pipeline ---
+annotation_model = "qwen3.5:2b"   # model for per-frame annotation (think=False)
+sop_model = "qwen3.5:4b"          # model for SOP generation (think=True)
+annotation_enabled = true          # enable continuous scene annotation pipeline
+stale_skip_count = 3               # skip after N consecutive non-workflow same-app frames
+sliding_window_max_age_sec = 600   # 10 min max age for context window
+
+[llm]
+enhance_sops = true
+max_enhancements_per_day = 20
+# model = "llama3.2:3b"        # lighter text model for local; empty = inherit from vlm
+# timeout_seconds = 60
+# temperature = 0.3
+# max_tokens = 800
+
+[openclaw]
+workspace_path = "~/.openclaw/workspace"
+sop_output_dir = "memory/apprentice/sops"
+index_path = "memory/apprentice/index.md"
+atomic_writes = true
+
+[sop]
+# When false (default), generated SOPs are saved as drafts for human review
+# in the app before being exported. Set to true to auto-approve and export
+# immediately — use only if you trust the pipeline's output quality.
+auto_approve = false
+
+[export]
+adapter = "openclaw"           # "openclaw" or "generic"
+json_export = false            # also write .json alongside .md
+# generic_output_dir = "~/Library/Application Support/agenthandover/sops"
+
+# ─── Phase 2+: Knowledge base, trust & privacy zones ───────────────
+
+[knowledge]
+# Root directory for the portable knowledge base.
+# Any AI agent can read this directory to execute your workflows.
+root_dir = "~/.agenthandover/knowledge"
+# Time to run daily batch processing (HH:MM, local time)
+daily_batch_time = "23:30"
+# Minimum days of data before pattern detection kicks in
+pattern_detection_min_days = 3
+# Enable the local HTTP query API for agents (default: true)
+query_api_enabled = true
+query_api_port = 9477
+# Enable knowledge base sync (Phase 5)
+sync_enabled = false
+# sync_remote = ""             # rsync-style remote path or URL
+
+[trust]
+# Default trust level for new procedures:
+#   "observe" | "suggest" | "draft" | "execute_with_approval" | "autonomous"
+default_trust_level = "observe"
+# Minimum observations before a procedure can be promoted beyond "observe"
+min_observations_for_promotion = 3
+# Minimum success rate (0.0–1.0) before suggesting promotion
+min_success_rate_for_suggestion = 0.90
+# Never auto-promote — only suggest (human must approve)
+auto_promote = false
+
+[constraints]
+# Global guardrails applied to ALL procedures
+# max_spend_usd_without_approval = 100
+# blocked_domains = []         # domains agent must never interact with
+# require_confirmation_for = ["email", "payment", "deletion"]
+# max_autonomous_actions_per_hour = 20
+
+[privacy.zones]
+# Apps that are always observed at full fidelity
+# full_observation = ["com.apple.Safari", "com.google.Chrome"]
+# Apps where only metadata (app name, timestamp) is captured — no screenshots
+# metadata_only = ["com.apple.Messages"]
+# Apps that are completely blocked from observation (glob patterns)
+# blocked = ["1Password*", "Bitwarden*", "LastPass*", "KeePassXC*", "Keychain Access"]
+# URL patterns that are always blocked (glob patterns, case-insensitive)
+# blocked_urls = ["*bank*", "*.gov/*", "*payroll*", "*login*password*"]
+# Time windows during which all observation is paused (HH:MM-HH:MM, local time)
+# auto_pause = ["12:00-13:00"]
+
+# ---- Feature Toggles ----
+# Enable/disable Phase 3-6 features independently.
+# All default to true. Set to false to disable.
+[features]
+# 8-class activity taxonomy (Phase 1)
+activity_classification = true
+# Task continuity graph across interruptions (Phase 2)
+continuity_tracking = true
+# 7-state procedure lifecycle state machine (Phase 3)
+lifecycle_management = true
+# Curation queue with merge/upgrade/drift detection (Phase 5)
+curation = true
+# Runtime environment validation via pgrep (Phase 6)
+runtime_validation = true

@@ -1,0 +1,609 @@
+{
+  "description": "Six pre-built v3 procedures at various trust levels, freshness states, and completeness. Tests procedure readiness: which procedures can execute, which can draft, and which are blocked by staleness, trust level, missing steps, or blocked domains. Uses 2026-03-13T12:00:00Z as 'today' for deterministic staleness calculations.",
+  "events": [],
+  "procedures": [
+    {
+      "schema_version": "3.0.0",
+      "id": "proc-fresh-autonomous",
+      "title": "Fresh Autonomous Procedure",
+      "short_title": "Fresh Auto",
+      "description": "A fresh procedure at autonomous trust level with sufficient observations. Should be fully executable.",
+      "tags": ["test", "autonomous"],
+      "confidence_avg": 0.90,
+      "confidence_summary": "high",
+      "episode_count": 5,
+      "evidence_window": "last_30_days",
+      "apps_involved": ["Chrome"],
+      "source": "v2_passive_discovery",
+      "steps": [
+        {
+          "step_id": "step_1",
+          "index": 0,
+          "action": "Navigate to dashboard",
+          "target": "Dashboard page",
+          "app": "Chrome",
+          "location": "https://app.example.com/dashboard",
+          "input": "",
+          "verify": "Dashboard loads successfully",
+          "selector": null,
+          "parameters": {"app": "Chrome", "verify": "Dashboard loads successfully"},
+          "confidence": 0.92,
+          "on_failure": {"strategy": "retry", "max_retries": 2, "delay_seconds": 3}
+        },
+        {
+          "step_id": "step_2",
+          "index": 1,
+          "action": "Click export button",
+          "target": "Export button",
+          "app": "Chrome",
+          "location": "https://app.example.com/dashboard",
+          "input": "",
+          "verify": "Export dialog appears",
+          "selector": null,
+          "parameters": {"app": "Chrome", "verify": "Export dialog appears"},
+          "confidence": 0.90,
+          "on_failure": {"strategy": "retry", "max_retries": 1, "delay_seconds": 2}
+        },
+        {
+          "step_id": "step_3",
+          "index": 2,
+          "action": "Download CSV report",
+          "target": "Download link",
+          "app": "Chrome",
+          "location": "https://app.example.com/dashboard/export",
+          "input": "",
+          "verify": "CSV file downloaded",
+          "selector": null,
+          "parameters": {"app": "Chrome", "verify": "CSV file downloaded"},
+          "confidence": 0.88,
+          "on_failure": {"strategy": "abort", "max_retries": 0, "delay_seconds": 0}
+        }
+      ],
+      "inputs": [],
+      "outputs": [{"name": "csv_file", "type": "file", "description": "Downloaded CSV report"}],
+      "environment": {
+        "required_apps": ["Chrome"],
+        "accounts": [{"service": "example.com", "required": true}],
+        "setup_actions": []
+      },
+      "branches": [],
+      "expected_outcomes": [{"type": "file_created", "description": "CSV report downloaded"}],
+      "staleness": {
+        "last_observed": "2026-03-13T12:00:00Z",
+        "last_confirmed": null,
+        "drift_signals": [],
+        "confidence_trend": [0.88, 0.90, 0.90]
+      },
+      "evidence": {
+        "observations": [],
+        "step_evidence": [],
+        "contradictions": [],
+        "total_observations": 5
+      },
+      "constraints": {
+        "trust_level": "autonomous",
+        "guardrails": []
+      },
+      "recurrence": {
+        "pattern": "weekly",
+        "day": "Friday",
+        "time": "16:00",
+        "avg_duration_minutes": 3,
+        "observations": 5
+      },
+      "chain": {
+        "depends_on": [],
+        "followed_by": [],
+        "co_occurrence_count": 0,
+        "can_compose": false
+      },
+      "preconditions": ["Must be logged into example.com"],
+      "postconditions": ["CSV report is saved to Downloads"],
+      "exceptions_seen": [],
+      "generated_at": "2026-03-13T12:00:00Z",
+      "metadata": {
+        "generator": "agenthandover",
+        "generator_version": "0.1.0",
+        "schema_version": "3.0.0"
+      }
+    },
+    {
+      "schema_version": "3.0.0",
+      "id": "proc-fresh-draft",
+      "title": "Fresh Draft Procedure",
+      "short_title": "Fresh Draft",
+      "description": "A fresh procedure at draft trust level. Can draft but not execute.",
+      "tags": ["test", "draft"],
+      "confidence_avg": 0.80,
+      "confidence_summary": "medium",
+      "episode_count": 3,
+      "evidence_window": "last_30_days",
+      "apps_involved": ["Chrome"],
+      "source": "v2_passive_discovery",
+      "steps": [
+        {
+          "step_id": "step_1",
+          "index": 0,
+          "action": "Open settings page",
+          "target": "Settings menu",
+          "app": "Chrome",
+          "location": "https://app.example.com/settings",
+          "input": "",
+          "verify": "Settings page loads",
+          "selector": null,
+          "parameters": {"app": "Chrome", "verify": "Settings page loads"},
+          "confidence": 0.82,
+          "on_failure": {"strategy": "abort", "max_retries": 0, "delay_seconds": 0}
+        },
+        {
+          "step_id": "step_2",
+          "index": 1,
+          "action": "Update notification preferences",
+          "target": "Notification toggle",
+          "app": "Chrome",
+          "location": "https://app.example.com/settings/notifications",
+          "input": "",
+          "verify": "Preferences saved",
+          "selector": null,
+          "parameters": {"app": "Chrome", "verify": "Preferences saved"},
+          "confidence": 0.78,
+          "on_failure": {"strategy": "abort", "max_retries": 0, "delay_seconds": 0}
+        }
+      ],
+      "inputs": [],
+      "outputs": [],
+      "environment": {
+        "required_apps": ["Chrome"],
+        "accounts": [{"service": "example.com", "required": true}],
+        "setup_actions": []
+      },
+      "branches": [],
+      "expected_outcomes": [{"type": "state_change", "description": "Notification preferences updated"}],
+      "staleness": {
+        "last_observed": "2026-03-13T12:00:00Z",
+        "last_confirmed": null,
+        "drift_signals": [],
+        "confidence_trend": [0.78, 0.80]
+      },
+      "evidence": {
+        "observations": [],
+        "step_evidence": [],
+        "contradictions": [],
+        "total_observations": 3
+      },
+      "constraints": {
+        "trust_level": "draft",
+        "guardrails": []
+      },
+      "recurrence": {
+        "pattern": null,
+        "day": null,
+        "time": null,
+        "avg_duration_minutes": null,
+        "observations": 0
+      },
+      "chain": {
+        "depends_on": [],
+        "followed_by": [],
+        "co_occurrence_count": 0,
+        "can_compose": false
+      },
+      "preconditions": [],
+      "postconditions": [],
+      "exceptions_seen": [],
+      "generated_at": "2026-03-13T12:00:00Z",
+      "metadata": {
+        "generator": "agenthandover",
+        "generator_version": "0.1.0",
+        "schema_version": "3.0.0"
+      }
+    },
+    {
+      "schema_version": "3.0.0",
+      "id": "proc-fresh-observe",
+      "title": "Fresh Observe-Only Procedure",
+      "short_title": "Fresh Observe",
+      "description": "A fresh procedure at observe trust level. Cannot execute or draft.",
+      "tags": ["test", "observe"],
+      "confidence_avg": 0.65,
+      "confidence_summary": "medium",
+      "episode_count": 2,
+      "evidence_window": "last_30_days",
+      "apps_involved": ["Chrome"],
+      "source": "v2_passive_discovery",
+      "steps": [
+        {
+          "step_id": "step_1",
+          "index": 0,
+          "action": "Open admin panel",
+          "target": "Admin link",
+          "app": "Chrome",
+          "location": "https://app.example.com/admin",
+          "input": "",
+          "verify": "Admin panel loads",
+          "selector": null,
+          "parameters": {"app": "Chrome", "verify": "Admin panel loads"},
+          "confidence": 0.68,
+          "on_failure": {"strategy": "abort", "max_retries": 0, "delay_seconds": 0}
+        },
+        {
+          "step_id": "step_2",
+          "index": 1,
+          "action": "View user list",
+          "target": "Users tab",
+          "app": "Chrome",
+          "location": "https://app.example.com/admin/users",
+          "input": "",
+          "verify": "User list displayed",
+          "selector": null,
+          "parameters": {"app": "Chrome", "verify": "User list displayed"},
+          "confidence": 0.62,
+          "on_failure": {"strategy": "abort", "max_retries": 0, "delay_seconds": 0}
+        }
+      ],
+      "inputs": [],
+      "outputs": [],
+      "environment": {
+        "required_apps": ["Chrome"],
+        "accounts": [{"service": "example.com", "required": true}],
+        "setup_actions": []
+      },
+      "branches": [],
+      "expected_outcomes": [],
+      "staleness": {
+        "last_observed": "2026-03-13T12:00:00Z",
+        "last_confirmed": null,
+        "drift_signals": [],
+        "confidence_trend": [0.62, 0.65]
+      },
+      "evidence": {
+        "observations": [],
+        "step_evidence": [],
+        "contradictions": [],
+        "total_observations": 2
+      },
+      "constraints": {
+        "trust_level": "observe",
+        "guardrails": []
+      },
+      "recurrence": {
+        "pattern": null,
+        "day": null,
+        "time": null,
+        "avg_duration_minutes": null,
+        "observations": 0
+      },
+      "chain": {
+        "depends_on": [],
+        "followed_by": [],
+        "co_occurrence_count": 0,
+        "can_compose": false
+      },
+      "preconditions": [],
+      "postconditions": [],
+      "exceptions_seen": [],
+      "generated_at": "2026-03-13T12:00:00Z",
+      "metadata": {
+        "generator": "agenthandover",
+        "generator_version": "0.1.0",
+        "schema_version": "3.0.0"
+      }
+    },
+    {
+      "schema_version": "3.0.0",
+      "id": "proc-stale-autonomous",
+      "title": "Stale Autonomous Procedure",
+      "short_title": "Stale Auto",
+      "description": "An autonomous procedure that has not been observed in over two years. Should be blocked due to staleness even though trust level is autonomous.",
+      "tags": ["test", "stale"],
+      "confidence_avg": 0.88,
+      "confidence_summary": "high",
+      "episode_count": 5,
+      "evidence_window": "last_30_days",
+      "apps_involved": ["Chrome"],
+      "source": "v2_passive_discovery",
+      "steps": [
+        {
+          "step_id": "step_1",
+          "index": 0,
+          "action": "Open analytics page",
+          "target": "Analytics link",
+          "app": "Chrome",
+          "location": "https://analytics.example.com/dashboard",
+          "input": "",
+          "verify": "Analytics dashboard loads",
+          "selector": null,
+          "parameters": {"app": "Chrome", "verify": "Analytics dashboard loads"},
+          "confidence": 0.90,
+          "on_failure": {"strategy": "retry", "max_retries": 2, "delay_seconds": 3}
+        },
+        {
+          "step_id": "step_2",
+          "index": 1,
+          "action": "Generate monthly report",
+          "target": "Report generator",
+          "app": "Chrome",
+          "location": "https://analytics.example.com/reports/monthly",
+          "input": "",
+          "verify": "Report generated",
+          "selector": null,
+          "parameters": {"app": "Chrome", "verify": "Report generated"},
+          "confidence": 0.88,
+          "on_failure": {"strategy": "abort", "max_retries": 0, "delay_seconds": 0}
+        },
+        {
+          "step_id": "step_3",
+          "index": 2,
+          "action": "Download report PDF",
+          "target": "Download button",
+          "app": "Chrome",
+          "location": "https://analytics.example.com/reports/monthly/download",
+          "input": "",
+          "verify": "PDF downloaded",
+          "selector": null,
+          "parameters": {"app": "Chrome", "verify": "PDF downloaded"},
+          "confidence": 0.86,
+          "on_failure": {"strategy": "abort", "max_retries": 0, "delay_seconds": 0}
+        }
+      ],
+      "inputs": [],
+      "outputs": [{"name": "report_pdf", "type": "file", "description": "Monthly analytics report"}],
+      "environment": {
+        "required_apps": ["Chrome"],
+        "accounts": [{"service": "analytics.example.com", "required": true}],
+        "setup_actions": []
+      },
+      "branches": [],
+      "expected_outcomes": [{"type": "file_created", "description": "PDF report downloaded"}],
+      "staleness": {
+        "last_observed": "2024-01-01T00:00:00Z",
+        "last_confirmed": null,
+        "drift_signals": [],
+        "confidence_trend": [0.88, 0.88]
+      },
+      "evidence": {
+        "observations": [],
+        "step_evidence": [],
+        "contradictions": [],
+        "total_observations": 5
+      },
+      "constraints": {
+        "trust_level": "autonomous",
+        "guardrails": []
+      },
+      "recurrence": {
+        "pattern": "monthly",
+        "day": "1",
+        "time": "09:00",
+        "avg_duration_minutes": 5,
+        "observations": 5
+      },
+      "chain": {
+        "depends_on": [],
+        "followed_by": [],
+        "co_occurrence_count": 0,
+        "can_compose": false
+      },
+      "preconditions": ["Must have analytics access"],
+      "postconditions": ["Monthly report is downloaded"],
+      "exceptions_seen": [],
+      "generated_at": "2024-01-01T00:00:00Z",
+      "metadata": {
+        "generator": "agenthandover",
+        "generator_version": "0.1.0",
+        "schema_version": "3.0.0"
+      }
+    },
+    {
+      "schema_version": "3.0.0",
+      "id": "proc-no-steps",
+      "title": "Empty Steps Procedure",
+      "short_title": "No Steps",
+      "description": "An autonomous procedure with no steps defined. Cannot execute because there is nothing to do.",
+      "tags": ["test", "empty"],
+      "confidence_avg": 0.0,
+      "confidence_summary": "low",
+      "episode_count": 5,
+      "evidence_window": "last_30_days",
+      "apps_involved": ["Chrome"],
+      "source": "v2_passive_discovery",
+      "steps": [],
+      "inputs": [],
+      "outputs": [],
+      "environment": {
+        "required_apps": ["Chrome"],
+        "accounts": [],
+        "setup_actions": []
+      },
+      "branches": [],
+      "expected_outcomes": [],
+      "staleness": {
+        "last_observed": "2026-03-13T12:00:00Z",
+        "last_confirmed": null,
+        "drift_signals": [],
+        "confidence_trend": []
+      },
+      "evidence": {
+        "observations": [],
+        "step_evidence": [],
+        "contradictions": [],
+        "total_observations": 5
+      },
+      "constraints": {
+        "trust_level": "autonomous",
+        "guardrails": []
+      },
+      "recurrence": {
+        "pattern": null,
+        "day": null,
+        "time": null,
+        "avg_duration_minutes": null,
+        "observations": 0
+      },
+      "chain": {
+        "depends_on": [],
+        "followed_by": [],
+        "co_occurrence_count": 0,
+        "can_compose": false
+      },
+      "preconditions": [],
+      "postconditions": [],
+      "exceptions_seen": [],
+      "generated_at": "2026-03-13T12:00:00Z",
+      "metadata": {
+        "generator": "agenthandover",
+        "generator_version": "0.1.0",
+        "schema_version": "3.0.0"
+      }
+    },
+    {
+      "schema_version": "3.0.0",
+      "id": "proc-blocked-domain",
+      "_constraints_to_set": {"blocked_domains": ["evil.blocked.com"]},
+      "title": "Blocked Domain Procedure",
+      "short_title": "Blocked Domain",
+      "description": "An autonomous, fresh procedure whose steps reference a blocked domain. Cannot execute due to domain block.",
+      "tags": ["test", "blocked"],
+      "confidence_avg": 0.90,
+      "confidence_summary": "high",
+      "episode_count": 5,
+      "evidence_window": "last_30_days",
+      "apps_involved": ["Chrome"],
+      "source": "v2_passive_discovery",
+      "steps": [
+        {
+          "step_id": "step_1",
+          "index": 0,
+          "action": "Navigate to external site",
+          "target": "Blocked site page",
+          "app": "Chrome",
+          "location": "https://evil.blocked.com/page",
+          "input": "",
+          "verify": "Page loads",
+          "selector": null,
+          "parameters": {"app": "Chrome", "verify": "Page loads"},
+          "confidence": 0.90,
+          "on_failure": {"strategy": "abort", "max_retries": 0, "delay_seconds": 0}
+        },
+        {
+          "step_id": "step_2",
+          "index": 1,
+          "action": "Submit form data",
+          "target": "Form on blocked site",
+          "app": "Chrome",
+          "location": "https://evil.blocked.com/submit",
+          "input": "{{sensitive_data}}",
+          "verify": "Form submitted",
+          "selector": null,
+          "parameters": {"app": "Chrome", "input": "{{sensitive_data}}", "verify": "Form submitted"},
+          "confidence": 0.88,
+          "on_failure": {"strategy": "abort", "max_retries": 0, "delay_seconds": 0}
+        },
+        {
+          "step_id": "step_3",
+          "index": 2,
+          "action": "Confirm submission",
+          "target": "Confirmation button",
+          "app": "Chrome",
+          "location": "https://evil.blocked.com/confirm",
+          "input": "",
+          "verify": "Confirmation shown",
+          "selector": null,
+          "parameters": {"app": "Chrome", "verify": "Confirmation shown"},
+          "confidence": 0.92,
+          "on_failure": {"strategy": "abort", "max_retries": 0, "delay_seconds": 0}
+        }
+      ],
+      "inputs": [
+        {"name": "sensitive_data", "type": "string", "required": true, "default": null, "description": "Data to submit"}
+      ],
+      "outputs": [],
+      "environment": {
+        "required_apps": ["Chrome"],
+        "accounts": [],
+        "setup_actions": []
+      },
+      "branches": [],
+      "expected_outcomes": [{"type": "data_transfer", "description": "Data submitted to external site"}],
+      "staleness": {
+        "last_observed": "2026-03-13T12:00:00Z",
+        "last_confirmed": null,
+        "drift_signals": [],
+        "confidence_trend": [0.88, 0.90, 0.90]
+      },
+      "evidence": {
+        "observations": [],
+        "step_evidence": [],
+        "contradictions": [],
+        "total_observations": 5
+      },
+      "constraints": {
+        "trust_level": "autonomous",
+        "guardrails": ["Do not submit PII to untrusted domains"]
+      },
+      "recurrence": {
+        "pattern": null,
+        "day": null,
+        "time": null,
+        "avg_duration_minutes": null,
+        "observations": 0
+      },
+      "chain": {
+        "depends_on": [],
+        "followed_by": [],
+        "co_occurrence_count": 0,
+        "can_compose": false
+      },
+      "preconditions": [],
+      "postconditions": [],
+      "exceptions_seen": [],
+      "generated_at": "2026-03-13T12:00:00Z",
+      "metadata": {
+        "generator": "agenthandover",
+        "generator_version": "0.1.0",
+        "schema_version": "3.0.0"
+      }
+    }
+  ],
+  "blocked_domains": ["blocked.com"],
+  "ground_truth": {
+    "procedure_readiness": [
+      {
+        "procedure_id": "proc-fresh-autonomous",
+        "expected_can_execute": true,
+        "expected_can_draft": true,
+        "reason": "Fresh, autonomous trust, has steps and sufficient observations"
+      },
+      {
+        "procedure_id": "proc-fresh-draft",
+        "expected_can_execute": false,
+        "expected_can_draft": true,
+        "reason": "Draft trust level allows drafting but not execution"
+      },
+      {
+        "procedure_id": "proc-fresh-observe",
+        "expected_can_execute": false,
+        "expected_can_draft": false,
+        "reason": "Observe trust level blocks both execution and drafting"
+      },
+      {
+        "procedure_id": "proc-stale-autonomous",
+        "expected_can_execute": false,
+        "expected_can_draft": false,
+        "reason": "Autonomous trust but stale (last_observed 2024-01-01, over 2 years old), low freshness score blocks execution"
+      },
+      {
+        "procedure_id": "proc-no-steps",
+        "expected_can_execute": false,
+        "expected_can_draft": false,
+        "reason": "Autonomous trust and fresh, but no steps — has_steps check blocks both execution and drafting"
+      },
+      {
+        "procedure_id": "proc-blocked-domain",
+        "expected_can_execute": false,
+        "expected_can_draft": true,
+        "reason": "Autonomous trust and fresh, but step locations reference blocked domain (evil.blocked.com matches blocked_domains rule for blocked.com)"
+      }
+    ]
+  }
+}

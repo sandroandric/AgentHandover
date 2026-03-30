@@ -1,0 +1,12 @@
+pub mod config;
+pub mod doctor;
+pub mod export;
+pub mod focus;
+pub mod logs;
+pub mod search;
+pub mod service;
+pub mod setup;
+pub mod sops;
+pub mod status;
+pub mod uninstall;
+pub mod watch;

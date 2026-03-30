@@ -1,0 +1,721 @@
+{
+  "description": "Five consecutive days of the same morning standup routine: Zoom call, Jira board review, status update. Tests recurrence detection, per-day task boundary identification, and daily summary generation.",
+  "events": [
+    {
+      "id": "evt-d1-001",
+      "timestamp": "2026-03-10T09:00:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Opening Zoom for standup", "is_workflow": true, "likely_next": "Join meeting"},
+        "visual_context": {"active_app": "Zoom", "location": "zoom://meeting/123456"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Zoom", "title": "Zoom - Join Meeting"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.85, 0.15, 0.00, 0.00]
+    },
+    {
+      "id": "evt-d1-002",
+      "timestamp": "2026-03-10T09:01:30Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Joining daily standup meeting", "is_workflow": true, "likely_next": "Listen to updates"},
+        "visual_context": {"active_app": "Zoom", "location": "zoom://meeting/123456"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Zoom", "title": "Zoom - Daily Standup"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.86, 0.14, 0.00, 0.00]
+    },
+    {
+      "id": "evt-d1-003",
+      "timestamp": "2026-03-10T09:03:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Participating in standup", "is_workflow": true, "likely_next": "Give status update"},
+        "visual_context": {"active_app": "Zoom", "location": "zoom://meeting/123456"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Zoom", "title": "Zoom - Daily Standup"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.84, 0.16, 0.00, 0.00]
+    },
+    {
+      "id": "evt-d1-004",
+      "timestamp": "2026-03-10T09:05:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Reviewing Jira board", "is_workflow": true, "likely_next": "Check sprint progress"},
+        "visual_context": {"active_app": "Chrome", "location": "https://jira.atlassian.net/board/42"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "Jira - Sprint Board"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.82, 0.18, 0.00, 0.00]
+    },
+    {
+      "id": "evt-d1-005",
+      "timestamp": "2026-03-10T09:07:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Reviewing Jira board", "is_workflow": true, "likely_next": "Check blockers"},
+        "visual_context": {"active_app": "Chrome", "location": "https://jira.atlassian.net/board/42"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "Jira - Sprint Board"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.83, 0.17, 0.00, 0.00]
+    },
+    {
+      "id": "evt-d1-006",
+      "timestamp": "2026-03-10T09:09:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Reviewing Jira board", "is_workflow": true, "likely_next": "Open ticket details"},
+        "visual_context": {"active_app": "Chrome", "location": "https://jira.atlassian.net/browse/PROJ-101"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "Jira - PROJ-101"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.81, 0.19, 0.00, 0.00]
+    },
+    {
+      "id": "evt-d1-007",
+      "timestamp": "2026-03-10T09:11:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Reviewing Jira board", "is_workflow": true, "likely_next": "Update status"},
+        "visual_context": {"active_app": "Chrome", "location": "https://jira.atlassian.net/browse/PROJ-102"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "Jira - PROJ-102"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.82, 0.18, 0.00, 0.00]
+    },
+    {
+      "id": "evt-d1-008",
+      "timestamp": "2026-03-10T09:12:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Updating Jira status", "is_workflow": true, "likely_next": "Move card to In Progress"},
+        "visual_context": {"active_app": "Chrome", "location": "https://jira.atlassian.net/browse/PROJ-101"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "Jira - PROJ-101 - Update Status"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.83, 0.17, 0.00, 0.00]
+    },
+    {
+      "id": "evt-d1-009",
+      "timestamp": "2026-03-10T09:13:30Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Updating Jira status", "is_workflow": true, "likely_next": "Add comment"},
+        "visual_context": {"active_app": "Chrome", "location": "https://jira.atlassian.net/browse/PROJ-101"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "Jira - PROJ-101 - Comment"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.84, 0.16, 0.00, 0.00]
+    },
+    {
+      "id": "evt-d1-010",
+      "timestamp": "2026-03-10T09:15:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Updating Jira status", "is_workflow": true, "likely_next": "Close standup routine"},
+        "visual_context": {"active_app": "Chrome", "location": "https://jira.atlassian.net/board/42"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "Jira - Sprint Board Updated"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.85, 0.15, 0.00, 0.00]
+    },
+
+    {
+      "id": "evt-d2-001",
+      "timestamp": "2026-03-11T09:00:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Opening Zoom for standup", "is_workflow": true, "likely_next": "Join meeting"},
+        "visual_context": {"active_app": "Zoom", "location": "zoom://meeting/123456"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Zoom", "title": "Zoom - Join Meeting"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.85, 0.15, 0.00, 0.00]
+    },
+    {
+      "id": "evt-d2-002",
+      "timestamp": "2026-03-11T09:01:30Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Joining daily standup meeting", "is_workflow": true, "likely_next": "Listen to updates"},
+        "visual_context": {"active_app": "Zoom", "location": "zoom://meeting/123456"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Zoom", "title": "Zoom - Daily Standup"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.86, 0.14, 0.00, 0.00]
+    },
+    {
+      "id": "evt-d2-003",
+      "timestamp": "2026-03-11T09:03:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Participating in standup", "is_workflow": true, "likely_next": "Give status update"},
+        "visual_context": {"active_app": "Zoom", "location": "zoom://meeting/123456"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Zoom", "title": "Zoom - Daily Standup"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.84, 0.16, 0.00, 0.00]
+    },
+    {
+      "id": "evt-d2-004",
+      "timestamp": "2026-03-11T09:05:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Reviewing Jira board", "is_workflow": true, "likely_next": "Check sprint progress"},
+        "visual_context": {"active_app": "Chrome", "location": "https://jira.atlassian.net/board/42"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "Jira - Sprint Board"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.82, 0.18, 0.00, 0.00]
+    },
+    {
+      "id": "evt-d2-005",
+      "timestamp": "2026-03-11T09:07:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Reviewing Jira board", "is_workflow": true, "likely_next": "Check blockers"},
+        "visual_context": {"active_app": "Chrome", "location": "https://jira.atlassian.net/board/42"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "Jira - Sprint Board"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.83, 0.17, 0.00, 0.00]
+    },
+    {
+      "id": "evt-d2-006",
+      "timestamp": "2026-03-11T09:09:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Reviewing Jira board", "is_workflow": true, "likely_next": "Open ticket details"},
+        "visual_context": {"active_app": "Chrome", "location": "https://jira.atlassian.net/browse/PROJ-103"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "Jira - PROJ-103"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.81, 0.19, 0.00, 0.00]
+    },
+    {
+      "id": "evt-d2-007",
+      "timestamp": "2026-03-11T09:11:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Reviewing Jira board", "is_workflow": true, "likely_next": "Update status"},
+        "visual_context": {"active_app": "Chrome", "location": "https://jira.atlassian.net/browse/PROJ-104"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "Jira - PROJ-104"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.82, 0.18, 0.00, 0.00]
+    },
+    {
+      "id": "evt-d2-008",
+      "timestamp": "2026-03-11T09:12:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Updating Jira status", "is_workflow": true, "likely_next": "Move card"},
+        "visual_context": {"active_app": "Chrome", "location": "https://jira.atlassian.net/browse/PROJ-103"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "Jira - PROJ-103 - Update Status"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.83, 0.17, 0.00, 0.00]
+    },
+    {
+      "id": "evt-d2-009",
+      "timestamp": "2026-03-11T09:13:30Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Updating Jira status", "is_workflow": true, "likely_next": "Add comment"},
+        "visual_context": {"active_app": "Chrome", "location": "https://jira.atlassian.net/browse/PROJ-103"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "Jira - PROJ-103 - Comment"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.84, 0.16, 0.00, 0.00]
+    },
+    {
+      "id": "evt-d2-010",
+      "timestamp": "2026-03-11T09:15:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Updating Jira status", "is_workflow": true, "likely_next": "Close standup routine"},
+        "visual_context": {"active_app": "Chrome", "location": "https://jira.atlassian.net/board/42"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "Jira - Sprint Board Updated"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.85, 0.15, 0.00, 0.00]
+    },
+
+    {
+      "id": "evt-d3-001",
+      "timestamp": "2026-03-12T09:00:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Opening Zoom for standup", "is_workflow": true, "likely_next": "Join meeting"},
+        "visual_context": {"active_app": "Zoom", "location": "zoom://meeting/123456"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Zoom", "title": "Zoom - Join Meeting"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.85, 0.15, 0.00, 0.00]
+    },
+    {
+      "id": "evt-d3-002",
+      "timestamp": "2026-03-12T09:01:30Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Joining daily standup meeting", "is_workflow": true, "likely_next": "Listen to updates"},
+        "visual_context": {"active_app": "Zoom", "location": "zoom://meeting/123456"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Zoom", "title": "Zoom - Daily Standup"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.86, 0.14, 0.00, 0.00]
+    },
+    {
+      "id": "evt-d3-003",
+      "timestamp": "2026-03-12T09:03:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Participating in standup", "is_workflow": true, "likely_next": "Give status update"},
+        "visual_context": {"active_app": "Zoom", "location": "zoom://meeting/123456"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Zoom", "title": "Zoom - Daily Standup"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.84, 0.16, 0.00, 0.00]
+    },
+    {
+      "id": "evt-d3-004",
+      "timestamp": "2026-03-12T09:05:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Reviewing Jira board", "is_workflow": true, "likely_next": "Check sprint progress"},
+        "visual_context": {"active_app": "Chrome", "location": "https://jira.atlassian.net/board/42"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "Jira - Sprint Board"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.82, 0.18, 0.00, 0.00]
+    },
+    {
+      "id": "evt-d3-005",
+      "timestamp": "2026-03-12T09:07:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Reviewing Jira board", "is_workflow": true, "likely_next": "Check blockers"},
+        "visual_context": {"active_app": "Chrome", "location": "https://jira.atlassian.net/board/42"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "Jira - Sprint Board"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.83, 0.17, 0.00, 0.00]
+    },
+    {
+      "id": "evt-d3-006",
+      "timestamp": "2026-03-12T09:09:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Reviewing Jira board", "is_workflow": true, "likely_next": "Open ticket details"},
+        "visual_context": {"active_app": "Chrome", "location": "https://jira.atlassian.net/browse/PROJ-105"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "Jira - PROJ-105"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.81, 0.19, 0.00, 0.00]
+    },
+    {
+      "id": "evt-d3-007",
+      "timestamp": "2026-03-12T09:11:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Reviewing Jira board", "is_workflow": true, "likely_next": "Update status"},
+        "visual_context": {"active_app": "Chrome", "location": "https://jira.atlassian.net/browse/PROJ-106"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "Jira - PROJ-106"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.82, 0.18, 0.00, 0.00]
+    },
+    {
+      "id": "evt-d3-008",
+      "timestamp": "2026-03-12T09:12:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Updating Jira status", "is_workflow": true, "likely_next": "Move card"},
+        "visual_context": {"active_app": "Chrome", "location": "https://jira.atlassian.net/browse/PROJ-105"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "Jira - PROJ-105 - Update Status"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.83, 0.17, 0.00, 0.00]
+    },
+    {
+      "id": "evt-d3-009",
+      "timestamp": "2026-03-12T09:13:30Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Updating Jira status", "is_workflow": true, "likely_next": "Add comment"},
+        "visual_context": {"active_app": "Chrome", "location": "https://jira.atlassian.net/browse/PROJ-105"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "Jira - PROJ-105 - Comment"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.84, 0.16, 0.00, 0.00]
+    },
+    {
+      "id": "evt-d3-010",
+      "timestamp": "2026-03-12T09:15:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Updating Jira status", "is_workflow": true, "likely_next": "Close standup routine"},
+        "visual_context": {"active_app": "Chrome", "location": "https://jira.atlassian.net/board/42"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "Jira - Sprint Board Updated"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.85, 0.15, 0.00, 0.00]
+    },
+
+    {
+      "id": "evt-d4-001",
+      "timestamp": "2026-03-13T09:00:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Opening Zoom for standup", "is_workflow": true, "likely_next": "Join meeting"},
+        "visual_context": {"active_app": "Zoom", "location": "zoom://meeting/123456"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Zoom", "title": "Zoom - Join Meeting"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.85, 0.15, 0.00, 0.00]
+    },
+    {
+      "id": "evt-d4-002",
+      "timestamp": "2026-03-13T09:01:30Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Joining daily standup meeting", "is_workflow": true, "likely_next": "Listen to updates"},
+        "visual_context": {"active_app": "Zoom", "location": "zoom://meeting/123456"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Zoom", "title": "Zoom - Daily Standup"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.86, 0.14, 0.00, 0.00]
+    },
+    {
+      "id": "evt-d4-003",
+      "timestamp": "2026-03-13T09:03:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Participating in standup", "is_workflow": true, "likely_next": "Give status update"},
+        "visual_context": {"active_app": "Zoom", "location": "zoom://meeting/123456"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Zoom", "title": "Zoom - Daily Standup"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.84, 0.16, 0.00, 0.00]
+    },
+    {
+      "id": "evt-d4-004",
+      "timestamp": "2026-03-13T09:05:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Reviewing Jira board", "is_workflow": true, "likely_next": "Check sprint progress"},
+        "visual_context": {"active_app": "Chrome", "location": "https://jira.atlassian.net/board/42"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "Jira - Sprint Board"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.82, 0.18, 0.00, 0.00]
+    },
+    {
+      "id": "evt-d4-005",
+      "timestamp": "2026-03-13T09:07:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Reviewing Jira board", "is_workflow": true, "likely_next": "Check blockers"},
+        "visual_context": {"active_app": "Chrome", "location": "https://jira.atlassian.net/board/42"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "Jira - Sprint Board"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.83, 0.17, 0.00, 0.00]
+    },
+    {
+      "id": "evt-d4-006",
+      "timestamp": "2026-03-13T09:09:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Reviewing Jira board", "is_workflow": true, "likely_next": "Open ticket details"},
+        "visual_context": {"active_app": "Chrome", "location": "https://jira.atlassian.net/browse/PROJ-107"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "Jira - PROJ-107"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.81, 0.19, 0.00, 0.00]
+    },
+    {
+      "id": "evt-d4-007",
+      "timestamp": "2026-03-13T09:11:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Reviewing Jira board", "is_workflow": true, "likely_next": "Update status"},
+        "visual_context": {"active_app": "Chrome", "location": "https://jira.atlassian.net/browse/PROJ-108"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "Jira - PROJ-108"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.82, 0.18, 0.00, 0.00]
+    },
+    {
+      "id": "evt-d4-008",
+      "timestamp": "2026-03-13T09:12:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Updating Jira status", "is_workflow": true, "likely_next": "Move card"},
+        "visual_context": {"active_app": "Chrome", "location": "https://jira.atlassian.net/browse/PROJ-107"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "Jira - PROJ-107 - Update Status"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.83, 0.17, 0.00, 0.00]
+    },
+    {
+      "id": "evt-d4-009",
+      "timestamp": "2026-03-13T09:13:30Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Updating Jira status", "is_workflow": true, "likely_next": "Add comment"},
+        "visual_context": {"active_app": "Chrome", "location": "https://jira.atlassian.net/browse/PROJ-107"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "Jira - PROJ-107 - Comment"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.84, 0.16, 0.00, 0.00]
+    },
+    {
+      "id": "evt-d4-010",
+      "timestamp": "2026-03-13T09:15:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Updating Jira status", "is_workflow": true, "likely_next": "Close standup routine"},
+        "visual_context": {"active_app": "Chrome", "location": "https://jira.atlassian.net/board/42"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "Jira - Sprint Board Updated"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.85, 0.15, 0.00, 0.00]
+    },
+
+    {
+      "id": "evt-d5-001",
+      "timestamp": "2026-03-14T09:00:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Opening Zoom for standup", "is_workflow": true, "likely_next": "Join meeting"},
+        "visual_context": {"active_app": "Zoom", "location": "zoom://meeting/123456"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Zoom", "title": "Zoom - Join Meeting"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.85, 0.15, 0.00, 0.00]
+    },
+    {
+      "id": "evt-d5-002",
+      "timestamp": "2026-03-14T09:01:30Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Joining daily standup meeting", "is_workflow": true, "likely_next": "Listen to updates"},
+        "visual_context": {"active_app": "Zoom", "location": "zoom://meeting/123456"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Zoom", "title": "Zoom - Daily Standup"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.86, 0.14, 0.00, 0.00]
+    },
+    {
+      "id": "evt-d5-003",
+      "timestamp": "2026-03-14T09:03:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Participating in standup", "is_workflow": true, "likely_next": "Give status update"},
+        "visual_context": {"active_app": "Zoom", "location": "zoom://meeting/123456"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Zoom", "title": "Zoom - Daily Standup"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.84, 0.16, 0.00, 0.00]
+    },
+    {
+      "id": "evt-d5-004",
+      "timestamp": "2026-03-14T09:05:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Reviewing Jira board", "is_workflow": true, "likely_next": "Check sprint progress"},
+        "visual_context": {"active_app": "Chrome", "location": "https://jira.atlassian.net/board/42"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "Jira - Sprint Board"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.82, 0.18, 0.00, 0.00]
+    },
+    {
+      "id": "evt-d5-005",
+      "timestamp": "2026-03-14T09:07:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Reviewing Jira board", "is_workflow": true, "likely_next": "Check blockers"},
+        "visual_context": {"active_app": "Chrome", "location": "https://jira.atlassian.net/board/42"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "Jira - Sprint Board"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.83, 0.17, 0.00, 0.00]
+    },
+    {
+      "id": "evt-d5-006",
+      "timestamp": "2026-03-14T09:09:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Reviewing Jira board", "is_workflow": true, "likely_next": "Open ticket details"},
+        "visual_context": {"active_app": "Chrome", "location": "https://jira.atlassian.net/browse/PROJ-109"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "Jira - PROJ-109"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.81, 0.19, 0.00, 0.00]
+    },
+    {
+      "id": "evt-d5-007",
+      "timestamp": "2026-03-14T09:11:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Reviewing Jira board", "is_workflow": true, "likely_next": "Update status"},
+        "visual_context": {"active_app": "Chrome", "location": "https://jira.atlassian.net/browse/PROJ-110"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "Jira - PROJ-110"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.82, 0.18, 0.00, 0.00]
+    },
+    {
+      "id": "evt-d5-008",
+      "timestamp": "2026-03-14T09:12:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Updating Jira status", "is_workflow": true, "likely_next": "Move card"},
+        "visual_context": {"active_app": "Chrome", "location": "https://jira.atlassian.net/browse/PROJ-109"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "Jira - PROJ-109 - Update Status"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.83, 0.17, 0.00, 0.00]
+    },
+    {
+      "id": "evt-d5-009",
+      "timestamp": "2026-03-14T09:13:30Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Updating Jira status", "is_workflow": true, "likely_next": "Add comment"},
+        "visual_context": {"active_app": "Chrome", "location": "https://jira.atlassian.net/browse/PROJ-109"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "Jira - PROJ-109 - Comment"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.84, 0.16, 0.00, 0.00]
+    },
+    {
+      "id": "evt-d5-010",
+      "timestamp": "2026-03-14T09:15:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Updating Jira status", "is_workflow": true, "likely_next": "Close standup routine"},
+        "visual_context": {"active_app": "Chrome", "location": "https://jira.atlassian.net/board/42"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "Jira - Sprint Board Updated"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.85, 0.15, 0.00, 0.00]
+    }
+  ],
+  "ground_truth": {
+    "recurrence": [
+      {
+        "pattern": "daily",
+        "procedure_slug": "daily-standup",
+        "time": "09:00",
+        "avg_duration_minutes": 15,
+        "observations": 5,
+        "apps": ["Zoom", "Chrome"],
+        "description": "Daily standup: Zoom call followed by Jira board review and status update"
+      }
+    ],
+    "task_boundaries": [
+      {"after_event_id": "evt-d1-010", "before_event_id": "evt-d2-001", "reason": "Day 1 standup ends, Day 2 begins"},
+      {"after_event_id": "evt-d2-010", "before_event_id": "evt-d3-001", "reason": "Day 2 standup ends, Day 3 begins"},
+      {"after_event_id": "evt-d3-010", "before_event_id": "evt-d4-001", "reason": "Day 3 standup ends, Day 4 begins"},
+      {"after_event_id": "evt-d4-010", "before_event_id": "evt-d5-001", "reason": "Day 4 standup ends, Day 5 begins"},
+      {"after_event_id": "evt-d5-010", "before_event_id": null, "reason": "Day 5 standup ends (last day)"}
+    ],
+    "daily_summaries": [
+      {
+        "date": "2026-03-10",
+        "procedures_observed": ["daily-standup"],
+        "active_hours": 0.25,
+        "task_count": 1,
+        "apps_used": ["Zoom", "Chrome"],
+        "tasks": [{"intent": "Daily standup", "matched_procedure": "daily-standup", "start_time": "2026-03-10T09:00:00Z", "duration_minutes": 15, "apps": ["Zoom", "Chrome"]}]
+      },
+      {
+        "date": "2026-03-11",
+        "procedures_observed": ["daily-standup"],
+        "active_hours": 0.25,
+        "task_count": 1,
+        "apps_used": ["Zoom", "Chrome"],
+        "tasks": [{"intent": "Daily standup", "matched_procedure": "daily-standup", "start_time": "2026-03-11T09:00:00Z", "duration_minutes": 15, "apps": ["Zoom", "Chrome"]}]
+      },
+      {
+        "date": "2026-03-12",
+        "procedures_observed": ["daily-standup"],
+        "active_hours": 0.25,
+        "task_count": 1,
+        "apps_used": ["Zoom", "Chrome"],
+        "tasks": [{"intent": "Daily standup", "matched_procedure": "daily-standup", "start_time": "2026-03-12T09:00:00Z", "duration_minutes": 15, "apps": ["Zoom", "Chrome"]}]
+      },
+      {
+        "date": "2026-03-13",
+        "procedures_observed": ["daily-standup"],
+        "active_hours": 0.25,
+        "task_count": 1,
+        "apps_used": ["Zoom", "Chrome"],
+        "tasks": [{"intent": "Daily standup", "matched_procedure": "daily-standup", "start_time": "2026-03-13T09:00:00Z", "duration_minutes": 15, "apps": ["Zoom", "Chrome"]}]
+      },
+      {
+        "date": "2026-03-14",
+        "procedures_observed": ["daily-standup"],
+        "active_hours": 0.25,
+        "task_count": 1,
+        "apps_used": ["Zoom", "Chrome"],
+        "tasks": [{"intent": "Daily standup", "matched_procedure": "daily-standup", "start_time": "2026-03-14T09:00:00Z", "duration_minutes": 15, "apps": ["Zoom", "Chrome"]}]
+      }
+    ]
+  }
+}

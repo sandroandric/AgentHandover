@@ -1,0 +1,20 @@
+[package]
+name = "agenthandover-common"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+regex.workspace = true
+tracing.workspace = true
+figment = { version = "0.10", features = ["toml", "env"] }
+toml = "0.8"
+directories = "6"
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"

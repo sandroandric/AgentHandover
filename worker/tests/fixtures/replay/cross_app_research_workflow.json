@@ -1,0 +1,292 @@
+{
+  "description": "Single cohesive research workflow spanning Chrome (Google Scholar), Notion (note-taking), and VS Code (code drafting). All events are work. Tests that cross-app workflows are grouped into one cluster family despite app switches, and that task boundaries are detected at app transitions.",
+  "events": [
+    {
+      "id": "evt-001",
+      "timestamp": "2026-03-10T10:00:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Researching ML papers", "is_workflow": true, "likely_next": "Search for papers"},
+        "visual_context": {"active_app": "Chrome", "location": "https://scholar.google.com"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "Google Scholar"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.80, 0.20, 0.00, 0.00]
+    },
+    {
+      "id": "evt-002",
+      "timestamp": "2026-03-10T10:02:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Researching ML papers", "is_workflow": true, "likely_next": "Open paper"},
+        "visual_context": {"active_app": "Chrome", "location": "https://scholar.google.com/scholar?q=transformer+architecture"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "Google Scholar - transformer architecture"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.81, 0.19, 0.00, 0.00]
+    },
+    {
+      "id": "evt-003",
+      "timestamp": "2026-03-10T10:04:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Researching ML papers", "is_workflow": true, "likely_next": "Read abstract"},
+        "visual_context": {"active_app": "Chrome", "location": "https://arxiv.org/abs/2301.12345"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "arXiv - Attention Mechanisms Survey"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.79, 0.21, 0.00, 0.00]
+    },
+    {
+      "id": "evt-004",
+      "timestamp": "2026-03-10T10:07:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Researching ML papers", "is_workflow": true, "likely_next": "Read methodology"},
+        "visual_context": {"active_app": "Chrome", "location": "https://arxiv.org/pdf/2301.12345"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "arXiv - Attention Mechanisms Survey (PDF)"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.80, 0.20, 0.00, 0.00]
+    },
+    {
+      "id": "evt-005",
+      "timestamp": "2026-03-10T10:10:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Researching ML papers", "is_workflow": true, "likely_next": "Check related work"},
+        "visual_context": {"active_app": "Chrome", "location": "https://arxiv.org/abs/2302.67890"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "arXiv - Efficient Transformers"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.82, 0.18, 0.00, 0.00]
+    },
+    {
+      "id": "evt-006",
+      "timestamp": "2026-03-10T10:13:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Researching ML papers", "is_workflow": true, "likely_next": "Compare approaches"},
+        "visual_context": {"active_app": "Chrome", "location": "https://paperswithcode.com/method/multi-head-attention"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "Papers With Code - Multi-Head Attention"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.78, 0.22, 0.00, 0.00]
+    },
+    {
+      "id": "evt-007",
+      "timestamp": "2026-03-10T10:15:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Researching ML papers", "is_workflow": true, "likely_next": "Review benchmarks"},
+        "visual_context": {"active_app": "Chrome", "location": "https://paperswithcode.com/sota/language-modelling-on-penn-treebank"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "Papers With Code - Benchmarks"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.80, 0.20, 0.00, 0.00]
+    },
+    {
+      "id": "evt-008",
+      "timestamp": "2026-03-10T10:17:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Researching ML papers", "is_workflow": true, "likely_next": "Start taking notes"},
+        "visual_context": {"active_app": "Chrome", "location": "https://scholar.google.com/scholar?q=flash+attention"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "Google Scholar - flash attention"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.81, 0.19, 0.00, 0.00]
+    },
+    {
+      "id": "evt-009",
+      "timestamp": "2026-03-10T10:20:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Taking research notes", "is_workflow": true, "likely_next": "Create new page"},
+        "visual_context": {"active_app": "Notion", "location": "notion://workspace/research-notes"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Notion", "title": "Notion - Research Notes"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.75, 0.25, 0.00, 0.00]
+    },
+    {
+      "id": "evt-010",
+      "timestamp": "2026-03-10T10:23:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Taking research notes", "is_workflow": true, "likely_next": "Summarize paper findings"},
+        "visual_context": {"active_app": "Notion", "location": "notion://workspace/research-notes/attention-mechanisms"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Notion", "title": "Notion - Attention Mechanisms Notes"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.76, 0.24, 0.00, 0.00]
+    },
+    {
+      "id": "evt-011",
+      "timestamp": "2026-03-10T10:26:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Taking research notes", "is_workflow": true, "likely_next": "Add diagram"},
+        "visual_context": {"active_app": "Notion", "location": "notion://workspace/research-notes/attention-mechanisms"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Notion", "title": "Notion - Attention Mechanisms Notes"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.74, 0.26, 0.00, 0.00]
+    },
+    {
+      "id": "evt-012",
+      "timestamp": "2026-03-10T10:29:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Taking research notes", "is_workflow": true, "likely_next": "Note key equations"},
+        "visual_context": {"active_app": "Notion", "location": "notion://workspace/research-notes/attention-mechanisms"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Notion", "title": "Notion - Attention Mechanisms Notes"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.75, 0.25, 0.00, 0.00]
+    },
+    {
+      "id": "evt-013",
+      "timestamp": "2026-03-10T10:31:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Taking research notes", "is_workflow": true, "likely_next": "Plan implementation"},
+        "visual_context": {"active_app": "Notion", "location": "notion://workspace/research-notes/implementation-plan"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Notion", "title": "Notion - Implementation Plan"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.73, 0.27, 0.00, 0.00]
+    },
+    {
+      "id": "evt-014",
+      "timestamp": "2026-03-10T10:33:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Taking research notes", "is_workflow": true, "likely_next": "Switch to code editor"},
+        "visual_context": {"active_app": "Notion", "location": "notion://workspace/research-notes/implementation-plan"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Notion", "title": "Notion - Implementation Plan"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.76, 0.24, 0.00, 0.00]
+    },
+    {
+      "id": "evt-015",
+      "timestamp": "2026-03-10T10:35:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Writing code based on research", "is_workflow": true, "likely_next": "Create new file"},
+        "visual_context": {"active_app": "VS Code", "location": "file:///Users/dev/ml-project/attention.py"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "VS Code", "title": "VS Code - attention.py"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.70, 0.30, 0.00, 0.00]
+    },
+    {
+      "id": "evt-016",
+      "timestamp": "2026-03-10T10:37:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Writing code based on research", "is_workflow": true, "likely_next": "Implement attention class"},
+        "visual_context": {"active_app": "VS Code", "location": "file:///Users/dev/ml-project/attention.py"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "VS Code", "title": "VS Code - attention.py"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.72, 0.28, 0.00, 0.00]
+    },
+    {
+      "id": "evt-017",
+      "timestamp": "2026-03-10T10:39:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Writing code based on research", "is_workflow": true, "likely_next": "Write forward pass"},
+        "visual_context": {"active_app": "VS Code", "location": "file:///Users/dev/ml-project/attention.py"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "VS Code", "title": "VS Code - attention.py"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.70, 0.30, 0.00, 0.00]
+    },
+    {
+      "id": "evt-018",
+      "timestamp": "2026-03-10T10:41:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Writing code based on research", "is_workflow": true, "likely_next": "Add tests"},
+        "visual_context": {"active_app": "VS Code", "location": "file:///Users/dev/ml-project/attention.py"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "VS Code", "title": "VS Code - attention.py"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.71, 0.29, 0.00, 0.00]
+    },
+    {
+      "id": "evt-019",
+      "timestamp": "2026-03-10T10:43:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Writing code based on research", "is_workflow": true, "likely_next": "Run tests"},
+        "visual_context": {"active_app": "VS Code", "location": "file:///Users/dev/ml-project/test_attention.py"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "VS Code", "title": "VS Code - test_attention.py"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.69, 0.31, 0.00, 0.00]
+    },
+    {
+      "id": "evt-020",
+      "timestamp": "2026-03-10T10:45:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Writing code based on research", "is_workflow": true, "likely_next": "Review results"},
+        "visual_context": {"active_app": "VS Code", "location": "file:///Users/dev/ml-project/test_attention.py"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "VS Code", "title": "VS Code - Terminal - pytest"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.70, 0.30, 0.00, 0.00]
+    }
+  ],
+  "ground_truth": {
+    "segments": [
+      {
+        "segment_id": "seg-research-chrome",
+        "event_ids": ["evt-001", "evt-002", "evt-003", "evt-004", "evt-005", "evt-006", "evt-007", "evt-008"],
+        "cluster_family": "ml-research",
+        "label": "Chrome-based paper research"
+      },
+      {
+        "segment_id": "seg-research-notion",
+        "event_ids": ["evt-009", "evt-010", "evt-011", "evt-012", "evt-013", "evt-014"],
+        "cluster_family": "ml-research",
+        "label": "Notion note-taking for research"
+      },
+      {
+        "segment_id": "seg-research-vscode",
+        "event_ids": ["evt-015", "evt-016", "evt-017", "evt-018", "evt-019", "evt-020"],
+        "cluster_family": "ml-research",
+        "label": "VS Code implementation from research"
+      }
+    ],
+    "task_boundaries": [
+      {"after_event_id": "evt-008", "before_event_id": "evt-009", "reason": "Switch from Chrome research to Notion note-taking"},
+      {"after_event_id": "evt-014", "before_event_id": "evt-015", "reason": "Switch from Notion notes to VS Code coding"},
+      {"after_event_id": "evt-020", "before_event_id": null, "reason": "End of research workflow session"}
+    ]
+  }
+}

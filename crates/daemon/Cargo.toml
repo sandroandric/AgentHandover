@@ -1,0 +1,44 @@
+[package]
+name = "agenthandover-daemon"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "agenthandover_daemon"
+path = "src/lib.rs"
+
+[[bin]]
+name = "agenthandover-daemon"
+path = "src/main.rs"
+
+[dependencies]
+agenthandover-common = { path = "../common" }
+agenthandover-storage = { path = "../storage" }
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tracing-appender = "0.2"
+anyhow.workspace = true
+thiserror.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+rusqlite.workspace = true
+sha2 = "0.10"
+hex = "0.4"
+libc = "0.2"
+# v2: JPEG encoding and image resizing for VLM annotation pipeline
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
+
+[build-dependencies]
+cc = "1"
+
+[dev-dependencies]
+tempfile = "3"
+serial_test.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-graphics = "0.24"
+core-foundation = "0.10"
+accessibility-sys = "0.2"

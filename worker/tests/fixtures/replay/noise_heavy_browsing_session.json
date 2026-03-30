@@ -1,0 +1,429 @@
+{
+  "description": "Afternoon session dominated by noise (YouTube, Reddit, news, social media) with brief Jira work interludes. Tests classification precision: only 6 of 30 events are work, the rest are noise. The classifier must not over-classify noise as work.",
+  "events": [
+    {
+      "id": "evt-001",
+      "timestamp": "2026-03-10T14:00:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Watching YouTube video", "is_workflow": false, "likely_next": "Watch another video"},
+        "visual_context": {"active_app": "Chrome", "location": "https://www.youtube.com/watch?v=abc123"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "YouTube - Funny Cat Compilation"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.00, 0.00, 0.90, 0.10]
+    },
+    {
+      "id": "evt-002",
+      "timestamp": "2026-03-10T14:03:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Watching YouTube video", "is_workflow": false, "likely_next": "Browse related videos"},
+        "visual_context": {"active_app": "Chrome", "location": "https://www.youtube.com/watch?v=def456"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "YouTube - Tech Review 2026"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.00, 0.02, 0.88, 0.10]
+    },
+    {
+      "id": "evt-003",
+      "timestamp": "2026-03-10T14:06:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Watching YouTube video", "is_workflow": false, "likely_next": "Watch next video"},
+        "visual_context": {"active_app": "Chrome", "location": "https://www.youtube.com/watch?v=ghi789"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "YouTube - Music Playlist"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.02, 0.00, 0.90, 0.08]
+    },
+    {
+      "id": "evt-004",
+      "timestamp": "2026-03-10T14:09:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Watching YouTube video", "is_workflow": false, "likely_next": "Close YouTube"},
+        "visual_context": {"active_app": "Chrome", "location": "https://www.youtube.com/watch?v=jkl012"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "YouTube - Cooking Tutorial"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.00, 0.02, 0.88, 0.10]
+    },
+    {
+      "id": "evt-005",
+      "timestamp": "2026-03-10T14:12:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Creating Jira ticket", "is_workflow": true, "likely_next": "Fill in ticket details"},
+        "visual_context": {"active_app": "Chrome", "location": "https://jira.atlassian.net/create"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "Jira - Create Issue"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.90, 0.00, 0.10, 0.00]
+    },
+    {
+      "id": "evt-006",
+      "timestamp": "2026-03-10T14:14:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Creating Jira ticket", "is_workflow": true, "likely_next": "Add description"},
+        "visual_context": {"active_app": "Chrome", "location": "https://jira.atlassian.net/create"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "Jira - Create Issue - Details"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.91, 0.00, 0.09, 0.00]
+    },
+    {
+      "id": "evt-007",
+      "timestamp": "2026-03-10T14:16:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Creating Jira ticket", "is_workflow": true, "likely_next": "Submit ticket"},
+        "visual_context": {"active_app": "Chrome", "location": "https://jira.atlassian.net/create"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "Jira - Create Issue - Submit"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.89, 0.01, 0.10, 0.00]
+    },
+    {
+      "id": "evt-008",
+      "timestamp": "2026-03-10T14:18:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Browsing Reddit", "is_workflow": false, "likely_next": "Read posts"},
+        "visual_context": {"active_app": "Chrome", "location": "https://www.reddit.com/r/all"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "Reddit - Front Page"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.00, 0.10, 0.80, 0.10]
+    },
+    {
+      "id": "evt-009",
+      "timestamp": "2026-03-10T14:20:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Browsing Reddit", "is_workflow": false, "likely_next": "Read comments"},
+        "visual_context": {"active_app": "Chrome", "location": "https://www.reddit.com/r/technology"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "Reddit - r/technology"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.02, 0.08, 0.82, 0.08]
+    },
+    {
+      "id": "evt-010",
+      "timestamp": "2026-03-10T14:22:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Reading news articles", "is_workflow": false, "likely_next": "Read next article"},
+        "visual_context": {"active_app": "Chrome", "location": "https://news.ycombinator.com"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "Hacker News"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.05, 0.10, 0.75, 0.10]
+    },
+    {
+      "id": "evt-011",
+      "timestamp": "2026-03-10T14:24:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Reading news articles", "is_workflow": false, "likely_next": "Read comments"},
+        "visual_context": {"active_app": "Chrome", "location": "https://news.ycombinator.com/item?id=12345"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "Hacker News - Article Discussion"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.05, 0.08, 0.78, 0.09]
+    },
+    {
+      "id": "evt-012",
+      "timestamp": "2026-03-10T14:26:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Browsing social media", "is_workflow": false, "likely_next": "Scroll feed"},
+        "visual_context": {"active_app": "Chrome", "location": "https://twitter.com/home"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "X - Home"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.00, 0.12, 0.78, 0.10]
+    },
+    {
+      "id": "evt-013",
+      "timestamp": "2026-03-10T14:28:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Browsing social media", "is_workflow": false, "likely_next": "Read thread"},
+        "visual_context": {"active_app": "Chrome", "location": "https://twitter.com/user/status/123"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "X - Thread"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.02, 0.10, 0.80, 0.08]
+    },
+    {
+      "id": "evt-014",
+      "timestamp": "2026-03-10T14:30:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Browsing Reddit", "is_workflow": false, "likely_next": "Read more"},
+        "visual_context": {"active_app": "Chrome", "location": "https://www.reddit.com/r/programming"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "Reddit - r/programming"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.03, 0.10, 0.77, 0.10]
+    },
+    {
+      "id": "evt-015",
+      "timestamp": "2026-03-10T14:33:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Updating Jira ticket", "is_workflow": true, "likely_next": "Change status"},
+        "visual_context": {"active_app": "Chrome", "location": "https://jira.atlassian.net/browse/PROJ-201"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "Jira - PROJ-201"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.88, 0.02, 0.10, 0.00]
+    },
+    {
+      "id": "evt-016",
+      "timestamp": "2026-03-10T14:35:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Updating Jira ticket", "is_workflow": true, "likely_next": "Add comment"},
+        "visual_context": {"active_app": "Chrome", "location": "https://jira.atlassian.net/browse/PROJ-201"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "Jira - PROJ-201 - Edit"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.90, 0.00, 0.10, 0.00]
+    },
+    {
+      "id": "evt-017",
+      "timestamp": "2026-03-10T14:37:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Updating Jira ticket", "is_workflow": true, "likely_next": "Save changes"},
+        "visual_context": {"active_app": "Chrome", "location": "https://jira.atlassian.net/browse/PROJ-201"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "Jira - PROJ-201 - Updated"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.87, 0.03, 0.10, 0.00]
+    },
+    {
+      "id": "evt-018",
+      "timestamp": "2026-03-10T14:39:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Watching YouTube video", "is_workflow": false, "likely_next": "Browse videos"},
+        "visual_context": {"active_app": "Chrome", "location": "https://www.youtube.com/watch?v=xyz999"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "YouTube - Product Unboxing"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.00, 0.05, 0.85, 0.10]
+    },
+    {
+      "id": "evt-019",
+      "timestamp": "2026-03-10T14:41:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Watching YouTube video", "is_workflow": false, "likely_next": "Watch next"},
+        "visual_context": {"active_app": "Chrome", "location": "https://www.youtube.com/watch?v=aaa111"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "YouTube - Travel Vlog"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.00, 0.03, 0.87, 0.10]
+    },
+    {
+      "id": "evt-020",
+      "timestamp": "2026-03-10T14:43:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Browsing social media", "is_workflow": false, "likely_next": "Scroll feed"},
+        "visual_context": {"active_app": "Chrome", "location": "https://twitter.com/home"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "X - Home"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.00, 0.15, 0.75, 0.10]
+    },
+    {
+      "id": "evt-021",
+      "timestamp": "2026-03-10T14:45:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Browsing social media", "is_workflow": false, "likely_next": "Read thread"},
+        "visual_context": {"active_app": "Chrome", "location": "https://twitter.com/user/status/456"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "X - Thread"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.02, 0.12, 0.76, 0.10]
+    },
+    {
+      "id": "evt-022",
+      "timestamp": "2026-03-10T14:47:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Reading news articles", "is_workflow": false, "likely_next": "Browse more news"},
+        "visual_context": {"active_app": "Chrome", "location": "https://www.bbc.com/news"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "BBC News - Home"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.05, 0.05, 0.80, 0.10]
+    },
+    {
+      "id": "evt-023",
+      "timestamp": "2026-03-10T14:49:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Reading news articles", "is_workflow": false, "likely_next": "Read article"},
+        "visual_context": {"active_app": "Chrome", "location": "https://www.bbc.com/news/technology-12345"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "BBC News - Tech Article"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.05, 0.05, 0.82, 0.08]
+    },
+    {
+      "id": "evt-024",
+      "timestamp": "2026-03-10T14:51:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Watching YouTube video", "is_workflow": false, "likely_next": "Browse more"},
+        "visual_context": {"active_app": "Chrome", "location": "https://www.youtube.com/watch?v=bbb222"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "YouTube - Gaming Highlights"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.00, 0.05, 0.85, 0.10]
+    },
+    {
+      "id": "evt-025",
+      "timestamp": "2026-03-10T14:53:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Watching YouTube video", "is_workflow": false, "likely_next": "Watch next"},
+        "visual_context": {"active_app": "Chrome", "location": "https://www.youtube.com/watch?v=ccc333"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "YouTube - Science Explained"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.02, 0.03, 0.87, 0.08]
+    },
+    {
+      "id": "evt-026",
+      "timestamp": "2026-03-10T14:55:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Browsing Reddit", "is_workflow": false, "likely_next": "Browse subreddits"},
+        "visual_context": {"active_app": "Chrome", "location": "https://www.reddit.com/r/funny"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "Reddit - r/funny"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.00, 0.12, 0.78, 0.10]
+    },
+    {
+      "id": "evt-027",
+      "timestamp": "2026-03-10T14:56:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Browsing Reddit", "is_workflow": false, "likely_next": "View post"},
+        "visual_context": {"active_app": "Chrome", "location": "https://www.reddit.com/r/funny/comments/xyz"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "Reddit - Funny Post"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.00, 0.10, 0.80, 0.10]
+    },
+    {
+      "id": "evt-028",
+      "timestamp": "2026-03-10T14:57:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Reading news articles", "is_workflow": false, "likely_next": "Close news"},
+        "visual_context": {"active_app": "Chrome", "location": "https://www.theverge.com"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "The Verge - Tech News"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.05, 0.05, 0.82, 0.08]
+    },
+    {
+      "id": "evt-029",
+      "timestamp": "2026-03-10T14:58:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Browsing social media", "is_workflow": false, "likely_next": "Close tab"},
+        "visual_context": {"active_app": "Chrome", "location": "https://www.instagram.com"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "Instagram"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.00, 0.10, 0.78, 0.12]
+    },
+    {
+      "id": "evt-030",
+      "timestamp": "2026-03-10T15:00:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Browsing social media", "is_workflow": false, "likely_next": "End session"},
+        "visual_context": {"active_app": "Chrome", "location": "https://www.instagram.com/explore"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "Instagram - Explore"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.00, 0.08, 0.80, 0.12]
+    }
+  ],
+  "ground_truth": {
+    "classification": [
+      {"event_id": "evt-001", "label": "noise", "activity_type": "entertainment", "reason": "YouTube entertainment"},
+      {"event_id": "evt-002", "label": "noise", "activity_type": "entertainment", "reason": "YouTube entertainment"},
+      {"event_id": "evt-003", "label": "noise", "activity_type": "entertainment", "reason": "YouTube entertainment"},
+      {"event_id": "evt-004", "label": "noise", "activity_type": "entertainment", "reason": "YouTube entertainment"},
+      {"event_id": "evt-005", "label": "work", "activity_type": "work", "reason": "Creating Jira ticket"},
+      {"event_id": "evt-006", "label": "work", "activity_type": "work", "reason": "Creating Jira ticket"},
+      {"event_id": "evt-007", "label": "work", "activity_type": "work", "reason": "Creating Jira ticket"},
+      {"event_id": "evt-008", "label": "noise", "activity_type": "entertainment", "reason": "Reddit browsing"},
+      {"event_id": "evt-009", "label": "noise", "activity_type": "entertainment", "reason": "Reddit browsing"},
+      {"event_id": "evt-010", "label": "noise", "activity_type": "entertainment", "reason": "Hacker News browsing"},
+      {"event_id": "evt-011", "label": "noise", "activity_type": "entertainment", "reason": "Hacker News browsing"},
+      {"event_id": "evt-012", "label": "noise", "activity_type": "entertainment", "reason": "Twitter/X social media"},
+      {"event_id": "evt-013", "label": "noise", "activity_type": "entertainment", "reason": "Twitter/X social media"},
+      {"event_id": "evt-014", "label": "noise", "activity_type": "entertainment", "reason": "Reddit browsing"},
+      {"event_id": "evt-015", "label": "work", "activity_type": "work", "reason": "Updating Jira ticket"},
+      {"event_id": "evt-016", "label": "work", "activity_type": "work", "reason": "Updating Jira ticket"},
+      {"event_id": "evt-017", "label": "work", "activity_type": "work", "reason": "Updating Jira ticket"},
+      {"event_id": "evt-018", "label": "noise", "activity_type": "entertainment", "reason": "YouTube entertainment"},
+      {"event_id": "evt-019", "label": "noise", "activity_type": "entertainment", "reason": "YouTube entertainment"},
+      {"event_id": "evt-020", "label": "noise", "activity_type": "entertainment", "reason": "Twitter/X social media"},
+      {"event_id": "evt-021", "label": "noise", "activity_type": "entertainment", "reason": "Twitter/X social media"},
+      {"event_id": "evt-022", "label": "noise", "activity_type": "entertainment", "reason": "BBC News browsing"},
+      {"event_id": "evt-023", "label": "noise", "activity_type": "entertainment", "reason": "BBC News browsing"},
+      {"event_id": "evt-024", "label": "noise", "activity_type": "entertainment", "reason": "YouTube entertainment"},
+      {"event_id": "evt-025", "label": "noise", "activity_type": "entertainment", "reason": "YouTube entertainment"},
+      {"event_id": "evt-026", "label": "noise", "activity_type": "entertainment", "reason": "Reddit browsing"},
+      {"event_id": "evt-027", "label": "noise", "activity_type": "entertainment", "reason": "Reddit browsing"},
+      {"event_id": "evt-028", "label": "noise", "activity_type": "entertainment", "reason": "The Verge news browsing"},
+      {"event_id": "evt-029", "label": "noise", "activity_type": "entertainment", "reason": "Instagram social media"},
+      {"event_id": "evt-030", "label": "noise", "activity_type": "entertainment", "reason": "Instagram social media"}
+    ]
+  }
+}

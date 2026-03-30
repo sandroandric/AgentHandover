@@ -1,0 +1,24 @@
+{
+  "name": "agenthandover-extension",
+  "version": "0.1.0",
+  "description": "AgentHandover Observer - Chrome MV3 extension for silent workflow learning",
+  "private": true,
+  "scripts": {
+    "build": "webpack --mode production",
+    "watch": "webpack --mode development --watch",
+    "clean": "rm -rf dist",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.0.287",
+    "@vitest/coverage-v8": "^4.0.18",
+    "copy-webpack-plugin": "^13.0.1",
+    "jsdom": "^28.1.0",
+    "ts-loader": "^9.5.1",
+    "typescript": "^5.7.3",
+    "vitest": "^4.0.18",
+    "webpack": "^5.97.1",
+    "webpack-cli": "^6.0.1"
+  }
+}

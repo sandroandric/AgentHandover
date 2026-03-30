@@ -1,0 +1,19 @@
+[package]
+name = "agenthandover-cli"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "agenthandover"
+path = "src/main.rs"
+
+[dependencies]
+agenthandover-common = { path = "../common" }
+clap = { version = "4", features = ["derive"] }
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+anyhow.workspace = true
+uuid.workspace = true
+colored = "2"
+libc = "0.2"

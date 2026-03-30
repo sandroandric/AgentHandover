@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.agenthandover.daemon</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Applications/AgentHandover.app/Contents/Helpers/AgentHandoverDaemon.app/Contents/MacOS/agenthandover-daemon</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>KeepAlive</key>
+    <false/>
+
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+
+    <key>LowPriorityBackgroundIO</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/tmp/com.agenthandover.daemon.stdout.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/tmp/com.agenthandover.daemon.stderr.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>RUST_LOG</key>
+        <string>info</string>
+    </dict>
+</dict>
+</plist>

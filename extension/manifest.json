@@ -1,0 +1,19 @@
+{
+  "manifest_version": 3,
+  "name": "AgentHandover Observer",
+  "version": "0.1.0",
+  "description": "Silent observer for workflow learning - captures DOM snapshots, click intent, and accessibility metadata",
+  "permissions": ["nativeMessaging", "activeTab"],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEArq1IMZDIT2KI9uTc/SXQ1CX/NyYTjWDcg/kA5G59JRvlYNa6wOPSCub+DpGbMyjHCsgPf7MLj2vp/n1eWQ+gq3wRPOhjQESWmIJYgY+shrr0ogdn3ImeUswpdmQAzzihz8Pz580zzmI0Jtc8MJGDctkv8thUrs040ZH8O5UciWwAaCepE7HTQT4MQs2rzGhlwwRpG6JEfhWjvBPEOgnZGY8WB/9ecVHtn8wc44fbtMx9GVvjQqRx2AI/O6ZmZfVvHUa3E6/U447jwqpliRjEcb+dc4H/2fp+pebwoJ1aS6n7crbCcnp9ZIz/6oH7Kkj6Jza8+XuId+qxhWAdrnI1PwIDAQAB"
+}

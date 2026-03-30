@@ -1,0 +1,303 @@
+{
+  "scenario_id": "interruption_resume_workflow",
+  "description": "Code review session on a GitHub PR, interrupted 3 times (Slack, email, Reddit). Tests continuity tracking: the 4 PR review segments should be linked into a single span despite interruptions.",
+  "tags": ["continuity", "classification"],
+  "events": [
+    {
+      "id": "evt-001",
+      "timestamp": "2026-03-10T09:00:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Reviewing pull request", "is_workflow": true, "likely_next": "Read diff"},
+        "visual_context": {"active_app": "Chrome", "location": "https://github.com/org/repo/pull/42"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "PR #42 - Review Changes"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.9, 0.1, 0.0, 0.0]
+    },
+    {
+      "id": "evt-002",
+      "timestamp": "2026-03-10T09:02:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Reviewing pull request", "is_workflow": true, "likely_next": "Add comment"},
+        "visual_context": {"active_app": "Chrome", "location": "https://github.com/org/repo/pull/42/files"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "PR #42 - Files changed"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.9, 0.1, 0.0, 0.0]
+    },
+    {
+      "id": "evt-003",
+      "timestamp": "2026-03-10T09:05:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Reviewing pull request", "is_workflow": true, "likely_next": "Check tests"},
+        "visual_context": {"active_app": "Chrome", "location": "https://github.com/org/repo/pull/42/files#diff-abc"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "PR #42 - Diff view"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.9, 0.1, 0.0, 0.0]
+    },
+    {
+      "id": "evt-004",
+      "timestamp": "2026-03-10T09:07:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Reviewing pull request", "is_workflow": true, "likely_next": "Write review summary"},
+        "visual_context": {"active_app": "Chrome", "location": "https://github.com/org/repo/pull/42/files#diff-def"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "PR #42 - Reviewing main.py"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.9, 0.1, 0.0, 0.0]
+    },
+    {
+      "id": "evt-005",
+      "timestamp": "2026-03-10T09:10:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Reviewing pull request", "is_workflow": true, "likely_next": "Submit inline comment"},
+        "visual_context": {"active_app": "Chrome", "location": "https://github.com/org/repo/pull/42/files#diff-ghi"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "PR #42 - Add comment"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.9, 0.1, 0.0, 0.0]
+    },
+    {
+      "id": "evt-006",
+      "timestamp": "2026-03-10T09:11:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Reading Slack message", "is_workflow": false, "likely_next": "Reply or dismiss"},
+        "visual_context": {"active_app": "Slack", "location": "slack://channel/dev-alerts"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Slack", "title": "Slack - #dev-alerts"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.1, 0.8, 0.1, 0.0]
+    },
+    {
+      "id": "evt-007",
+      "timestamp": "2026-03-10T09:11:30Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Reading Slack message", "is_workflow": false, "likely_next": "Return to PR review"},
+        "visual_context": {"active_app": "Slack", "location": "slack://channel/dev-alerts"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Slack", "title": "Slack - #dev-alerts"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.1, 0.8, 0.1, 0.0]
+    },
+    {
+      "id": "evt-008",
+      "timestamp": "2026-03-10T09:13:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Reviewing pull request", "is_workflow": true, "likely_next": "Continue diff review"},
+        "visual_context": {"active_app": "Chrome", "location": "https://github.com/org/repo/pull/42/files"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "PR #42 - Files changed"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.9, 0.1, 0.0, 0.0]
+    },
+    {
+      "id": "evt-009",
+      "timestamp": "2026-03-10T09:15:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Reviewing pull request", "is_workflow": true, "likely_next": "Check CI status"},
+        "visual_context": {"active_app": "Chrome", "location": "https://github.com/org/repo/pull/42/files#diff-jkl"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "PR #42 - Review utils.py"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.9, 0.1, 0.0, 0.0]
+    },
+    {
+      "id": "evt-010",
+      "timestamp": "2026-03-10T09:18:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Reviewing pull request", "is_workflow": true, "likely_next": "Review test changes"},
+        "visual_context": {"active_app": "Chrome", "location": "https://github.com/org/repo/pull/42/checks"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "PR #42 - Checks"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.9, 0.1, 0.0, 0.0]
+    },
+    {
+      "id": "evt-011",
+      "timestamp": "2026-03-10T09:20:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Reviewing pull request", "is_workflow": true, "likely_next": "Approve or request changes"},
+        "visual_context": {"active_app": "Chrome", "location": "https://github.com/org/repo/pull/42/files#diff-mno"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "PR #42 - Test file diffs"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.9, 0.1, 0.0, 0.0]
+    },
+    {
+      "id": "evt-012",
+      "timestamp": "2026-03-10T09:21:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Checking email", "is_workflow": false, "likely_next": "Read message"},
+        "visual_context": {"active_app": "Chrome", "location": "https://mail.google.com/mail/u/0/#inbox"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "Gmail - Inbox"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.1, 0.0, 0.8, 0.1]
+    },
+    {
+      "id": "evt-013",
+      "timestamp": "2026-03-10T09:26:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Checking email", "is_workflow": false, "likely_next": "Close Gmail"},
+        "visual_context": {"active_app": "Chrome", "location": "https://mail.google.com/mail/u/0/#inbox/msg42"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "Gmail - Team standup notes"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.1, 0.0, 0.8, 0.1]
+    },
+    {
+      "id": "evt-014",
+      "timestamp": "2026-03-10T09:27:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Reviewing pull request", "is_workflow": true, "likely_next": "Write review comment"},
+        "visual_context": {"active_app": "Chrome", "location": "https://github.com/org/repo/pull/42/files"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "PR #42 - Files changed"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.9, 0.1, 0.0, 0.0]
+    },
+    {
+      "id": "evt-015",
+      "timestamp": "2026-03-10T09:30:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Reviewing pull request", "is_workflow": true, "likely_next": "Submit review"},
+        "visual_context": {"active_app": "Chrome", "location": "https://github.com/org/repo/pull/42#pullrequestreview-123"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "PR #42 - Write review"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.9, 0.1, 0.0, 0.0]
+    },
+    {
+      "id": "evt-016",
+      "timestamp": "2026-03-10T09:33:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Reviewing pull request", "is_workflow": true, "likely_next": "Check final diff"},
+        "visual_context": {"active_app": "Chrome", "location": "https://github.com/org/repo/pull/42/files#diff-pqr"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "PR #42 - Final review"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.9, 0.1, 0.0, 0.0]
+    },
+    {
+      "id": "evt-017",
+      "timestamp": "2026-03-10T09:35:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Reviewing pull request", "is_workflow": true, "likely_next": "Approve PR"},
+        "visual_context": {"active_app": "Chrome", "location": "https://github.com/org/repo/pull/42#pullrequestreview-submit"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "PR #42 - Submit review"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.9, 0.1, 0.0, 0.0]
+    },
+    {
+      "id": "evt-018",
+      "timestamp": "2026-03-10T09:36:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Browsing Reddit", "is_workflow": false, "likely_next": "Read more posts"},
+        "visual_context": {"active_app": "Chrome", "location": "https://www.reddit.com/r/programming"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "Reddit - r/programming"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.0, 0.9, 0.0, 0.1]
+    },
+    {
+      "id": "evt-019",
+      "timestamp": "2026-03-10T09:50:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Browsing Reddit", "is_workflow": false, "likely_next": "Close tab"},
+        "visual_context": {"active_app": "Chrome", "location": "https://www.reddit.com/r/programming/comments/xyz789"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "Reddit - Interesting Discussion"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.0, 0.9, 0.0, 0.1]
+    },
+    {
+      "id": "evt-020",
+      "timestamp": "2026-03-10T09:51:00Z",
+      "scene_annotation_json": {
+        "task_context": {"what_doing": "Reviewing pull request", "is_workflow": true, "likely_next": "Merge PR"},
+        "visual_context": {"active_app": "Chrome", "location": "https://github.com/org/repo/pull/42"}
+      },
+      "frame_diff_json": {"diff_type": "action"},
+      "window_json": {"app": "Chrome", "title": "PR #42 - Ready to merge"},
+      "kind_json": {"DwellSnapshot": {}},
+      "metadata_json": {},
+      "embedding": [0.9, 0.1, 0.0, 0.0]
+    }
+  ],
+  "ground_truth": {
+    "continuity": {
+      "expected_spans": [
+        {
+          "goal": "Reviewing pull request",
+          "event_ids": ["evt-001", "evt-002", "evt-003", "evt-004", "evt-005",
+                        "evt-008", "evt-009", "evt-010", "evt-011",
+                        "evt-014", "evt-015", "evt-016", "evt-017", "evt-020"],
+          "type": "single_span_with_interruptions"
+        }
+      ],
+      "false_merge_pairs": []
+    },
+    "classification": [
+      {"event_id": "evt-001", "is_workflow": true, "activity_type": "work"},
+      {"event_id": "evt-002", "is_workflow": true, "activity_type": "work"},
+      {"event_id": "evt-003", "is_workflow": true, "activity_type": "work"},
+      {"event_id": "evt-004", "is_workflow": true, "activity_type": "work"},
+      {"event_id": "evt-005", "is_workflow": true, "activity_type": "work"},
+      {"event_id": "evt-006", "is_workflow": false, "activity_type": "communication"},
+      {"event_id": "evt-007", "is_workflow": false, "activity_type": "communication"},
+      {"event_id": "evt-008", "is_workflow": true, "activity_type": "work"},
+      {"event_id": "evt-009", "is_workflow": true, "activity_type": "work"},
+      {"event_id": "evt-010", "is_workflow": true, "activity_type": "work"},
+      {"event_id": "evt-011", "is_workflow": true, "activity_type": "work"},
+      {"event_id": "evt-012", "is_workflow": false, "activity_type": "communication"},
+      {"event_id": "evt-013", "is_workflow": false, "activity_type": "communication"},
+      {"event_id": "evt-014", "is_workflow": true, "activity_type": "work"},
+      {"event_id": "evt-015", "is_workflow": true, "activity_type": "work"},
+      {"event_id": "evt-016", "is_workflow": true, "activity_type": "work"},
+      {"event_id": "evt-017", "is_workflow": true, "activity_type": "work"},
+      {"event_id": "evt-018", "is_workflow": false, "activity_type": "entertainment"},
+      {"event_id": "evt-019", "is_workflow": false, "activity_type": "entertainment"},
+      {"event_id": "evt-020", "is_workflow": true, "activity_type": "work"}
+    ]
+  }
+}

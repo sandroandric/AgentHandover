@@ -1,0 +1,16 @@
+# Root-level pytest configuration for running ALL Python tests from repo root.
+#
+# Usage:
+#   python -m pytest                     # runs worker + integration + e2e + load
+#   python -m pytest worker/tests        # just worker unit tests
+#   python -m pytest tests/e2e           # just e2e tests
+#
+# The worker/pyproject.toml [tool.pytest.ini_options] is only used when
+# running pytest from inside the worker/ directory.
+
+[tool.pytest.ini_options]
+testpaths = ["worker/tests", "tests/e2e", "tests/integration", "tests/load"]
+pythonpath = ["worker/src", "worker/tests"]
+# importlib mode avoids the tests/__init__.py namespace collision between
+# worker/tests and the repo-root tests/ directories.
+addopts = "--import-mode=importlib"
