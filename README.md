@@ -373,3 +373,13 @@ agenthandover uninstall --purge-data # Remove everything
 ## License
 
 [Apache 2.0](LICENSE)
+
+## Star History
+
+<a href="https://www.star-history.com/?repos=sandroandric%2FAgentHandover&type=date&legend=top-left">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/image?repos=sandroandric/AgentHandover&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/image?repos=sandroandric/AgentHandover&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/image?repos=sandroandric/AgentHandover&type=date&legend=top-left" />
+ </picture>
+</a>
