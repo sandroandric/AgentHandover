@@ -39,6 +39,7 @@ final class ServiceController {
             "BraveSoftware/Brave-Browser",
             "Microsoft Edge",
             "Arc/User Data",
+            "Comet",
         ]
 
         return relativeRoots.map { relativeRoot in
@@ -196,7 +197,6 @@ final class ServiceController {
             "description": "AgentHandover native messaging host",
             "path": daemonExecPath,
             "type": "stdio",
-            "args": ["--native-messaging"],
             "allowed_origins": [
                 "chrome-extension://knldjmfmopnpolahpmmgbagdohdnhkik/",
             ],

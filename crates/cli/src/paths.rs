@@ -178,6 +178,7 @@ pub fn native_messaging_hosts_dirs() -> Vec<PathBuf> {
             "Chromium/NativeMessagingHosts",
             "BraveSoftware/Brave-Browser/NativeMessagingHosts",
             "Microsoft Edge/NativeMessagingHosts",
+            "Comet/NativeMessagingHosts",
         ] {
             dirs.push(
                 PathBuf::from(&home)

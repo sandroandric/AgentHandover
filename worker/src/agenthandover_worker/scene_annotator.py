@@ -288,11 +288,20 @@ def _call_ollama_vlm(
     num_predict: int = 1500,
     system: str = "",
     timeout: float = 60.0,
+    think: bool | str = False,
+    extra_options: dict | None = None,
 ) -> tuple[str, float]:
     """Call Ollama's /api/generate with an optional image.
 
     Returns (response_text, inference_time_seconds).
     Raises on connection or HTTP errors.
+
+    Args:
+        think: False, True, "low", "medium", or "high". Controls reasoning
+            depth for models that support it (Gemma 4, Qwen 3.5).
+        extra_options: Additional Ollama options (top_k, presence_penalty, etc.)
+            merged into the options dict. Use model_profiles.get_profile() to
+            get optimal settings per model.
     """
     import urllib.request
     import urllib.error
@@ -300,18 +309,20 @@ def _call_ollama_vlm(
 
     url = f"{host}/api/generate"
 
+    options = {
+        "num_predict": num_predict,
+        "num_ctx": 8192,
+    }
+    if extra_options:
+        options.update(extra_options)
+
     payload: dict = {
         "model": model,
         "prompt": prompt,
         "stream": False,
-        # think=False must be a top-level parameter, NOT inside options.
-        # Inside options it has no effect and Qwen3.5 models consume all
-        # num_predict tokens on internal reasoning, returning empty content.
-        "think": False,
-        "options": {
-            "num_predict": num_predict,
-            "num_ctx": 8192,
-        },
+        # think must be a top-level parameter, NOT inside options.
+        "think": think,
+        "options": options,
     }
 
     if system:
@@ -456,13 +467,20 @@ class SceneAnnotator:
 
         # --- Call VLM ---
         try:
+            from agenthandover_worker.model_profiles import get_profile
+            profile = get_profile(self.config.model)
             raw_response, inference_time = _call_ollama_vlm(
                 model=self.config.model,
                 prompt=prompt,
                 image_path=screenshot_path,
                 host=self.config.ollama_host,
-                num_predict=self.config.num_predict,
-                system=SYSTEM_PROMPT,
+                num_predict=profile.ann_num_predict,
+                system=profile.ann_system or SYSTEM_PROMPT,
+                think=profile.ann_think,
+                extra_options={
+                    k: v for k, v in profile.ann_options().items()
+                    if k not in ("num_predict", "num_ctx")
+                },
             )
         except ConnectionError as exc:
             self._stats["failed"] += 1
@@ -497,8 +515,13 @@ class SceneAnnotator:
                     prompt=retry_prompt,
                     image_path=screenshot_path,
                     host=self.config.ollama_host,
-                    num_predict=self.config.num_predict,
-                    system=SYSTEM_PROMPT,
+                    num_predict=profile.ann_num_predict,
+                    system=profile.ann_system or SYSTEM_PROMPT,
+                    think=profile.ann_think,
+                    extra_options={
+                        k: v for k, v in profile.ann_options().items()
+                        if k not in ("num_predict", "num_ctx")
+                    },
                 )
                 inference_time += retry_time
                 annotation = _validate_annotation(raw_response)

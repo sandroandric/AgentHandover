@@ -4,6 +4,7 @@
   "version": "0.1.0",
   "description": "Silent observer for workflow learning - captures DOM snapshots, click intent, and accessibility metadata",
   "permissions": ["nativeMessaging", "activeTab"],
+  "host_permissions": ["<all_urls>"],
   "background": {
     "service_worker": "background.js",
     "type": "module"

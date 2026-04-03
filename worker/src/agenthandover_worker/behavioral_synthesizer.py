@@ -148,10 +148,11 @@ def _call_ollama_text(
     model: str,
     prompt: str,
     host: str = "http://localhost:11434",
-    num_predict: int = 8000,
+    num_predict: int = 12000,
     system: str = "",
     timeout: float = 600.0,
-    think: bool = True,
+    think: bool | str = True,
+    extra_options: dict | None = None,
 ) -> tuple[str, float]:
     """Call Ollama's /api/generate for text-only synthesis."""
     import urllib.request
@@ -159,12 +160,16 @@ def _call_ollama_text(
 
     url = f"{host}/api/generate"
 
+    options: dict = {"num_predict": num_predict}
+    if extra_options:
+        options.update(extra_options)
+
     payload: dict = {
         "model": model,
         "prompt": prompt,
         "stream": False,
         "think": think,
-        "options": {"num_predict": num_predict},
+        "options": options,
     }
     if system:
         payload["system"] = system
@@ -192,26 +197,50 @@ _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 
 
 def _parse_json_response(raw: str) -> dict | None:
-    """Parse a VLM JSON response, handling fences and thinking tags."""
+    """Parse a VLM JSON response, handling fences, thinking tags, and truncation."""
     text = _THINK_RE.sub("", raw).strip()
     match = _FENCE_RE.search(text)
     if match:
         text = match.group(1).strip()
     if not text:
         return None
+
+    # Find the first { to start of JSON
+    start = text.find("{")
+    if start < 0:
+        return None
+    text = text[start:]
+
+    # Try direct parse
     try:
         data = json.loads(text)
+        return data if isinstance(data, dict) else None
     except json.JSONDecodeError:
-        for i, ch in enumerate(text):
-            if ch == "{":
-                try:
-                    data = json.loads(text[i:])
-                    break
-                except json.JSONDecodeError:
-                    continue
-        else:
-            return None
-    return data if isinstance(data, dict) else None
+        pass
+
+    # Try repairing truncated JSON by closing open brackets
+    repaired = text
+    open_braces = repaired.count("{") - repaired.count("}")
+    open_brackets = repaired.count("[") - repaired.count("]")
+
+    # Strip trailing partial content (after last complete value)
+    # Find the last comma or complete value before truncation
+    for trim_char in [",", '"', "}", "]"]:
+        last_pos = repaired.rfind(trim_char)
+        if last_pos > 0:
+            candidate = repaired[:last_pos + 1]
+            # Close open brackets/braces
+            suffix = "]" * max(0, candidate.count("[") - candidate.count("]"))
+            suffix += "}" * max(0, candidate.count("{") - candidate.count("}"))
+            try:
+                data = json.loads(candidate + suffix)
+                if isinstance(data, dict):
+                    logger.debug("Repaired truncated behavioral JSON (%d open braces closed)", open_braces)
+                    return data
+            except json.JSONDecodeError:
+                continue
+
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -296,16 +325,22 @@ class BehavioralSynthesizer:
             continuity_spans=continuity_spans,
         )
 
-        # Call VLM
+        # Call VLM with model-specific profile
+        from agenthandover_worker.model_profiles import get_profile
+        profile = get_profile(self.config.model)
         try:
             raw_response, elapsed = _call_ollama_text(
                 model=self.config.model,
                 prompt=prompt,
                 host=self.config.ollama_host,
-                num_predict=self.config.num_predict,
-                system=BEHAVIORAL_SYSTEM_PROMPT,
+                num_predict=12000,  # high budget — thinking consumes ~3-4K tokens
+                system=profile.sop_system or BEHAVIORAL_SYSTEM_PROMPT,
                 timeout=self.config.timeout,
-                think=True,
+                think=profile.sop_think if profile.sop_think else True,
+                extra_options={
+                    k: v for k, v in profile.sop_options().items()
+                    if k not in ("num_predict",)
+                },
             )
         except ConnectionError as exc:
             logger.warning("Behavioral synthesis VLM failed for '%s': %s", slug, exc)
@@ -329,7 +364,10 @@ class BehavioralSynthesizer:
         # Parse response
         parsed = _parse_json_response(raw_response)
         if parsed is None:
-            logger.warning("Behavioral synthesis: invalid JSON for '%s'", slug)
+            logger.warning(
+                "Behavioral synthesis: invalid JSON for '%s' (response length=%d, first 200 chars: %s)",
+                slug, len(raw_response), raw_response[:200],
+            )
             return BehavioralInsights()
 
         insights = self._parse_insights(parsed)

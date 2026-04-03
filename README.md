@@ -82,7 +82,7 @@ This is not a screen recorder with ChatGPT on top. AgentHandover runs an 11-stag
 | Stage | What it does |
 |-------|-------------|
 | **1. Screen capture** | Half-resolution screenshots, deduplicated by perceptual hashing (70% of frames are duplicates and get dropped) |
-| **2. VLM annotation** | Local Qwen 3.5 model reads each frame -- what app, what URL, what you're doing, what you'll do next |
+| **2. VLM annotation** | Local AI model (Gemma 4 or Qwen 3.5) reads each frame -- what app, what URL, what you're doing, what you'll do next |
 | **3. Activity classification** | 8-class taxonomy separates work from noise. Your expense filing is "work." Your YouTube break is "entertainment." |
 | **4. Text embedding** | Every annotation embedded into a vector knowledge base (nomic-embed-text, 768d) for semantic matching |
 | **5. Image embedding** | Optional SigLIP embeddings (1152d) capture what your screen looked like -- find visually similar screens even when text differs |
@@ -208,7 +208,7 @@ curl -X POST http://localhost:9477/search/semantic \
 
 Download the latest `.pkg` from [**Releases**](https://github.com/sandroandric/AgentHandover/releases) and double-click.
 
-The onboarding app walks you through: permissions, AI model downloads (Qwen for screen understanding and Skill generation, nomic-embed-text for semantic search, optional SigLIP for image embeddings), Chrome extension, and your first recording.
+The onboarding app walks you through: permissions, AI model downloads (auto-recommends the best model for your Mac's RAM), Chrome extension, and your first recording.
 
 <details>
 <summary><strong>Developer / advanced install</strong></summary>
@@ -220,12 +220,23 @@ agenthandover doctor     # Verify prerequisites
 agenthandover start all  # Start daemon + worker
 ```
 
-### Pull models manually
+### AI Models
+
+AgentHandover auto-detects your Mac's RAM during onboarding and recommends the best model tier:
+
+| RAM | Tier | Model | Download |
+|-----|------|-------|----------|
+| 8 GB | Standard | Qwen 3.5 (2B + 4B) | ~6 GB |
+| 16 GB | Recommended | Gemma 4 E4B | ~10 GB |
+| 24 GB | Performance | Gemma 4 E4B Q8 | ~12 GB |
+| 48 GB+ | Max Quality | Gemma 4 31B | ~20 GB |
+
+Gemma 4 models require Ollama 0.20.0+. All models run fully local via Ollama.
 
 ```bash
-ollama pull qwen3.5:2b         # Scene annotation (~2.7 GB)
-ollama pull qwen3.5:4b         # Skill generation (~3.4 GB)
-ollama pull nomic-embed-text   # Semantic search (~274 MB)
+# Or pull manually:
+ollama pull gemma4              # Recommended for 16 GB+ (~10 GB)
+ollama pull nomic-embed-text    # Semantic search (~274 MB)
 ```
 
 ### Chrome extension
@@ -251,7 +262,7 @@ just build-all
 
 ### Choose your AI model
 
-AgentHandover defaults to local Qwen models via Ollama -- free, fast, private. Six backends supported:
+AgentHandover defaults to local models via Ollama (Gemma 4 for 16 GB+ Macs, Qwen 3.5 for 8 GB) -- free, fast, private. Six backends supported:
 
 | Backend | Best for |
 |---------|----------|
@@ -370,16 +381,43 @@ agenthandover uninstall --purge-data # Remove everything
 
 [sandro@sandric.co](mailto:sandro@sandric.co)
 
+## Changelog
+
+### v0.2.0 (2026-04-03)
+
+**Gemma 4 support and model tier system**
+- Auto-detects RAM and recommends optimal model tier during onboarding (8 GB to 48 GB+)
+- Gemma 4 E4B as recommended model for 16 GB+ Macs -- higher annotation reliability, richer SOP generation with thinking mode
+- Per-model optimal settings (system prompts, thinking levels, sampling parameters) applied automatically
+- Ollama version check -- warns if Gemma 4 selected but Ollama < 0.20.0
+
+**Pipeline improvements**
+- Vector embeddings wired into all pipeline stages (procedures, daily summaries, profile)
+- Behavioral pre-analysis enriched with app names and URLs -- strategy extraction now succeeds on first call
+- Strategy fallback: if post-SOP behavioral call fails, pre-analysis strategy is preserved
+- Truncated JSON repair in behavioral synthesizer
+
+**UI and UX**
+- FAQ window accessible from menu bar with 15 Q&A items across 5 sections
+- Daily Digest shows task intents and app usage (was showing empty bullets)
+- Focus Q&A window comes to front instead of being buried behind Workflows
+- Compact menu bar quick links (Skills, Digest, FAQ) -- no more truncation
+- Stale daemon PID detection prevents "Observe Me" from silently failing
+
+**Agent integration**
+- Fixed MCP server and agent_connect knowledge base paths
+- CLI skills list shows only approved SOPs (was showing 29 passive noise entries)
+- Slash commands per procedure with full steps, strategy, Q&A, execution protocol
+- agenthandover-mcp symlinked to /usr/local/bin/ in pkg installer
+
+**Browser extension**
+- Added host_permissions for MV3 content script injection
+- Comet browser support alongside Chrome, Chromium, Brave, Edge, Arc
+
+**Reliability**
+- postinstall: chown venv before pip reinstall (fixes root-owned dist-info blocker)
+- 252 Rust tests, 2955 Python tests passing
+
 ## License
 
 [Apache 2.0](LICENSE)
-
-## Star History
-
-<a href="https://www.star-history.com/?repos=sandroandric%2FAgentHandover&type=date&legend=top-left">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/image?repos=sandroandric/AgentHandover&type=date&theme=dark&legend=top-left" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/image?repos=sandroandric/AgentHandover&type=date&legend=top-left" />
-   <img alt="Star History Chart" src="https://api.star-history.com/image?repos=sandroandric/AgentHandover&type=date&legend=top-left" />
- </picture>
-</a>

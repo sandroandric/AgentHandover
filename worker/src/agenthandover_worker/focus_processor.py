@@ -125,19 +125,30 @@ class FocusProcessor:
 
         # Step 4: Behavioral pre-analysis (optional, informs SOP generation)
         behavioral_context = ""
+        self._last_pre_analysis_strategy = ""  # expose for fallback
         if self.behavioral_synthesizer is not None:
             try:
                 from agenthandover_worker.sop_generator import _generate_slug
                 pre_procedure = {"title": title, "steps": [], "source": "focus"}
+                # Build richer observations from annotations (app, location, action)
+                # so the model has enough context to extract strategy
                 timeline_obs = [
-                    [{"action": f.get("annotation", {}).get("task_context", {}).get("what_doing", "")}
-                     for f in timeline if f.get("annotation")]
+                    [
+                        {
+                            "action": f.get("annotation", {}).get("task_context", {}).get("what_doing", ""),
+                            "app": f.get("annotation", {}).get("app", ""),
+                            "location": f.get("annotation", {}).get("location", ""),
+                            "target": f.get("annotation", {}).get("location", ""),
+                        }
+                        for f in timeline if f.get("annotation")
+                    ]
                 ]
                 insights = self.behavioral_synthesizer.synthesize(
                     _generate_slug(title), pre_procedure, timeline_obs,
                     force=True,
                 )
                 if insights.strategy:
+                    self._last_pre_analysis_strategy = insights.strategy
                     behavioral_context = f"User intent: {insights.strategy}\n"
                     if insights.selection_criteria:
                         behavioral_context += (

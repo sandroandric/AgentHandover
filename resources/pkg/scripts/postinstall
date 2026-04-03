@@ -77,7 +77,8 @@ for browser_dir in \
     "Chromium" \
     "BraveSoftware/Brave-Browser" \
     "Microsoft Edge" \
-    "Arc/User Data"; do
+    "Arc/User Data" \
+    "Comet"; do
     BROWSER_ROOT="${USER_HOME}/Library/Application Support/${browser_dir}"
     if [ -d "${BROWSER_ROOT}" ]; then
         mkdir -p "${BROWSER_ROOT}/NativeMessagingHosts"
@@ -154,9 +155,12 @@ if [ ! -d "${LIB_DIR}/venv" ]; then
 
     echo "  Python virtual environment created."
 else
-    # Venv exists — reinstall worker package to pick up code changes
+    # Venv exists — reinstall worker package to pick up code changes.
+    # chown first: earlier installs may have left root-owned dist-info
+    # which blocks pip uninstall/reinstall as the console user.
+    chown -R "${CONSOLE_USER}" "${LIB_DIR}/venv"
     echo "  Updating worker package..."
-    sudo -u "${CONSOLE_USER}" "${LIB_DIR}/venv/bin/pip" install --quiet --force-reinstall --no-deps "${LIB_DIR}/worker/" 2>/dev/null || true
+    sudo -u "${CONSOLE_USER}" "${LIB_DIR}/venv/bin/pip" install --quiet --force-reinstall "${LIB_DIR}/worker/" 2>/dev/null || true
     # Ensure mlx-embeddings is installed
     sudo -u "${CONSOLE_USER}" "${LIB_DIR}/venv/bin/pip" install --quiet "mlx-embeddings>=0.0.4" 2>/dev/null || true
 fi

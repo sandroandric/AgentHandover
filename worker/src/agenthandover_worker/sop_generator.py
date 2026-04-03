@@ -1102,36 +1102,40 @@ def _call_ollama(
     num_predict: int = 12000,
     system: str = "",
     timeout: float = 1800.0,
-    think: bool = True,
+    think: bool | str = True,
     format_json: bool = False,
+    extra_options: dict | None = None,
 ) -> tuple[str, float]:
     """Call Ollama's /api/generate for text-only SOP generation.
 
-    Uses think=True for 4B model to enable reasoning (produces better SOPs).
     Returns (response_text, inference_time_seconds).
+
+    Args:
+        think: False, True, "low", "medium", or "high". For Gemma 4 models,
+            "high" enables deep reasoning which produces better SOPs.
+        extra_options: Additional Ollama options merged into the options dict.
+            Use model_profiles.get_profile().sop_options() for optimal settings.
     """
     import urllib.request
     import urllib.error
 
     url = f"{host}/api/generate"
 
+    options: dict = {
+        "num_predict": num_predict,
+        "num_ctx": 24576,
+        "temperature": 0.3,
+    }
+    if extra_options:
+        options.update(extra_options)
+
     payload: dict = {
         "model": model,
         "prompt": prompt,
         "stream": False,
         # think must be a top-level parameter, NOT inside options.
-        # Inside options it has no effect and Qwen3.5 thinking models
-        # may consume all num_predict tokens on reasoning.
         "think": think,
-        "options": {
-            "num_predict": num_predict,
-            # Ollama defaults to 4096 context which truncates our prompts.
-            # 16K accommodates timeline (~4-6K) + output (8K) comfortably.
-            "num_ctx": 24576,
-            # Lower temperature for reliable JSON output.
-            # Ollama defaults to 0.8 which is too creative for structured data.
-            "temperature": 0.3,
-        },
+        "options": options,
     }
 
     if system:
@@ -1224,16 +1228,22 @@ class SOPGenerator:
         if behavioral_context:
             prompt += f"\n\nBEHAVIORAL CONTEXT (use this to understand the user's intent and filter noise like ads, notifications, or unrelated content):\n{behavioral_context}\n"
 
-        # Call VLM
+        # Call VLM with model-specific profile
+        from agenthandover_worker.model_profiles import get_profile
+        profile = get_profile(self.config.model)
         try:
             raw_response, elapsed = _call_ollama(
                 model=self.config.model,
                 prompt=prompt,
                 host=self.config.ollama_host,
-                num_predict=self.config.num_predict,
-                system=SOP_SYSTEM_PROMPT,
+                num_predict=profile.sop_num_predict,
+                system=profile.sop_system or SOP_SYSTEM_PROMPT,
                 timeout=self.config.timeout,
-                think=True,
+                think=profile.sop_think,
+                extra_options={
+                    k: v for k, v in profile.sop_options().items()
+                    if k not in ("num_predict",)
+                },
             )
         except ConnectionError as exc:
             return GeneratedSOP(

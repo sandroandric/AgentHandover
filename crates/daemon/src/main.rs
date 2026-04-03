@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use tokio::sync::{mpsc, watch};
-use tracing::{info, warn, error};
+use tracing::{info, warn, error, debug};
 use tracing_subscriber::EnvFilter;
 use tracing_appender::rolling;
 use sha2::{Digest, Sha256};
@@ -665,7 +665,9 @@ async fn run_native_messaging_bridge() -> Result<()> {
             interval.tick().await;
 
             // Only request DOM snapshots during active focus recording
-            let is_focus = agenthandover_common::focus_session::read_focus_signal(&state_dir)
+            let focus_signal = agenthandover_common::focus_session::read_focus_signal(&state_dir);
+            let is_focus = focus_signal
+                .as_ref()
                 .map(|s| s.is_recording())
                 .unwrap_or(false);
 
@@ -676,8 +678,11 @@ async fn run_native_messaging_bridge() -> Result<()> {
             let tab_id = dom_tab_id.load(Ordering::Relaxed);
             if tab_id < 0 {
                 // No tab seen yet — Chrome hasn't sent any messages
+                debug!("DOM request: focus active but no tab ID yet");
                 continue;
             }
+
+            info!("DOM request: sending request_snapshot to tab {}", tab_id);
 
             let payload = serde_json::json!({
                 "tabId": tab_id,

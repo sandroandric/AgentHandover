@@ -1871,7 +1871,24 @@ def _process_focus_sessions_v2(
                         "(strategy=%s, %d guardrails)",
                         title, bool(insights.strategy), len(insights.guardrails),
                     )
+                elif not procedure_dict.get("strategy"):
+                    # Post-SOP synthesis failed — fall back to pre-analysis strategy
+                    pre_strategy = getattr(focus_processor, "_last_pre_analysis_strategy", "")
+                    if pre_strategy:
+                        procedure_dict["strategy"] = pre_strategy
+                        logger.info(
+                            "Focus v2 session '%s': using pre-analysis strategy as fallback",
+                            title,
+                        )
             except Exception:
+                # Post-SOP synthesis crashed — still try pre-analysis fallback
+                pre_strategy = getattr(focus_processor, "_last_pre_analysis_strategy", "")
+                if pre_strategy and not procedure_dict.get("strategy"):
+                    procedure_dict["strategy"] = pre_strategy
+                    logger.info(
+                        "Focus v2 session '%s': using pre-analysis strategy as fallback (post-SOP failed)",
+                        title,
+                    )
                 logger.debug(
                     "Focus v2 behavioral synthesis failed for '%s'",
                     title, exc_info=True,
@@ -4461,8 +4478,13 @@ def main(argv: list[str] | None = None) -> None:
     evidence_normalizer = EvidenceNormalizer(variant_detector=variant_detector)
 
     # Behavioral synthesis + evidence extraction
-    from agenthandover_worker.behavioral_synthesizer import BehavioralSynthesizer
-    behavioral_synthesizer = BehavioralSynthesizer(vlm_queue=vlm_queue)
+    from agenthandover_worker.behavioral_synthesizer import BehavioralSynthesizer, SynthesizerConfig
+    _synth_model = v2_cfg["sop_model"] if v2_cfg else "qwen3.5:4b"
+    _synth_host = v2_cfg.get("ollama_host", "http://localhost:11434") if v2_cfg else "http://localhost:11434"
+    behavioral_synthesizer = BehavioralSynthesizer(
+        config=SynthesizerConfig(model=_synth_model, ollama_host=_synth_host),
+        vlm_queue=vlm_queue,
+    )
 
     # Focus session questioner (gap analysis + targeted questions)
     from agenthandover_worker.focus_questioner import FocusQuestioner
@@ -4487,6 +4509,37 @@ def main(argv: list[str] | None = None) -> None:
         )
 
     logger.info("Knowledge base initialized: %s", args.knowledge_dir)
+
+    # Log model tier recommendation based on system RAM
+    try:
+        from agenthandover_worker.model_profiles import (
+            log_recommendation, get_profile, ollama_supports_gemma4,
+        )
+        recommended_tier = log_recommendation()
+
+        # Warn if using Gemma 4 but Ollama is too old
+        ann_model = v2_cfg["annotation_model"] if v2_cfg else "qwen3.5:2b"
+        sop_model = v2_cfg["sop_model"] if v2_cfg else "qwen3.5:4b"
+        uses_gemma = "gemma4" in ann_model or "gemma4" in sop_model
+        if uses_gemma:
+            ollama_host = v2_cfg.get("ollama_host", "http://localhost:11434") if v2_cfg else "http://localhost:11434"
+            if not ollama_supports_gemma4(ollama_host):
+                logger.warning(
+                    "Gemma 4 models require Ollama 0.20.0+. "
+                    "Current version may not support them. "
+                    "Upgrade: brew upgrade ollama"
+                )
+
+        # Log active model profiles
+        ann_profile = get_profile(ann_model)
+        sop_profile = get_profile(sop_model)
+        logger.info(
+            "Model profiles: annotation=%s (think=%s), SOP=%s (think=%s)",
+            ann_model, ann_profile.ann_think,
+            sop_model, sop_profile.sop_think,
+        )
+    except Exception:
+        logger.debug("Model profile detection failed", exc_info=True)
 
     # Initialize pipeline components
     episode_builder = EpisodeBuilder()

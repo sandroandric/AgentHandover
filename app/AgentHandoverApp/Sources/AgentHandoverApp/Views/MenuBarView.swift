@@ -954,20 +954,34 @@ struct MenuBarView: View {
         return startedAt
     }
 
+    private static let windowIdToTitle: [String: String] = [
+        "workflows": "Workflows",
+        "daily-digest": "Daily Digest",
+        "micro-review": "Review Queue",
+        "focus-qa": "Focus Q&A",
+        "faq": "FAQ",
+    ]
+
     private func openAndActivate(_ windowId: String) {
         NSApp.setActivationPolicy(.regular)
         openWindow(id: windowId)
+        let targetTitle = Self.windowIdToTitle[windowId]
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
             NSApp.activate(ignoringOtherApps: true)
-            let knownTitles: Set<String> = [
-                "Workflows", "Review Queue", "Daily Digest", "Focus Q&A", "FAQ",
-            ]
-            for window in NSApp.windows {
-                if knownTitles.contains(window.title) {
+            // Bring the specific requested window to front, not just any app window
+            if let targetTitle {
+                for window in NSApp.windows where window.title == targetTitle {
                     window.makeKeyAndOrderFront(nil)
                     window.orderFrontRegardless()
-                    break
+                    return
                 }
+            }
+            // Fallback: bring any known window to front
+            let knownTitles: Set<String> = Set(Self.windowIdToTitle.values)
+            for window in NSApp.windows where knownTitles.contains(window.title) {
+                window.makeKeyAndOrderFront(nil)
+                window.orderFrontRegardless()
+                break
             }
         }
     }

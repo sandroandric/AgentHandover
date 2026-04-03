@@ -62,6 +62,74 @@ struct OnboardingView: View {
     @State private var useCustomModels = false
     @State private var customAnnotationModel = "qwen3.5:2b"
     @State private var customSOPModel = "qwen3.5:4b"
+
+    // Model tier selection
+    enum ModelTier: String, CaseIterable {
+        case standard = "Standard"
+        case recommended = "Recommended"
+        case performance = "Performance"
+        case maxQuality = "Max Quality"
+
+        var annotationModel: String {
+            switch self {
+            case .standard: return "qwen3.5:2b"
+            case .recommended: return "gemma4"
+            case .performance: return "gemma4:e4b-it-q8_0"
+            case .maxQuality: return "gemma4:31b"
+            }
+        }
+
+        var sopModel: String {
+            switch self {
+            case .standard: return "qwen3.5:4b"
+            case .recommended: return "gemma4"
+            case .performance: return "gemma4:e4b-it-q8_0"
+            case .maxQuality: return "gemma4:31b"
+            }
+        }
+
+        var diskSize: String {
+            switch self {
+            case .standard: return "~6 GB"
+            case .recommended: return "~10 GB"
+            case .performance: return "~12 GB"
+            case .maxQuality: return "~20 GB"
+            }
+        }
+
+        var minRAM: Int {
+            switch self {
+            case .standard: return 0
+            case .recommended: return 16
+            case .performance: return 24
+            case .maxQuality: return 48
+            }
+        }
+
+        var subtitle: String {
+            switch self {
+            case .standard: return "Qwen 3.5 — works on 8 GB Macs"
+            case .recommended: return "Gemma 4 E4B — best speed and quality"
+            case .performance: return "Gemma 4 E4B Q8 — higher precision"
+            case .maxQuality: return "Gemma 4 31B — frontier intelligence"
+            }
+        }
+
+        var needsNewOllama: Bool {
+            self != .standard
+        }
+
+        static func recommendedFor(ramGB: Int) -> ModelTier {
+            if ramGB >= 48 { return .maxQuality }
+            if ramGB >= 24 { return .performance }
+            if ramGB >= 16 { return .recommended }
+            return .standard
+        }
+    }
+
+    @State private var selectedTier: ModelTier = .standard
+    @State private var detectedRAMGB: Int = 0
+    @State private var recommendedTier: ModelTier = .standard
     @State private var ollamaInstalled = false
     @State private var ollamaRunning = false
     @State private var ollamaHasRequiredModels = false
@@ -978,13 +1046,19 @@ struct OnboardingView: View {
     }
 
     private var resolvedAnnotationModel: String {
-        let custom = customAnnotationModel.trimmingCharacters(in: .whitespacesAndNewlines)
-        return useCustomModels && !custom.isEmpty ? custom : "qwen3.5:2b"
+        if useCustomModels {
+            let custom = customAnnotationModel.trimmingCharacters(in: .whitespacesAndNewlines)
+            return custom.isEmpty ? selectedTier.annotationModel : custom
+        }
+        return selectedTier.annotationModel
     }
 
     private var resolvedSOPModel: String {
-        let custom = customSOPModel.trimmingCharacters(in: .whitespacesAndNewlines)
-        return useCustomModels && !custom.isEmpty ? custom : "qwen3.5:4b"
+        if useCustomModels {
+            let custom = customSOPModel.trimmingCharacters(in: .whitespacesAndNewlines)
+            return custom.isEmpty ? selectedTier.sopModel : custom
+        }
+        return selectedTier.sopModel
     }
 
     private var requiredLocalModels: [String] {
@@ -1430,29 +1504,84 @@ struct OnboardingView: View {
                     }
                 } else {
                     VStack(alignment: .leading, spacing: 10) {
-                        HStack(spacing: 8) {
-                            Image(systemName: ollamaHasRequiredModels ? "checkmark.circle.fill" : "arrow.down.circle.fill")
-                                .foregroundColor(ollamaHasRequiredModels ? brightGreen : warmOrange)
-                                .font(.system(size: 16))
-                            Text(ollamaHasRequiredModels ? "Required local models are already available." : "~6 GB download \u{00B7} Runs on Apple Silicon")
-                                .font(.system(size: 13, weight: .medium))
-                                .foregroundColor(darkNavy.opacity(0.5))
-                        }
-
-                        HStack(spacing: 8) {
-                            Image(systemName: "bolt.circle.fill")
+                        // Model tier picker
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack(spacing: 6) {
+                            Image(systemName: "cpu")
                                 .foregroundColor(warmOrange)
-                                .font(.system(size: 16))
-                            Text("Pulling models only works while the Ollama app is open.")
-                                .font(.system(size: 13, weight: .medium))
+                                .font(.system(size: 14))
+                            Text("Detected: \(detectedRAMGB) GB RAM")
+                                .font(.system(size: 12, weight: .medium))
                                 .foregroundColor(darkNavy.opacity(0.5))
                         }
 
-                        VStack(alignment: .leading, spacing: 6) {
-                            modelRow("qwen3.5:2b", "2.7 GB", "Screen annotation - reads your screen and describes what you're doing")
-                            modelRow("qwen3.5:4b", "3.4 GB", "SOP generation - writes step-by-step procedures from observations")
-                            modelRow("nomic-embed-text", "274 MB", "Semantic search - finds similar workflows by meaning")
+                        ForEach(ModelTier.allCases.filter { $0.minRAM <= detectedRAMGB }, id: \.rawValue) { tier in
+                            Button(action: { selectedTier = tier }) {
+                                HStack(spacing: 10) {
+                                    Image(systemName: selectedTier == tier ? "checkmark.circle.fill" : "circle")
+                                        .foregroundColor(selectedTier == tier ? warmOrange : darkNavy.opacity(0.2))
+                                        .font(.system(size: 16))
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        HStack(spacing: 6) {
+                                            Text(tier.rawValue)
+                                                .font(.system(size: 13, weight: .bold, design: .rounded))
+                                                .foregroundColor(darkNavy)
+                                            if tier == recommendedTier {
+                                                Text("Best for your Mac")
+                                                    .font(.system(size: 9, weight: .bold))
+                                                    .foregroundColor(.white)
+                                                    .padding(.horizontal, 6)
+                                                    .padding(.vertical, 2)
+                                                    .background(Capsule().fill(warmOrange))
+                                            }
+                                        }
+                                        Text("\(tier.subtitle) \u{00B7} \(tier.diskSize)")
+                                            .font(.system(size: 11))
+                                            .foregroundColor(darkNavy.opacity(0.5))
+                                    }
+                                    Spacer()
+                                }
+                                .padding(10)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 10)
+                                        .fill(selectedTier == tier ? warmOrange.opacity(0.08) : Color.clear)
+                                )
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 10)
+                                        .stroke(selectedTier == tier ? warmOrange.opacity(0.3) : darkNavy.opacity(0.08), lineWidth: 1)
+                                )
+                            }
+                            .buttonStyle(.plain)
                         }
+                    }
+
+                    HStack(spacing: 8) {
+                        Image(systemName: ollamaHasRequiredModels ? "checkmark.circle.fill" : "arrow.down.circle.fill")
+                            .foregroundColor(ollamaHasRequiredModels ? brightGreen : warmOrange)
+                            .font(.system(size: 16))
+                        Text(ollamaHasRequiredModels ? "Required models ready." : "\(selectedTier.diskSize) download \u{00B7} Runs on Apple Silicon")
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundColor(darkNavy.opacity(0.5))
+                    }
+
+                    HStack(spacing: 8) {
+                        Image(systemName: "bolt.circle.fill")
+                            .foregroundColor(warmOrange)
+                            .font(.system(size: 16))
+                        Text("Pulling models only works while the Ollama app is open.")
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundColor(darkNavy.opacity(0.5))
+                    }
+
+                    VStack(alignment: .leading, spacing: 6) {
+                        if selectedTier == .standard {
+                            modelRow("qwen3.5:2b", "2.7 GB", "Screen annotation")
+                            modelRow("qwen3.5:4b", "3.4 GB", "Skill generation")
+                        } else {
+                            modelRow(selectedTier.annotationModel, selectedTier.diskSize, "Screen annotation + Skill generation (single model)")
+                        }
+                        modelRow("nomic-embed-text", "274 MB", "Semantic search")
+                    }
 
                         // Image embeddings toggle
                         HStack(spacing: 10) {
@@ -2427,6 +2556,52 @@ struct OnboardingView: View {
         findOllamaPath() != nil
     }
 
+    private func getOllamaVersion(_ ollamaPath: String) -> String? {
+        // Prefer the server version from the API (most accurate)
+        if let apiVersion = getOllamaVersionFromAPI() {
+            return apiVersion
+        }
+
+        // Fallback to CLI — parse FIRST line only ("ollama version is X.Y.Z")
+        // because subsequent lines may contain "Warning: client version is ..."
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: ollamaPath)
+        process.arguments = ["--version"]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+        do {
+            try process.run()
+            process.waitUntilExit()
+            let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+            let firstLine = output.components(separatedBy: "\n").first ?? output
+            let parts = firstLine.components(separatedBy: " ")
+            return parts.last?.trimmingCharacters(in: .whitespacesAndNewlines)
+        } catch {
+            return nil
+        }
+    }
+
+    private func getOllamaVersionFromAPI() -> String? {
+        guard let url = URL(string: "http://localhost:11434/api/version"),
+              let data = try? Data(contentsOf: url),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let version = json["version"] as? String else {
+            return nil
+        }
+        return version
+    }
+
+    private func isOllamaVersionSufficient(_ version: String, minimum: String) -> Bool {
+        let clean = version.components(separatedBy: "-").first ?? version // strip -rc1
+        let vParts = clean.components(separatedBy: ".").compactMap { Int($0) }
+        let mParts = minimum.components(separatedBy: ".").compactMap { Int($0) }
+        guard vParts.count >= 3, mParts.count >= 3 else { return false }
+        if vParts[0] != mParts[0] { return vParts[0] > mParts[0] }
+        if vParts[1] != mParts[1] { return vParts[1] > mParts[1] }
+        return vParts[2] >= mParts[2]
+    }
+
     private func findOllamaPath() -> String? {
         let paths = [
             "/usr/local/bin/ollama",
@@ -2482,13 +2657,35 @@ struct OnboardingView: View {
         vlmPullInProgress = true
         vlmPullOutput = "Starting download..."
 
-        let annModel = useCustomModels ? customAnnotationModel : "qwen3.5:2b"
-        let sopModel = useCustomModels ? customSOPModel : "qwen3.5:4b"
-        let models = [
+        let annModel: String
+        let sopModel: String
+        if useCustomModels {
+            annModel = customAnnotationModel
+            sopModel = customSOPModel
+        } else {
+            annModel = selectedTier.annotationModel
+            sopModel = selectedTier.sopModel
+        }
+
+        // Check Ollama version if Gemma 4 is selected
+        let needsGemma = annModel.contains("gemma4") || sopModel.contains("gemma4")
+        if needsGemma {
+            let ollamaVersion = getOllamaVersion(ollamaPath)
+            if let version = ollamaVersion, !isOllamaVersionSufficient(version, minimum: "0.20.0") {
+                vlmPullInProgress = false
+                vlmPullOutput = "Gemma 4 requires Ollama 0.20.0+. You have \(version). Please update: brew upgrade ollama"
+                return
+            }
+        }
+
+        var models = [
             (annModel, "scene annotation"),
-            (sopModel, "Skill generation"),
             ("nomic-embed-text", "semantic search"),
         ]
+        // Only add SOP model separately if different from annotation model
+        if sopModel != annModel {
+            models.insert((sopModel, "Skill generation"), at: 1)
+        }
 
         DispatchQueue.global(qos: .userInitiated).async {
             // Check which models are already pulled
@@ -2557,12 +2754,10 @@ struct OnboardingView: View {
                 }
             }
 
-            // Save embedding config + custom models
+            // Save embedding config + model config (always, to persist tier selection)
             let imageEmbEnabled = self.enableImageEmbeddings
             self.saveEmbeddingConfig(imageEmbeddings: imageEmbEnabled)
-            if self.useCustomModels {
-                self.saveCustomModelConfig(annotation: annModel, sop: sopModel)
-            }
+            self.saveCustomModelConfig(annotation: annModel, sop: sopModel)
 
             DispatchQueue.main.async {
                 vlmPullInProgress = false
@@ -2575,6 +2770,13 @@ struct OnboardingView: View {
     private func seedVLMStateFromConfigIfNeeded() {
         guard !hasSeededVLMFromConfig else { return }
         hasSeededVLMFromConfig = true
+
+        // Detect RAM and set recommended tier
+        let ramBytes = ProcessInfo.processInfo.physicalMemory
+        detectedRAMGB = Int(ramBytes / (1024 * 1024 * 1024))
+        recommendedTier = ModelTier.recommendedFor(ramGB: detectedRAMGB)
+        selectedTier = recommendedTier
+
         appState.refreshStatus()
         if appState.vlmMode == "remote" {
             vlmMode = .cloud
