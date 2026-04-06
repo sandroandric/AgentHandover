@@ -884,6 +884,20 @@ def _embed_procedure(vector_kb, procedure: dict) -> None:
     _embed_in_vector_kb(vector_kb, "procedure", slug, text)
 
 
+def _refresh_claude_commands() -> None:
+    """Refresh Claude Code slash commands after a Skill is approved.
+
+    Runs connect_claude_code() to regenerate /ah-{slug} commands from
+    all agent_ready procedures in the knowledge base.
+    """
+    try:
+        from agenthandover_worker.agent_connect import connect_claude_code
+        connect_claude_code()
+        logger.info("Refreshed Claude Code slash commands")
+    except Exception:
+        logger.debug("Failed to refresh Claude Code commands", exc_info=True)
+
+
 def _write_sops_index(
     db: WorkerDB,
     knowledge_base: "KnowledgeBase | None" = None,
@@ -2076,6 +2090,7 @@ def _process_focus_sessions_v2(
                 procedure_writer=procedure_writer,
                 kb_export_adapter=kb_export_adapter,
             )
+            _refresh_claude_commands()
         else:
             logger.info(
                 "Focus v2 session '%s': SOP saved as draft (auto_approve=False)",
@@ -2289,6 +2304,9 @@ def _check_focus_answers(
 
     # Clean up Q&A files
     clear_focus_qa_files(state_dir)
+
+    # Refresh Claude Code slash commands with the new/updated procedure
+    _refresh_claude_commands()
 
     logger.info(
         "Focus v2 '%s': Q&A complete, exported %d SOP(s) (status=%s)",
@@ -3081,6 +3099,7 @@ def _process_approval_triggers(
                         )
                         logger.info("Approved and exported SOP %s", sop_id)
                         _embed_procedure(vector_kb, sop_template)
+                        _refresh_claude_commands()
                 else:
                     logger.warning(
                         "Approved SOP %s but could not load template for export",
