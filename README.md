@@ -9,6 +9,7 @@
 </p>
 
 <p align="center">
+  <a href="#demo">Demo</a> &middot;
   <a href="#what-a-skill-looks-like">What a Skill Looks Like</a> &middot;
   <a href="#how-it-works">How It Works</a> &middot;
   <a href="#the-knowledge-base">Knowledge Base</a> &middot;
@@ -22,6 +23,16 @@
 <p align="center">
   <img src="AgentHandover.png" alt="The Struggle - The Discovery - The Transformation" />
 </p>
+
+## Demo
+
+<p align="center">
+  <a href="https://youtu.be/3nGH3rYbgfY">
+    <img src="https://img.youtube.com/vi/3nGH3rYbgfY/maxresdefault.jpg" alt="AgentHandover Demo" width="600" />
+  </a>
+</p>
+
+<p align="center"><a href="https://youtu.be/3nGH3rYbgfY">Watch the full demo on YouTube</a></p>
 
 You already know how to do your work. Your agents don't.
 
