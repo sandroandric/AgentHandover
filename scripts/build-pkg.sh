@@ -83,6 +83,18 @@ if [ -f "${APP_BINARY}" ]; then
     cp "${REPO_ROOT}/app/AgentHandoverApp/Sources/AgentHandoverApp/Info.plist" \
        "${PKG_ROOT}/Applications/AgentHandover.app/Contents/Info.plist"
 
+    # Add rpath for embedded frameworks so Sparkle.framework loads at runtime
+    install_name_tool -add_rpath @loader_path/../Frameworks "${APP_BUNDLE}/AgentHandover" 2>/dev/null || true
+
+    # Copy frameworks (Sparkle) to Contents/Frameworks
+    FRAMEWORKS_DIR="${PKG_ROOT}/Applications/AgentHandover.app/Contents/Frameworks"
+    mkdir -p "${FRAMEWORKS_DIR}"
+    for FW in "${REPO_ROOT}"/app/AgentHandoverApp/.build/release/*.framework; do
+        [ -d "${FW}" ] || continue
+        cp -R "${FW}" "${FRAMEWORKS_DIR}/"
+        echo "  Framework included: $(basename "${FW}")"
+    done
+
     # Copy SPM resource bundle + icon to Contents/Resources
     RESOURCES_DIR="${PKG_ROOT}/Applications/AgentHandover.app/Contents/Resources"
     mkdir -p "${RESOURCES_DIR}"

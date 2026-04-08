@@ -710,6 +710,14 @@ struct MenuBarView: View {
 
             Spacer()
 
+            Button("Update") {
+                delegate.updaterController.checkForUpdates(nil)
+            }
+            .font(.system(size: 11))
+            .foregroundColor(.secondary)
+            .buttonStyle(.plain)
+            .padding(.trailing, 8)
+
             Button("Quit") {
                 NSApplication.shared.terminate(nil)
             }
