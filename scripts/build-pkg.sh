@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="${VERSION:-0.1.0}"
-PKG_ROOT="$(mktemp -d)"
 SCRIPTS_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPTS_DIR/.." && pwd)"
+# Read version from Info.plist (source of truth)
+VERSION="${VERSION:-$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "${REPO_ROOT}/app/AgentHandoverApp/Sources/AgentHandoverApp/Info.plist" 2>/dev/null || echo "0.1.0")}"
+PKG_ROOT="$(mktemp -d)"
 OUTPUT="${REPO_ROOT}/target/AgentHandover-${VERSION}.pkg"
 
 echo "=== Building AgentHandover ${VERSION} ==="
