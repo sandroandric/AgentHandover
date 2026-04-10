@@ -4,14 +4,32 @@ Implements section 5.7 of the AgentHandover spec: identify clipboard
 copy-paste pairs by matching SHA-256 content hashes within a
 configurable time window (default 30 minutes).
 
-Event format (from daemon's event model):
-- ``ClipboardChange`` events have ``metadata_json`` containing
-  ``{"content_hash": "sha256...", "content_types": [...], "byte_size": N}``
-- ``PasteDetected`` events have ``metadata_json`` containing
-  ``{"content_hash": "sha256...", "target_app": "..."}``
-- ``kind_json`` contains the event kind, e.g.
-  ``{"ClipboardChange": {}}`` or ``{"PasteDetected": {}}``
-- ``timestamp`` is ISO 8601 format
+Event format (from daemon's event model).  Both the kind AND the
+clipboard payload live inside ``kind_json``::
+
+    kind_json = {
+        "type": "ClipboardChange",
+        "content_types": [...],
+        "byte_size": N,
+        "content_hash": "sha256...",
+        "high_entropy": bool,
+    }
+
+    kind_json = {
+        "type": "PasteDetected",
+        "content_hash": "sha256...",
+        "target_app": "...",
+        "byte_size": N,
+    }
+
+``metadata_json`` holds unrelated fields (e.g. ``focus_session_id``)
+and should NEVER be read here.  Historically these helpers read
+``metadata_json`` because the event schema changed and nobody updated
+the worker — meaning no clipboard copy/paste link has been produced
+in passive discovery since that migration.  See tests in
+``test_clipboard_linker.py`` for the regression coverage.
+
+``timestamp`` is ISO 8601 format.
 """
 
 from __future__ import annotations
@@ -125,38 +143,49 @@ class ClipboardLinker:
     # ------------------------------------------------------------------
 
     @staticmethod
+    def _parse_kind_json(event: dict) -> dict | None:
+        """Parse ``kind_json`` into a dict.  Returns None on any failure."""
+        kind_json = event.get("kind_json", "")
+        if not kind_json:
+            return None
+        try:
+            parsed = (
+                json.loads(kind_json)
+                if isinstance(kind_json, str)
+                else kind_json
+            )
+        except (json.JSONDecodeError, TypeError):
+            return None
+        return parsed if isinstance(parsed, dict) else None
+
+    @staticmethod
     def _extract_kind(event: dict) -> str:
         """Extract the event kind name from ``kind_json``.
 
-        ``kind_json`` is expected to be a JSON string like
-        ``'{"ClipboardChange": {}}'``.  Returns the top-level key.
+        The daemon serializes events as ``{"type": "ClipboardChange", ...}``.
+        Return the VALUE of the ``type`` field — NOT the first key
+        (historical bug: ``next(iter(parsed))`` returned ``"type"`` which
+        never matched any event kind in this module).
         """
-        kind_json = event.get("kind_json", "")
-        if not kind_json:
+        parsed = ClipboardLinker._parse_kind_json(event)
+        if parsed is None:
             return ""
-
-        try:
-            parsed = json.loads(kind_json) if isinstance(kind_json, str) else kind_json
-        except (json.JSONDecodeError, TypeError):
-            return ""
-
-        if isinstance(parsed, dict) and parsed:
-            return next(iter(parsed))
-        return ""
+        kind = parsed.get("type", "")
+        return str(kind) if kind else ""
 
     @staticmethod
     def _extract_content_length(event: dict) -> int:
-        """Extract ``byte_size`` from ``metadata_json``, returning 0 if absent."""
-        metadata_json = event.get("metadata_json", "")
-        if not metadata_json:
-            return 0
+        """Extract ``byte_size`` from ``kind_json``.
 
-        try:
-            metadata = json.loads(metadata_json) if isinstance(metadata_json, str) else metadata_json
-        except (json.JSONDecodeError, TypeError):
+        Historical bug: this was reading ``metadata_json`` which is always
+        ``{}`` for clipboard events, so the length was always 0 and the
+        content-length safety check in ``find_links`` never actually
+        compared real lengths.
+        """
+        parsed = ClipboardLinker._parse_kind_json(event)
+        if parsed is None:
             return 0
-
-        byte_size = metadata.get("byte_size", 0)
+        byte_size = parsed.get("byte_size", 0)
         try:
             return int(byte_size)
         except (TypeError, ValueError):
@@ -164,17 +193,17 @@ class ClipboardLinker:
 
     @staticmethod
     def _extract_hash(event: dict) -> str:
-        """Extract ``content_hash`` from ``metadata_json``."""
-        metadata_json = event.get("metadata_json", "")
-        if not metadata_json:
-            return ""
+        """Extract ``content_hash`` from ``kind_json``.
 
-        try:
-            metadata = json.loads(metadata_json) if isinstance(metadata_json, str) else metadata_json
-        except (json.JSONDecodeError, TypeError):
+        Historical bug: this was reading ``metadata_json`` which doesn't
+        contain ``content_hash``, so no copy/paste pair has ever been
+        linked in the passive pipeline since the event schema migration.
+        """
+        parsed = ClipboardLinker._parse_kind_json(event)
+        if parsed is None:
             return ""
-
-        return metadata.get("content_hash", "")
+        h = parsed.get("content_hash", "")
+        return str(h) if h else ""
 
     @staticmethod
     def _parse_timestamp(event: dict) -> datetime | None:

@@ -63,8 +63,14 @@ max_compute_minutes_per_day = 20
 # model = "gpt-4o-mini"        # provider-specific model name
 # api_key_env = "OPENAI_API_KEY"  # env var name (NEVER store keys directly!)
 # --- v2 scene annotation pipeline ---
-annotation_model = "qwen3.5:2b"   # model for per-frame annotation (think=False)
-sop_model = "qwen3.5:4b"          # model for SOP generation (think=True)
+# Model tiers (auto-detected by RAM during onboarding):
+#   8GB:  qwen3.5:2b + qwen3.5:4b (6.1 GB, standard)
+#   16GB: gemma4 (9.6 GB, recommended — single model for both)
+#   24GB: gemma4:e4b-it-q8_0 (12 GB, performance — higher precision)
+#   48GB: gemma4:31b (20 GB, max quality — frontier intelligence)
+# Settings per model are auto-tuned via model_profiles.py.
+annotation_model = "qwen3.5:2b"   # model for per-frame annotation
+sop_model = "qwen3.5:4b"          # model for SOP generation
 annotation_enabled = true          # enable continuous scene annotation pipeline
 stale_skip_count = 3               # skip after N consecutive non-workflow same-app frames
 sliding_window_max_age_sec = 600   # 10 min max age for context window

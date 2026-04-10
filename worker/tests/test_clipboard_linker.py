@@ -30,25 +30,36 @@ def _make_clipboard_event(
     content_hash: str,
     timestamp: str,
     event_id: str | None = None,
-    extra_metadata: dict | None = None,
+    extra_kind_fields: dict | None = None,
 ) -> dict:
-    """Build a ClipboardChange or PasteDetected event dict."""
+    """Build a ClipboardChange or PasteDetected event dict in the daemon's
+    actual format.
+
+    The daemon serializes the entire clipboard payload into ``kind_json``
+    as ``{"type": <kind>, "content_hash": ..., "byte_size": ..., ...}``.
+    ``metadata_json`` holds unrelated fields (focus_session_id etc.) and
+    must NOT be used for clipboard fields — doing so was the historical
+    bug caught 2026-04-10 where fixtures and production code were both
+    reading the wrong field and agreed with each other.
+    """
     eid = event_id or str(uuid.uuid4())
-    metadata: dict = {"content_hash": content_hash}
+    kind_payload: dict = {"type": kind, "content_hash": content_hash}
     if kind == "ClipboardChange":
-        metadata["content_types"] = ["text/plain"]
-        metadata["byte_size"] = 42
+        kind_payload["content_types"] = ["public.utf8-plain-text"]
+        kind_payload["byte_size"] = 42
+        kind_payload["high_entropy"] = False
     elif kind == "PasteDetected":
-        metadata["target_app"] = "com.apple.TextEdit"
-    if extra_metadata:
-        metadata.update(extra_metadata)
+        kind_payload["target_app"] = "com.apple.TextEdit"
+        kind_payload["byte_size"] = 42
+    if extra_kind_fields:
+        kind_payload.update(extra_kind_fields)
 
     return {
         "id": eid,
         "timestamp": timestamp,
-        "kind_json": json.dumps({kind: {}}),
+        "kind_json": json.dumps(kind_payload),
         "window_json": json.dumps({"app_id": "com.example.App", "title": "Test"}),
-        "metadata_json": json.dumps(metadata),
+        "metadata_json": "{}",  # intentionally empty — payload lives in kind_json
         "display_topology_json": "[]",
         "primary_display_id": "main",
         "processed": 0,

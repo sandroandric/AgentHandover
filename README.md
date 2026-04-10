@@ -9,9 +9,11 @@
 </p>
 
 <p align="center">
+  <a href="#demo">Demo</a> &middot;
+  <a href="#quickstart">Quickstart</a> &middot;
+  <a href="#what-you-can-automate">Use Cases</a> &middot;
   <a href="#what-a-skill-looks-like">What a Skill Looks Like</a> &middot;
   <a href="#how-it-works">How It Works</a> &middot;
-  <a href="#the-knowledge-base">Knowledge Base</a> &middot;
   <a href="#connect-your-agent">Connect Your Agent</a> &middot;
   <a href="#install">Install</a> &middot;
   <a href="#privacy">Privacy</a>
@@ -23,11 +25,55 @@
   <img src="AgentHandover.png" alt="The Struggle - The Discovery - The Transformation" />
 </p>
 
-You already know how to do your work. Your agents don't.
+## Demo
 
-AgentHandover watches you work on your Mac, understands what you're doing and *why*, and produces **self-improving Skills** -- structured playbooks that tell AI agents exactly what to do and how to do it, and get better every time they're executed. Each Skill contains the steps, the strategy behind them, decision logic, guardrails, and your writing voice. When agents execute a Skill, they report back -- successes boost confidence, deviations become new decision branches, failures trigger corrections. **Claude Code**, **OpenClaw**, **Codex**, or any MCP-compatible agent can pick up a Skill and execute the workflow the way you would.
+<p align="center">
+  <a href="https://youtu.be/3nGH3rYbgfY">
+    <img src="https://img.youtube.com/vi/3nGH3rYbgfY/maxresdefault.jpg" alt="AgentHandover Demo" width="600" />
+  </a>
+</p>
 
-Not static playbooks. Self-improving ones.
+<p align="center"><a href="https://youtu.be/3nGH3rYbgfY">Watch the full demo on YouTube</a></p>
+
+### Show it once. Hand it off forever.
+
+AgentHandover watches how you work on your Mac, turns your workflows into reusable **Skills**, and lets agents like **Claude Code**, **OpenClaw**, **Hermes**, **Codex**, or any MCP-compatible tool execute them the way you do it.
+
+Each Skill captures the *what*, the *why*, and the *how* — steps, strategy, decision logic, guardrails, and your writing voice. And they're **self-improving**: agents report back after every execution, successes boost confidence, deviations become new decision branches, failures trigger corrections.
+
+You already know how to do your work. Now your agents can too.
+
+## Why this matters
+
+Getting an AI agent to do real work today means writing prompts or hand-crafting skills — brittle, time-consuming, and stale the moment your process changes. Worse, those skills capture *what* you do, not *how* you decide.
+
+AgentHandover flips it. Instead of telling the agent how you work, you just work. The system watches, infers the strategy behind your clicks, and produces Skills with the *why* built in — selection criteria, guardrails, decision branches, your voice. Because agents report back after every execution, Skills get better the more they're used.
+
+Less time writing prompts. More time doing work that matters.
+
+## What you can automate
+
+AgentHandover learns whatever you do repeatedly on your Mac. A few examples of the kinds of workflows it handles well:
+
+- **Research routines** — Your way of scanning sources, extracting key facts, and composing a summary.
+- **Community engagement** — Daily check-ins on Reddit, Discord, or forums with your selection rules and voice.
+- **Support triage** — How you read a ticket, check the dashboard, pick a macro, and draft a reply.
+- **Data extraction** — Pulling structured data from a dashboard, CRM, or spreadsheet the way you do it.
+- **Ops checklists** — Deploys, releases, status updates — your actual sequence with the decisions you make.
+- **Personal skill library** — Any repetitive workflow you don't want to explain to an agent twice.
+
+If it's a workflow you've done three times and will do again, it belongs in a Skill.
+
+## Quickstart
+
+1. **Install.** Download the latest `.pkg` from [Releases](https://github.com/sandroandric/AgentHandover/releases) and double-click. The onboarding app walks you through permissions and auto-downloads the best AI model for your Mac.
+2. **Record a task.** Click **Record** in the menu bar, name it (e.g. *"Daily Reddit marketing"*), perform it once, click **Stop**.
+3. **Answer 1-3 questions.** AgentHandover asks from the agent's perspective — *"What determines which posts you engage with?"*
+4. **Review and approve.** Open the Skill in the menu bar app, check the steps/strategy/guardrails, click **Approve for Agents**.
+5. **Connect your agent.** `agenthandover connect claude-code` (or `codex` / `openclaw`). One command.
+6. **Run it.** In Claude Code, type `/reddit-community-marketing`. The agent executes your workflow.
+
+That's the whole loop. Record once, hand off forever.
 
 ## What a Skill Looks Like
 
@@ -74,26 +120,6 @@ Skills follow the same format as Claude Code's native skills -- same frontmatter
 **Focus Recording** -- Click Record in the menu bar, name the task, perform it, click Stop. AgentHandover asks 1-3 targeted questions from the agent's perspective ("What determines which posts you engage with vs. skip?"), then generates a complete Skill. Best for workflows you want to hand off right now.
 
 **Passive Discovery** -- Just work normally. AgentHandover recognizes recurring workflows across sessions using semantic similarity, accumulates observations, and when it has enough evidence, runs behavioral analysis to extract the strategy, decisions, and patterns behind your actions -- then generates a Skill automatically. You don't have to do anything.
-
-### An 11-stage intelligence pipeline
-
-This is not a screen recorder with ChatGPT on top. AgentHandover runs an 11-stage pipeline that turns raw screen activity into agent-ready Skills:
-
-| Stage | What it does |
-|-------|-------------|
-| **1. Screen capture** | Half-resolution screenshots, deduplicated by perceptual hashing (70% of frames are duplicates and get dropped) |
-| **2. VLM annotation** | Local Qwen 3.5 model reads each frame -- what app, what URL, what you're doing, what you'll do next |
-| **3. Activity classification** | 8-class taxonomy separates work from noise. Your expense filing is "work." Your YouTube break is "entertainment." |
-| **4. Text embedding** | Every annotation embedded into a vector knowledge base (nomic-embed-text, 768d) for semantic matching |
-| **5. Image embedding** | Optional SigLIP embeddings (1152d) capture what your screen looked like -- find visually similar screens even when text differs |
-| **6. Semantic clustering** | Groups related activity by meaning, not keywords. "Deploy to staging" matches "push to stage environment." |
-| **7. Cross-session linking** | Connects the same workflow across days and interruptions using vector cosine similarity |
-| **8. Behavioral synthesis** | After 3+ observations: extracts strategy, selection criteria, content templates, guardrails, decision branches, and timing patterns |
-| **9. Voice analysis** | Captures your writing style from typed text -- formality, sentence length, vocabulary, emoji. Per workflow. Strengthens over sessions. |
-| **10. Skill generation** | Produces a canonical Skill with semantic dedup (won't create duplicates even if you describe the same workflow differently) |
-| **11. Human review** | You approve before any agent can execute. Six readiness gates must pass. Nothing auto-promotes. |
-
-Every stage runs locally on your Mac. No cloud APIs required.
 
 ### You stay in control
 
@@ -191,6 +217,21 @@ agenthandover connect openclaw
 
 Skills auto-sync to the OpenClaw workspace. Nothing to configure.
 
+### Hermes
+
+```bash
+agenthandover connect hermes
+```
+
+Installs your Skills into `~/.hermes/skills/agenthandover/<slug>/SKILL.md` for [Hermes](https://github.com/NousResearch/hermes-agent), Nous Research's self-improving agent. Hermes walks `~/.hermes/skills/` looking for `SKILL.md` files (agentskills.io / anthropic-skills convention), so AgentHandover Skills drop in directly — `/skills` lists them, `/<skill-name>` runs them. For live semantic search and the execution-feedback loop, also add the MCP server to `~/.hermes/config.yaml`:
+
+```yaml
+mcp:
+  servers:
+    agenthandover:
+      command: "agenthandover-mcp"
+```
+
 ### REST API
 
 Already running on localhost:9477:
@@ -208,7 +249,7 @@ curl -X POST http://localhost:9477/search/semantic \
 
 Download the latest `.pkg` from [**Releases**](https://github.com/sandroandric/AgentHandover/releases) and double-click.
 
-The onboarding app walks you through: permissions, AI model downloads (Qwen for screen understanding and Skill generation, nomic-embed-text for semantic search, optional SigLIP for image embeddings), Chrome extension, and your first recording.
+The onboarding app walks you through: permissions, AI model downloads (auto-recommends the best model for your Mac's RAM), Chrome extension, and your first recording.
 
 <details>
 <summary><strong>Developer / advanced install</strong></summary>
@@ -220,12 +261,23 @@ agenthandover doctor     # Verify prerequisites
 agenthandover start all  # Start daemon + worker
 ```
 
-### Pull models manually
+### AI Models
+
+AgentHandover auto-detects your Mac's RAM during onboarding and recommends the best model tier:
+
+| RAM | Tier | Model | Download |
+|-----|------|-------|----------|
+| 8 GB | Standard | Qwen 3.5 (2B + 4B) | ~6 GB |
+| 16 GB | Recommended | Gemma 4 E4B | ~10 GB |
+| 24 GB | Performance | Gemma 4 E4B Q8 | ~12 GB |
+| 48 GB+ | Max Quality | Gemma 4 31B | ~20 GB |
+
+Gemma 4 models require Ollama 0.20.0+. All models run fully local via Ollama.
 
 ```bash
-ollama pull qwen3.5:2b         # Scene annotation (~2.7 GB)
-ollama pull qwen3.5:4b         # Skill generation (~3.4 GB)
-ollama pull nomic-embed-text   # Semantic search (~274 MB)
+# Or pull manually:
+ollama pull gemma4              # Recommended for 16 GB+ (~10 GB)
+ollama pull nomic-embed-text    # Semantic search (~274 MB)
 ```
 
 ### Chrome extension
@@ -251,7 +303,7 @@ just build-all
 
 ### Choose your AI model
 
-AgentHandover defaults to local Qwen models via Ollama -- free, fast, private. Six backends supported:
+AgentHandover defaults to local models via Ollama (Gemma 4 for 16 GB+ Macs, Qwen 3.5 for 8 GB) -- free, fast, private. Six backends supported:
 
 | Backend | Best for |
 |---------|----------|
@@ -287,6 +339,29 @@ Everything runs on your machine:
 - **Encryption at rest.** Artifacts use zstd + XChaCha20-Poly1305.
 - **Configurable retention.** Raw events pruned at 14 days. Valuable evidence extracted and preserved permanently before expiry.
 - **No telemetry.** Nothing phones home. Ever.
+
+<details>
+<summary><strong>The 11-stage intelligence pipeline (technical)</strong></summary>
+
+This is not a screen recorder with ChatGPT on top. AgentHandover runs an 11-stage pipeline that turns raw screen activity into agent-ready Skills:
+
+| Stage | What it does |
+|-------|-------------|
+| **1. Screen capture** | Half-resolution screenshots, deduplicated by perceptual hashing (70% of frames are duplicates and get dropped) |
+| **2. VLM annotation** | Local AI model (Gemma 4 or Qwen 3.5) reads each frame -- what app, what URL, what you're doing, what you'll do next |
+| **3. Activity classification** | 8-class taxonomy separates work from noise. Your expense filing is "work." Your YouTube break is "entertainment." |
+| **4. Text embedding** | Every annotation embedded into a vector knowledge base (nomic-embed-text, 768d) for semantic matching |
+| **5. Image embedding** | Optional SigLIP embeddings (1152d) capture what your screen looked like -- find visually similar screens even when text differs |
+| **6. Semantic clustering** | Groups related activity by meaning, not keywords. "Deploy to staging" matches "push to stage environment." |
+| **7. Cross-session linking** | Connects the same workflow across days and interruptions using vector cosine similarity |
+| **8. Behavioral synthesis** | After 3+ observations: extracts strategy, selection criteria, content templates, guardrails, decision branches, and timing patterns -- now grounded in the user's profile (tools, role, accounts) |
+| **9. Voice analysis** | Captures your writing style from typed text -- formality, sentence length, vocabulary, emoji. Per workflow. Strengthens over sessions. |
+| **10. Skill generation** | Produces a canonical Skill with semantic dedup (won't create duplicates even if you describe the same workflow differently) |
+| **11. Human review** | You approve before any agent can execute. Six readiness gates must pass. Nothing auto-promotes. |
+
+Every stage runs locally on your Mac. No cloud APIs required.
+
+</details>
 
 <details>
 <summary><strong>Architecture</strong></summary>
@@ -366,10 +441,115 @@ agenthandover uninstall              # Remove services, keep data
 agenthandover uninstall --purge-data # Remove everything
 ```
 
+## Contributing
+
+AgentHandover is early and unusually high-leverage for contributors. The prompt files, agent connectors, and skill templates are all plain text that anyone can read, run, and improve — a careful hour of prompt tuning can measurably change the quality of every Skill the tool produces for every user.
+
+### Ways to help (no code required)
+
+- **Share a Skill you actually use.** Record a real workflow, review the generated Skill, and post it in [Discussions → Show & Tell](https://github.com/sandroandric/AgentHandover/discussions). Real workflows beat synthetic examples and become the reference library everyone learns from.
+- **Report bad outputs.** Did a generated Skill miss a step, add a redundant click, or misread your strategy? Open an [issue](https://github.com/sandroandric/AgentHandover/issues) with the Skill + what it should have been. The prompts get tuned directly from this feedback.
+- **Bug reports from real usage.** Everything is logged locally so reproductions are usually easy. The more unusual your Mac setup, model tier, or workflow, the more valuable the report.
+- **Answer questions in [Discussions](https://github.com/sandroandric/AgentHandover/discussions).** Anyone who's used the tool for more than a week has context new users need.
+
+### Code contributions we'd love
+
+- **New agent connectors.** Follow the pattern in [`worker/src/agenthandover_worker/agent_connect.py`](worker/src/agenthandover_worker/agent_connect.py). Cursor, Windsurf, Cline, Aider, RooCode, and any agent that reads Claude Code-format skills or MCP are straightforward — the Hermes and Codex connectors are each under 150 lines.
+- **New VLM backends.** Six supported today (Ollama, MLX, llama.cpp, Anthropic, Google, OpenAI-compat) in [`worker/src/agenthandover_worker/backends/`](worker/src/agenthandover_worker/backends/). LocalAI, LM Studio, vLLM, and any OpenAI-compatible endpoint are easy drop-ins.
+- **Prompt engineering.** The prompts in [`sop_generator.py`](worker/src/agenthandover_worker/sop_generator.py) and [`behavioral_synthesizer.py`](worker/src/agenthandover_worker/behavioral_synthesizer.py) drive the entire output quality. If you see a way to make them more precise, more robust, or better at handling your language, send a PR.
+- **Browser extension ports.** Chrome / Chromium / Brave / Edge / Arc / Comet are supported. Firefox and Safari are wide open.
+- **Privacy review.** This is a local-first tool that handles sensitive data. Extra eyes on [`crates/common/src/redaction.rs`](crates/common/src/redaction.rs) and the artifact encryption path are genuinely wanted.
+
+### Getting started
+
+If you're not sure where to begin, open a [Discussion](https://github.com/sandroandric/AgentHandover/discussions) with a rough idea — it's faster to shape something together than to send a PR cold. Small PRs get reviewed quickly. If your contribution is non-trivial, running `just test` and `cargo test` before opening the PR saves a review round-trip.
+
+Direct line for anything that doesn't fit: [sandro@sandric.co](mailto:sandro@sandric.co).
+
 ## Contact
 
 [sandro@sandric.co](mailto:sandro@sandric.co)
 
+## Changelog
+
+### v0.2.1 (2026-04-10)
+
+**Critical bugfixes for focus recordings + behavioral synthesis** — recommended upgrade for everyone on v0.2.0.
+
+**Focus recording reliability**
+- Menu bar icon now appears reliably (`LSUIElement=true` added so SwiftUI `MenuBarExtra` registers correctly)
+- Fixed worker startup crash from a `v2_cfg` scoping bug that prevented the worker from starting at all on Python 3.14
+- Fixed race where the passive annotation loop would delete focus session JPEGs before the focus_processor could use them — focus recordings would silently fail with "missing_screenshot"
+- Clipboard events now correctly attach to the snapshot BEFORE the copy (the source app), so Copy steps get the right attribution instead of being labelled with whatever app the user switched to next
+
+**SOP quality — concrete intent extraction**
+- VLM annotation prompt now receives the daemon's high-confidence OCR text as ground truth — Gemma stops misreading email addresses and small UI text from half-res screenshots
+- Behavioral synthesizer now requires a concrete `goal` field naming the artifact, recipient, and trigger (no more abstract *"research-to-communication cycle"* — actual intent like *"compile domain leads from Afternic into Google Doc 'New leads'"*)
+- Synthesizer prompt now includes per-frame TIMELINE EVIDENCE with verbatim text (emails, URLs, typed content, active UI elements) so the model can quote real data when extracting strategy and guardrails
+- Annotation prompt asks for explicit compose-window fields (recipient, subject, body_first_line) so email workflows extract the actual values instead of *"drafting an email"*
+- Behavioral confidence jumped from 0.20 → 0.95 in tested workflows
+
+**Hermes agent integration**
+- New `agenthandover connect hermes` command installs Skills into `~/.hermes/skills/agenthandover/<slug>/SKILL.md` in the agentskills.io format that [Hermes](https://github.com/NousResearch/hermes-agent) reads natively
+- Skills appear in Hermes via `/skills` and `/<skill-name>`
+
+**Behavioral analysis — user-aware synthesis**
+- Behavioral analysis now reads the inferred user profile (primary apps, stack, accounts, working hours, writing style) and injects it into the synthesis prompt — strategy and guardrails are grounded in WHO the user actually is, not an abstract "user"
+- Cold-start fallback: first-time users with no profile yet still get a lightweight "observed apps in this workflow" context derived from the current recording
+- Heuristic role hint (developer / designer / founder / PM) generated from tools + accounts
+
+**Other**
+- Fixed `clipboard_linker` reading the wrong JSON field — copy/paste pairs in passive discovery now actually link for the first time since the schema migration
+- Test fixtures corrected — historical bug where production code and test fixtures both encoded the wrong daemon event format and silently agreed
+- Sharper SOP rules for accidental click detection, typo corrections, copy/paste guidance
+- Removed stale `com.agenthandover.daemon.plist` from the installer (it referenced a path that no longer exists; fixes [#1](https://github.com/sandroandric/AgentHandover/issues/1))
+- 3000+ tests passing
+
+### v0.2.0 (2026-04-03)
+
+**Gemma 4 support and model tier system**
+- Auto-detects RAM and recommends optimal model tier during onboarding (8 GB to 48 GB+)
+- Gemma 4 E4B as recommended model for 16 GB+ Macs -- higher annotation reliability, richer SOP generation with thinking mode
+- Per-model optimal settings (system prompts, thinking levels, sampling parameters) applied automatically
+- Ollama version check -- warns if Gemma 4 selected but Ollama < 0.20.0
+
+**Pipeline improvements**
+- Vector embeddings wired into all pipeline stages (procedures, daily summaries, profile)
+- Behavioral pre-analysis enriched with app names and URLs -- strategy extraction now succeeds on first call
+- Strategy fallback: if post-SOP behavioral call fails, pre-analysis strategy is preserved
+- Truncated JSON repair in behavioral synthesizer
+
+**UI and UX**
+- FAQ window accessible from menu bar with 15 Q&A items across 5 sections
+- Daily Digest shows task intents and app usage (was showing empty bullets)
+- Focus Q&A window comes to front instead of being buried behind Workflows
+- Compact menu bar quick links (Skills, Digest, FAQ) -- no more truncation
+- Stale daemon PID detection prevents "Observe Me" from silently failing
+
+**Agent integration**
+- Fixed MCP server and agent_connect knowledge base paths
+- CLI skills list shows only approved SOPs (was showing 29 passive noise entries)
+- Slash commands per procedure with full steps, strategy, Q&A, execution protocol
+- agenthandover-mcp symlinked to /usr/local/bin/ in pkg installer
+
+**Browser extension**
+- Added host_permissions for MV3 content script injection
+- Comet browser support alongside Chrome, Chromium, Brave, Edge, Arc
+
+**Reliability**
+- postinstall: chown venv before pip reinstall (fixes root-owned dist-info blocker)
+- 252 Rust tests, 2955 Python tests passing
+
 ## License
 
-[BSL 1.1](LICENSE) -- source available, non-commercial. Converts to Apache 2.0 on 2030-03-25.
+[Apache 2.0](LICENSE)
+
+## Star History
+
+<a href="https://www.star-history.com/?repos=sandroandric%2FAgentHandover&type=date&legend=top-left">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/image?repos=sandroandric/AgentHandover&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/image?repos=sandroandric/AgentHandover&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/image?repos=sandroandric/AgentHandover&type=date&legend=top-left" />
+ </picture>
+</a>

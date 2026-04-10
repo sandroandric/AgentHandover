@@ -403,8 +403,33 @@ def _process_annotations(
     """Process a batch of unannotated screenshots through the scene annotator.
 
     Returns stats dict with counts of annotated/skipped/failed events.
+
+    Focus-session events (tagged with ``focus_session_id`` in metadata)
+    are explicitly skipped here and left to the focus_processor to
+    handle. The scene annotator deletes the source JPEG after processing
+    (``delete_screenshot_after_processing=True``), so if passive annotation
+    ran on focus events first, the focus_processor would find
+    ``missing_screenshot`` and fail to generate the SOP.
     """
-    unannotated = db.get_unannotated_events(limit=batch_size)
+    unannotated_raw = db.get_unannotated_events(limit=batch_size)
+    if not unannotated_raw:
+        return {"annotated": 0, "skipped": 0, "failed": 0, "blocked": 0}
+
+    # Filter out events that belong to a focus session — they MUST be
+    # processed by the focus_processor (which preserves JPEGs until the
+    # full timeline is built). Leaving them here would race with focus
+    # processing and destroy the screenshots before the SOP is generated.
+    unannotated = []
+    for ev in unannotated_raw:
+        meta_raw = ev.get("metadata_json") or "{}"
+        try:
+            meta = json.loads(meta_raw) if isinstance(meta_raw, str) else meta_raw
+        except (json.JSONDecodeError, TypeError):
+            meta = {}
+        if isinstance(meta, dict) and meta.get("focus_session_id"):
+            continue  # focus-owned — defer to focus_processor
+        unannotated.append(ev)
+
     if not unannotated:
         return {"annotated": 0, "skipped": 0, "failed": 0, "blocked": 0}
 
@@ -882,6 +907,20 @@ def _embed_procedure(vector_kb, procedure: dict) -> None:
 
     text = "\n".join(parts)
     _embed_in_vector_kb(vector_kb, "procedure", slug, text)
+
+
+def _refresh_claude_commands() -> None:
+    """Refresh Claude Code slash commands after a Skill is approved.
+
+    Runs connect_claude_code() to regenerate /ah-{slug} commands from
+    all agent_ready procedures in the knowledge base.
+    """
+    try:
+        from agenthandover_worker.agent_connect import connect_claude_code
+        connect_claude_code()
+        logger.info("Refreshed Claude Code slash commands")
+    except Exception:
+        logger.debug("Failed to refresh Claude Code commands", exc_info=True)
 
 
 def _write_sops_index(
@@ -1854,13 +1893,22 @@ def _process_focus_sessions_v2(
         procedure_dict["lifecycle_state"] = "draft"  # Focus recordings start as draft, not observed
         if behavioral_synthesizer is not None:
             try:
-                # Build a single-demo observations list from the SOP steps
-                timeline_as_observations = result.sop.get("steps", [])
+                # Prefer the rich per-frame observations stashed by the
+                # focus_processor (email_addresses, typed_text, urls,
+                # visible_values from the OCR-enriched annotations) so the
+                # synthesizer can quote verbatim text in goal/strategy.
+                # Fall back to abstract SOP steps only if rich data is
+                # unavailable.
+                rich_obs = getattr(focus_processor, "_last_rich_observations", None)
+                if rich_obs and rich_obs[0]:
+                    obs_for_synthesis = rich_obs
+                else:
+                    obs_for_synthesis = [result.sop.get("steps", [])]
                 insights = behavioral_synthesizer.synthesize(
-                    slug, procedure_dict, [timeline_as_observations],
+                    slug, procedure_dict, obs_for_synthesis,
                     force=True,  # bypass min_observations for focus
                 )
-                if insights.strategy or insights.guardrails:
+                if insights.goal or insights.strategy or insights.guardrails:
                     procedure_dict = behavioral_synthesizer.merge_insights_into_procedure(
                         procedure_dict, insights,
                     )
@@ -1868,10 +1916,36 @@ def _process_focus_sessions_v2(
                     sop_templates = [procedure_dict]
                     logger.info(
                         "Focus v2 session '%s': behavioral synthesis complete "
-                        "(strategy=%s, %d guardrails)",
-                        title, bool(insights.strategy), len(insights.guardrails),
+                        "(goal=%s, strategy=%s, %d guardrails)",
+                        title, bool(insights.goal), bool(insights.strategy),
+                        len(insights.guardrails),
                     )
+                elif not procedure_dict.get("strategy") or not procedure_dict.get("goal"):
+                    # Post-SOP synthesis failed — fall back to pre-analysis
+                    pre_strategy = getattr(focus_processor, "_last_pre_analysis_strategy", "")
+                    pre_goal = getattr(focus_processor, "_last_pre_analysis_goal", "")
+                    if pre_strategy and not procedure_dict.get("strategy"):
+                        procedure_dict["strategy"] = pre_strategy
+                    if pre_goal and not procedure_dict.get("goal"):
+                        procedure_dict["goal"] = pre_goal
+                    if pre_strategy or pre_goal:
+                        logger.info(
+                            "Focus v2 session '%s': using pre-analysis goal/strategy as fallback",
+                            title,
+                        )
             except Exception:
+                # Post-SOP synthesis crashed — still try pre-analysis fallback
+                pre_strategy = getattr(focus_processor, "_last_pre_analysis_strategy", "")
+                pre_goal = getattr(focus_processor, "_last_pre_analysis_goal", "")
+                if pre_strategy and not procedure_dict.get("strategy"):
+                    procedure_dict["strategy"] = pre_strategy
+                if pre_goal and not procedure_dict.get("goal"):
+                    procedure_dict["goal"] = pre_goal
+                if pre_strategy or pre_goal:
+                    logger.info(
+                        "Focus v2 session '%s': using pre-analysis goal/strategy as fallback (post-SOP failed)",
+                        title,
+                    )
                 logger.debug(
                     "Focus v2 behavioral synthesis failed for '%s'",
                     title, exc_info=True,
@@ -2059,6 +2133,7 @@ def _process_focus_sessions_v2(
                 procedure_writer=procedure_writer,
                 kb_export_adapter=kb_export_adapter,
             )
+            _refresh_claude_commands()
         else:
             logger.info(
                 "Focus v2 session '%s': SOP saved as draft (auto_approve=False)",
@@ -2272,6 +2347,9 @@ def _check_focus_answers(
 
     # Clean up Q&A files
     clear_focus_qa_files(state_dir)
+
+    # Refresh Claude Code slash commands with the new/updated procedure
+    _refresh_claude_commands()
 
     logger.info(
         "Focus v2 '%s': Q&A complete, exported %d SOP(s) (status=%s)",
@@ -3064,6 +3142,7 @@ def _process_approval_triggers(
                         )
                         logger.info("Approved and exported SOP %s", sop_id)
                         _embed_procedure(vector_kb, sop_template)
+                        _refresh_claude_commands()
                 else:
                     logger.warning(
                         "Approved SOP %s but could not load template for export",
@@ -4460,9 +4539,21 @@ def main(argv: list[str] | None = None) -> None:
     variant_detector = VariantDetector()
     evidence_normalizer = EvidenceNormalizer(variant_detector=variant_detector)
 
+    # Load v2 VLM config early — both the behavioral synthesizer init
+    # below and the annotation pipeline further down need this dict.
+    # Python scoping makes `v2_cfg` a local because of the later
+    # assignment, so reading it before this line raises UnboundLocalError.
+    v2_cfg = _read_vlm_v2_config()
+
     # Behavioral synthesis + evidence extraction
-    from agenthandover_worker.behavioral_synthesizer import BehavioralSynthesizer
-    behavioral_synthesizer = BehavioralSynthesizer(vlm_queue=vlm_queue)
+    from agenthandover_worker.behavioral_synthesizer import BehavioralSynthesizer, SynthesizerConfig
+    _synth_model = v2_cfg["sop_model"] if v2_cfg else "qwen3.5:4b"
+    _synth_host = v2_cfg.get("ollama_host", "http://localhost:11434") if v2_cfg else "http://localhost:11434"
+    behavioral_synthesizer = BehavioralSynthesizer(
+        config=SynthesizerConfig(model=_synth_model, ollama_host=_synth_host),
+        vlm_queue=vlm_queue,
+        knowledge_base=knowledge_base,
+    )
 
     # Focus session questioner (gap analysis + targeted questions)
     from agenthandover_worker.focus_questioner import FocusQuestioner
@@ -4487,6 +4578,37 @@ def main(argv: list[str] | None = None) -> None:
         )
 
     logger.info("Knowledge base initialized: %s", args.knowledge_dir)
+
+    # Log model tier recommendation based on system RAM
+    try:
+        from agenthandover_worker.model_profiles import (
+            log_recommendation, get_profile, ollama_supports_gemma4,
+        )
+        recommended_tier = log_recommendation()
+
+        # Warn if using Gemma 4 but Ollama is too old
+        ann_model = v2_cfg["annotation_model"] if v2_cfg else "qwen3.5:2b"
+        sop_model = v2_cfg["sop_model"] if v2_cfg else "qwen3.5:4b"
+        uses_gemma = "gemma4" in ann_model or "gemma4" in sop_model
+        if uses_gemma:
+            ollama_host = v2_cfg.get("ollama_host", "http://localhost:11434") if v2_cfg else "http://localhost:11434"
+            if not ollama_supports_gemma4(ollama_host):
+                logger.warning(
+                    "Gemma 4 models require Ollama 0.20.0+. "
+                    "Current version may not support them. "
+                    "Upgrade: brew upgrade ollama"
+                )
+
+        # Log active model profiles
+        ann_profile = get_profile(ann_model)
+        sop_profile = get_profile(sop_model)
+        logger.info(
+            "Model profiles: annotation=%s (think=%s), SOP=%s (think=%s)",
+            ann_model, ann_profile.ann_think,
+            sop_model, sop_profile.sop_think,
+        )
+    except Exception:
+        logger.debug("Model profile detection failed", exc_info=True)
 
     # Initialize pipeline components
     episode_builder = EpisodeBuilder()
@@ -4711,7 +4833,7 @@ def main(argv: list[str] | None = None) -> None:
         )
 
     # Initialize v2 scene annotation pipeline
-    v2_cfg = _read_vlm_v2_config()
+    # v2_cfg already loaded near the top of main() for behavioral synthesizer.
     scene_annotator: SceneAnnotator | None = None
     frame_differ: FrameDiffer | None = None
     v2_annotation_enabled = v2_cfg["annotation_enabled"]

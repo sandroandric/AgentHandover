@@ -63,6 +63,31 @@ def _make_observations(count=3):
     ]
 
 
+def _make_observations_with_apps():
+    """Observations that carry app names, for cold-start context tests."""
+    return [
+        [
+            {"action": "focus", "app": "Visual Studio Code"},
+            {"action": "switch", "app": "Google Chrome"},
+            {"action": "switch", "app": "Terminal"},
+        ],
+        [
+            {"action": "focus", "app": "Visual Studio Code"},
+            {"action": "switch", "app": "Google Chrome"},
+        ],
+    ]
+
+
+class _FakeKB:
+    """Minimal KB stub that returns a preset profile."""
+
+    def __init__(self, profile: dict):
+        self._profile = profile
+
+    def get_profile(self) -> dict:
+        return self._profile
+
+
 class TestBuildPrompt:
 
     def test_includes_extracted_evidence(self):
@@ -100,10 +125,156 @@ class TestBuildPrompt:
         assert "CONTENT PRODUCED BY USER" not in prompt
 
 
+class TestUserContext:
+    """Tests for user profile injection into the synthesis prompt."""
+
+    def test_no_kb_no_apps_uses_generic_placeholder(self):
+        """With no KB and no app signals, the prompt shows the generic fallback."""
+        synth = BehavioralSynthesizer(SynthesizerConfig(min_observations=1))
+        prompt = synth._build_prompt(_make_procedure(), _make_observations())
+        assert "no user profile yet" in prompt
+        assert "first-time user" in prompt
+
+    def test_cold_start_derives_apps_from_observations(self):
+        """With no KB but apps in observations, cold-start context kicks in."""
+        synth = BehavioralSynthesizer(SynthesizerConfig(min_observations=1))
+        prompt = synth._build_prompt(
+            _make_procedure(), _make_observations_with_apps(),
+        )
+        assert "first-time user" in prompt
+        assert "Visual Studio Code" in prompt
+        assert "Google Chrome" in prompt
+        assert "Observed apps in this workflow" in prompt
+
+    def test_kb_profile_renders_full_block(self):
+        """With a populated KB, the full USER PROFILE block is injected."""
+        profile = {
+            "tools": {
+                "browser": "Google Chrome",
+                "editor": "Visual Studio Code",
+                "terminal": "Terminal",
+                "primary_apps": [
+                    {"app": "Google Chrome", "total_minutes": 1200, "days_used": 20},
+                    {"app": "Visual Studio Code", "total_minutes": 900, "days_used": 18},
+                    {"app": "Terminal", "total_minutes": 300, "days_used": 15},
+                ],
+            },
+            "accounts": [
+                {"service": "github", "frequency": "daily"},
+                {"service": "vercel", "frequency": "weekly"},
+            ],
+            "working_hours": {
+                "typical_start": "09:00",
+                "typical_end": "18:00",
+                "avg_active_hours": 7.5,
+                "weekend_active": True,
+            },
+            "communication_style": {
+                "primary_channels": ["Slack", "Mail"],
+                "avg_comm_minutes_per_day": 30,
+            },
+            "writing_style": {"formality": "casual", "confidence": 0.72},
+        }
+        synth = BehavioralSynthesizer(
+            SynthesizerConfig(min_observations=1),
+            knowledge_base=_FakeKB(profile),
+        )
+        prompt = synth._build_prompt(
+            _make_procedure(), _make_observations_with_apps(),
+        )
+        assert "USER PROFILE (who this user is):" in prompt
+        assert "Google Chrome" in prompt
+        assert "editor=Visual Studio Code" in prompt
+        assert "github (daily)" in prompt
+        assert "09:00-18:00" in prompt
+        assert "Slack" in prompt
+        assert "casual" in prompt
+        # Role hint should classify this as dev given github + editor
+        assert "software developer" in prompt.lower()
+
+    def test_empty_kb_profile_falls_back_to_cold_start(self):
+        """A KB that returns empty-defaults profile should fall through."""
+        synth = BehavioralSynthesizer(
+            SynthesizerConfig(min_observations=1),
+            knowledge_base=_FakeKB({
+                "tools": {},
+                "working_hours": {},
+                "accounts": [],
+                "communication_style": {},
+            }),
+        )
+        prompt = synth._build_prompt(
+            _make_procedure(), _make_observations_with_apps(),
+        )
+        # No rich profile — cold-start derived apps should appear
+        assert "first-time user" in prompt
+        assert "Visual Studio Code" in prompt
+
+    def test_kb_failure_is_graceful(self):
+        """If KB.get_profile() throws, we still get a prompt."""
+        class _BrokenKB:
+            def get_profile(self):
+                raise RuntimeError("boom")
+
+        synth = BehavioralSynthesizer(
+            SynthesizerConfig(min_observations=1),
+            knowledge_base=_BrokenKB(),
+        )
+        prompt = synth._build_prompt(
+            _make_procedure(), _make_observations_with_apps(),
+        )
+        # Falls back to cold-start
+        assert "first-time user" in prompt
+        assert "Visual Studio Code" in prompt
+
+    def test_role_hint_designer(self):
+        """Figma-heavy profile classifies as designer."""
+        profile = {
+            "tools": {
+                "browser": "Google Chrome",
+                "primary_apps": [
+                    {"app": "Figma", "total_minutes": 2000, "days_used": 25},
+                    {"app": "Google Chrome", "total_minutes": 500, "days_used": 20},
+                ],
+            },
+            "accounts": [{"service": "figma", "frequency": "daily"}],
+        }
+        synth = BehavioralSynthesizer(
+            SynthesizerConfig(min_observations=1),
+            knowledge_base=_FakeKB(profile),
+        )
+        prompt = synth._build_prompt(_make_procedure(), _make_observations())
+        assert "designer" in prompt.lower()
+
+    def test_role_hint_founder_when_all_signals(self):
+        """Dev + design + PM tools classify as founder/generalist."""
+        profile = {
+            "tools": {
+                "editor": "Visual Studio Code",
+                "primary_apps": [
+                    {"app": "Figma", "total_minutes": 500, "days_used": 10},
+                    {"app": "Visual Studio Code", "total_minutes": 800, "days_used": 15},
+                ],
+            },
+            "accounts": [
+                {"service": "github", "frequency": "daily"},
+                {"service": "figma", "frequency": "weekly"},
+                {"service": "notion", "frequency": "daily"},
+            ],
+        }
+        synth = BehavioralSynthesizer(
+            SynthesizerConfig(min_observations=1),
+            knowledge_base=_FakeKB(profile),
+        )
+        prompt = synth._build_prompt(_make_procedure(), _make_observations())
+        assert "founder" in prompt.lower() or "generalist" in prompt.lower()
+
+
 class TestSynthesize:
 
     def test_mocked_vlm_returns_insights(self):
         vlm_response = json.dumps({
+            "goal": "Sends daily marketing replies on /r/startups to drive product signups",
             "strategy": "Daily community marketing on Reddit",
             "selection_criteria": [{"criterion": "Posts with 10+ comments", "examples": [], "confidence": 0.8}],
             "content_templates": [],
@@ -121,9 +292,163 @@ class TestSynthesize:
                 "test-proc", _make_procedure_with_evidence(),
                 _make_observations(3),
             )
+        assert insights.goal == "Sends daily marketing replies on /r/startups to drive product signups"
         assert insights.strategy == "Daily community marketing on Reddit"
         assert len(insights.guardrails) == 1
         assert insights.confidence == 0.85
+
+    def test_goal_field_is_parsed_and_stripped(self):
+        """The goal field must be extracted from VLM JSON and stripped."""
+        vlm_response = json.dumps({
+            "goal": "  Sends a daily HN digest email to self at sandro@sandric.co  ",
+            "strategy": "Copy HN top stories, paste into Gmail compose, send",
+            "confidence": 0.9,
+        })
+        synth = BehavioralSynthesizer(SynthesizerConfig(min_observations=1))
+        with patch(
+            "agenthandover_worker.behavioral_synthesizer._call_ollama_text",
+            return_value=(vlm_response, 1.0),
+        ):
+            insights = synth.synthesize(
+                "daily-email", _make_procedure(), _make_observations(1),
+            )
+        assert insights.goal == "Sends a daily HN digest email to self at sandro@sandric.co"
+        assert "sandro@sandric.co" in insights.goal
+
+    def test_prompt_requires_concrete_goal(self):
+        """The synthesis prompt body must ask for a concrete goal with \
+examples of what acceptable vs abstract answers look like."""
+        from agenthandover_worker.behavioral_synthesizer import (
+            BEHAVIORAL_SYNTHESIS_PROMPT,
+        )
+        assert '"goal":' in BEHAVIORAL_SYNTHESIS_PROMPT
+        assert "FOR WHOM" in BEHAVIORAL_SYNTHESIS_PROMPT
+        assert "TRIGGER/CADENCE" in BEHAVIORAL_SYNTHESIS_PROMPT
+        # The prompt should include the daily-HN example as a concrete goal
+        assert "Hacker News" in BEHAVIORAL_SYNTHESIS_PROMPT
+        # And explicitly reject abstract phrasings
+        assert "research-to-communication cycle" in BEHAVIORAL_SYNTHESIS_PROMPT
+
+    def test_merge_insights_writes_goal_to_procedure(self):
+        synth = BehavioralSynthesizer()
+        proc = _make_procedure()
+        insights = BehavioralInsights(
+            goal="Sends a daily HN digest email to self",
+            strategy="Copy-paste workflow",
+            confidence=0.9,
+        )
+        updated = synth.merge_insights_into_procedure(proc, insights)
+        assert updated["goal"] == "Sends a daily HN digest email to self"
+        assert updated["strategy"] == "Copy-paste workflow"
+        # Original procedure must NOT be mutated
+        assert "goal" not in proc
+
+
+class TestTimelineEvidence:
+    """Tests for the per-frame evidence formatter that surfaces verbatim
+    text (emails, URLs, typed text) into the synthesizer prompt.
+
+    Historical bug (caught 2026-04-10): the synthesizer asked the model
+    for a concrete goal with verbatim text but the prompt template never
+    actually formatted observation content into the prompt — len() and
+    cold-start app extraction were the only consumers.  The model
+    rightly returned 'Unclear — recipient not visible'.
+    """
+
+    @staticmethod
+    def _make_rich_frame(**kwargs) -> dict:
+        base = {
+            "action": "composing email",
+            "app": "Gmail",
+            "location": "mail.google.com",
+            "target": "mail.google.com",
+        }
+        base.update(kwargs)
+        return base
+
+    def test_empty_observations_returns_empty(self):
+        assert BehavioralSynthesizer._format_timeline_evidence([]) == ""
+        assert BehavioralSynthesizer._format_timeline_evidence([[]]) == ""
+
+    def test_renders_email_addresses_verbatim(self):
+        obs = [[
+            self._make_rich_frame(
+                email_addresses=["sandro@sandric.co"],
+                typed_text="updates",
+            )
+        ]]
+        out = BehavioralSynthesizer._format_timeline_evidence(obs)
+        assert "sandro@sandric.co" in out
+        assert "TIMELINE EVIDENCE" in out
+        assert "verbatim" in out
+        assert 'typed="updates"' in out
+
+    def test_renders_urls_and_values(self):
+        obs = [[
+            self._make_rich_frame(
+                urls=["https://news.ycombinator.com"],
+                visible_values=["Top 10 HN stories", "by time"],
+            )
+        ]]
+        out = BehavioralSynthesizer._format_timeline_evidence(obs)
+        assert "news.ycombinator.com" in out
+        assert "Top 10 HN stories" in out
+
+    def test_renders_clipboard_preview(self):
+        obs = [[
+            self._make_rich_frame(
+                clipboard_preview="Top story 1\nTop story 2\nTop story 3",
+            )
+        ]]
+        out = BehavioralSynthesizer._format_timeline_evidence(obs)
+        assert 'COPIED="Top story 1' in out
+
+    def test_caps_at_max_frames(self):
+        # Build 100 frames, expect a truncation marker
+        obs = [[
+            self._make_rich_frame(typed_text=f"frame {i}")
+            for i in range(100)
+        ]]
+        out = BehavioralSynthesizer._format_timeline_evidence(obs)
+        assert "more frames truncated" in out
+
+    def test_skips_frames_with_no_useful_fields(self):
+        obs = [[
+            {"app": "", "location": "", "action": ""},
+            self._make_rich_frame(email_addresses=["x@y.com"]),
+        ]]
+        out = BehavioralSynthesizer._format_timeline_evidence(obs)
+        # Frame without any useful fields should not produce a line
+        assert "frame 1:" not in out
+        assert "frame 2:" in out
+        assert "x@y.com" in out
+
+    def test_build_prompt_includes_timeline_evidence(self):
+        """End-to-end: rich observations must appear in the formatted prompt."""
+        synth = BehavioralSynthesizer(SynthesizerConfig(min_observations=1))
+        rich_obs = [[
+            {
+                "action": "compose email",
+                "app": "Gmail",
+                "location": "mail.google.com",
+                "email_addresses": ["sandro@sandric.co"],
+                "typed_text": "daily updates email",
+            },
+            {
+                "action": "scan top stories",
+                "app": "Comet",
+                "location": "https://news.ycombinator.com",
+                "urls": ["https://news.ycombinator.com"],
+                "visible_values": ["Story 1", "Story 2"],
+            },
+        ]]
+        prompt = synth._build_prompt(_make_procedure(), rich_obs)
+        # The verbatim grounding the synthesizer prompt asks for must
+        # actually appear in the prompt body.
+        assert "sandro@sandric.co" in prompt
+        assert "news.ycombinator.com" in prompt
+        assert "daily updates email" in prompt
+        assert "Story 1" in prompt
 
     def test_below_min_observations_returns_empty(self):
         synth = BehavioralSynthesizer(SynthesizerConfig(min_observations=3))

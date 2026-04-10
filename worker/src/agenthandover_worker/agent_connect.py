@@ -5,6 +5,7 @@ Usage::
     agenthandover connect claude-code   # Register skills as /slash-commands
     agenthandover connect codex         # Generate AGENTS.md for Codex
     agenthandover connect openclaw      # Verify OpenClaw path and sync
+    agenthandover connect hermes        # Install skills into ~/.hermes/skills/
     agenthandover connect mcp           # Show MCP config for any agent
 """
 
@@ -317,6 +318,195 @@ def connect_openclaw() -> None:
         print('  workspace_path = "/path/to/openclaw/workspace"')
 
 
+def _render_skill_markdown(proc: dict, *, include_name: bool = False) -> str:
+    """Render a procedure as an agentskills.io / Claude Code-format skill.
+
+    This is the same format used by Claude Code slash commands, OpenClaw
+    SOPs, and Hermes skills (all compatible with the agentskills.io open
+    standard).  Any agent that reads Claude Code-format skills can load
+    this output as-is.
+
+    When ``include_name`` is True, the frontmatter gets an explicit
+    ``name:`` field (required by Hermes's ``SKILL.md`` convention so the
+    skill identity doesn't depend on the parent directory name).
+    """
+    slug = proc.get("id", "?")
+    title = proc.get("title", "Untitled")
+    desc = proc.get("description", "")
+    strategy = proc.get("strategy", "")
+    steps = proc.get("steps", [])
+    constraints = proc.get("constraints", {})
+    guardrails = constraints.get("guardrails", [])
+    vp = proc.get("voice_profile", {})
+    inputs = proc.get("inputs", [])
+    clarifications = proc.get("agent_clarifications", {})
+
+    lines = ["---"]
+    if include_name:
+        lines.append(f"name: {slug}")
+    lines.extend([
+        f"description: {title}",
+        "---",
+        "",
+        f"# {title}",
+        "",
+    ])
+
+    if desc:
+        lines.append(f"{desc}")
+        lines.append("")
+
+    if strategy:
+        lines.append("## Strategy")
+        lines.append(f"{strategy}")
+        lines.append("")
+
+    if steps:
+        lines.append("## Steps")
+        lines.append("")
+        for i, s in enumerate(steps, 1):
+            action = s.get("action", s.get("description", ""))
+            target = s.get("target", "")
+            verify = s.get("verify", "")
+            line = f"{i}. {action}"
+            if target:
+                line += f" (target: {target})"
+            lines.append(line)
+            if verify:
+                lines.append(f"   - Verify: {verify}")
+        lines.append("")
+
+    if inputs:
+        lines.append("## Required Inputs")
+        lines.append("")
+        for inp in inputs:
+            name = inp if isinstance(inp, str) else inp.get("name", "")
+            is_cred = not isinstance(inp, str) and inp.get("is_credential", False)
+            label = f"**{name}**" + (" (credential)" if is_cred else "")
+            lines.append(f"- {label}")
+        lines.append("")
+
+    if guardrails:
+        lines.append("## Guardrails")
+        lines.append("")
+        for g in guardrails:
+            lines.append(f"- {g}")
+        lines.append("")
+
+    if clarifications:
+        lines.append("## User Preferences (from Q&A)")
+        lines.append("")
+        if isinstance(clarifications, list):
+            for item in clarifications:
+                q = item.get("question", "")
+                a = item.get("answer", "")
+                if q and a:
+                    lines.append(f"- **{q}**: {a}")
+        elif isinstance(clarifications, dict):
+            for q, a in clarifications.items():
+                lines.append(f"- **{q}**: {a}")
+        lines.append("")
+
+    if vp and vp.get("formality"):
+        lines.append("## Voice")
+        lines.append(f"Tone: {vp.get('formality', 'neutral')}")
+        lines.append("")
+
+    lines.extend([
+        "## Execution Protocol",
+        "",
+        "If you have access to the AgentHandover MCP server, report your progress:",
+        f"1. Call `report_execution_start` with slug `{slug}` before starting",
+        "2. Call `report_step_result` after completing each step",
+        "3. Call `report_execution_complete` when finished",
+        "",
+        "This feedback loop improves the skill for future runs.",
+        "",
+        "---",
+        "*Learned by AgentHandover.*",
+    ])
+
+    return "\n".join(lines)
+
+
+def connect_hermes() -> None:
+    """Install AgentHandover skills into the Hermes skill library.
+
+    Hermes (https://github.com/NousResearch/hermes-agent) loads skills
+    by walking ``~/.hermes/skills/`` and reading each subdirectory's
+    ``SKILL.md`` file (agentskills.io / anthropic-skills convention).
+    The skill identity is taken from the ``name:`` frontmatter field
+    (or the parent directory name as a fallback).
+
+    Writes each agent-ready procedure to::
+
+        ~/.hermes/skills/agenthandover/<slug>/SKILL.md
+
+    The ``agenthandover/`` namespace groups our skills alongside
+    Hermes's other source-namespaced skills (e.g. ``openclaw-imports/``).
+    Stale ``<slug>/`` directories from previous runs are removed on each
+    refresh.  Also prints the MCP config Hermes users can add for live
+    semantic search and the execution-feedback loop.
+    """
+    import shutil
+
+    namespace_dir = Path.home() / ".hermes" / "skills" / "agenthandover"
+    namespace_dir.mkdir(parents=True, exist_ok=True)
+
+    procedures = _load_procedures()
+    ready = [p for p in procedures if p.get("lifecycle_state") == "agent_ready"]
+
+    written_slugs: set[str] = set()
+    for proc in ready:
+        slug = proc.get("id", "?")
+        slug_dir = namespace_dir / slug
+        slug_dir.mkdir(parents=True, exist_ok=True)
+        (slug_dir / "SKILL.md").write_text(
+            _render_skill_markdown(proc, include_name=True),
+            encoding="utf-8",
+        )
+        written_slugs.add(slug)
+
+    # Clean up stale skill directories from previous runs
+    for entry in namespace_dir.iterdir():
+        if entry.is_dir() and entry.name not in written_slugs:
+            shutil.rmtree(entry, ignore_errors=True)
+        # Also remove any loose .md files from the old (incorrect) flat layout
+        elif entry.is_file() and entry.suffix == ".md":
+            entry.unlink(missing_ok=True)
+
+    hermes_root = Path.home() / ".hermes"
+    hermes_exists = hermes_root.is_dir()
+
+    print("Hermes integration ready.")
+    print(f"  Skills namespace: {namespace_dir}")
+    print(f"  Procedures installed: {len(ready)}")
+    print()
+    if not hermes_exists:
+        print("Note: ~/.hermes not found — Hermes may not be installed yet.")
+        print("  Install Hermes: https://github.com/NousResearch/hermes-agent")
+        print("  Skills have been staged — they'll be picked up once you install.")
+        print()
+    if ready:
+        print("In Hermes, your skills are available via:")
+        print("  /skills                    — list all skills")
+        for proc in ready:
+            print(f"  /{proc.get('id', '?')}   — {proc.get('title', '')}")
+    else:
+        print("No agent-ready skills yet. AgentHandover is still learning your workflows.")
+        print("Record a Focus Session and approve the draft to make it available.")
+    print()
+    print("For live semantic search + execution feedback, also add the MCP server")
+    print("to Hermes. Edit ~/.hermes/config.yaml and add:")
+    print()
+    print("  mcp:")
+    print("    servers:")
+    print("      agenthandover:")
+    print('        command: "agenthandover-mcp"')
+    print()
+    print("Or run `agenthandover connect mcp` to see the JSON-format config.")
+
+
 def connect_mcp() -> None:
     """Print MCP configuration for any MCP-compatible agent."""
     config = {
@@ -359,6 +549,7 @@ def main():
         print("  claude-code   Register skills as /slash-commands")
         print("  codex         Generate AGENTS.md for Codex")
         print("  openclaw      Verify OpenClaw path and sync status")
+        print("  hermes        Install skills into ~/.hermes/skills/")
         print("  mcp           Show MCP config for any MCP-compatible agent")
         sys.exit(1)
 
@@ -370,6 +561,7 @@ def main():
         "codex": connect_codex,
         "openclaw": connect_openclaw,
         "claw": connect_openclaw,
+        "hermes": connect_hermes,
         "mcp": connect_mcp,
     }
 

@@ -19,6 +19,7 @@ from agenthandover_worker.scene_annotator import (
     AnnotationResult,
     SceneAnnotator,
     _StaleTracker,
+    _extract_ocr_text_from_event,
     _strip_markdown_fences,
     _validate_annotation,
     build_annotation_prompt,
@@ -792,3 +793,138 @@ class TestDBAnnotationMethods:
             assert len(events) == 2
             # Focus event should be first despite later timestamp
             assert events[0]["id"] == eid2
+
+
+# ---------------------------------------------------------------------------
+# OCR injection into annotation prompt
+# ---------------------------------------------------------------------------
+
+
+class TestOCRInjection:
+    """Regression tests for OCR text being passed to the VLM prompt.
+
+    Historical bug (caught 2026-04-10): the scene_annotator never fed
+    daemon OCR output into the VLM prompt.  Gemma re-read text visually
+    from half-res screenshots and misread things like email addresses
+    (e.g. 'sandro@sandric.co' → 'sandro@sandroid.co').  The daemon-
+    captured OCR had confidence 1.0 for those exact chars but sat unused.
+    """
+
+    def test_extract_ocr_text_from_daemon_elements(self):
+        """The daemon writes ocr.elements[]; we must read that format."""
+        event = {
+            "metadata_json": json.dumps({
+                "ocr": {
+                    "elements": [
+                        {"text": "To:", "confidence": 1.0, "bbox_normalized": [0, 0, 0.1, 0.05]},
+                        {"text": "sandro@sandric.co", "confidence": 1.0, "bbox_normalized": [0.1, 0, 0.5, 0.05]},
+                        {"text": "Subject:", "confidence": 1.0, "bbox_normalized": [0, 0.05, 0.1, 0.1]},
+                        {"text": "daily news for April 10", "confidence": 1.0, "bbox_normalized": [0.1, 0.05, 0.7, 0.1]},
+                    ]
+                }
+            }),
+        }
+        text = _extract_ocr_text_from_event(event)
+        assert "sandro@sandric.co" in text
+        assert "daily news for April 10" in text
+        assert "Subject:" in text
+
+    def test_extract_ocr_handles_missing_metadata(self):
+        assert _extract_ocr_text_from_event({}) == ""
+        assert _extract_ocr_text_from_event({"metadata_json": "{}"}) == ""
+        assert _extract_ocr_text_from_event({"metadata_json": "not-json"}) == ""
+        assert _extract_ocr_text_from_event({"metadata_json": json.dumps({"ocr": {}})}) == ""
+        assert _extract_ocr_text_from_event(
+            {"metadata_json": json.dumps({"ocr": {"elements": []}})}
+        ) == ""
+
+    def test_extract_ocr_skips_malformed_elements(self):
+        event = {
+            "metadata_json": json.dumps({
+                "ocr": {
+                    "elements": [
+                        {"text": "valid"},
+                        "not a dict",
+                        {"text": ""},
+                        {"text": "   "},  # whitespace only
+                        {"text": "also valid"},
+                    ]
+                }
+            }),
+        }
+        text = _extract_ocr_text_from_event(event)
+        assert "valid" in text
+        assert "also valid" in text
+        assert "not a dict" not in text
+
+    def test_extract_ocr_respects_max_chars(self):
+        big_text = "x" * 10000
+        event = {
+            "metadata_json": json.dumps({
+                "ocr": {"elements": [{"text": big_text}]}
+            }),
+        }
+        text = _extract_ocr_text_from_event(event, max_chars=500)
+        assert len(text) == 500
+
+    def test_extract_ocr_falls_back_to_full_text(self):
+        """Older format with flat full_text is still supported."""
+        event = {
+            "metadata_json": json.dumps({
+                "ocr": {"full_text": "fallback text"}
+            }),
+        }
+        text = _extract_ocr_text_from_event(event)
+        assert text == "fallback text"
+
+    def test_extract_ocr_handles_dict_metadata(self):
+        """metadata_json may already be a dict, not a string."""
+        event = {
+            "metadata_json": {
+                "ocr": {"elements": [{"text": "already a dict"}]}
+            },
+        }
+        text = _extract_ocr_text_from_event(event)
+        assert "already a dict" in text
+
+    def test_build_prompt_injects_ocr_section(self):
+        """When OCR text is passed, the prompt must include an OCR block
+        containing the actual OCR text and the ground-truth marker."""
+        prompt = build_annotation_prompt(
+            recent_annotations=None,
+            ocr_text="sandro@sandric.co\ndaily news for April 10",
+        )
+        # Must contain the actual OCR text we passed in
+        assert "sandro@sandric.co" in prompt
+        assert "daily news for April 10" in prompt
+        # Must contain the OCR block header (only present when ocr_text is non-empty)
+        assert "treat as ground truth" in prompt
+
+    def test_build_prompt_omits_ocr_section_when_empty(self):
+        """When no OCR text is passed, the OCR block header must not appear."""
+        prompt = build_annotation_prompt(ocr_text="")
+        # The OCR block-specific header (from OCR_TEMPLATE) should NOT appear.
+        # Note: the rule text in the template body still mentions "OCR TEXT"
+        # as a general instruction — we check for the distinctive block header.
+        assert "treat as ground truth, not visual guess" not in prompt
+
+    def test_build_prompt_combines_ocr_and_context(self):
+        """OCR and sliding-window context can coexist in the same prompt."""
+        recent = [
+            {
+                "timestamp": "2026-04-10T12:07:00Z",
+                "scene_annotation_json": json.dumps({
+                    "app": "Gmail",
+                    "location": "mail.google.com",
+                    "task_context": {"what_doing": "composing email"},
+                }),
+            }
+        ]
+        prompt = build_annotation_prompt(
+            recent_annotations=recent,
+            ocr_text="sandro@sandric.co",
+        )
+        assert "sandro@sandric.co" in prompt
+        assert "treat as ground truth" in prompt
+        assert "PREVIOUS FRAMES" in prompt
+        assert "Gmail" in prompt

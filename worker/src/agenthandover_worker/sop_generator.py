@@ -117,6 +117,26 @@ Generate a JSON SOP with this exact structure:
 Rules:
 - Include EVERY meaningful step (navigation, data entry, confirmation)
 - Skip redundant frames (reading, scrolling without action)
+- DETECT ACCIDENTAL CLICKS vs INTENTIONAL NAVIGATION: use your \
+judgment. A real mistake looks like: opened a tab/app and closed it \
+WITHIN 1-2 FRAMES with no interaction (no scroll, no click, no \
+reading, no copy). The user landed on the wrong thing and bailed \
+immediately. Drop these from the SOP. \
+IMPORTANT: "opened X → went back → did Y" is NOT automatically a \
+mistake. If the user spent time on X (multiple frames, scrolled, \
+clicked, read content, copied something), then going back to Y is \
+part of the real workflow — a reference lookup, a context check, or \
+multi-tab research. Include these as legitimate steps. \
+When in doubt, KEEP the step. Only drop when it's clearly a \
+bailed-immediately action with no value extracted.
+- DETECT TYPO CORRECTIONS: if the user types something, deletes \
+it, then types the correct version in the same field without switching \
+context — only include the final typed value as a single step. This \
+is a correction, not a separate workflow step.
+- BE SPECIFIC WITH PASTE/ENTRY STEPS: when the user types or pastes \
+something, say WHAT was typed/pasted, not just "enter text". Example: \
+"Paste the product description into the email body" not "Click text \
+field". Extract the actual value from visible content when possible.
 - Extract variables: values that would change each time (dates, amounts, \
 names) should be marked as {{{{variable_name}}}}
 - The "outcome" is a single sentence describing the end result of the whole workflow
@@ -132,12 +152,14 @@ filepath, password (always sensitive=true), selection (one of a set)
 - Ignore any frames where the user is configuring the recording tool \
 (e.g., AgentHandover settings, starting/stopping recording, checking daemon \
 status). Focus only on the actual task being performed.
-- IMPORTANT: Frames marked with ">>> COPY ACTION" indicate the user \
+- CRITICAL: Frames marked with ">>> COPY ACTION" indicate the user \
 copied content to the clipboard. You MUST include these as explicit \
-steps: one step for the Copy action (what was copied and from where) \
-and a subsequent step for the Paste action (where it was pasted). \
-Example: 'Copy the domain name from the registrar page' followed by \
-'Paste the domain name into the DNS settings field'.
+steps: one step for the Copy action (what was copied and from where — \
+use the content_preview to describe what was copied) and a subsequent \
+step for the Paste action (where it was pasted and that the content \
+came from the clipboard). Example: 'Copy product description from \
+Product Hunt page' followed by 'Paste product description into email \
+body'. The paste step should reference the previously copied content.
 
 Respond with ONLY the JSON object."""
 
@@ -336,22 +358,41 @@ def _format_timeline_entry(
         elif diff_type == "no_change":
             lines.append("  [No visible change]")
 
-    # Clipboard context (attached by FocusProcessor._attach_clipboard_context)
-    # Rendered as a prominent top-level marker so Qwen treats it as an
+    # Clipboard context (attached by FocusProcessor._attach_clipboard_context).
+    # Rendered as a prominent top-level marker so the model treats it as an
     # explicit COPY action that must become a step in the SOP.
+    #
+    # Important: the clipboard is attached to the snapshot BEFORE the
+    # clipboard event (the SOURCE — where the user actually pressed
+    # Cmd+C).  We surface ``source_app`` / ``source_location`` here so the
+    # model attributes the Copy step to the right app, not to whatever
+    # the user happened to switch to next.
     if clipboard_context and isinstance(clipboard_context, dict):
         byte_size = clipboard_context.get("byte_size", 0)
         content_types = clipboard_context.get("content_types", [])
         preview = clipboard_context.get("content_preview", "")
+        source_app = clipboard_context.get("source_app", "")
+        source_location = clipboard_context.get("source_location", "")
         types_str = ", ".join(str(t) for t in content_types) if content_types else "unknown"
+
+        source_str = ""
+        if source_app and source_location:
+            source_str = f" FROM {source_app} ({source_location})"
+        elif source_app:
+            source_str = f" FROM {source_app}"
+        elif source_location:
+            source_str = f" FROM {source_location}"
+
         lines.append(
-            f"  >>> COPY ACTION: User copied content to clipboard "
+            f"  >>> COPY ACTION: User copied content{source_str} "
             f"({byte_size} bytes, {types_str})"
         )
         if preview:
             lines.append(f'  >>> Copied text: "{preview[:200]}"')
         lines.append(
-            "  >>> (Include this as a Copy step and a subsequent Paste step in the SOP)"
+            "  >>> (Include this as a Copy step (attribute the Copy to the "
+            "FROM app above, NOT to whatever app the next frame shows) and "
+            "a subsequent Paste step in the SOP)"
         )
 
     return "\n".join(lines)
@@ -1102,36 +1143,40 @@ def _call_ollama(
     num_predict: int = 12000,
     system: str = "",
     timeout: float = 1800.0,
-    think: bool = True,
+    think: bool | str = True,
     format_json: bool = False,
+    extra_options: dict | None = None,
 ) -> tuple[str, float]:
     """Call Ollama's /api/generate for text-only SOP generation.
 
-    Uses think=True for 4B model to enable reasoning (produces better SOPs).
     Returns (response_text, inference_time_seconds).
+
+    Args:
+        think: False, True, "low", "medium", or "high". For Gemma 4 models,
+            "high" enables deep reasoning which produces better SOPs.
+        extra_options: Additional Ollama options merged into the options dict.
+            Use model_profiles.get_profile().sop_options() for optimal settings.
     """
     import urllib.request
     import urllib.error
 
     url = f"{host}/api/generate"
 
+    options: dict = {
+        "num_predict": num_predict,
+        "num_ctx": 24576,
+        "temperature": 0.3,
+    }
+    if extra_options:
+        options.update(extra_options)
+
     payload: dict = {
         "model": model,
         "prompt": prompt,
         "stream": False,
         # think must be a top-level parameter, NOT inside options.
-        # Inside options it has no effect and Qwen3.5 thinking models
-        # may consume all num_predict tokens on reasoning.
         "think": think,
-        "options": {
-            "num_predict": num_predict,
-            # Ollama defaults to 4096 context which truncates our prompts.
-            # 16K accommodates timeline (~4-6K) + output (8K) comfortably.
-            "num_ctx": 24576,
-            # Lower temperature for reliable JSON output.
-            # Ollama defaults to 0.8 which is too creative for structured data.
-            "temperature": 0.3,
-        },
+        "options": options,
     }
 
     if system:
@@ -1224,16 +1269,22 @@ class SOPGenerator:
         if behavioral_context:
             prompt += f"\n\nBEHAVIORAL CONTEXT (use this to understand the user's intent and filter noise like ads, notifications, or unrelated content):\n{behavioral_context}\n"
 
-        # Call VLM
+        # Call VLM with model-specific profile
+        from agenthandover_worker.model_profiles import get_profile
+        profile = get_profile(self.config.model)
         try:
             raw_response, elapsed = _call_ollama(
                 model=self.config.model,
                 prompt=prompt,
                 host=self.config.ollama_host,
-                num_predict=self.config.num_predict,
-                system=SOP_SYSTEM_PROMPT,
+                num_predict=profile.sop_num_predict,
+                system=profile.sop_system or SOP_SYSTEM_PROMPT,
                 timeout=self.config.timeout,
-                think=True,
+                think=profile.sop_think,
+                extra_options={
+                    k: v for k, v in profile.sop_options().items()
+                    if k not in ("num_predict",)
+                },
             )
         except ConnectionError as exc:
             return GeneratedSOP(

@@ -38,6 +38,7 @@ logger = logging.getLogger(__name__)
 class BehavioralInsights:
     """Results of behavioral synthesis for a procedure."""
 
+    goal: str = ""
     strategy: str = ""
     selection_criteria: list[dict] = field(default_factory=list)
     content_templates: list[dict] = field(default_factory=list)
@@ -52,10 +53,15 @@ class BehavioralInsights:
 # ---------------------------------------------------------------------------
 
 BEHAVIORAL_SYSTEM_PROMPT = """\
-You are a behavioral analyst examining recorded work sessions. \
-You analyze patterns in HOW and WHY a person works, not just WHAT they click. \
-Your output is structured JSON describing the strategy, decision logic, and \
-behavioral patterns behind observed workflows.
+You are analyzing the work of a SPECIFIC INDIVIDUAL — not workflows in \
+general.  When a USER PROFILE is provided, treat it as authoritative \
+context about who this person is, what tools they use, and how they work.  \
+Reason about WHY they work this way given their role and stack, not just \
+WHAT patterns emerge from clicks.
+
+Your output is structured JSON describing the strategy, decision logic, \
+and behavioral patterns behind observed workflows — grounded in the \
+user's actual identity and tooling when known.
 
 Respond with ONLY valid JSON. No markdown fences, no commentary."""
 
@@ -66,9 +72,12 @@ You are analyzing {observation_count} recorded sessions of the same workflow.
 WORKFLOW TITLE: {title}
 WORKFLOW DESCRIPTION: {description}
 
+{user_context}
+
 The mechanical steps have already been identified:
 {steps_summary}
 
+{timeline_evidence}
 {daily_context}
 {session_context}
 {continuity_context}
@@ -77,8 +86,21 @@ The mechanical steps have already been identified:
 Now analyze the STRATEGY behind these steps.  Respond with a JSON object:
 
 {{
-  "strategy": "<high-level description of the user's approach and goals — \
-not a list of steps, but the reasoning and intent behind them>",
+  "goal": "<ONE concrete sentence: what is the user ultimately producing, \
+FOR WHOM, and with WHAT TRIGGER/CADENCE? Must include: the artifact produced \
+(e.g. 'email to self', 'Slack update to team'), the recipient (specific \
+person, team, or channel if visible), and the trigger (daily, weekly, on \
+event X, etc.). Example of concrete: 'Sends a daily digest email of top 10 \
+Hacker News stories to themselves at sandro@sandric.co to stay updated on \
+tech news.' Example of BAD abstract: 'research-to-communication cycle'. \
+If you cannot determine the concrete goal, say so explicitly: \
+'Unclear — recipient/cadence not visible in observations'>",
+
+  "strategy": "<2-4 sentences elaborating HOW the user achieves the goal — \
+the approach, ordering, and reasoning. This is a SUPPORTING explanation of \
+the goal above, not a restatement. Must be grounded in specific evidence \
+from the observations — quote visible text (emails, subjects, URLs, counts) \
+when present.>",
 
   "selection_criteria": [
     {{
@@ -125,7 +147,18 @@ placeholders for parts that change>",
 }}
 
 Rules:
-- "strategy" should be 2-4 sentences explaining the APPROACH, not the steps
+- "goal" is THE MOST IMPORTANT FIELD. It must be CONCRETE — naming the \
+artifact, the recipient, and the trigger. If any of those three are visible \
+in the observations (specific email addresses, subject lines, counts, \
+usernames, channels, schedules), you MUST incorporate them verbatim. \
+Generic phrases like "research cycle", "communication workflow", \
+"information management" are NOT acceptable goals — they describe shape, \
+not intent.
+- "strategy" should be 2-4 sentences explaining HOW the user achieves the \
+goal, not restating the goal itself
+- Use VERBATIM TEXT from OCR/annotations where it appears (recipient emails, \
+subject lines, URLs, item counts, selected text). Don't generalize "an email \
+address" when the observations show "sandro@sandric.co".
 - "selection_criteria" should explain WHAT the user engages with vs skips
 - "content_templates" should capture the STRUCTURE of text the user produces
 - "decision_branches" should explain branch conditions from observed behavior
@@ -134,6 +167,11 @@ Rules:
 - "confidence" should be 0.0-1.0 reflecting how well the sessions support analysis
 - If you cannot determine something, use empty arrays or null values
 - Base everything on OBSERVED patterns, do not speculate
+- When a USER PROFILE is provided, your strategy and guardrails MUST \
+reflect who this user actually is — their role, primary tools, and \
+accounts.  Don't describe a generic "user" when the profile tells you \
+this is e.g. a designer, a developer, or a founder.  Ground every \
+inference in their actual stack and working patterns.
 {voice_guidance}
 
 Respond with ONLY the JSON object."""
@@ -148,10 +186,11 @@ def _call_ollama_text(
     model: str,
     prompt: str,
     host: str = "http://localhost:11434",
-    num_predict: int = 8000,
+    num_predict: int = 12000,
     system: str = "",
     timeout: float = 600.0,
-    think: bool = True,
+    think: bool | str = True,
+    extra_options: dict | None = None,
 ) -> tuple[str, float]:
     """Call Ollama's /api/generate for text-only synthesis."""
     import urllib.request
@@ -159,12 +198,16 @@ def _call_ollama_text(
 
     url = f"{host}/api/generate"
 
+    options: dict = {"num_predict": num_predict}
+    if extra_options:
+        options.update(extra_options)
+
     payload: dict = {
         "model": model,
         "prompt": prompt,
         "stream": False,
         "think": think,
-        "options": {"num_predict": num_predict},
+        "options": options,
     }
     if system:
         payload["system"] = system
@@ -192,26 +235,50 @@ _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 
 
 def _parse_json_response(raw: str) -> dict | None:
-    """Parse a VLM JSON response, handling fences and thinking tags."""
+    """Parse a VLM JSON response, handling fences, thinking tags, and truncation."""
     text = _THINK_RE.sub("", raw).strip()
     match = _FENCE_RE.search(text)
     if match:
         text = match.group(1).strip()
     if not text:
         return None
+
+    # Find the first { to start of JSON
+    start = text.find("{")
+    if start < 0:
+        return None
+    text = text[start:]
+
+    # Try direct parse
     try:
         data = json.loads(text)
+        return data if isinstance(data, dict) else None
     except json.JSONDecodeError:
-        for i, ch in enumerate(text):
-            if ch == "{":
-                try:
-                    data = json.loads(text[i:])
-                    break
-                except json.JSONDecodeError:
-                    continue
-        else:
-            return None
-    return data if isinstance(data, dict) else None
+        pass
+
+    # Try repairing truncated JSON by closing open brackets
+    repaired = text
+    open_braces = repaired.count("{") - repaired.count("}")
+    open_brackets = repaired.count("[") - repaired.count("]")
+
+    # Strip trailing partial content (after last complete value)
+    # Find the last comma or complete value before truncation
+    for trim_char in [",", '"', "}", "]"]:
+        last_pos = repaired.rfind(trim_char)
+        if last_pos > 0:
+            candidate = repaired[:last_pos + 1]
+            # Close open brackets/braces
+            suffix = "]" * max(0, candidate.count("[") - candidate.count("]"))
+            suffix += "}" * max(0, candidate.count("{") - candidate.count("}"))
+            try:
+                data = json.loads(candidate + suffix)
+                if isinstance(data, dict):
+                    logger.debug("Repaired truncated behavioral JSON (%d open braces closed)", open_braces)
+                    return data
+            except json.JSONDecodeError:
+                continue
+
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -244,9 +311,15 @@ class BehavioralSynthesizer:
         self,
         config: SynthesizerConfig | None = None,
         vlm_queue: Any | None = None,
+        knowledge_base: Any | None = None,
     ) -> None:
         self.config = config or SynthesizerConfig()
         self._vlm_queue = vlm_queue
+        # KB is used to inject user profile (tools/accounts/working hours)
+        # into the synthesis prompt so the model reasons about WHO the user
+        # is, not an abstract "user".  Optional — falls back to observation-
+        # derived signals or a generic framing when KB/profile is empty.
+        self._kb = knowledge_base
 
     def synthesize(
         self,
@@ -296,16 +369,22 @@ class BehavioralSynthesizer:
             continuity_spans=continuity_spans,
         )
 
-        # Call VLM
+        # Call VLM with model-specific profile
+        from agenthandover_worker.model_profiles import get_profile
+        profile = get_profile(self.config.model)
         try:
             raw_response, elapsed = _call_ollama_text(
                 model=self.config.model,
                 prompt=prompt,
                 host=self.config.ollama_host,
-                num_predict=self.config.num_predict,
-                system=BEHAVIORAL_SYSTEM_PROMPT,
+                num_predict=12000,  # high budget — thinking consumes ~3-4K tokens
+                system=profile.sop_system or BEHAVIORAL_SYSTEM_PROMPT,
                 timeout=self.config.timeout,
-                think=True,
+                think=profile.sop_think if profile.sop_think else True,
+                extra_options={
+                    k: v for k, v in profile.sop_options().items()
+                    if k not in ("num_predict",)
+                },
             )
         except ConnectionError as exc:
             logger.warning("Behavioral synthesis VLM failed for '%s': %s", slug, exc)
@@ -329,16 +408,20 @@ class BehavioralSynthesizer:
         # Parse response
         parsed = _parse_json_response(raw_response)
         if parsed is None:
-            logger.warning("Behavioral synthesis: invalid JSON for '%s'", slug)
+            logger.warning(
+                "Behavioral synthesis: invalid JSON for '%s' (response length=%d, first 200 chars: %s)",
+                slug, len(raw_response), raw_response[:200],
+            )
             return BehavioralInsights()
 
         insights = self._parse_insights(parsed)
 
         logger.info(
-            "Behavioral synthesis for '%s': strategy=%s, "
+            "Behavioral synthesis for '%s': goal=%s, strategy=%s, "
             "%d criteria, %d templates, %d branches, %d guardrails "
             "(%.1fs VLM, confidence=%.2f)",
             slug,
+            bool(insights.goal),
             bool(insights.strategy),
             len(insights.selection_criteria),
             len(insights.content_templates),
@@ -347,6 +430,11 @@ class BehavioralSynthesizer:
             elapsed,
             insights.confidence,
         )
+        if insights.goal:
+            logger.info(
+                "Behavioral synthesis for '%s' extracted goal: %s",
+                slug, insights.goal[:240],
+            )
 
         return insights
 
@@ -381,6 +469,8 @@ class BehavioralSynthesizer:
         """
         proc = dict(procedure)
 
+        if insights.goal:
+            proc["goal"] = insights.goal
         if insights.strategy:
             proc["strategy"] = insights.strategy
         if insights.selection_criteria:
@@ -641,11 +731,22 @@ class BehavioralSynthesizer:
             )
             voice_guidance = "\nUSER WRITING STYLE:\n" + "\n".join(parts)
 
+        # Format user profile context (who the user is)
+        user_context = self._format_user_context(observations)
+
+        # Format per-frame timeline evidence — the actual verbatim text the
+        # frames contain (email addresses, typed text, URLs, values).  This
+        # is the data the model needs to write a CONCRETE goal.  Without it,
+        # the prompt asks for verbatim text but never shows any.
+        timeline_evidence = self._format_timeline_evidence(observations)
+
         return BEHAVIORAL_SYNTHESIS_PROMPT.format(
             observation_count=len(observations),
             title=title,
             description=description,
+            user_context=user_context or "(no user profile yet — first-time user; infer from observations only)",
             steps_summary=steps_summary,
+            timeline_evidence=timeline_evidence or "(no per-frame evidence available)",
             daily_context=daily_context or "(no daily context available)",
             session_context=session_context or "(no cross-day context available)",
             continuity_context=continuity_context or "(no continuity context available)",
@@ -654,9 +755,297 @@ class BehavioralSynthesizer:
         )
 
     @staticmethod
+    def _format_timeline_evidence(observations: list[list[dict]]) -> str:
+        """Format per-frame evidence so the model can quote verbatim text.
+
+        ``observations`` is a list of timelines (one per recorded session).
+        Each timeline is a list of frame dicts.  This formatter extracts
+        the rich fields populated by the focus_processor's
+        ``_build_pre_analysis_obs`` (action, app, location, email_addresses,
+        urls, typed_text, visible_values, plus copy/paste content_preview
+        when present) and renders them as a numbered evidence list the
+        synthesizer prompt can quote from.
+
+        Without this, the prompt asks the model to write a concrete goal
+        with verbatim emails/URLs/counts but never actually surfaces any
+        of that data — the model has to guess from the steps_summary
+        alone, and rightly returns the explicit "Unclear" fallback.
+        """
+        if not observations:
+            return ""
+
+        lines: list[str] = ["TIMELINE EVIDENCE (verbatim text from each frame — quote these directly when filling goal/strategy):"]
+        max_frames_total = 60  # cap to keep prompt size reasonable
+        rendered = 0
+
+        for sess_idx, timeline in enumerate(observations):
+            if not timeline:
+                continue
+            if len(observations) > 1:
+                lines.append(f"\n[Session {sess_idx + 1}]")
+            for f_idx, frame in enumerate(timeline):
+                if rendered >= max_frames_total:
+                    lines.append("  ... (more frames truncated)")
+                    break
+                if not isinstance(frame, dict):
+                    continue
+                parts: list[str] = []
+                app = frame.get("app", "") or ""
+                loc = frame.get("location", "") or ""
+                if app:
+                    parts.append(f"app={app}")
+                if loc:
+                    parts.append(f"loc={loc}")
+                action = frame.get("action", "") or ""
+                if action:
+                    parts.append(f"doing={action[:140]}")
+
+                # The verbatim grounding fields (added by OCR injection +
+                # _build_pre_analysis_obs).  These are what the model needs
+                # to write a concrete goal.
+                emails = frame.get("email_addresses") or []
+                if emails:
+                    parts.append(f"emails={list(emails)[:6]}")
+                names = frame.get("names") or []
+                if names:
+                    parts.append(f"names={list(names)[:6]}")
+                urls = frame.get("urls") or []
+                if urls:
+                    parts.append(f"urls={list(urls)[:4]}")
+                typed = frame.get("typed_text") or ""
+                if typed:
+                    parts.append(f'typed="{typed[:140]}"')
+                selected = frame.get("selected_text") or ""
+                if selected:
+                    parts.append(f'selected="{selected[:140]}"')
+                # active_element is a STRONG signal for what the user is
+                # currently focused on (e.g. "Send button" tells the
+                # model the user just sent the email)
+                active = frame.get("active_element") or ""
+                if active:
+                    parts.append(f'focus="{active[:120]}"')
+                values = frame.get("visible_values") or []
+                if values:
+                    parts.append(f"values={list(values)[:12]}")
+                headings = frame.get("headings") or []
+                if headings:
+                    parts.append(f"headings={list(headings)[:6]}")
+                # Compose-specific structured fields (recipient, subject,
+                # body) — these are the highest-signal verbatim text
+                compose = frame.get("compose")
+                if isinstance(compose, dict) and compose:
+                    parts.append(f"compose={compose}")
+                # Copy/paste content_preview (set by focus_processor
+                # when a clipboard event is attached to the frame)
+                clip = frame.get("clipboard_preview") or ""
+                if clip:
+                    parts.append(f'COPIED="{clip[:200]}"')
+
+                if parts:
+                    lines.append(f"  frame {f_idx + 1}: " + " | ".join(parts))
+                    rendered += 1
+
+            if rendered >= max_frames_total:
+                break
+
+        return "\n".join(lines) if rendered > 0 else ""
+
+    # ------------------------------------------------------------------
+    # User context formatting
+    # ------------------------------------------------------------------
+
+    def _format_user_context(self, observations: list[list[dict]]) -> str:
+        """Format a USER PROFILE block describing who the user is.
+
+        Order of preference:
+        1. KB profile (rich: tools, accounts, working_hours, comm_style) —
+           used when the profile has been built from accumulated daily
+           summaries.
+        2. Cold-start fallback: derive primary apps from the current
+           observation batch so even the very first synthesis has some
+           "who" context to reason about.
+        3. Empty string — caller substitutes a generic placeholder.
+        """
+        # 1) KB profile
+        profile = self._load_kb_profile()
+        if profile and self._profile_has_signal(profile):
+            return self._format_kb_profile(profile)
+
+        # 2) Cold-start: derive signals from observations
+        cold_start = self._format_cold_start_context(observations)
+        if cold_start:
+            return cold_start
+
+        return ""
+
+    def _load_kb_profile(self) -> dict | None:
+        """Load the user profile from the KB, if available."""
+        if self._kb is None:
+            return None
+        try:
+            return self._kb.get_profile()
+        except Exception:
+            logger.debug("Failed to load KB profile for synthesizer", exc_info=True)
+            return None
+
+    @staticmethod
+    def _profile_has_signal(profile: dict) -> bool:
+        """True if the profile has enough data to be worth injecting."""
+        if not isinstance(profile, dict):
+            return False
+        tools = profile.get("tools") or {}
+        accounts = profile.get("accounts") or []
+        working_hours = profile.get("working_hours") or {}
+        # At minimum need either a primary app or an identifiable account
+        has_apps = bool(tools.get("primary_apps")) or bool(
+            tools.get("browser") or tools.get("editor") or tools.get("terminal")
+        )
+        return bool(has_apps or accounts or working_hours)
+
+    @staticmethod
+    def _format_kb_profile(profile: dict) -> str:
+        """Render the KB profile as a USER PROFILE block for the prompt."""
+        lines = ["USER PROFILE (who this user is):"]
+
+        tools = profile.get("tools") or {}
+        primary_apps = tools.get("primary_apps") or []
+        if primary_apps:
+            top = primary_apps[:6]
+            app_strs = [
+                f"{a.get('app', '?')} ({a.get('total_minutes', 0):.0f} min)"
+                for a in top
+            ]
+            lines.append("  Primary apps: " + ", ".join(app_strs))
+
+        stack_parts = []
+        if tools.get("browser"):
+            stack_parts.append(f"browser={tools['browser']}")
+        if tools.get("editor"):
+            stack_parts.append(f"editor={tools['editor']}")
+        if tools.get("terminal"):
+            stack_parts.append(f"terminal={tools['terminal']}")
+        if stack_parts:
+            lines.append("  Stack: " + ", ".join(stack_parts))
+
+        accounts = profile.get("accounts") or []
+        if accounts:
+            account_strs = [
+                f"{a.get('service', '?')} ({a.get('frequency', '?')})"
+                for a in accounts[:8]
+            ]
+            lines.append("  Accounts used: " + ", ".join(account_strs))
+
+        wh = profile.get("working_hours") or {}
+        wh_parts = []
+        if wh.get("typical_start") and wh.get("typical_end"):
+            wh_parts.append(f"{wh['typical_start']}-{wh['typical_end']}")
+        if wh.get("avg_active_hours"):
+            wh_parts.append(f"~{wh['avg_active_hours']}h/day active")
+        if wh.get("weekend_active"):
+            wh_parts.append("weekends active")
+        if wh_parts:
+            lines.append("  Working hours: " + ", ".join(wh_parts))
+
+        cs = profile.get("communication_style") or {}
+        channels = cs.get("primary_channels") or []
+        if channels:
+            lines.append("  Primary comm channels: " + ", ".join(channels[:4]))
+
+        ws = profile.get("writing_style") or {}
+        if ws.get("formality"):
+            lines.append(
+                f"  Writing style: {ws['formality']}"
+                + (f" (confidence {ws.get('confidence', 0):.2f})" if ws.get("confidence") else "")
+            )
+
+        # Inferred role hint — cheap heuristic so the model gets a starting
+        # frame.  The LLM can override this with its own reasoning.
+        role_hint = BehavioralSynthesizer._infer_role_hint(tools, accounts)
+        if role_hint:
+            lines.append(f"  Likely role (heuristic): {role_hint}")
+
+        return "\n".join(lines) if len(lines) > 1 else ""
+
+    @staticmethod
+    def _infer_role_hint(tools: dict, accounts: list) -> str:
+        """Lightweight role hint from tools + accounts.
+
+        Intentionally conservative — only returns a hint when the
+        signals are strong.  The VLM is expected to refine or reject
+        this.
+        """
+        account_services = {
+            a.get("service", "").lower() for a in accounts if isinstance(a, dict)
+        }
+        primary_apps = {
+            (a.get("app", "") or "").lower()
+            for a in (tools.get("primary_apps") or [])
+            if isinstance(a, dict)
+        }
+        all_signals = account_services | primary_apps
+        editor = (tools.get("editor") or "").lower()
+
+        dev_signals = {"github", "vercel", "aws"}
+        design_signals = {"figma", "sketch"}
+        pm_signals = {"jira", "linear", "notion"}
+
+        has_dev = bool(dev_signals & all_signals) or bool(editor)
+        has_design = bool(design_signals & all_signals) or "figma" in primary_apps
+        has_pm = bool(pm_signals & all_signals)
+
+        if has_dev and not has_design:
+            return "software developer / engineer"
+        if has_design and not has_dev:
+            return "designer"
+        if has_dev and has_design and has_pm:
+            return "founder / generalist builder"
+        if has_pm and not has_dev and not has_design:
+            return "product / project manager"
+        return ""
+
+    @staticmethod
+    def _format_cold_start_context(observations: list[list[dict]]) -> str:
+        """Cold-start fallback: derive apps from current observation batch.
+
+        When there's no KB profile yet (first-time user, first synthesis),
+        we still want the VLM to see which apps the user actually uses in
+        this workflow.  We aggregate app names from the observation events
+        so the model can at least reason about the tooling.
+        """
+        from collections import Counter
+
+        app_counter: Counter = Counter()
+        for timeline in observations or []:
+            for event in timeline or []:
+                if not isinstance(event, dict):
+                    continue
+                app = (
+                    event.get("app")
+                    or event.get("app_name")
+                    or event.get("application")
+                    or (event.get("context") or {}).get("app")
+                )
+                if isinstance(app, str) and app.strip():
+                    app_counter[app.strip()] += 1
+
+        if not app_counter:
+            return ""
+
+        top_apps = [app for app, _ in app_counter.most_common(6)]
+        lines = [
+            "USER PROFILE (first-time user — derived from this workflow only):",
+            "  Observed apps in this workflow: " + ", ".join(top_apps),
+            "  Note: no historical profile exists yet.  Reason from what you see "
+            "in this workflow, and be conservative about generalizing to the "
+            "user's broader habits.",
+        ]
+        return "\n".join(lines)
+
+    @staticmethod
     def _parse_insights(data: dict) -> BehavioralInsights:
         """Parse VLM JSON response into BehavioralInsights."""
         return BehavioralInsights(
+            goal=str(data.get("goal", "") or "").strip(),
             strategy=data.get("strategy", ""),
             selection_criteria=[
                 sc for sc in data.get("selection_criteria", [])

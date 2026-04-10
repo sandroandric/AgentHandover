@@ -17,12 +17,25 @@
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleVersion</key>
-    <string>0.1.0</string>
+    <string>0.2.1</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.1.0</string>
+    <string>0.2.1</string>
     <key>NSPrincipalClass</key>
     <string>NSApplication</string>
+    <!-- LSUIElement=true makes this a menu-bar-only (accessory) app.
+         REQUIRED for SwiftUI MenuBarExtra to register a status bar
+         item correctly.  Without it, the app launches as a regular
+         Dock app and the menu bar icon silently fails to appear.
+         Bug caught 2026-04-10 — affected all v0.2.0 users. -->
+    <key>LSUIElement</key>
+    <true/>
     <key>NSHumanReadableCopyright</key>
-    <string>Copyright 2026 AgentHandover Contributors. MIT License.</string>
+    <string>Copyright 2026 Sandro Andric. Apache 2.0 License.</string>
+    <key>SUPublicEDKey</key>
+    <string>/0p0TTgbLloxiQqGwRSm2rw7PCKE+E5y3EJZkKGzYi4=</string>
+    <key>SUFeedURL</key>
+    <string>https://www.agenthandover.com/appcast.xml</string>
+    <key>SUEnableAutomaticChecks</key>
+    <true/>
 </dict>
 </plist>

@@ -10,8 +10,10 @@ import pytest
 
 from agenthandover_worker.agent_connect import (
     _load_procedures,
+    _render_skill_markdown,
     connect_claude_code,
     connect_codex,
+    connect_hermes,
     connect_mcp,
 )
 
@@ -115,3 +117,146 @@ class TestConnectMCP:
         assert "agenthandover-mcp" in output
         assert "mcpServers" in output
         assert "list_ready_procedures" in output
+
+
+class TestRenderSkillMarkdown:
+    """Tests for the shared Claude Code / agentskills.io markdown renderer."""
+
+    def test_includes_frontmatter_and_title(self):
+        proc = {
+            "id": "reddit-marketing",
+            "title": "Reddit Community Marketing",
+            "description": "Daily engagement workflow",
+            "steps": [{"action": "Open Reddit"}],
+            "constraints": {"guardrails": ["Max 5/day"]},
+        }
+        md = _render_skill_markdown(proc)
+        assert md.startswith("---\ndescription: Reddit Community Marketing\n---\n")
+        assert "# Reddit Community Marketing" in md
+        assert "Daily engagement workflow" in md
+        assert "## Steps" in md
+        assert "1. Open Reddit" in md
+        assert "## Guardrails" in md
+        assert "Max 5/day" in md
+
+    def test_include_name_adds_name_field(self):
+        """Hermes convention requires a `name:` field in frontmatter."""
+        proc = {
+            "id": "reddit-marketing",
+            "title": "Reddit Community Marketing",
+            "steps": [],
+        }
+        md = _render_skill_markdown(proc, include_name=True)
+        assert "name: reddit-marketing" in md
+        assert "description: Reddit Community Marketing" in md
+        # name should come before description
+        assert md.index("name:") < md.index("description:")
+
+    def test_include_name_false_omits_name(self):
+        proc = {"id": "x", "title": "X", "steps": []}
+        md = _render_skill_markdown(proc, include_name=False)
+        assert "name:" not in md
+
+    def test_includes_execution_protocol(self):
+        proc = {"id": "x", "title": "X", "steps": []}
+        md = _render_skill_markdown(proc)
+        assert "## Execution Protocol" in md
+        assert "report_execution_start" in md
+        assert "slug `x`" in md
+
+    def test_omits_empty_sections(self):
+        proc = {"id": "x", "title": "X", "steps": []}
+        md = _render_skill_markdown(proc)
+        assert "## Strategy" not in md
+        assert "## Guardrails" not in md
+        assert "## Steps" not in md
+        assert "## Voice" not in md
+
+
+class TestConnectHermes:
+    """Tests for Hermes integration.
+
+    Hermes loads skills by walking ``~/.hermes/skills/`` and reading each
+    subdirectory's ``SKILL.md`` file — NOT loose ``.md`` files.  These
+    tests verify we write the correct layout:
+    ``~/.hermes/skills/agenthandover/<slug>/SKILL.md``.
+    """
+
+    def test_writes_skill_in_hermes_layout(self, fake_kb: Path, tmp_path: Path, capsys):
+        with patch("agenthandover_worker.agent_connect._get_kb_root", return_value=fake_kb / "knowledge"), \
+             patch("agenthandover_worker.agent_connect.Path.home", return_value=tmp_path):
+            connect_hermes()
+
+        namespace_dir = tmp_path / ".hermes" / "skills" / "agenthandover"
+        assert namespace_dir.is_dir()
+
+        # Only the agent_ready procedure should be written, as a subdirectory
+        slug_dirs = [d for d in namespace_dir.iterdir() if d.is_dir()]
+        assert len(slug_dirs) == 1
+        assert slug_dirs[0].name == "reddit-marketing"
+
+        # The file must be named SKILL.md (Hermes convention)
+        skill_file = slug_dirs[0] / "SKILL.md"
+        assert skill_file.exists()
+
+        content = skill_file.read_text(encoding="utf-8")
+        # Frontmatter must include the name field for Hermes
+        assert "name: reddit-marketing" in content
+        assert "description: Reddit Community Marketing" in content
+        assert "Max 5/day" in content
+        assert "## Execution Protocol" in content
+
+        out = capsys.readouterr().out
+        assert "Hermes integration ready" in out
+        assert "Procedures installed: 1" in out
+
+    def test_cleans_up_stale_slug_directories(self, fake_kb: Path, tmp_path: Path):
+        """Stale skill directories from previous runs must be removed."""
+        namespace_dir = tmp_path / ".hermes" / "skills" / "agenthandover"
+        stale_dir = namespace_dir / "old-workflow"
+        stale_dir.mkdir(parents=True)
+        (stale_dir / "SKILL.md").write_text("old content", encoding="utf-8")
+
+        with patch("agenthandover_worker.agent_connect._get_kb_root", return_value=fake_kb / "knowledge"), \
+             patch("agenthandover_worker.agent_connect.Path.home", return_value=tmp_path):
+            connect_hermes()
+
+        assert not stale_dir.exists()
+        assert (namespace_dir / "reddit-marketing" / "SKILL.md").exists()
+
+    def test_migrates_from_old_flat_layout(self, fake_kb: Path, tmp_path: Path):
+        """Loose .md files from the old (incorrect) flat layout must be cleaned up."""
+        namespace_dir = tmp_path / ".hermes" / "skills" / "agenthandover"
+        namespace_dir.mkdir(parents=True)
+        old_flat_file = namespace_dir / "mydailynews.md"
+        old_flat_file.write_text("--- old flat layout ---", encoding="utf-8")
+
+        with patch("agenthandover_worker.agent_connect._get_kb_root", return_value=fake_kb / "knowledge"), \
+             patch("agenthandover_worker.agent_connect.Path.home", return_value=tmp_path):
+            connect_hermes()
+
+        assert not old_flat_file.exists()
+        assert (namespace_dir / "reddit-marketing" / "SKILL.md").exists()
+
+    def test_empty_kb_warns_about_no_skills(self, tmp_path: Path, capsys):
+        with patch("agenthandover_worker.agent_connect._get_kb_root", return_value=tmp_path / "nope"), \
+             patch("agenthandover_worker.agent_connect.Path.home", return_value=tmp_path):
+            connect_hermes()
+
+        out = capsys.readouterr().out
+        assert "No agent-ready skills yet" in out
+
+    def test_prints_yaml_mcp_config(self, fake_kb: Path, tmp_path: Path, capsys):
+        """Hermes uses config.yaml — the printed hint must show YAML, not TOML."""
+        with patch("agenthandover_worker.agent_connect._get_kb_root", return_value=fake_kb / "knowledge"), \
+             patch("agenthandover_worker.agent_connect.Path.home", return_value=tmp_path):
+            connect_hermes()
+
+        out = capsys.readouterr().out
+        assert "agenthandover-mcp" in out
+        assert "config.yaml" in out
+        # YAML-style indent, not TOML section headers
+        assert "mcp:" in out
+        assert "servers:" in out
+        # Ensure we didn't leave the old TOML hint in place
+        assert "[mcp.servers.agenthandover]" not in out

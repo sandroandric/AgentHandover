@@ -861,3 +861,167 @@ class TestFocusProcessorDomNodes:
 
         assert len(timeline) == 1
         assert timeline[0]["dom_nodes"] is None
+
+
+# ---------------------------------------------------------------------------
+# Clipboard context extraction and attachment
+# ---------------------------------------------------------------------------
+
+
+class TestClipboardAttach:
+    """Regression tests for the clipboard attach path.
+
+    Historical bug (caught 2026-04-10): _extract_clipboard_meta read
+    metadata_json instead of kind_json, so clipboard context was never
+    attached to any focus SOP on any user's machine. The SOP prompt
+    depends on this to emit explicit Copy/Paste steps.
+    """
+
+    @staticmethod
+    def _make_processor() -> FocusProcessor:
+        return FocusProcessor(
+            annotator=None,  # type: ignore
+            differ=None,  # type: ignore
+            sop_generator=None,  # type: ignore
+        )
+
+    def test_extract_clipboard_meta_reads_kind_json(self):
+        """Clipboard payload lives in kind_json, NOT metadata_json."""
+        event = {
+            "id": "clip-1",
+            "kind_json": json.dumps({
+                "type": "ClipboardChange",
+                "content_types": [
+                    "public.html",
+                    "public.utf8-plain-text",
+                ],
+                "byte_size": 30812,
+                "high_entropy": True,
+                "content_hash": "abc123",
+            }),
+            "metadata_json": "{}",  # intentionally empty — proves we look at kind_json
+        }
+        meta = FocusProcessor._extract_clipboard_meta(event)
+        assert meta is not None
+        assert meta["byte_size"] == 30812
+        assert "public.html" in meta["content_types"]
+        assert meta["high_entropy"] is True
+        assert meta["content_hash"] == "abc123"
+
+    def test_extract_clipboard_meta_ignores_metadata_json(self):
+        """If only metadata_json has clipboard fields, we return None (wrong field)."""
+        event = {
+            "id": "clip-2",
+            "kind_json": json.dumps({"type": "ClipboardChange"}),
+            "metadata_json": json.dumps({
+                "content_types": ["public.utf8-plain-text"],
+                "byte_size": 999,
+            }),
+        }
+        meta = FocusProcessor._extract_clipboard_meta(event)
+        assert meta is None  # no useful fields in kind_json
+
+    def test_extract_clipboard_meta_handles_dict_kind_json(self):
+        """kind_json may already be a dict (not a JSON string)."""
+        event = {
+            "id": "clip-3",
+            "kind_json": {
+                "type": "ClipboardChange",
+                "content_types": ["public.utf8-plain-text"],
+                "byte_size": 42,
+            },
+        }
+        meta = FocusProcessor._extract_clipboard_meta(event)
+        assert meta is not None
+        assert meta["byte_size"] == 42
+
+    def test_extract_clipboard_meta_returns_none_for_non_clipboard(self):
+        event = {
+            "id": "snap-1",
+            "kind_json": json.dumps({"type": "DwellSnapshot"}),
+        }
+        meta = FocusProcessor._extract_clipboard_meta(event)
+        assert meta is None
+
+    def test_attach_clipboard_context_maps_to_snapshot_before(self):
+        """End-to-end: clipboard attaches to the snapshot BEFORE the
+        clipboard event — that's where the user actually pressed Cmd+C
+        (the SOURCE of the copy).  Attaching to the AFTER frame would
+        misattribute the Copy step to whatever app the user switched to
+        next, which was the historical bug fixed 2026-04-10.
+        """
+        processor = self._make_processor()
+        events = [
+            {
+                "id": "snap-1-source",  # user is here when they press Cmd+C
+                "kind_json": json.dumps({"type": "DwellSnapshot"}),
+                "window_json": json.dumps({
+                    "app_name": "Comet",
+                    "title": "Hacker News",
+                }),
+                "metadata_json": "{}",
+                "timestamp": "2026-04-10T12:07:15.000Z",
+            },
+            {
+                "id": "clip-1",
+                "kind_json": json.dumps({
+                    "type": "ClipboardChange",
+                    "content_types": ["public.utf8-plain-text"],
+                    "byte_size": 30812,
+                }),
+                "metadata_json": "{}",
+                "timestamp": "2026-04-10T12:07:16.000Z",
+            },
+            {
+                "id": "snap-2-after",  # user has switched to Gmail
+                "kind_json": json.dumps({"type": "DwellSnapshot"}),
+                "window_json": json.dumps({
+                    "app_name": "Comet",
+                    "title": "Gmail",
+                }),
+                "metadata_json": "{}",
+                "timestamp": "2026-04-10T12:07:17.000Z",
+            },
+        ]
+        cleaned = processor._attach_clipboard_context(events)
+
+        # ClipboardChange removed from event list
+        assert len(cleaned) == 2
+        assert all(
+            processor._extract_event_kind(e) == "DwellSnapshot" for e in cleaned
+        )
+
+        # Clipboard attached to the snapshot BEFORE (the source of the copy)
+        assert "snap-1-source" in processor._clipboard_map
+        assert "snap-2-after" not in processor._clipboard_map
+        clip = processor._clipboard_map["snap-1-source"]
+        assert clip["byte_size"] == 30812
+        # Source app/location are looked up and attached so the SOP
+        # generator can attribute the Copy step to the right app
+        assert clip["source_app"] == "Comet"
+        assert clip["source_location"] == "Hacker News"
+
+    def test_attach_clipboard_falls_back_to_after_when_no_before(self):
+        """If clipboard fires before any DwellSnapshot, fall back to AFTER."""
+        processor = self._make_processor()
+        events = [
+            {
+                "id": "clip-1",
+                "kind_json": json.dumps({
+                    "type": "ClipboardChange",
+                    "content_types": ["public.utf8-plain-text"],
+                    "byte_size": 100,
+                }),
+                "metadata_json": "{}",
+                "timestamp": "2026-04-10T12:07:14.000Z",
+            },
+            {
+                "id": "snap-only",
+                "kind_json": json.dumps({"type": "DwellSnapshot"}),
+                "window_json": "{}",
+                "metadata_json": "{}",
+                "timestamp": "2026-04-10T12:07:15.000Z",
+            },
+        ]
+        processor._attach_clipboard_context(events)
+        assert "snap-only" in processor._clipboard_map

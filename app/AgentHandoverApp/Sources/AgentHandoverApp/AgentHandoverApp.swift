@@ -1,4 +1,5 @@
 import SwiftUI
+import Sparkle
 
 @main
 struct AgentHandoverApp: App {
@@ -69,6 +70,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
 
     /// Single shared AppState used by onboarding, menu bar, and all windows.
     @MainActor let sharedAppState = AppState()
+
+    /// Sparkle auto-updater — starts on launch per SUEnableAutomaticChecks in Info.plist.
+    let updaterController = SPUStandardUpdaterController(
+        startingUpdater: true,
+        updaterDelegate: nil,
+        userDriverDelegate: nil
+    )
 
     /// Screenshot capture server — serves pixels to the daemon via Unix socket.
     private let captureServer = ScreenCaptureServer()

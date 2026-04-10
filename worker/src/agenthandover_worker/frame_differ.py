@@ -345,14 +345,20 @@ class FrameDiffer:
 
         try:
             from agenthandover_worker.scene_annotator import _call_ollama_vlm
+            from agenthandover_worker.model_profiles import get_profile
+            profile = get_profile(self.config.model)
 
             raw_response, inference_time = _call_ollama_vlm(
                 model=self.config.model,
                 prompt=prompt,
                 host=self.config.ollama_host,
-                num_predict=self.config.num_predict,
-                system=DIFF_SYSTEM_PROMPT,
-                # No image — text-only diff
+                num_predict=profile.diff_num_predict,
+                system=profile.diff_system or DIFF_SYSTEM_PROMPT,
+                think=profile.diff_think,
+                extra_options={
+                    k: v for k, v in profile.diff_options().items()
+                    if k not in ("num_predict",)
+                },
             )
         except ConnectionError as exc:
             self._stats["failed"] += 1

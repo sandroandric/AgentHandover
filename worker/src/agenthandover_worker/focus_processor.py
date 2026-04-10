@@ -125,29 +125,60 @@ class FocusProcessor:
 
         # Step 4: Behavioral pre-analysis (optional, informs SOP generation)
         behavioral_context = ""
+        self._last_pre_analysis_strategy = ""  # expose for fallback
+        self._last_pre_analysis_goal = ""  # expose for fallback
+        # Build the rich-evidence observations once and stash on the
+        # processor so the post-SOP synthesizer in main.py can reuse the
+        # SAME rich data instead of just the abstract SOP steps.
+        rich_observations = [
+            [
+                self._build_pre_analysis_obs(f)
+                for f in timeline if f.get("annotation")
+            ]
+        ]
+        self._last_rich_observations = rich_observations
         if self.behavioral_synthesizer is not None:
             try:
                 from agenthandover_worker.sop_generator import _generate_slug
                 pre_procedure = {"title": title, "steps": [], "source": "focus"}
-                timeline_obs = [
-                    [{"action": f.get("annotation", {}).get("task_context", {}).get("what_doing", "")}
-                     for f in timeline if f.get("annotation")]
-                ]
+                # Build richer observations from annotations so the model
+                # has enough context to extract a concrete goal.  Include
+                # key_text fields (email addresses, typed text, urls) which
+                # are now populated accurately from daemon OCR — these are
+                # the "verbatim" grounding the synthesizer prompt asks for.
+                timeline_obs = rich_observations
                 insights = self.behavioral_synthesizer.synthesize(
                     _generate_slug(title), pre_procedure, timeline_obs,
                     force=True,
                 )
-                if insights.strategy:
-                    behavioral_context = f"User intent: {insights.strategy}\n"
+                if insights.goal:
+                    self._last_pre_analysis_goal = insights.goal
+                if insights.strategy or insights.goal:
+                    self._last_pre_analysis_strategy = insights.strategy
+                    # Goal leads the context so the SOP generator sees
+                    # intent before approach.
+                    pieces: list[str] = []
+                    if insights.goal:
+                        pieces.append(f"User goal: {insights.goal}")
+                    if insights.strategy:
+                        pieces.append(f"User strategy: {insights.strategy}")
                     if insights.selection_criteria:
-                        behavioral_context += (
-                            "Selection criteria: "
-                            + ", ".join(c.criterion for c in insights.selection_criteria)
-                            + "\n"
-                        )
+                        crit_strs: list[str] = []
+                        for c in insights.selection_criteria:
+                            # selection_criteria entries are dicts, not objects
+                            if isinstance(c, dict):
+                                val = c.get("criterion", "")
+                                if val:
+                                    crit_strs.append(str(val))
+                        if crit_strs:
+                            pieces.append(
+                                "Selection criteria: " + ", ".join(crit_strs)
+                            )
+                    behavioral_context = "\n".join(pieces) + "\n"
                     logger.info(
-                        "Focus v2 session '%s': behavioral pre-analysis complete",
-                        title,
+                        "Focus v2 session '%s': behavioral pre-analysis complete "
+                        "(goal=%s, strategy=%s)",
+                        title, bool(insights.goal), bool(insights.strategy),
                     )
             except Exception:
                 logger.debug(
@@ -161,6 +192,78 @@ class FocusProcessor:
         )
         return result
 
+    @staticmethod
+    def _build_pre_analysis_obs(frame: dict) -> dict:
+        """Build one observation dict from a timeline frame for the
+        behavioral synthesizer.
+
+        Pulls EVERY structured field Gemma fills in, so the synthesizer
+        can see verbatim text (emails, URLs, typed content, names, the
+        Send button being focused) rather than just 'user is doing X'.
+
+        Historical bug (caught 2026-04-10): only 4 fields were extracted,
+        dropping ``names``, ``ui_state.active_element``, ``visible_content
+        .values`` (where compose body content lives), and the explicit
+        ``compose`` block — all of which carry the recipient/subject/body
+        text the synthesizer needs to write a concrete goal.
+        """
+        ann = frame.get("annotation", {}) or {}
+        tc = ann.get("task_context", {}) or {}
+        kt = ann.get("key_text", {}) or {}
+        vc = ann.get("visible_content", {}) or {}
+        ui = ann.get("ui_state", {}) or {}
+
+        obs: dict = {
+            "action": tc.get("what_doing", ""),
+            "app": ann.get("app", ""),
+            "location": ann.get("location", ""),
+            "target": ann.get("location", ""),
+        }
+
+        # Verbatim grounding — helps the synthesizer write concrete goals
+        email_addrs = kt.get("email_addresses") or []
+        if email_addrs:
+            obs["email_addresses"] = email_addrs
+        urls = kt.get("urls") or []
+        if urls:
+            obs["urls"] = urls
+        names = kt.get("names") or []
+        if names:
+            obs["names"] = names[:10]
+        typed = kt.get("typed_text") or ""
+        if typed:
+            obs["typed_text"] = typed[:400]
+        selected = kt.get("selected_text") or ""
+        if selected:
+            obs["selected_text"] = selected[:400]
+
+        # UI state — "active_element=Send button" tells the synthesizer
+        # the user is about to send something, even when typed_text is
+        # empty (Gemma often leaves typed_text blank if the cursor isn't
+        # visibly blinking in the screenshot).
+        active_element = ui.get("active_element") or ""
+        if active_element:
+            obs["active_element"] = active_element[:200]
+
+        # All visible text — Gemma flattens compose-window content into
+        # visible_content.values mixed with background UI text.  We pass
+        # it through with a higher cap so the synthesizer can quote
+        # actual subject lines, body text, recipient chips, etc.
+        values = vc.get("values") or []
+        if values:
+            obs["visible_values"] = values[:25]
+        headings = vc.get("headings") or []
+        if headings:
+            obs["headings"] = headings[:8]
+
+        # Compose-specific structured fields (filled in when the
+        # annotation prompt explicitly asks for them — sharper prompt
+        # added 2026-04-10).
+        compose = ann.get("compose")
+        if isinstance(compose, dict) and compose:
+            obs["compose"] = compose
+
+        return obs
 
     # ------------------------------------------------------------------
     # Step 0a: Filter own events
@@ -238,12 +341,19 @@ class FocusProcessor:
         ClipboardChange events have no screenshots and cannot be annotated
         by the VLM.  This method:
         1. Identifies ClipboardChange events via ``kind_json``.
-        2. For each, finds the nearest DwellSnapshot event (preferring the
-           one immediately AFTER; if none exists, uses the one immediately
-           BEFORE).
-        3. Stores clipboard info (content_types, byte_size) keyed by the
-           target event's ID in ``self._clipboard_map``.
+        2. For each, finds the snapshot immediately BEFORE the clipboard
+           event — this is the frame the user was looking at when they
+           pressed Cmd+C, so it's the SOURCE of the copy.  Falls back to
+           the snapshot AFTER if no BEFORE exists (very rare).
+        3. Stores clipboard info keyed by the target event's ID in
+           ``self._clipboard_map``.
         4. Removes ClipboardChange events from the list.
+
+        Historical bug (caught 2026-04-10): the matcher preferred the
+        snapshot AFTER the clipboard event.  When a user copied from HN
+        and switched to Gmail before the next snapshot fired, the COPY
+        marker landed on a Gmail frame and the SOP generator wrote
+        ``Copy from Gmail`` instead of ``Copy from Hacker News``.
 
         Returns the cleaned event list (DwellSnapshots only).
         """
@@ -275,39 +385,59 @@ class FocusProcessor:
             if not clip_meta:
                 continue
 
-            # Find nearest DwellSnapshot: prefer immediately after, else before
-            best_id: str | None = None
-            best_distance = float("inf")
-            prefer_after = True
-
+            # Find the closest DwellSnapshot BEFORE the clipboard event —
+            # that's where the user actually pressed Cmd+C.
+            best_before: tuple[int, str] | None = None  # (idx, dwell_id)
+            best_after: tuple[int, str] | None = None
             for dwell_orig_idx, dwell_id in dwell_positions:
-                distance = dwell_orig_idx - clip_idx
-                abs_distance = abs(distance)
+                if dwell_orig_idx < clip_idx:
+                    if best_before is None or dwell_orig_idx > best_before[0]:
+                        best_before = (dwell_orig_idx, dwell_id)
+                elif dwell_orig_idx > clip_idx:
+                    if best_after is None or dwell_orig_idx < best_after[0]:
+                        best_after = (dwell_orig_idx, dwell_id)
 
-                if abs_distance >= best_distance:
-                    # If current best is "after" and this is "before" with
-                    # same distance, keep "after"
-                    if abs_distance == best_distance and not prefer_after and distance > 0:
-                        best_id = dwell_id
-                        best_distance = abs_distance
-                        prefer_after = True
-                    continue
+            # Prefer BEFORE (the actual copy source); fall back to AFTER
+            target = best_before or best_after
+            if target is None:
+                continue
+            target_id = target[1]
 
-                # Prefer "after" (positive distance) over "before"
-                if distance > 0:
-                    best_id = dwell_id
-                    best_distance = abs_distance
-                    prefer_after = True
-                elif best_id is None or (not prefer_after and abs_distance < best_distance):
-                    best_id = dwell_id
-                    best_distance = abs_distance
-                    prefer_after = False
+            # Look up the source frame's app/location so we can include
+            # them in the COPY marker — gives the SOP generator the
+            # context it needs to attribute the action correctly.
+            source_app = ""
+            source_location = ""
+            for orig_idx, evt in non_clipboard:
+                if evt.get("id", "") == target_id:
+                    win_raw = evt.get("window_json", "")
+                    try:
+                        win = (
+                            json.loads(win_raw)
+                            if isinstance(win_raw, str)
+                            else win_raw
+                        )
+                        if isinstance(win, dict):
+                            source_app = str(
+                                win.get("app_name", "")
+                                or win.get("app_bundle_id", "")
+                            )
+                            source_location = str(
+                                win.get("title", "") or win.get("url", "")
+                            )
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+                    break
+            if source_app:
+                clip_meta["source_app"] = source_app
+            if source_location:
+                clip_meta["source_location"] = source_location
 
-            if best_id:
-                self._clipboard_map[best_id] = clip_meta
+            self._clipboard_map[target_id] = clip_meta
 
         logger.info(
-            "Focus v2: attached %d clipboard context(s) to snapshots, "
+            "Focus v2: attached %d clipboard context(s) to snapshots "
+            "(prefer BEFORE = source of copy), "
             "removed %d ClipboardChange event(s)",
             len(self._clipboard_map), len(clipboard_events),
         )
@@ -317,7 +447,12 @@ class FocusProcessor:
 
     @staticmethod
     def _extract_event_kind(event: dict) -> str:
-        """Extract the event kind name from ``kind_json``."""
+        """Extract the event kind name from ``kind_json``.
+
+        kind_json is serialized as ``{"type": "DwellSnapshot", ...}`` or
+        ``{"type": "ClipboardChange", ...}``. We need the VALUE of ``type``,
+        not the first key.
+        """
         kind_json = event.get("kind_json", "")
         if not kind_json:
             return ""
@@ -329,31 +464,53 @@ class FocusProcessor:
             )
         except (json.JSONDecodeError, TypeError):
             return ""
-        if isinstance(parsed, dict) and parsed:
-            return next(iter(parsed))
+        if isinstance(parsed, dict) and "type" in parsed:
+            return str(parsed.get("type", ""))
         return ""
 
     @staticmethod
     def _extract_clipboard_meta(event: dict) -> dict | None:
-        """Extract clipboard metadata (content_types, byte_size) from an event."""
-        metadata_json = event.get("metadata_json", "")
-        if not metadata_json:
+        """Extract clipboard metadata (content_types, byte_size) from an event.
+
+        ClipboardChange events serialize the payload inside ``kind_json``,
+        not ``metadata_json``.  The daemon writes it as::
+
+            kind_json = {
+                "type": "ClipboardChange",
+                "content_types": [...],
+                "byte_size": N,
+                "high_entropy": bool,
+                "content_hash": "...",
+            }
+
+        This was historically read from ``metadata_json``, which is always
+        ``{}`` for clipboard events — so clipboard context was never
+        attached to focus SOPs.
+        """
+        kind_json = event.get("kind_json", "")
+        if not kind_json:
             return None
         try:
-            metadata = (
-                json.loads(metadata_json)
-                if isinstance(metadata_json, str)
-                else metadata_json
+            parsed = (
+                json.loads(kind_json)
+                if isinstance(kind_json, str)
+                else kind_json
             )
         except (json.JSONDecodeError, TypeError):
             return None
-        if not isinstance(metadata, dict):
+        if not isinstance(parsed, dict):
             return None
-        content_types = metadata.get("content_types", [])
-        byte_size = metadata.get("byte_size", 0)
+        content_types = parsed.get("content_types", [])
+        byte_size = parsed.get("byte_size", 0)
         if not content_types and not byte_size:
             return None
-        return {"content_types": content_types, "byte_size": byte_size}
+        meta: dict = {"content_types": content_types, "byte_size": byte_size}
+        # Include extra fields that the SOP generator may use for context
+        if parsed.get("high_entropy") is not None:
+            meta["high_entropy"] = parsed["high_entropy"]
+        if parsed.get("content_hash"):
+            meta["content_hash"] = parsed["content_hash"]
+        return meta
 
     # ------------------------------------------------------------------
     # Step 1: Annotation

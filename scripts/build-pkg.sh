@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="${VERSION:-0.1.0}"
-PKG_ROOT="$(mktemp -d)"
 SCRIPTS_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPTS_DIR/.." && pwd)"
+# Read version from Info.plist (source of truth)
+VERSION="${VERSION:-$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "${REPO_ROOT}/app/AgentHandoverApp/Sources/AgentHandoverApp/Info.plist" 2>/dev/null || echo "0.1.0")}"
+PKG_ROOT="$(mktemp -d)"
 OUTPUT="${REPO_ROOT}/target/AgentHandover-${VERSION}.pkg"
 
 echo "=== Building AgentHandover ${VERSION} ==="
@@ -64,8 +65,14 @@ elif [ -f "${EXT_SRC}/package.json" ]; then
     [ -f "${EXT_SRC}/webpack.config.js" ] && cp "${EXT_SRC}/webpack.config.js" "${EXT_DST}/"
 fi
 
-# Copy launchd plists (templates)
-cp "${REPO_ROOT}/resources/launchd/"*.plist "${PKG_ROOT}/usr/local/lib/agenthandover/launchd/"
+# Copy launchd plists (templates).
+# Only the worker uses launchd — the daemon is launched directly by the
+# menu bar app via Process() (see ServiceController.swift), so no daemon
+# plist is shipped.  A daemon plist used to live here with a stale path
+# pointing into the old Helpers/AgentHandoverDaemon.app bundle, which
+# caused user confusion (issue #1) — explicit list, not a glob, prevents
+# stale plists from sneaking back in.
+cp "${REPO_ROOT}/resources/launchd/com.agenthandover.worker.plist" "${PKG_ROOT}/usr/local/lib/agenthandover/launchd/"
 
 # Copy worker Python package (source only, no tests/build artifacts)
 echo "Staging worker..."
@@ -82,6 +89,18 @@ if [ -f "${APP_BINARY}" ]; then
     cp "${APP_BINARY}" "${APP_BUNDLE}/AgentHandover"
     cp "${REPO_ROOT}/app/AgentHandoverApp/Sources/AgentHandoverApp/Info.plist" \
        "${PKG_ROOT}/Applications/AgentHandover.app/Contents/Info.plist"
+
+    # Add rpath for embedded frameworks so Sparkle.framework loads at runtime
+    install_name_tool -add_rpath @loader_path/../Frameworks "${APP_BUNDLE}/AgentHandover" 2>/dev/null || true
+
+    # Copy frameworks (Sparkle) to Contents/Frameworks
+    FRAMEWORKS_DIR="${PKG_ROOT}/Applications/AgentHandover.app/Contents/Frameworks"
+    mkdir -p "${FRAMEWORKS_DIR}"
+    for FW in "${REPO_ROOT}"/app/AgentHandoverApp/.build/release/*.framework; do
+        [ -d "${FW}" ] || continue
+        cp -R "${FW}" "${FRAMEWORKS_DIR}/"
+        echo "  Framework included: $(basename "${FW}")"
+    done
 
     # Copy SPM resource bundle + icon to Contents/Resources
     RESOURCES_DIR="${PKG_ROOT}/Applications/AgentHandover.app/Contents/Resources"

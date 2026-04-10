@@ -267,17 +267,25 @@ class TestClipboardLinkerIntegration:
         base = datetime(2026, 2, 16, 10, 0, 0, tzinfo=timezone.utc)
         content_hash = hashlib.sha256(b"test content").hexdigest()
 
+        # Clipboard events use the real daemon format: kind_json carries
+        # {"type": "<kind>", "content_hash": ..., "byte_size": ...}.
+        # metadata_json holds unrelated fields and is {} for clipboard
+        # events in production.  (Historical bug caught 2026-04-10: this
+        # fixture previously wrote to metadata_json, which matched the
+        # broken production code, so both drifted from reality together.)
         events = [
             {
                 "id": "copy-1",
                 "timestamp": _ts(base),
-                "kind_json": json.dumps({"ClipboardChange": {}}),
-                "window_json": json.dumps({"app_id": "com.apple.Terminal", "title": "Terminal"}),
-                "metadata_json": json.dumps({
+                "kind_json": json.dumps({
+                    "type": "ClipboardChange",
                     "content_hash": content_hash,
-                    "content_types": ["text/plain"],
+                    "content_types": ["public.utf8-plain-text"],
                     "byte_size": 12,
+                    "high_entropy": False,
                 }),
+                "window_json": json.dumps({"app_id": "com.apple.Terminal", "title": "Terminal"}),
+                "metadata_json": "{}",
                 "display_topology_json": "[]",
                 "primary_display_id": "main",
                 "processed": 0,
@@ -285,12 +293,14 @@ class TestClipboardLinkerIntegration:
             {
                 "id": "paste-1",
                 "timestamp": _ts(base + timedelta(minutes=2)),
-                "kind_json": json.dumps({"PasteDetected": {}}),
-                "window_json": json.dumps({"app_id": "com.apple.Terminal", "title": "Terminal"}),
-                "metadata_json": json.dumps({
+                "kind_json": json.dumps({
+                    "type": "PasteDetected",
                     "content_hash": content_hash,
                     "target_app": "com.apple.TextEdit",
+                    "byte_size": 12,
                 }),
+                "window_json": json.dumps({"app_id": "com.apple.Terminal", "title": "Terminal"}),
+                "metadata_json": "{}",
                 "display_topology_json": "[]",
                 "primary_display_id": "main",
                 "processed": 0,

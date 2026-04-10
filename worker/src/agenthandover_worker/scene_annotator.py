@@ -99,6 +99,13 @@ Be specific — include exact text, names, email addresses, URLs, numbers, and v
     "typed_text": "<exact text the user is typing or has typed in any input field>",
     "selected_text": "<any highlighted or selected text>"
   }},
+  "compose": {{
+    "is_compose_window_open": <true|false: is an email/message compose window visible AT ALL>,
+    "recipient": "<exact text in the To/Recipient field, including chip names like 'Sandro Andric (incentive.ae)'. Empty string if no compose window.>",
+    "subject": "<exact text in the Subject field as visible on screen. Empty string if no compose window or subject is empty.>",
+    "body_first_line": "<the first line of the email body, exactly as visible on screen (e.g. 'Hi Sandro,' or 'Top news:'). Empty string if no body text visible.>",
+    "send_button_state": "<'visible', 'focused', 'just_clicked', or 'not_visible'>"
+  }},
   "task_context": {{
     "what_doing": "<one detailed sentence: what specific task is the user performing — include names, recipients, subjects>",
     "likely_next": "<one sentence: what will the user probably do next>",
@@ -106,7 +113,33 @@ Be specific — include exact text, names, email addresses, URLs, numbers, and v
   }}
 }}
 
-{context_section}Respond with ONLY the JSON object. No markdown, no explanation."""
+CRITICAL FOR COMPOSE WINDOWS: When the screenshot shows an open email
+compose window (Gmail, Outlook, Mail.app, Slack DM, etc.), you MUST fill
+the ``compose`` block with VERBATIM text from the actual compose fields:
+- ``recipient``: copy the EXACT text in the To field, including any
+  contact-chip suffixes like "(incentive.ae)" or "<email@domain>"
+- ``subject``: copy the EXACT subject line text as displayed
+- ``body_first_line``: copy the FIRST visible line of the message body
+Do NOT paraphrase or summarize.  Do NOT confuse it with text from the
+inbox list panel that's still visible alongside the compose window.
+If a compose window is NOT visible, set is_compose_window_open=false
+and leave the other compose fields as empty strings.
+
+{ocr_section}{context_section}IMPORTANT: Whenever an OCR TEXT section is provided above, treat it as \
+ground truth for ANY text field (email_addresses, urls, typed_text, values, \
+active_element, selected_text, names, subjects, counts).  The OCR was produced \
+by the OS's text extraction at confidence 1.0 and is exact.  Visual reading \
+of the screenshot is often blurry or downscaled — the OCR is the source of \
+truth when the two disagree.
+
+Respond with ONLY the JSON object. No markdown, no explanation."""
+
+OCR_TEMPLATE = """\
+OCR TEXT (high-confidence text extracted by the OS for this exact frame — \
+treat as ground truth, not visual guess):
+{ocr_text}
+
+"""
 
 CONTEXT_TEMPLATE = """\
 PREVIOUS FRAMES (last {window_age_label}):
@@ -155,15 +188,85 @@ def _build_context_section(recent_annotations: list[dict]) -> str:
     )
 
 
+def _extract_ocr_text_from_event(event: dict, max_chars: int = 4000) -> str:
+    """Pull high-confidence OCR text out of the event's ``metadata_json``.
+
+    The daemon writes OCR results as::
+
+        metadata_json = {
+            "ocr": {
+                "elements": [
+                    {"text": "...", "confidence": 1.0, "bbox_normalized": [...]},
+                    ...
+                ]
+            }
+        }
+
+    We extract the ``text`` of each element, preserving daemon order (roughly
+    top-to-bottom, left-to-right), and join with newlines.  This gets injected
+    into the VLM prompt as ground truth so Gemma doesn't have to re-read
+    small/downscaled text visually.
+
+    Historically this was never passed to the VLM prompt — OCR was only used
+    for the vector text proxy via ``ocr.full_text`` (a field the daemon never
+    writes).  Bug caught 2026-04-10.
+    """
+    metadata_raw = event.get("metadata_json", "{}")
+    try:
+        metadata = (
+            json.loads(metadata_raw)
+            if isinstance(metadata_raw, str)
+            else metadata_raw
+        )
+    except (json.JSONDecodeError, TypeError):
+        return ""
+    if not isinstance(metadata, dict):
+        return ""
+
+    ocr_data = metadata.get("ocr")
+    if not isinstance(ocr_data, dict):
+        return ""
+
+    # Prefer the structured elements list (what the daemon actually writes)
+    elements = ocr_data.get("elements")
+    if isinstance(elements, list):
+        texts: list[str] = []
+        for el in elements:
+            if not isinstance(el, dict):
+                continue
+            text = el.get("text", "")
+            if isinstance(text, str) and text.strip():
+                texts.append(text.strip())
+        combined = "\n".join(texts)
+        if combined:
+            return combined[:max_chars]
+
+    # Fallback: some older formats may have stored a flat full_text string
+    full_text = ocr_data.get("full_text", "")
+    if isinstance(full_text, str) and full_text:
+        return full_text[:max_chars]
+
+    return ""
+
+
 def build_annotation_prompt(
     recent_annotations: list[dict] | None = None,
+    ocr_text: str = "",
 ) -> str:
-    """Build the full annotation prompt with optional sliding-window context."""
+    """Build the full annotation prompt with optional sliding-window context
+    and optional OCR ground-truth text for the current frame."""
     context_section = ""
     if recent_annotations:
         context_section = _build_context_section(recent_annotations)
 
-    return ANNOTATION_PROMPT_TEMPLATE.format(context_section=context_section)
+    ocr_section = ""
+    if ocr_text:
+        ocr_section = OCR_TEMPLATE.format(ocr_text=ocr_text)
+
+    return ANNOTATION_PROMPT_TEMPLATE.format(
+        context_section=context_section,
+        ocr_section=ocr_section,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -288,11 +391,20 @@ def _call_ollama_vlm(
     num_predict: int = 1500,
     system: str = "",
     timeout: float = 60.0,
+    think: bool | str = False,
+    extra_options: dict | None = None,
 ) -> tuple[str, float]:
     """Call Ollama's /api/generate with an optional image.
 
     Returns (response_text, inference_time_seconds).
     Raises on connection or HTTP errors.
+
+    Args:
+        think: False, True, "low", "medium", or "high". Controls reasoning
+            depth for models that support it (Gemma 4, Qwen 3.5).
+        extra_options: Additional Ollama options (top_k, presence_penalty, etc.)
+            merged into the options dict. Use model_profiles.get_profile() to
+            get optimal settings per model.
     """
     import urllib.request
     import urllib.error
@@ -300,18 +412,20 @@ def _call_ollama_vlm(
 
     url = f"{host}/api/generate"
 
+    options = {
+        "num_predict": num_predict,
+        "num_ctx": 8192,
+    }
+    if extra_options:
+        options.update(extra_options)
+
     payload: dict = {
         "model": model,
         "prompt": prompt,
         "stream": False,
-        # think=False must be a top-level parameter, NOT inside options.
-        # Inside options it has no effect and Qwen3.5 models consume all
-        # num_predict tokens on internal reasoning, returning empty content.
-        "think": False,
-        "options": {
-            "num_predict": num_predict,
-            "num_ctx": 8192,
-        },
+        # think must be a top-level parameter, NOT inside options.
+        "think": think,
+        "options": options,
     }
 
     if system:
@@ -452,17 +566,28 @@ class SceneAnnotator:
             )
 
         # --- Build prompt ---
-        prompt = build_annotation_prompt(recent_annotations)
+        # Extract daemon OCR text from this event and feed it to the VLM
+        # as ground truth. Prevents Gemma from visually misreading small
+        # text (email addresses, subject lines, counts) at half resolution.
+        ocr_text = _extract_ocr_text_from_event(event)
+        prompt = build_annotation_prompt(recent_annotations, ocr_text=ocr_text)
 
         # --- Call VLM ---
         try:
+            from agenthandover_worker.model_profiles import get_profile
+            profile = get_profile(self.config.model)
             raw_response, inference_time = _call_ollama_vlm(
                 model=self.config.model,
                 prompt=prompt,
                 image_path=screenshot_path,
                 host=self.config.ollama_host,
-                num_predict=self.config.num_predict,
-                system=SYSTEM_PROMPT,
+                num_predict=profile.ann_num_predict,
+                system=profile.ann_system or SYSTEM_PROMPT,
+                think=profile.ann_think,
+                extra_options={
+                    k: v for k, v in profile.ann_options().items()
+                    if k not in ("num_predict", "num_ctx")
+                },
             )
         except ConnectionError as exc:
             self._stats["failed"] += 1
@@ -497,8 +622,13 @@ class SceneAnnotator:
                     prompt=retry_prompt,
                     image_path=screenshot_path,
                     host=self.config.ollama_host,
-                    num_predict=self.config.num_predict,
-                    system=SYSTEM_PROMPT,
+                    num_predict=profile.ann_num_predict,
+                    system=profile.ann_system or SYSTEM_PROMPT,
+                    think=profile.ann_think,
+                    extra_options={
+                        k: v for k, v in profile.ann_options().items()
+                        if k not in ("num_predict", "num_ctx")
+                    },
                 )
                 inference_time += retry_time
                 annotation = _validate_annotation(raw_response)
