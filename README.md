@@ -9,6 +9,13 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/sandroandric/AgentHandover/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/sandroandric/AgentHandover?label=release&color=blue" /></a>
+  <img alt="License" src="https://img.shields.io/github/license/sandroandric/AgentHandover?color=blue" />
+  <img alt="Platform" src="https://img.shields.io/badge/platform-macOS-black" />
+  <img alt="Local-first" src="https://img.shields.io/badge/local--first-yes-brightgreen" />
+</p>
+
+<p align="center">
   <a href="#demo">Demo</a> &middot;
   <a href="#quickstart">Quickstart</a> &middot;
   <a href="#what-you-can-automate">Use Cases</a> &middot;
