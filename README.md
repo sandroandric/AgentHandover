@@ -79,7 +79,7 @@ If it's a workflow you've done three times and will do again, it belongs in a Sk
 3. **Answer 1-3 questions.** AgentHandover asks from the agent's perspective — *"What determines which posts you engage with?"*
 4. **Review and approve.** Open the Skill in the menu bar app, check the steps/strategy/guardrails, click **Approve for Agents**.
 5. **Connect your agent.** `agenthandover connect claude-code` (or `codex` / `openclaw`). One command.
-6. **Run it.** In Claude Code, type `/reddit-community-marketing`. The agent executes your workflow.
+6. **Run it.** In Claude Code, type `/ah-reddit-community-marketing`. The agent executes your workflow.
 
 That's the whole loop. Record once, hand off forever.
 
@@ -207,7 +207,7 @@ Exposes 8 tools:
 agenthandover connect claude-code
 ```
 
-Skills appear as `/slash-commands`. Type `/reddit-community-marketing` and Claude Code gets the full Skill.
+Skills appear as `/ah-<slug>` slash commands (the `ah-` prefix groups them together in Claude Code's command palette so your other project commands don't collide with AgentHandover's). Type `/ah-reddit-community-marketing` and Claude Code gets the full Skill.
 
 ### Codex
 
