@@ -499,6 +499,24 @@ GitHub [Discussions](https://github.com/sandroandric/AgentHandover/discussions) 
 
 ## Changelog
 
+### v0.2.4 (2026-04-11)
+
+Hotfix for three follow-up issues reported on the v0.2.3 install. All three were install-time / lifecycle issues — the observation and SOP pipelines are unchanged.
+
+**Installer — correct user detection on edge cases**
+- `postinstall` now cascades through four methods to find the real logged-in user instead of relying on `stat -f '%Su' /dev/console` alone. On at least one reporter's machine, `/dev/console` was owned by `root` at install time, which cascaded into `dscl . -read /Users/root NFSHomeDirectory` → `/var/root`, which is a real directory on macOS, so the `[ -d "$USER_HOME" ]` safety check passed and the LaunchAgent got copied to `/var/root/Library/LaunchAgents/` instead of the user's home. Silent failure — `launchctl` from the user's session never saw the plist. New order: `scutil show State:/Users/ConsoleUser` (Apple's canonical GUI-user source) → `SUDO_USER` env var → `stat -f '%Su' /dev/console` → first-real-user scan via `dscl . list /Users UniqueID` filtered to UID ≥ 500. Each method is validated via `_valid_user()` (UID must exist AND be ≥ 500), the `postinstall` hard-fails with an explicit error message if none of the four methods find a real user, and it refuses to install if `USER_HOME` ever resolves to `/var/root` or empty. The install diagnostic now prints `Installing for user: <user> (UID=<uid>, HOME=<home>, detected via <method>)` so future bug reports include the detection path.
+
+**CLI — `agenthandover start worker` no longer prints a spurious error**
+- `start_worker_launchd()` used to call `launchctl load -w <plist>` (deprecated) via a wrapper that auto-printed stderr before verifying success. `launchctl load` returns `Load failed: 5: Input/output error` when the job is already loaded (even though the worker is running correctly), so users saw a scary error message on every call. Rewrote both `start_worker_launchd` and `stop_worker_launchd` to use the modern `bootstrap gui/<uid>` / `kickstart -k gui/<uid>/<label>` / `bootout gui/<uid>/<label>` APIs, added an idempotent "already running" short-circuit check at the top of `start_worker_launchd`, and switched to a silent-launchctl wrapper that only surfaces stderr on actual failure (final `is_job_running` check after 500 ms confirms the outcome). Previous behavior: error printed, exit 0. New behavior: clean success message, no error text in the common case.
+
+**Worker — `/version` and `worker-status.json` report the installed version**
+- `worker_version` was hardcoded as the string `"0.2.0"` in three places (`main.py`, `procedure_schema.py`, `query_api.py`) and `__version__` in `agenthandover_worker/__init__.py` was hardcoded as `"0.1.0"` — all four had been frozen across v0.2.0, v0.2.1, v0.2.2, and v0.2.3 releases, so the REST `/version` endpoint and `worker-status.json` were lying about which worker an agent was talking to, and every saved procedure's `generator_version` was wrong. Refactored to a single source of truth: `agenthandover_worker/__init__.py` now reads the installed version dynamically from `importlib.metadata.version("agenthandover-worker")`, and the three hardcoded call sites all read `__version__` from the package. No more drift — the worker version tracks `pyproject.toml` automatically on every release.
+
+**Tests**
+- 3000/3000 Python tests pass (unchanged test count — all three fixes were behavioral, no new surface area).
+- Swift app, Rust daemon, and Chrome extension unchanged except for version bumps.
+- Validated end-to-end on the installed pkg.
+
 ### v0.2.3 (2026-04-11)
 
 Hotfix for a v0.2.2 regression that crashed the worker on first launch, plus four other issues caught during deep testing. Recommended upgrade for everyone on v0.2.2.

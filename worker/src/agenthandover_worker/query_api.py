@@ -795,9 +795,14 @@ class QueryAPIHandler(http.server.BaseHTTPRequestHandler):
         self._send_json({"trend": telemetry.get_trend(7)})
 
     def _handle_version(self) -> None:
+        # Worker version read from package metadata (dist-info), not a
+        # hardcoded string. Previously frozen at "0.2.0" through three
+        # releases — the REST /version endpoint was lying about which
+        # worker the agent was talking to.
+        from agenthandover_worker import __version__ as worker_version
         from agenthandover_worker.procedure_schema import PROCEDURE_SCHEMA_VERSION
         self._send_json({
-            "worker_version": "0.2.0",
+            "worker_version": worker_version,
             "schema_version": PROCEDURE_SCHEMA_VERSION,
         })
 

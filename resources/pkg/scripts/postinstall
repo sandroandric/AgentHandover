@@ -6,14 +6,144 @@ set -e
 WARNINGS=""
 warn() { WARNINGS="${WARNINGS}\n  ⚠ $1"; }
 
-# Resolve the real user's home — installer runs as root so $USER may be "root".
-# Use the console owner (the logged-in user) as the target.
-CONSOLE_USER=$(stat -f '%Su' /dev/console 2>/dev/null || echo "$USER")
+# ----------------------------------------------------------------------
+# Detect the real logged-in user (the one we want to install into).
+#
+# This is harder than it looks. The installer runs as root, so $USER is
+# always "root" (or whatever the invoking shell was). We need "the human
+# behind the keyboard" — the person whose ~/Library/LaunchAgents we
+# should write to, whose ~/Library/Application Support we should create.
+#
+# v0.2.3 used `stat -f '%Su' /dev/console` with a fallback to `$USER`.
+# That broke for at least one user (hikoae, issue #1 follow-up) because
+# on his machine `/dev/console` resolved to `root` at install time,
+# causing the whole install to target `/var/root/Library/LaunchAgents/`
+# instead of his user's — the LaunchAgent was never visible to his
+# logged-in session, `agenthandover start` failed with
+# `launchctl: Load failed: 5: Input/output error`, and `doctor`
+# reported `Worker launchd plist` as missing. The failure was silent
+# because `/var/root` is a real directory on macOS, so the fallback
+# `[ -d "$USER_HOME" ]` check always passed.
+#
+# v0.2.4 cascades through four methods, each more reliable than the
+# previous, with explicit UID >= 500 validation and a hard-fail if none
+# of them find a real user. Order matters: scutil is the authoritative
+# source for "current GUI console user" per Apple's own docs; SUDO_USER
+# catches the case where someone runs `sudo installer -pkg` from an
+# SSH session (where scutil may return `loginwindow` or be empty);
+# stat /dev/console is the legacy method and still works on most
+# machines; dscl is a last-resort "first real user on this system"
+# fallback for pathological cases.
+# ----------------------------------------------------------------------
+
+_uid_of() {
+    # Echo the UID for a given username, or nothing if the user doesn't
+    # exist or has no UID. Safe on system accounts (returns their UID,
+    # which the caller validates against >= 500).
+    id -u "$1" 2>/dev/null || true
+}
+
+_valid_user() {
+    # Return 0 if $1 is a non-empty, non-"root", non-"loginwindow",
+    # non-"_appstore" (system account) username with a UID >= 500.
+    local _u="$1"
+    if [ -z "$_u" ] || [ "$_u" = "root" ] || [ "$_u" = "loginwindow" ]; then
+        return 1
+    fi
+    local _uid=$(_uid_of "$_u")
+    if [ -z "$_uid" ]; then
+        return 1
+    fi
+    if [ "$_uid" -lt 500 ] 2>/dev/null; then
+        return 1
+    fi
+    return 0
+}
+
+CONSOLE_USER=""
+
+# Method 1: scutil on State:/Users/ConsoleUser — Apple's recommended
+# source for the current GUI user. Returns empty or "loginwindow" if
+# no one is logged in at the console.
+_method1=$(scutil <<< "show State:/Users/ConsoleUser" 2>/dev/null | awk '/Name :/ && $3 != "loginwindow" { print $3; exit }')
+if _valid_user "${_method1}"; then
+    CONSOLE_USER="${_method1}"
+    _detect_method="scutil"
+fi
+
+# Method 2: SUDO_USER env var — reliable when installed via
+# `sudo installer -pkg ...` from a terminal, even if no one is at the
+# GUI console. Installer.app invocations don't set this (they run as
+# root directly), but `sudo installer` CLI invocations do.
+if [ -z "${CONSOLE_USER}" ]; then
+    if _valid_user "${SUDO_USER}"; then
+        CONSOLE_USER="${SUDO_USER}"
+        _detect_method="SUDO_USER"
+    fi
+fi
+
+# Method 3: stat -f '%Su' /dev/console — the legacy v0.2.3 method.
+# Kept as a fallback because it works on most machines, even though
+# it broke for hikoae.
+if [ -z "${CONSOLE_USER}" ]; then
+    _method3=$(stat -f '%Su' /dev/console 2>/dev/null)
+    if _valid_user "${_method3}"; then
+        CONSOLE_USER="${_method3}"
+        _detect_method="stat-console"
+    fi
+fi
+
+# Method 4: first real user on the system via dscl. Last resort —
+# picks an arbitrary user on multi-user machines but is better than
+# targeting /var/root.
+if [ -z "${CONSOLE_USER}" ]; then
+    _method4=$(dscl . list /Users UniqueID 2>/dev/null | awk '$2 >= 500 && $2 < 60000 { print $1; exit }')
+    if _valid_user "${_method4}"; then
+        CONSOLE_USER="${_method4}"
+        _detect_method="dscl-first-real-user"
+    fi
+fi
+
+# Hard fail if every method failed. Better than silently installing
+# into /var/root and leaving the user with a broken install.
+if [ -z "${CONSOLE_USER}" ]; then
+    cat >&2 <<'ERR'
+ERROR: AgentHandover postinstall could not determine which user to install for.
+
+All four detection methods returned empty or invalid:
+  1. scutil 'State:/Users/ConsoleUser'  (the GUI console user)
+  2. SUDO_USER env var                    (the user who ran sudo)
+  3. stat -f '%Su' /dev/console           (the console device owner)
+  4. dscl first-real-user scan            (any user with UID >= 500)
+
+This usually happens when:
+  - No one is logged in at the GUI console (SSH-only install without sudo)
+  - The install ran before the user's login session fully initialized
+
+To fix: log in to the Mac via the GUI, then re-run:
+    sudo installer -pkg AgentHandover-*.pkg -target /
+
+If you're installing via SSH from a remote machine, make sure you're
+using `sudo` (not `sudo -i` or `su -`) so SUDO_USER is set correctly.
+ERR
+    exit 1
+fi
+
+CONSOLE_UID=$(_uid_of "${CONSOLE_USER}")
 USER_HOME=$(dscl . -read /Users/"${CONSOLE_USER}" NFSHomeDirectory 2>/dev/null | awk '{print $2}')
 if [ -z "$USER_HOME" ] || [ ! -d "$USER_HOME" ]; then
     USER_HOME=$(eval echo ~"$CONSOLE_USER")
 fi
-CONSOLE_UID=$(id -u "${CONSOLE_USER}" 2>/dev/null || echo "501")
+# Safety: if USER_HOME somehow resolved to /var/root (i.e. user is
+# root despite the _valid_user check — impossible, but let's be sure)
+# or is still empty, hard fail.
+if [ -z "$USER_HOME" ] || [ ! -d "$USER_HOME" ] || [ "$USER_HOME" = "/var/root" ]; then
+    echo "ERROR: AgentHandover postinstall resolved CONSOLE_USER='${CONSOLE_USER}' to USER_HOME='${USER_HOME}' which is invalid." >&2
+    echo "Refusing to install LaunchAgent into system user home directory." >&2
+    exit 1
+fi
+
+echo "  Installing for user: ${CONSOLE_USER} (UID=${CONSOLE_UID}, HOME=${USER_HOME}, detected via ${_detect_method})"
 DATA_DIR="${USER_HOME}/Library/Application Support/agenthandover"
 LAUNCH_AGENTS="${USER_HOME}/Library/LaunchAgents"
 LIB_DIR="/usr/local/lib/agenthandover"

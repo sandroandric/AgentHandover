@@ -57,7 +57,13 @@ KNOWLEDGE_BASE_DIR = Path.home() / ".agenthandover" / "knowledge"
 POLL_INTERVAL_SECONDS = 2.0
 VLM_REJECT_THRESHOLD = 0.60
 
-_WORKER_VERSION = "0.2.0"
+# Single source of truth: read from the package metadata (pyproject.toml
+# → dist-info). See agenthandover_worker/__init__.py for the fallback
+# behavior. This replaces a hardcoded "0.2.0" string that went stale
+# across three releases and was caught by hikoae on v0.2.3 as
+# "worker status/version still reports 0.2.0 in the runtime status file
+# even though the installed package is 0.2.3".
+from agenthandover_worker import __version__ as _WORKER_VERSION
 _DB_RETRY_MAX_SECONDS = 120
 _DB_RETRY_POLL_SECONDS = 5
 _IDLE_LOG_INTERVAL_SECONDS = 300  # 5 minutes
