@@ -13,6 +13,7 @@
   <img alt="License" src="https://img.shields.io/github/license/sandroandric/AgentHandover?color=blue" />
   <img alt="Platform" src="https://img.shields.io/badge/platform-macOS-black" />
   <img alt="Local-first" src="https://img.shields.io/badge/local--first-yes-brightgreen" />
+  <a href="https://discord.gg/Fcx3X7CtBV"><img alt="Discord" src="https://img.shields.io/badge/discord-join-5865F2?logo=discord&logoColor=white" /></a>
 </p>
 
 <p align="center">
@@ -477,6 +478,20 @@ AgentHandover is early and unusually high-leverage for contributors. The prompt 
 If you're not sure where to begin, open a [Discussion](https://github.com/sandroandric/AgentHandover/discussions) with a rough idea — it's faster to shape something together than to send a PR cold. Small PRs get reviewed quickly. If your contribution is non-trivial, running `just test` and `cargo test` before opening the PR saves a review round-trip.
 
 Direct line for anything that doesn't fit: [sandro@sandric.co](mailto:sandro@sandric.co).
+
+## Community
+
+[**Join the AgentHandover Discord →**](https://discord.gg/Fcx3X7CtBV)
+
+The Discord is where the community actually talks in real time:
+
+- **#skills-gallery** — share a Skill you're using and see what other people have built
+- **#help** — get a response in minutes instead of days
+- **#bugs** — fast triage before things become GitHub issues
+- **#dev** — prompt engineering, connector authors, contributor chat
+- **#announcements** — release notes and updates
+
+GitHub [Discussions](https://github.com/sandroandric/AgentHandover/discussions) and [Issues](https://github.com/sandroandric/AgentHandover/issues) are still the right home for anything that should be public and searchable long-term — bug reports with reproductions, feature proposals, design discussions. Discord is for the ephemeral stuff in between.
 
 ## Contact
 
