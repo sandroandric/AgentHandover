@@ -284,20 +284,25 @@ ollama pull nomic-embed-text    # Semantic search (~274 MB)
 
 Open `chrome://extensions` > Enable Developer Mode > Load unpacked > select the extension directory shown by `agenthandover doctor`.
 
-### Homebrew
+### Homebrew (cask)
 
 ```bash
 brew tap sandroandric/agenthandover
-brew install --HEAD agenthandover
+brew install --cask agenthandover
 ```
 
-### Source build (Rust, Node.js 18+, Python 3.11+)
+The cask downloads the signed, notarized `.pkg` from GitHub releases and runs Apple's installer — you get bit-identical behavior to the direct-download path, so all TCC (Accessibility + Screen Recording), launchd, and Ollama onboarding flows work the same. Uninstall cleanly with `brew uninstall --cask agenthandover` (use `--zap` to also remove `~/Library/Application Support/agenthandover`).
+
+### Source build (Rust, Node.js 18+, Python 3.11+, Swift / Xcode CLT)
 
 ```bash
 git clone https://github.com/sandroandric/AgentHandover.git && cd AgentHandover
-just build-all
-./scripts/setup.sh
+bash scripts/build-pkg.sh     # builds daemon + CLI + worker + extension + app,
+                              # then packages a signed .pkg at target/
+sudo installer -pkg target/AgentHandover-*.pkg -target /
 ```
+
+`scripts/build-pkg.sh` is the single source of truth for builds — it's what the GitHub releases pipeline runs. The `justfile` has individual `just build-daemon`, `just build-cli`, etc. recipes if you need to rebuild a single component during development.
 
 </details>
 
@@ -471,6 +476,20 @@ Direct line for anything that doesn't fit: [sandro@sandric.co](mailto:sandro@san
 [sandro@sandric.co](mailto:sandro@sandric.co)
 
 ## Changelog
+
+### v0.2.2 (2026-04-11)
+
+Small maintenance release that cleans up a lingering v0.2.0 → v0.2.1 upgrade wart and ports the v0.2.1 "rich observations" grounding to the daily re-synthesis path.
+
+**Upgrade safety**
+- Preinstall script now explicitly removes `com.agenthandover.daemon.plist` from every location v0.2.0 may have installed it (`~/Library/LaunchAgents`, `/usr/local/lib/agenthandover/launchd`, `/Library/LaunchAgents`, `/Library/LaunchDaemons`). macOS's `pkg` installer only replaces files that are in the new Bom, so a stale plist from v0.2.0 would otherwise survive in-place upgrades forever — fixes [#1](https://github.com/sandroandric/AgentHandover/issues/1) for anyone still on v0.2.0.
+- `agenthandover start` / `agenthandover stop` now spawn the daemon directly via `Process()` (matching what the menu bar app already does) instead of calling `launchctl load` on a plist that no longer ships. The worker still uses launchd.
+
+**Behavioral synthesis — rich observations in daily re-synthesis path**
+- The daily re-synthesis loop now looks up the real events for each focus-derived observation from the SQLite store, parses `scene_annotation_json`, and builds rich per-frame dicts (`email_addresses`, `urls`, `typed_text`, `visible_values`, `active_element`, `compose`) via `FocusProcessor._build_pre_analysis_obs` — the same grounding focus recordings already used in v0.2.1. The synthesizer prompt's TIMELINE EVIDENCE section now has verbatim text to quote for focus-derived procedures, not just abstract SOP steps.
+- Procedures without a focus session id fall back to the old abstracted-step path — no regression.
+
+2997 Python tests pass. No schema changes, no breaking changes.
 
 ### v0.2.1 (2026-04-10)
 

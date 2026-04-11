@@ -15,7 +15,18 @@ CONSOLE_UID=$(id -u "${CONSOLE_USER}" 2>/dev/null || echo "501")
 # Stop and remove daemon launchd job (daemon is now app-launched, not launchd)
 sudo -u "${CONSOLE_USER}" launchctl bootout "gui/${CONSOLE_UID}/com.agenthandover.daemon" 2>/dev/null || true
 sudo -u "${CONSOLE_USER}" launchctl disable "gui/${CONSOLE_UID}/com.agenthandover.daemon" 2>/dev/null || true
+
+# Remove the stale daemon launchd plist from ALL known locations.
+# Prior to v0.2.1 the build shipped a com.agenthandover.daemon.plist
+# pointing at a path inside the app bundle that no longer exists.  The
+# macOS pkg installer only REPLACES files that are in the new Bom —
+# files the new pkg never heard of (like this one) are left untouched
+# on an upgrade-in-place.  Explicitly delete from every location it
+# could be hiding so upgrading from v0.2.0 is clean.  See issue #1.
 rm -f "${LAUNCH_AGENTS}/com.agenthandover.daemon.plist" 2>/dev/null
+rm -f /usr/local/lib/agenthandover/launchd/com.agenthandover.daemon.plist 2>/dev/null
+rm -f /Library/LaunchAgents/com.agenthandover.daemon.plist 2>/dev/null
+rm -f /Library/LaunchDaemons/com.agenthandover.daemon.plist 2>/dev/null
 
 # Remove old daemon from inside app bundle (moved to /usr/local/lib/agenthandover/).
 # Having it inside the bundle caused codesign --deep to register it as a second TCC principal.

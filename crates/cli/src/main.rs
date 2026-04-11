@@ -16,13 +16,13 @@ struct Cli {
 enum Commands {
     /// Show daemon and worker status
     Status,
-    /// Start services via launchd
+    /// Start services (daemon launched directly, worker via launchd)
     Start {
         /// Which service to start: daemon, worker, or all (default)
         #[arg(default_value = "all")]
         service: String,
     },
-    /// Stop services via launchd
+    /// Stop services (daemon via SIGTERM, worker via launchd)
     Stop {
         /// Which service to stop: daemon, worker, or all (default)
         #[arg(default_value = "all")]

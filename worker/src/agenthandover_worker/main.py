@@ -5713,16 +5713,56 @@ def main(argv: list[str] | None = None) -> None:
                                         if not behavioral_synthesizer.should_synthesize(proc):
                                             continue
 
-                                        # Build observations from procedure evidence
+                                        # Build observations for the synthesizer.
+                                        #
+                                        # For each observation record with a
+                                        # session_id (focus-derived), look up
+                                        # the actual events from the DB and
+                                        # build rich per-frame dicts with
+                                        # verbatim text (email_addresses,
+                                        # urls, typed_text, visible_values,
+                                        # active_element) via
+                                        # FocusProcessor._build_pre_analysis_obs.
+                                        # This surfaces the same ground-truth
+                                        # grounding to the synthesizer prompt's
+                                        # TIMELINE EVIDENCE section that focus
+                                        # recordings already get.
+                                        #
+                                        # For observations without a session_id
+                                        # or where event lookup fails, fall
+                                        # back to the abstracted SOP step list
+                                        # so nothing gets worse.
+                                        from agenthandover_worker.focus_processor import FocusProcessor
                                         _synth_obs: list[list[dict]] = []
                                         evidence = proc.get("evidence", {})
                                         obs_records = evidence.get("observations", [])
                                         proc_steps = proc.get("steps", [])
-                                        if proc_steps:
-                                            # Each observation record represents
-                                            # one demonstration; reconstruct as
-                                            # a list of step dicts per observation.
-                                            for _rec in obs_records:
+
+                                        for _rec in obs_records:
+                                            rich_frames: list[dict] = []
+                                            _sid = _rec.get("session_id") if isinstance(_rec, dict) else None
+                                            if _sid:
+                                                try:
+                                                    _events = db.get_focus_session_events(_sid)
+                                                except Exception:
+                                                    _events = []
+                                                for _ev in _events:
+                                                    _ann_raw = _ev.get("scene_annotation_json")
+                                                    if not _ann_raw:
+                                                        continue
+                                                    try:
+                                                        _ann = json.loads(_ann_raw) if isinstance(_ann_raw, str) else _ann_raw
+                                                    except (json.JSONDecodeError, TypeError):
+                                                        continue
+                                                    rich_frames.append(
+                                                        FocusProcessor._build_pre_analysis_obs({
+                                                            "annotation": _ann,
+                                                        })
+                                                    )
+                                            if rich_frames:
+                                                _synth_obs.append(rich_frames)
+                                            elif proc_steps:
+                                                # Fallback: abstracted step dicts
                                                 _synth_obs.append(proc_steps)
 
                                         insights = behavioral_synthesizer.synthesize(
