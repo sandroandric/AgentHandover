@@ -150,12 +150,41 @@ fn launchctl_silent(args: &[&str]) -> Result<LaunchctlResult> {
     })
 }
 
+/// Check whether a launchd job is actually **running** (has a live process),
+/// not merely loaded/registered.
+///
+/// Uses `launchctl print gui/<uid>/<label>` and parses the output for a
+/// `pid = <N>` line where N > 0 — the same check the SwiftUI menu bar
+/// app uses in `ServiceController.isJobRunning()`.
+///
+/// The previous implementation used `launchctl list <label>` which returns
+/// success when the job is *registered* in launchd even if the process
+/// isn't running (PID column is `-`).  This caused `agenthandover start`
+/// to falsely report "Worker already running" when the launchd service
+/// was loaded but the Python process had exited or never started —
+/// exactly the symptom hikoae reported on v0.2.5.
 fn is_job_running(label: &str) -> bool {
-    Command::new("launchctl")
-        .args(["list", label])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    let domain_target = format!("{}/{}", gui_domain(), label);
+    let output = Command::new("launchctl")
+        .args(["print", &domain_target])
+        .output();
+    match output {
+        Ok(o) if o.status.success() => {
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            for line in stdout.lines() {
+                let trimmed = line.trim();
+                if trimmed.starts_with("pid =") || trimmed.starts_with("pid=") {
+                    if let Some(pid_str) = trimmed.split('=').last() {
+                        if let Ok(pid) = pid_str.trim().parse::<u32>() {
+                            return pid > 0;
+                        }
+                    }
+                }
+            }
+            false
+        }
+        _ => false,
+    }
 }
 
 /// Return the GUI launchd domain for the current user: ``gui/<uid>``.

@@ -199,9 +199,28 @@ TOML
     chown "${CONSOLE_USER}" "${DATA_DIR}/config.toml"
 fi
 
-# Remove any stale Chromium-family native host manifest. The app now installs
-# these only when the extension step is reached or onboarding is already
-# complete, so the daemon cannot be spawned during first-run permission setup.
+# Write the Chrome native messaging host manifest for every installed
+# Chromium-family browser. Previous versions only DELETED stale manifests
+# here and relied on the app to recreate them on launch via
+# ServiceController.installNativeMessagingHostManifest(). That broke when
+# the app didn't launch cleanly after install (crash, timing, permission
+# issue) — the manifests stayed deleted and the user had to run
+# `agenthandover setup --extension` manually. v0.2.6 writes them directly
+# in the postinstall as well (belt and suspenders — the app will overwrite
+# them on launch anyway, but this guarantees they exist).
+#
+# The extension ID is derived from the SHA-256 of the RSA key in
+# extension/manifest.json, mapped to Chrome's a-p alphabet.
+NM_EXTENSION_ID="jpemkdcihaijkolbkankcldmiimmmnfo"
+NM_MANIFEST='{
+  "name": "com.agenthandover.host",
+  "description": "AgentHandover native messaging host",
+  "path": "/usr/local/lib/agenthandover/ah-observer",
+  "type": "stdio",
+  "allowed_origins": [
+    "chrome-extension://'"${NM_EXTENSION_ID}"'/"
+  ]
+}'
 for browser_dir in \
     "Google/Chrome" \
     "Chromium" \
@@ -212,7 +231,8 @@ for browser_dir in \
     BROWSER_ROOT="${USER_HOME}/Library/Application Support/${browser_dir}"
     if [ -d "${BROWSER_ROOT}" ]; then
         mkdir -p "${BROWSER_ROOT}/NativeMessagingHosts"
-        rm -f "${BROWSER_ROOT}/NativeMessagingHosts/com.agenthandover.host.json"
+        echo "${NM_MANIFEST}" > "${BROWSER_ROOT}/NativeMessagingHosts/com.agenthandover.host.json"
+        chown "${CONSOLE_USER}" "${BROWSER_ROOT}/NativeMessagingHosts/com.agenthandover.host.json"
     fi
 done
 

@@ -767,7 +767,7 @@ def _write_worker_status(
             os.fsync(f.fileno())
         os.rename(tmp_path, str(target))
     except Exception:
-        logger.debug("Failed to write worker-status.json", exc_info=True)
+        logger.warning("Failed to write worker-status.json", exc_info=True)
         # Best-effort; don't crash the worker over a status file
         try:
             os.unlink(tmp_path)
@@ -4406,6 +4406,27 @@ def main(argv: list[str] | None = None) -> None:
     logger.info("Starting agenthandover-worker v%s", _WORKER_VERSION)
     logger.info("Database path: %s", args.db_path)
     logger.info("Poll interval: %.1fs", args.poll_interval)
+
+    # Write an early "starting" status file so the CLI and menu bar app
+    # can see the worker is alive before heavy initialization finishes.
+    # Previously the first status write happened ~700 lines later (after
+    # DB connect, module imports, knowledge base init, vector KB, Ollama
+    # health checks) — if anything failed before that point, no status
+    # file was ever written and the CLI reported "not running" even though
+    # the Python process was alive.  hikoae reported this exact symptom
+    # on v0.2.5: launchctl showed a running process but no
+    # worker-status.json appeared.
+    started_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    _write_worker_status(
+        started_at=started_at,
+        events_processed_today=0,
+        sops_generated=0,
+        last_pipeline_duration_ms=None,
+        consecutive_errors=0,
+        vlm_available=False,
+        sop_inducer_available=False,
+        vlm_mode="starting",
+    )
 
     # Task 1: Retry loop — wait for the daemon to create the DB
     if not _wait_for_db(args.db_path, shutdown_flag):

@@ -499,6 +499,19 @@ GitHub [Discussions](https://github.com/sandroandric/AgentHandover/discussions) 
 
 ## Changelog
 
+### v0.2.6 (2026-04-12)
+
+Fixes worker startup state detection and native host manifest reliability.
+
+**`is_job_running()` now checks for an actual running process, not just a registered job**
+- The CLI's `is_job_running()` used `launchctl list <label>` which returns success when the job is *registered* in launchd, even if the process isn't running (PID is `-`). This caused `agenthandover start` to falsely report "Worker already running" when the worker wasn't actually running. Rewrote to use `launchctl print gui/<uid>/<label>` and parse for `pid = <N>` where N > 0 — the same check the Swift menu bar app uses. `agenthandover start` and `agenthandover status` now agree on whether the worker is actually running.
+
+**Native host manifest written directly by postinstall**
+- v0.2.5 removed stale manifests in postinstall and relied on the app to recreate them on launch. If the app didn't launch cleanly, manifests stayed deleted. v0.2.6 writes the correct manifest directly in the postinstall (belt and suspenders — the app still overwrites on launch). No more `agenthandover setup --extension` needed after install.
+
+**Worker writes an early "starting" status file before heavy initialization**
+- Previously `worker-status.json` was written only after ~700 lines of initialization (DB connect, module imports, knowledge base, vector KB, Ollama checks). If anything failed before that point, no status file existed and the CLI reported "not running" even though the Python process was alive. v0.2.6 writes a minimal status file with `"vlm_mode": "starting"` immediately after PID file creation, then updates it to the full status once initialization completes.
+
 ### v0.2.5 (2026-04-12)
 
 Fixes the Chrome extension native messaging connection. The `allowed_origins` in the native host manifest was using a stale extension ID (`knldjmfmopnpolahpmmgbagdohdnhkik`) that didn't match the actual ID derived from the `key` field in `manifest.json` (`jpemkdcihaijkolbkankcldmiimmmnfo`). Chrome correctly rejected the connection with "Access to the specified native messaging host is forbidden." Fixed in 9 locations across the codebase. The app re-writes the native host manifest on every launch, so upgrading to v0.2.5 and restarting the app is sufficient — no manual editing required.
