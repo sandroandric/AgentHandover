@@ -7,7 +7,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Stable extension ID from the RSA key in extension/manifest.json.
 # Override with: AGENTHANDOVER_EXTENSION_ID=<id> ./scripts/setup.sh
-EXTENSION_ID="${AGENTHANDOVER_EXTENSION_ID:-knldjmfmopnpolahpmmgbagdohdnhkik}"
+EXTENSION_ID="${AGENTHANDOVER_EXTENSION_ID:-jpemkdcihaijkolbkankcldmiimmmnfo}"
 
 echo "=== AgentHandover Setup ==="
 echo

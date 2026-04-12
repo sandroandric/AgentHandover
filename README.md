@@ -499,6 +499,10 @@ GitHub [Discussions](https://github.com/sandroandric/AgentHandover/discussions) 
 
 ## Changelog
 
+### v0.2.5 (2026-04-12)
+
+Fixes the Chrome extension native messaging connection. The `allowed_origins` in the native host manifest was using a stale extension ID (`knldjmfmopnpolahpmmgbagdohdnhkik`) that didn't match the actual ID derived from the `key` field in `manifest.json` (`jpemkdcihaijkolbkankcldmiimmmnfo`). Chrome correctly rejected the connection with "Access to the specified native messaging host is forbidden." Fixed in 9 locations across the codebase. The app re-writes the native host manifest on every launch, so upgrading to v0.2.5 and restarting the app is sufficient — no manual editing required.
+
 ### v0.2.4 (2026-04-11)
 
 Hotfix for three follow-up issues reported on the v0.2.3 install. All three were install-time / lifecycle issues — the observation and SOP pipelines are unchanged.

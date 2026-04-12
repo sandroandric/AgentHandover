@@ -198,7 +198,7 @@ final class ServiceController {
             "path": daemonExecPath,
             "type": "stdio",
             "allowed_origins": [
-                "chrome-extension://knldjmfmopnpolahpmmgbagdohdnhkik/",
+                "chrome-extension://jpemkdcihaijkolbkankcldmiimmmnfo/",
             ],
         ]
 

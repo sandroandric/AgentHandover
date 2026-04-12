@@ -23,12 +23,12 @@ Alternatively, run the install script **from the repo root**:
 
 ```bash
 # From the repository root directory
-bash scripts/install-native-host.sh --extension-id knldjmfmopnpolahpmmgbagdohdnhkik
+bash scripts/install-native-host.sh --extension-id jpemkdcihaijkolbkankcldmiimmmnfo
 ```
 
 > **Important:** You must provide `--extension-id` with your actual extension ID.
 > After loading the extension in Chrome, find the ID on `chrome://extensions`.
-> The default ID `knldjmfmopnpolahpmmgbagdohdnhkik` comes from the `key` field
+> The default ID `jpemkdcihaijkolbkankcldmiimmmnfo` comes from the `key` field
 > in `manifest.json` and is stable for unpacked loads from the same key.
 
 ### 3. Load in Chrome

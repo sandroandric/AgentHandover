@@ -13,7 +13,7 @@ use crate::paths;
 /// Chrome Native Messaging host name -- must match `crates/daemon/src/ipc/native_messaging.rs:26`
 const NM_HOST_NAME: &str = "com.agenthandover.host";
 /// Chrome extension ID derived from the RSA key in `extension/manifest.json`.
-const EXTENSION_ID: &str = "knldjmfmopnpolahpmmgbagdohdnhkik";
+const EXTENSION_ID: &str = "jpemkdcihaijkolbkankcldmiimmmnfo";
 
 /// Detect which install channel produced this AgentHandover installation.
 fn detect_install_channel() -> &'static str {

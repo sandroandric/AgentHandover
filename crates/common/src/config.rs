@@ -248,7 +248,7 @@ impl Default for PrivacyConfig {
 impl Default for BrowserConfig {
     fn default() -> Self {
         Self {
-            extension_id: "knldjmfmopnpolahpmmgbagdohdnhkik".into(),
+            extension_id: "jpemkdcihaijkolbkankcldmiimmmnfo".into(),
             native_host_name: "com.agenthandover.host".into(),
             deny_network_egress: true,
         }

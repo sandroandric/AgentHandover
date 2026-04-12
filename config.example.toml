@@ -21,7 +21,7 @@ clipboard_preview_max_chars = 200
 secure_field_drop = true
 
 [browser]
-extension_id = "knldjmfmopnpolahpmmgbagdohdnhkik"
+extension_id = "jpemkdcihaijkolbkankcldmiimmmnfo"
 native_host_name = "com.agenthandover.host"
 deny_network_egress = true
 

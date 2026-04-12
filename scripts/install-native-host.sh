@@ -115,7 +115,7 @@ fi
 if [[ -z "$EXTENSION_ID" ]]; then
     # Use the stable extension ID derived from the RSA key in manifest.json.
     # Override via --extension-id if you build/sign the extension yourself.
-    EXTENSION_ID="knldjmfmopnpolahpmmgbagdohdnhkik"
+    EXTENSION_ID="jpemkdcihaijkolbkankcldmiimmmnfo"
     echo "Using default extension ID: ${EXTENSION_ID}"
 fi
 ALLOWED_ORIGINS="[\"chrome-extension://${EXTENSION_ID}/\"]"

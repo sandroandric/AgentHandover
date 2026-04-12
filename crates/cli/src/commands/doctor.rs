@@ -617,7 +617,7 @@ fn check_native_messaging_manifest() -> bool {
 
     // Verify allowed_origins contains expected extension ID
     let origins = parsed.get("allowed_origins").and_then(|v| v.as_array());
-    let expected_origin = "chrome-extension://knldjmfmopnpolahpmmgbagdohdnhkik/";
+    let expected_origin = "chrome-extension://jpemkdcihaijkolbkankcldmiimmmnfo/";
     let has_origin = origins
         .map(|arr| arr.iter().any(|v| v.as_str() == Some(expected_origin)))
         .unwrap_or(false);
