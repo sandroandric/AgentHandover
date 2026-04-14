@@ -78,9 +78,26 @@ final class ServiceController {
     }
 
     /// Stop daemon by sending SIGTERM to its process.
+    ///
+    /// Also clears `daemon-status.json` so `agenthandover status` and the menu
+    /// bar app don't keep reading a stale heartbeat pointing at the dead PID.
+    /// Without this, v0.2.6 and earlier left the file behind on SIGTERM — the
+    /// CLI would then check `kill(stale_pid, 0)`, see a dead process, and
+    /// report the daemon as "not responding" even when the user had
+    /// deliberately toggled off observation (hikoae's 0.2.6 report).
+    ///
+    /// `daemon.pid` is left alone — `isDaemonRunning()` self-cleans stale PID
+    /// files (lines 97-101) and other code still uses it as the source of
+    /// truth for which process to signal.
     static func stopDaemon() {
         guard let pid = daemonPid() else { return }
         kill(pid, SIGTERM)
+
+        // Remove stale status file so status tooling reports a clean "stopped"
+        // state instead of "not responding". Best-effort — file may not exist.
+        let statusPath = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/agenthandover/daemon-status.json")
+        try? FileManager.default.removeItem(at: statusPath)
     }
 
     /// Check if the daemon process is running.
@@ -146,12 +163,25 @@ final class ServiceController {
     static func startAll() -> Bool {
         let d = startDaemon()
         let w = startWorker()
+        // Re-install native messaging host manifest on resume. It was removed
+        // by stopAll() on pause to prevent Chrome from spawning transient
+        // ah-observer bridge instances while observation was supposed to be
+        // off. Without this, toggling "Observe Me" back on would leave the
+        // extension permanently disconnected until the app relaunched.
+        installNativeMessagingHostManifest()
         return d && w
     }
 
     static func stopAll() {
         stopDaemon()
         stopWorker()
+        // Remove the native messaging host manifest so Chrome can't spawn
+        // transient ah-observer bridge instances while observation is paused.
+        // Previously the extension would keep writing extension-heartbeat.json
+        // via those bridges even after the main daemon was stopped, showing
+        // as "connected" while the daemon showed as "not responding" — exactly
+        // the confusing state hikoae reported on v0.2.6.
+        removeNativeMessagingHostManifest()
     }
 
     static func restartDaemon() {

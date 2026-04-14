@@ -499,6 +499,17 @@ GitHub [Discussions](https://github.com/sandroandric/AgentHandover/discussions) 
 
 ## Changelog
 
+### v0.2.7 (2026-04-14)
+
+Fixes confusing status reporting after toggling "Observe Me" off. The main daemon correctly stopped on pause, but `daemon-status.json` was never deleted — so the CLI kept reading the stale file, seeing a dead PID, and reporting "not responding". Meanwhile Chrome would keep spawning stateless `ah-observer` native-messaging bridge instances whenever the extension tried to communicate, which would write fresh `extension-heartbeat.json` entries and show the extension as "connected" while the daemon showed red.
+
+Three changes:
+- **Daemon clears its own status file on clean shutdown** — matches the worker's `_remove_worker_status()` behavior. The SIGTERM-driven cleanup path now removes `daemon-status.json` right after `daemon.pid`, at the source.
+- **`ServiceController.stopAll()` removes the native messaging host manifest** on pause, so Chrome can't spawn transient bridge instances. Extension cleanly goes to "disconnected" on pause instead of staying green via bridge processes. `startAll()` re-installs the manifest on resume (symmetric).
+- **`agenthandover stop daemon` also removes the status file** — belt-and-suspenders cleanup for the case where the daemon didn't exit cleanly.
+
+After v0.2.7, `agenthandover status` shows a clean "not running" state when observation is paused, and the extension indicator matches daemon state.
+
 ### v0.2.6 (2026-04-12)
 
 Fixes worker startup state detection and native host manifest reliability.

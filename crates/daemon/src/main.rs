@@ -510,6 +510,14 @@ async fn main() -> Result<()> {
     // Remove PID file on clean shutdown
     agenthandover_common::pid::remove_pid_file("daemon");
 
+    // Remove daemon-status.json on clean shutdown so CLI/app status tooling
+    // reports a clean "Stopped" state instead of reading a stale heartbeat
+    // with a dead PID (which renders as "not responding" — the confusing
+    // v0.2.6 symptom hikoae reported after toggling "Observe Me" off).
+    // Matches the worker's _remove_worker_status() behavior on clean exit.
+    let status_path = agenthandover_common::status::status_dir().join("daemon-status.json");
+    let _ = std::fs::remove_file(status_path);
+
     info!("agenthandover-daemon stopped");
     observer_result
 }

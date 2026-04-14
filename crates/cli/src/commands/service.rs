@@ -105,6 +105,16 @@ fn start_daemon_direct() -> Result<()> {
 fn stop_daemon_direct() -> Result<()> {
     println!("Stopping daemon...");
 
+    // Always clean up `daemon-status.json` — even when the daemon is already
+    // stopped or was orphaned by a crash. Without this, a stale status file
+    // with a dead PID makes `agenthandover status` report "not responding"
+    // indefinitely until something overwrites the file (hikoae's v0.2.6
+    // symptom after toggling "Observe Me" off). We delete first, then
+    // decide whether to SIGTERM anything.
+    if let Some(status_path) = daemon_pid_file().parent().map(|d| d.join("daemon-status.json")) {
+        let _ = std::fs::remove_file(status_path);
+    }
+
     let pid_file = daemon_pid_file();
     let pid_str = match std::fs::read_to_string(&pid_file) {
         Ok(s) => s,
@@ -123,6 +133,7 @@ fn stop_daemon_direct() -> Result<()> {
 
     // Graceful SIGTERM via kill(2).  Ignore errors if the process is already gone.
     let _ = Command::new("kill").args(["-TERM", &pid.to_string()]).status();
+
     println!("  Daemon stopped.");
     Ok(())
 }
