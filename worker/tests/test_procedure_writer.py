@@ -119,6 +119,46 @@ class TestWriteProcedure:
         path = writer.write_procedure(sop, source="focus", source_id="s1")
         assert path.is_file()
 
+    def test_write_preserves_step_description(
+        self, writer: ProcedureWriter, kb: KnowledgeBase
+    ) -> None:
+        """v0.3.0 fix: ``sop_template_to_procedure`` propagates step
+        description into the saved procedure.
+
+        Regression test for the parser-pipeline gap that caused all
+        v0.2.x Skills to ship with empty descriptions even though the
+        VLM was emitting them.  The diagnostic dump on the dailynews
+        focus session confirmed Gemma 4 e4b returns 19/19 steps with
+        rich descriptions; before this fix, ``sop_template_to_procedure``
+        in ``procedure_schema.py`` constructed proc_step without
+        copying ``step["description"]``, silently dropping it.
+        """
+        sop = {
+            "slug": "with-description",
+            "title": "Skill with descriptive steps",
+            "steps": [
+                {
+                    "step": "Open the dashboard",
+                    "description": "Initial entry point — opens the main "
+                                   "dashboard so the agent can see the "
+                                   "current state before making changes.",
+                    "target": "https://example.com/dashboard",
+                },
+                {
+                    "step": "Click Export",
+                    "description": "Export current data so we have a "
+                                   "snapshot to attach to the email.",
+                },
+            ],
+        }
+        writer.write_procedure(sop, source="focus", source_id="s1")
+        proc = kb.get_procedure("with-description")
+        assert proc is not None
+        steps = proc.get("steps", [])
+        assert len(steps) == 2
+        assert "Initial entry point" in steps[0].get("description", "")
+        assert "snapshot to attach" in steps[1].get("description", "")
+
 
 # ---------------------------------------------------------------------------
 # update_procedure

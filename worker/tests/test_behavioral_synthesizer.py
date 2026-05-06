@@ -501,3 +501,93 @@ class TestMergeInsights:
         updated = synth.merge_insights_into_procedure(proc, insights)
         assert proc.get("strategy") is None
         assert updated["strategy"] == "Test"
+
+    def test_merge_does_not_set_last_synthesized_on_empty_insights(self):
+        """``last_synthesized`` is only set when something substantive was extracted.
+
+        Regression test for v0.2.x bug: marketing-stats-email had
+        ``last_synthesized`` populated despite empty strategy and empty
+        guardrails, falsely signalling that synthesis succeeded.  After
+        the fix, an empty BehavioralInsights() leaves the procedure
+        unchanged with no timestamp.
+        """
+        synth = BehavioralSynthesizer()
+        proc = _make_procedure()
+        empty = BehavioralInsights()  # all defaults
+        updated = synth.merge_insights_into_procedure(proc, empty)
+        assert "last_synthesized" not in updated
+        assert "_obs_at_last_synthesis" not in updated
+
+    def test_merge_sets_last_synthesized_on_goal_only(self):
+        """A goal alone is enough to consider synthesis successful."""
+        synth = BehavioralSynthesizer()
+        proc = _make_procedure()
+        insights = BehavioralInsights(goal="Send weekly report email")
+        updated = synth.merge_insights_into_procedure(proc, insights)
+        assert "last_synthesized" in updated
+        assert updated["goal"] == "Send weekly report email"
+
+
+class TestParseInsightsValidation:
+    """Tests for the EmptyInsightsError validation in _parse_insights."""
+
+    def test_parse_raises_on_completely_empty_dict(self):
+        from agenthandover_worker.behavioral_synthesizer import (
+            EmptyInsightsError,
+        )
+        with pytest.raises(EmptyInsightsError):
+            BehavioralSynthesizer._parse_insights({})
+
+    def test_parse_raises_on_all_empty_fields(self):
+        from agenthandover_worker.behavioral_synthesizer import (
+            EmptyInsightsError,
+        )
+        with pytest.raises(EmptyInsightsError):
+            BehavioralSynthesizer._parse_insights({
+                "goal": "",
+                "strategy": "",
+                "guardrails": [],
+                "selection_criteria": [],
+            })
+
+    def test_parse_accepts_goal_only(self):
+        insights = BehavioralSynthesizer._parse_insights({"goal": "test goal"})
+        assert insights.goal == "test goal"
+        assert insights.strategy == ""
+
+    def test_parse_accepts_strategy_only(self):
+        insights = BehavioralSynthesizer._parse_insights(
+            {"strategy": "test strategy"}
+        )
+        assert insights.strategy == "test strategy"
+
+    def test_parse_accepts_guardrails_only(self):
+        """Guardrails alone are enough — they are real extracted constraints."""
+        insights = BehavioralSynthesizer._parse_insights(
+            {"guardrails": ["never auto-send"]}
+        )
+        assert insights.guardrails == ["never auto-send"]
+
+    def test_parse_accepts_selection_criteria_only(self):
+        insights = BehavioralSynthesizer._parse_insights({
+            "selection_criteria": [{"criterion": "B2B SaaS founders"}],
+        })
+        assert len(insights.selection_criteria) == 1
+
+    def test_parse_raises_on_decision_branches_only(self):
+        """Decision branches alone are insufficient — they describe HOW but
+        not WHY/WHAT (no goal/strategy)."""
+        from agenthandover_worker.behavioral_synthesizer import (
+            EmptyInsightsError,
+        )
+        with pytest.raises(EmptyInsightsError):
+            BehavioralSynthesizer._parse_insights({
+                "decision_branches": [{"condition": "if X then Y"}],
+            })
+
+    def test_parse_raises_on_non_dict_input(self):
+        from agenthandover_worker.behavioral_synthesizer import (
+            EmptyInsightsError,
+        )
+        with pytest.raises(EmptyInsightsError):
+            BehavioralSynthesizer._parse_insights("not a dict")  # type: ignore

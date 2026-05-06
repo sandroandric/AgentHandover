@@ -499,6 +499,26 @@ GitHub [Discussions](https://github.com/sandroandric/AgentHandover/discussions) 
 
 ## Changelog
 
+### v0.3.0 (2026-05-06)
+
+The biggest Skill-quality jump since v0.2.0. Fixes a chain of silent data losses between the VLM, the saved procedure JSON, and the app UI — every one of which left users looking at procedures that were a fraction of what the model had actually produced.
+
+**Step descriptions are now saved AND rendered.** Gemma 4 e4b emits a `description` field on every step (verified 19/19 on the dailynews validation run). Two separate bugs were dropping it: (1) `procedure_schema.sop_template_to_procedure()` constructed `proc_step` without copying `step["description"]`, so the saved JSON only had `action`. (2) Even with description in the JSON, `SOPDetailView.swift` rendered it as a `??`-fallback for `action` — meaning whenever action was populated (always), description was silently swallowed by the fallback chain. The Swift step card now shows action (bold) + description (dim) + `→ target` (monospaced) + `Input:` + `✓ verify` lines, all conditional. Old v0.2.x procedures with no description look the same as before.
+
+**Behavioral synthesis fails loud.** When the VLM returned an empty insights JSON (no goal, strategy, selection criteria, or guardrails), the worker silently set `last_synthesized` and moved on — leaving the procedure with empty behavioral fields and never retrying. Now raises `EmptyInsightsError` on substantively-empty extractions, retries once, and only stamps `last_synthesized` when the extraction had substantive content.
+
+**Voice profile picks up real user-authored text.** Style analyzer was reading from `extracted_evidence.content_produced`, which is populated late in the pipeline and was empty for most fresh sessions — so first-time users got a generic voice. Now reads from clipboard events, step inputs/descriptions, and content samples too, with URL/JSON/short-string rejection filters. Min combined text lowered from 50 → 30 chars.
+
+**Q&A no longer corrupts procedures.** Free-text answers from the focus questioner were being auto-merged into `accounts`, `branches`, and `decision` structured fields by `_merge_credentials()` and `_merge_decision()` — overwriting clean structured data with prose fragments. Both helpers removed. `FocusQuestion` now carries a `step_indexes` field; clarifications do targeted in-place rewrites of the specific steps the question covered. `_merge_strategy()` is kept but only fires when no synthesised strategy exists yet.
+
+**Variables wired into step text.** Declared variables with concrete examples are now post-substituted into step `step`/`description`/`target` and `parameters.input`/`verify`/`location` as `{{varname}}` templates by a new `_wire_variables_into_steps()` pass. Skips generic example values (`yes`/`no`/`true`/`false`) and sorts longest-first to avoid partial matches inside longer strings.
+
+**Brace double-wrap fix.** Gemma occasionally wraps an already-templated reference in another `{{...}}`, producing `{{{{var}}suffix}}` — caught in the wild as `target: '{{{{bohemia}}.io}}'`. New `_unwrap_double_templated()` regex pass collapses these to `{{var}}suffix` on every step's text fields.
+
+**Schemas tightened.** `FOCUS_SOP_PROMPT`, `PASSIVE_SOP_PROMPT`, and `ENRICHED_PASSIVE_PROMPT` now require `description` and `verify` per step. The coherence-check rule was refined so intermediate actions aren't dropped as "unused later" — that rule was over-eagerly removing legitimate workflow steps.
+
+**Tests:** 3026/3026 Python tests pass. Validated end-to-end on the dailynews focus session: 19/19 steps with rich descriptions, 19/19 verifies, 0 brace bugs, 0 Q&A corruption, behavioral synthesis confidence 0.81 with retries=0.
+
 ### v0.2.10 (2026-04-18)
 
 Fixes the daemon silently disappearing after the launching shell exits. When you ran `agenthandover restart` from a terminal and then closed that terminal (or the shell exited for any reason), the daemon would die within seconds — no crash, no logs, nothing. Root cause: the daemon's parent-process ID correctly reparented to 1 (init/launchd), but its **process group ID** stayed tied to the launching shell. When the shell closed its controlling TTY, SIGHUP was sent to every process in that group — including the daemon. Default SIGHUP action is immediate termination with no signal handler invocation, no stderr output, no unified log entry.

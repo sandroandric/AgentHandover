@@ -187,6 +187,86 @@ class TestAnalyzeProcedureStyle:
         vp, cs = analyze_procedure_style(proc, llm_reasoner=None)
         assert vp == {}
 
+    def test_pulls_text_from_clipboard_events(self):
+        """v0.3.0 fix B: voice analysis runs at procedure-write time.
+
+        Style analysis was previously gated on ``content_produced`` which
+        the EvidenceExtractor only populates 12+ days after a procedure
+        is recorded.  All 24 v0.2.x Skills shipped with empty
+        voice_profile because they never had content_produced filled in
+        when style analysis ran.
+
+        Reading from clipboard_events (available immediately) lets voice
+        analysis succeed at procedure-write time on fresh Skills.
+        """
+        reasoner = make_mock_reasoner(CASUAL_PROFILE)
+        proc = {
+            "evidence": {
+                "clipboard_events": [
+                    {"text": "Hey, that demo looks awesome — really shipping fast!"},
+                    {"text": "Yeah let's go with the casual version, feels more on brand"},
+                    {"text": "Totally agree, ship it!"},
+                ],
+            },
+        }
+        vp, cs = analyze_procedure_style(proc, llm_reasoner=reasoner)
+        assert vp.get("formality") == "casual"
+        assert vp.get("sample_count") == 3
+        assert len(cs) > 0
+
+    def test_pulls_text_from_step_inputs(self):
+        """Voice analysis also reads typed step inputs."""
+        reasoner = make_mock_reasoner(CASUAL_PROFILE)
+        proc = {
+            "steps": [
+                {
+                    "action": "Compose email",
+                    "parameters": {
+                        "input": "Hey team, hope you're well — quick update on shipping status",
+                    },
+                },
+                {
+                    "action": "Type body",
+                    "input": "We're shipping the casual version because it feels more on brand",
+                },
+            ],
+        }
+        vp, _cs = analyze_procedure_style(proc, llm_reasoner=reasoner)
+        assert vp.get("formality") == "casual"
+
+    def test_threshold_lowered_to_30_chars(self):
+        """The minimum combined-text threshold is 30 chars in v0.3.0
+        (was 50 in v0.2.x).  Casual workflows often have terse content
+        that's still voice-revealing."""
+        reasoner = make_mock_reasoner(CASUAL_PROFILE)
+        proc = {
+            "evidence": {
+                "clipboard_events": [
+                    {"text": "Ship it now please"},  # 18 chars
+                    {"text": "Looks good to me"},    # 16 chars
+                ],
+            },
+        }
+        # 34 chars combined — under old 50 threshold, over new 30 threshold.
+        vp, _cs = analyze_procedure_style(proc, llm_reasoner=reasoner)
+        assert vp.get("formality") == "casual"
+
+    def test_skips_urls_and_short_strings(self):
+        """The collector rejects URLs and very short non-prose values."""
+        reasoner = make_mock_reasoner(CASUAL_PROFILE)
+        proc = {
+            "evidence": {
+                "clipboard_events": [
+                    {"text": "https://example.com/very/long/url/that/should/skip"},
+                    {"text": "ok"},  # too short
+                    {"text": "{\"key\": \"value\"}"},  # JSON blob
+                ],
+            },
+        }
+        vp, _cs = analyze_procedure_style(proc, llm_reasoner=reasoner)
+        # All 3 inputs are filtered out → no analysis runs.
+        assert vp == {}
+
     def test_merges_with_existing(self):
         reasoner = make_mock_reasoner(CASUAL_PROFILE)
         proc = {

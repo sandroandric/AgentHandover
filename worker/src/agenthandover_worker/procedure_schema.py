@@ -113,6 +113,15 @@ def sop_to_procedure(sop_template: dict) -> dict:
             "step_id": f"step_{i + 1}",
             "index": i,
             "action": step.get("step", step.get("action", "")),
+            # description elaborates on WHY/HOW for the agent — separate
+            # from the verb-phrase action.  Was being silently dropped here
+            # in v0.2.x and the early v0.3.0 attempt: the parser captured
+            # it from the VLM response into ``step["description"]`` but
+            # this downstream copy didn't include it.  Confirmed via
+            # diagnostic dump that Gemma 4 e4b emits description on every
+            # step (6/6 in the test recording) — the loss was at this
+            # exact boundary.
+            "description": step.get("description", ""),
             "target": step.get("target", ""),
             "app": step.get("app", ""),
             "location": step.get("location", ""),

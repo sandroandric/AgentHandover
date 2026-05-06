@@ -48,6 +48,18 @@ class BehavioralInsights:
     confidence: float = 0.0
 
 
+class EmptyInsightsError(ValueError):
+    """Raised when ``_parse_insights`` receives a JSON object that has no
+    substantive behavioral content (no goal AND no strategy AND no
+    selection_criteria AND no guardrails).
+
+    The synthesizer treats this as a recoverable failure and retries the
+    VLM call once before giving up.  Distinguished from a malformed-JSON
+    failure (which surfaces as ``parsed is None`` upstream) so the retry
+    feedback can be different.
+    """
+
+
 # ---------------------------------------------------------------------------
 # Synthesis prompt
 # ---------------------------------------------------------------------------
@@ -330,6 +342,7 @@ class BehavioralSynthesizer:
         linked_tasks: list[dict] | None = None,
         continuity_spans: list[dict] | None = None,
         force: bool = False,
+        _retry_count: int = 0,
     ) -> BehavioralInsights:
         """Run behavioral synthesis for a procedure.
 
@@ -412,14 +425,49 @@ class BehavioralSynthesizer:
                 "Behavioral synthesis: invalid JSON for '%s' (response length=%d, first 200 chars: %s)",
                 slug, len(raw_response), raw_response[:200],
             )
+            # Allow one retry for transient parse failures.  After a single
+            # retry we give up to avoid runaway loops on systemically broken
+            # model output.
+            if _retry_count < 1:
+                logger.info(
+                    "Retrying behavioral synthesis for '%s' after parse failure", slug,
+                )
+                return self.synthesize(
+                    slug, procedure, observations,
+                    daily_summaries=daily_summaries,
+                    linked_tasks=linked_tasks,
+                    continuity_spans=continuity_spans,
+                    force=force,
+                    _retry_count=_retry_count + 1,
+                )
             return BehavioralInsights()
 
-        insights = self._parse_insights(parsed)
+        try:
+            insights = self._parse_insights(parsed)
+        except EmptyInsightsError as exc:
+            logger.warning(
+                "Behavioral synthesis returned empty insights for '%s': %s "
+                "(response length=%d)",
+                slug, exc, len(raw_response),
+            )
+            if _retry_count < 1:
+                logger.info(
+                    "Retrying behavioral synthesis for '%s' after empty insights", slug,
+                )
+                return self.synthesize(
+                    slug, procedure, observations,
+                    daily_summaries=daily_summaries,
+                    linked_tasks=linked_tasks,
+                    continuity_spans=continuity_spans,
+                    force=force,
+                    _retry_count=_retry_count + 1,
+                )
+            return BehavioralInsights()
 
         logger.info(
             "Behavioral synthesis for '%s': goal=%s, strategy=%s, "
             "%d criteria, %d templates, %d branches, %d guardrails "
-            "(%.1fs VLM, confidence=%.2f)",
+            "(%.1fs VLM, confidence=%.2f, retries=%d)",
             slug,
             bool(insights.goal),
             bool(insights.strategy),
@@ -429,6 +477,7 @@ class BehavioralSynthesizer:
             len(insights.guardrails),
             elapsed,
             insights.confidence,
+            _retry_count,
         )
         if insights.goal:
             logger.info(
@@ -466,8 +515,24 @@ class BehavioralSynthesizer:
         """Merge synthesis results into a procedure dict.
 
         Does NOT mutate the input.  Returns a new dict.
+
+        ``last_synthesized`` is only set when at least one substantive field
+        was extracted (goal, strategy, selection_criteria, guardrails, or
+        decision_branches).  Previously this timestamp was set
+        unconditionally — even when ``insights`` was the all-defaults
+        ``BehavioralInsights()`` returned on parse failure — which produced
+        the v0.2.x false-positive "synthesis succeeded" signal on Skills
+        like marketing-stats-email.
         """
         proc = dict(procedure)
+
+        had_substantive_extraction = bool(
+            insights.goal
+            or insights.strategy
+            or insights.selection_criteria
+            or insights.guardrails
+            or insights.decision_branches
+        )
 
         if insights.goal:
             proc["goal"] = insights.goal
@@ -493,10 +558,11 @@ class BehavioralSynthesizer:
         if insights.confidence > 0:
             proc["behavioral_confidence"] = round(insights.confidence, 4)
 
-        proc["last_synthesized"] = datetime.now(timezone.utc).isoformat()
-        proc["_obs_at_last_synthesis"] = proc.get("evidence", {}).get(
-            "total_observations", 0
-        )
+        if had_substantive_extraction:
+            proc["last_synthesized"] = datetime.now(timezone.utc).isoformat()
+            proc["_obs_at_last_synthesis"] = proc.get("evidence", {}).get(
+                "total_observations", 0
+            )
 
         return proc
 
@@ -1043,26 +1109,62 @@ class BehavioralSynthesizer:
 
     @staticmethod
     def _parse_insights(data: dict) -> BehavioralInsights:
-        """Parse VLM JSON response into BehavioralInsights."""
+        """Parse VLM JSON response into BehavioralInsights.
+
+        Raises ``EmptyInsightsError`` when the parsed JSON has no
+        substantive content — no goal, no strategy, no selection_criteria,
+        and no guardrails.  This prevents the v0.2.x silent-failure mode
+        where the VLM returned ``{"goal": "", "strategy": "", "guardrails": []}``,
+        the parser accepted it, ``last_synthesized`` was set, and the
+        procedure shipped to ``agent_ready`` with empty behavioral data.
+        Decision_branches and content_templates alone are not enough to
+        consider synthesis successful — they're optional, while goal or
+        strategy is required for an actionable Skill.
+        """
+        if not isinstance(data, dict):
+            raise EmptyInsightsError(
+                f"VLM response is not a JSON object (got {type(data).__name__})"
+            )
+
+        goal = str(data.get("goal", "") or "").strip()
+        strategy = str(data.get("strategy", "") or "").strip()
+        selection_criteria = [
+            sc for sc in data.get("selection_criteria", [])
+            if isinstance(sc, dict) and sc.get("criterion")
+        ]
+        content_templates = [
+            ct for ct in data.get("content_templates", [])
+            if isinstance(ct, dict) and ct.get("template")
+        ]
+        decision_branches = [
+            br for br in data.get("decision_branches", [])
+            if isinstance(br, dict) and br.get("condition")
+        ]
+        guardrails = [
+            g for g in data.get("guardrails", [])
+            if isinstance(g, str) and g.strip()
+        ]
+        timing = data.get("timing", {}) if isinstance(data.get("timing"), dict) else {}
+        confidence = 0.0
+        try:
+            confidence = float(data.get("confidence", 0.0))
+        except (TypeError, ValueError):
+            confidence = 0.0
+
+        # Require at least one substantive field for the synthesis to be
+        # considered successful.  goal OR strategy is the minimum bar.
+        if not goal and not strategy and not selection_criteria and not guardrails:
+            raise EmptyInsightsError(
+                "synthesis returned no goal, strategy, criteria, or guardrails"
+            )
+
         return BehavioralInsights(
-            goal=str(data.get("goal", "") or "").strip(),
-            strategy=data.get("strategy", ""),
-            selection_criteria=[
-                sc for sc in data.get("selection_criteria", [])
-                if isinstance(sc, dict) and sc.get("criterion")
-            ],
-            content_templates=[
-                ct for ct in data.get("content_templates", [])
-                if isinstance(ct, dict) and ct.get("template")
-            ],
-            decision_branches=[
-                br for br in data.get("decision_branches", [])
-                if isinstance(br, dict) and br.get("condition")
-            ],
-            guardrails=[
-                g for g in data.get("guardrails", [])
-                if isinstance(g, str) and g.strip()
-            ],
-            timing=data.get("timing", {}),
-            confidence=float(data.get("confidence", 0.0)),
+            goal=goal,
+            strategy=strategy,
+            selection_criteria=selection_criteria,
+            content_templates=content_templates,
+            decision_branches=decision_branches,
+            guardrails=guardrails,
+            timing=timing,
+            confidence=confidence,
         )

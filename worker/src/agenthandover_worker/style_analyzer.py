@@ -54,6 +54,9 @@ Rules:
 Respond with ONLY the JSON object."""
 
 
+_MIN_COMBINED_TEXT_FOR_STYLE = 30
+
+
 def analyze_style(
     texts: list[str],
     llm_reasoner: "LLMReasoner | None" = None,
@@ -62,17 +65,32 @@ def analyze_style(
 
     Uses LLM when available, returns empty dict if no reasoner
     or insufficient text.
+
+    Threshold is 30 chars combined (down from 50 in earlier versions).
+    Real workflows often produce terse content that's still
+    voice-revealing — a casual comment or one-line message reflects
+    style.  We log at INFO level when skipping due to insufficient
+    content so operators can see why a Skill ended up voice-less.
     """
     if not texts:
         return {}
 
     combined = " ".join(texts)
-    if len(combined) < 50:
+    if len(combined) < _MIN_COMBINED_TEXT_FOR_STYLE:
+        logger.info(
+            "Style analysis skipped: only %d chars across %d samples "
+            "(need at least %d)",
+            len(combined), len(texts), _MIN_COMBINED_TEXT_FOR_STYLE,
+        )
         return {}
 
     # Need the LLM for real analysis
     if llm_reasoner is None:
-        logger.debug("No LLM reasoner — style analysis skipped")
+        logger.info(
+            "Style analysis skipped for %d samples (%d chars): no LLM "
+            "reasoner available",
+            len(texts), len(combined),
+        )
         return {}
 
     # Format samples for the prompt
@@ -145,27 +163,102 @@ def extract_content_samples(
     return samples
 
 
+def _collect_user_authored_texts(procedure: dict) -> list[str]:
+    """Pull user-authored text from every place it can land in a procedure.
+
+    Voice analysis was previously gated on
+    ``evidence.extracted_evidence.content_produced``, which is populated
+    by the EvidenceExtractor's daily pass — that pass only runs against
+    observations 12+ days old (targeting the 14-day expiry window).  So
+    a freshly-generated procedure had ``content_produced = []`` until
+    almost two weeks later, and ``analyze_style`` returned an empty
+    voice profile every time on every Skill.  All 24 historical Skills
+    show ``voice_profile: {}`` because of this delay.
+
+    This collector reads from EVERY source that's available at procedure
+    write time, not only the delayed extraction:
+
+    - ``evidence.extracted_evidence.content_produced`` (fast path when
+      the daily extractor has already run for older procedures)
+    - ``evidence.clipboard_events[].text`` (the user's own copy/paste
+      content captured live during the recording)
+    - per-step ``parameters.input`` and top-level ``input`` fields (text
+      the user typed during the recording — composes, prompts, search
+      queries, comments)
+    - ``content_samples`` already on the procedure from prior runs
+
+    Only includes strings that are at least 10 characters and look like
+    natural language (not single tokens, URLs, or boolean flags).
+    """
+    texts: list[str] = []
+
+    def _add(text: object) -> None:
+        if not isinstance(text, str):
+            return
+        stripped = text.strip()
+        if len(stripped) < 10:
+            return
+        # Reject obvious non-prose values (URLs, IDs, JSON-looking blobs).
+        if stripped.startswith(("http://", "https://", "{", "[")):
+            return
+        texts.append(stripped)
+
+    evidence = procedure.get("evidence", {}) or {}
+    extracted = evidence.get("extracted_evidence", {}) or {}
+
+    for item in extracted.get("content_produced", []):
+        if not isinstance(item, dict):
+            continue
+        full = item.get("full_value", "")
+        if full and isinstance(full, str) and len(full) > 10:
+            _add(full)
+        else:
+            _add(item.get("value_preview", ""))
+
+    for event in evidence.get("clipboard_events", []):
+        if isinstance(event, dict):
+            _add(event.get("text"))
+            _add(event.get("preview"))
+
+    for step in procedure.get("steps", []):
+        if not isinstance(step, dict):
+            continue
+        _add(step.get("input"))
+        _add(step.get("description"))
+        params = step.get("parameters")
+        if isinstance(params, dict):
+            _add(params.get("input"))
+
+    for sample in procedure.get("content_samples", []) or []:
+        if isinstance(sample, dict):
+            _add(sample.get("text"))
+        elif isinstance(sample, str):
+            _add(sample)
+
+    # De-duplicate while preserving order.
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for t in texts:
+        if t not in seen:
+            seen.add(t)
+            deduped.append(t)
+    return deduped
+
+
 def analyze_procedure_style(
     procedure: dict,
     llm_reasoner: "LLMReasoner | None" = None,
 ) -> tuple[dict, list[dict]]:
-    """Extract style profile from a procedure's evidence.
+    """Extract style profile from a procedure's text content.
 
-    Reads content_produced and analyzes writing patterns via LLM.
+    Pulls source texts from every place they can live in a procedure
+    (clipboard events, typed step inputs, content samples, and the
+    delayed ``extracted_evidence.content_produced``) so style analysis
+    can run at procedure write time instead of waiting 12+ days for the
+    evidence extractor to populate ``content_produced``.  See
+    ``_collect_user_authored_texts`` for the rationale.
     """
-    evidence = procedure.get("evidence", {})
-    extracted = evidence.get("extracted_evidence", {})
-    content_items = extracted.get("content_produced", [])
-
-    texts = []
-    for item in content_items:
-        full = item.get("full_value", "")
-        if full and len(full) > 10:
-            texts.append(full)
-        else:
-            preview = item.get("value_preview", "")
-            if preview and len(preview) > 10:
-                texts.append(preview)
+    texts = _collect_user_authored_texts(procedure)
 
     voice_profile = analyze_style(texts, llm_reasoner=llm_reasoner)
     content_samples = extract_content_samples(texts)

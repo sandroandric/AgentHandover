@@ -287,7 +287,7 @@ struct SOPDetailView: View {
                                                 .fill(warmOrange)
                                         )
 
-                                    VStack(alignment: .leading, spacing: 3) {
+                                    VStack(alignment: .leading, spacing: 5) {
                                         if let app = step["app"] as? String, !app.trimmingCharacters(in: .whitespaces).isEmpty {
                                             Text(app)
                                                 .font(.system(size: 10, weight: .medium))
@@ -297,12 +297,62 @@ struct SOPDetailView: View {
                                                 .background(lightGray)
                                                 .cornerRadius(5)
                                         }
-                                        Text(step["action"] as? String ?? step["step"] as? String ?? step["description"] as? String ?? "")
-                                            .font(.system(size: 12))
-                                            .foregroundColor(darkNavy.opacity(0.85))
+                                        Text(step["action"] as? String ?? step["step"] as? String ?? "")
+                                            .font(.system(size: 12, weight: .semibold))
+                                            .foregroundColor(darkNavy)
                                             .textSelection(.enabled)
                                             .fixedSize(horizontal: false, vertical: true)
                                             .lineSpacing(3)
+                                        if let desc = step["description"] as? String,
+                                           !desc.trimmingCharacters(in: .whitespaces).isEmpty {
+                                            Text(desc)
+                                                .font(.system(size: 11))
+                                                .foregroundColor(darkNavy.opacity(0.7))
+                                                .textSelection(.enabled)
+                                                .fixedSize(horizontal: false, vertical: true)
+                                                .lineSpacing(3)
+                                        }
+                                        if let target = step["target"] as? String,
+                                           !target.trimmingCharacters(in: .whitespaces).isEmpty {
+                                            HStack(alignment: .top, spacing: 4) {
+                                                Image(systemName: "arrow.right")
+                                                    .font(.system(size: 9, weight: .semibold))
+                                                    .foregroundColor(darkNavy.opacity(0.45))
+                                                    .padding(.top, 3)
+                                                Text(target)
+                                                    .font(.system(size: 11, design: .monospaced))
+                                                    .foregroundColor(darkNavy.opacity(0.7))
+                                                    .textSelection(.enabled)
+                                                    .fixedSize(horizontal: false, vertical: true)
+                                            }
+                                        }
+                                        if let input = step["input"] as? String,
+                                           !input.trimmingCharacters(in: .whitespaces).isEmpty {
+                                            HStack(alignment: .top, spacing: 4) {
+                                                Text("Input:")
+                                                    .font(.system(size: 11, weight: .medium))
+                                                    .foregroundColor(darkNavy.opacity(0.5))
+                                                Text(input)
+                                                    .font(.system(size: 11))
+                                                    .foregroundColor(darkNavy.opacity(0.75))
+                                                    .textSelection(.enabled)
+                                                    .fixedSize(horizontal: false, vertical: true)
+                                            }
+                                        }
+                                        if let verify = step["verify"] as? String,
+                                           !verify.trimmingCharacters(in: .whitespaces).isEmpty {
+                                            HStack(alignment: .top, spacing: 4) {
+                                                Image(systemName: "checkmark.circle")
+                                                    .font(.system(size: 10))
+                                                    .foregroundColor(brightGreen)
+                                                    .padding(.top, 1)
+                                                Text(verify)
+                                                    .font(.system(size: 11))
+                                                    .foregroundColor(darkNavy.opacity(0.75))
+                                                    .textSelection(.enabled)
+                                                    .fixedSize(horizontal: false, vertical: true)
+                                            }
+                                        }
                                     }
                                 }
                             }

@@ -91,11 +91,12 @@ Generate a JSON SOP with this exact structure:
   "steps": [
     {{
       "step_number": 1,
-      "action": "<verb phrase: what to do>",
+      "action": "<verb phrase: what to do — short, imperative>",
+      "description": "<one-sentence elaboration that gives the agent the WHY and the HOW: why this step is needed in the workflow, and any nuance about the action that isn't obvious from the verb phrase alone. REQUIRED — cannot be empty.>",
       "app": "<application name>",
       "location": "<URL, file path, or screen location>",
-      "input": "<text to type or value to enter, if any>",
-      "verify": "<concrete check to confirm this step succeeded — what should the user see or be able to confirm?>"
+      "input": "<text to type or value to enter — the EXACT observed value, or empty string if the step has no input>",
+      "verify": "<concrete check to confirm THIS step succeeded — what should the agent observe? REQUIRED — cannot be empty. If no specific check exists, write 'wait briefly for the action to complete and the next UI state to render' rather than leaving blank.>"
     }}
   ],
   "success_criteria": ["<how to confirm the entire task succeeded>"],
@@ -115,7 +116,8 @@ Generate a JSON SOP with this exact structure:
 }}
 
 Rules:
-- Include EVERY meaningful step (navigation, data entry, confirmation)
+- EVERY STEP MUST INCLUDE A NON-EMPTY `description` AND `verify`. The `description` explains why and how; the `verify` describes what tells the agent the step worked. Empty strings for these fields are not acceptable and will cause the SOP to be rejected.
+- Include EVERY meaningful step (navigation, data entry, confirmation, copy, paste, submit, save). Intermediate actions like typing into a field and then submitting are TWO separate steps — do not collapse them into one. The agent needs both the input action AND the submit action visible to execute correctly.
 - Skip redundant frames (reading, scrolling without action)
 - DETECT ACCIDENTAL CLICKS vs INTENTIONAL NAVIGATION: use your \
 judgment. A real mistake looks like: opened a tab/app and closed it \
@@ -127,28 +129,43 @@ mistake. If the user spent time on X (multiple frames, scrolled, \
 clicked, read content, copied something), then going back to Y is \
 part of the real workflow — a reference lookup, a context check, or \
 multi-tab research. Include these as legitimate steps.
-- COHERENCE CHECK — distinguish workflow steps from distractions: \
-"spent time on X" is necessary but not sufficient for X to belong in \
-the SOP. Evaluate each candidate step in the context of the whole \
-recording. For each frame, apply this two-question test: \
-(a) Is the activity in this frame topically coherent with the \
-primary task inferred from the overall recording? \
-(b) Does the content the user interacted with in this frame get \
-referenced, quoted, copied, paraphrased, or otherwise USED in any \
-LATER frame of the same recording? \
-If the answer to BOTH is NO — topically disconnected from the task \
-AND leaves no downstream trace — treat the frame as a distraction \
-(side-reading, context-switch, app-flipping during a pause) and DROP \
-it from the steps. Do not use app names, content, or your training \
-priors to decide what is "relevant"; use only the internal consistency \
-of THIS recording. A legitimate reference lookup always leaves a \
-trace: the content the user consulted shows up downstream. A \
-distraction leaves no trace. That causal linkage, not how long the \
-user lingered, is what determines membership in the SOP.
+- COHERENCE CHECK — distinguish workflow steps from distractions, \
+WITHOUT dropping in-task intermediate actions: \
+A workflow has two kinds of frames the agent needs in the SOP: \
+(i) DIRECTLY OBSERVABLE EFFECTS — frames where you can see the user \
+read, copy, type, click submit, navigate; their effect is visible in \
+that frame OR in the very next frame. \
+(ii) IN-TASK INTERMEDIATES — frames whose effect only becomes visible \
+in a LATER step (e.g. typing into a compose window before clicking \
+Send; setting a date filter before clicking Apply; opening a tool \
+panel before performing the action that uses it). These are required \
+steps even though their immediate downstream content trace is weak. \
+DO NOT drop in-task intermediates just because their result is not \
+visible until the next step completes. The agent will fail to execute \
+the workflow without them. \
+\
+ONLY drop a frame as a distraction when ALL of these are true: \
+(a) The activity is topically disconnected from the inferred primary \
+task (different domain, unrelated app, off-task content). \
+(b) The content the user interacted with in that frame leaves no \
+downstream trace anywhere in the recording (no quotes, no paste, no \
+reference, no follow-up action enabled by it). \
+(c) The frame is NOT obviously an enabling intermediate for the \
+following frame (e.g. clicking on a field is NOT a distraction even \
+if the field's contents only appear in a later "submit" frame). \
+\
+Use only the internal consistency of THIS recording for the \
+distraction call — not app names, content, or your training priors. \
+A legitimate reference lookup leaves a trace; a distraction does not. \
+That causal linkage determines membership in the SOP, not how long \
+the user lingered.
 - When in doubt and the frame is NOT clearly a distraction, KEEP the \
-step. Drop only with clear evidence — either (i) bailed-immediately \
-within 1-2 frames with no interaction, or (ii) topically disjoint \
-from the task AND unused in any later frame.
+step. Especially keep frames where the user typed, pasted, clicked a \
+control, or selected an option — these are the actions an agent must \
+replay even if the result only becomes visible later. Drop only with \
+clear evidence — either (i) bailed-immediately within 1-2 frames with \
+no interaction, or (ii) topically disjoint from the task AND unused \
+in any later frame AND not enabling a subsequent action.
 - DETECT TYPO CORRECTIONS: if the user types something, deletes \
 it, then types the correct version in the same field without switching \
 context — only include the final typed value as a single step. This \
@@ -209,11 +226,12 @@ Generate a JSON SOP with this exact structure:
   "steps": [
     {{
       "step_number": 1,
-      "action": "<verb phrase>",
+      "action": "<verb phrase — short, imperative>",
+      "description": "<one-sentence elaboration: why this step is needed in the workflow and any nuance an agent needs. REQUIRED — cannot be empty.>",
       "app": "<application>",
       "location": "<URL or location>",
       "input": "<text/value to enter, use {{{{variable}}}} for parts that differ>",
-      "verify": "<concrete check to confirm this step succeeded — what should the user see or confirm?>"
+      "verify": "<concrete check to confirm THIS step succeeded — what should the agent observe? REQUIRED — cannot be empty. If no specific check exists, write 'wait briefly for the action to complete and the next UI state to render' rather than leaving blank.>"
     }}
   ],
   "success_criteria": ["<overall success checks>"],
@@ -280,10 +298,11 @@ Generate a JSON SOP with this exact structure:
     {{
       "step_number": 1,
       "action": "<verb phrase — use the canonical action as baseline>",
+      "description": "<one-sentence elaboration: why this step is needed in the workflow and any nuance an agent needs. REQUIRED — cannot be empty.>",
       "app": "<application>",
       "location": "<URL or location>",
       "input": "<text/value, use {{{{variable}}}} for parameters>",
-      "verify": "<how to confirm this step succeeded>"
+      "verify": "<how to confirm THIS step succeeded — what should the agent observe? REQUIRED — cannot be empty.>"
     }}
   ],
   "success_criteria": ["<overall success checks>"],
@@ -759,6 +778,133 @@ def _try_repair_json(text: str) -> dict | None:
     return None
 
 
+_GENERIC_VAR_EXAMPLES = frozenset({
+    # Words/values too short or too generic to template-substitute safely.
+    "yes", "no", "true", "false", "n/a", "ok", "y", "n",
+    "tbd", "todo", "the", "a", "an", "and", "or",
+})
+
+
+_DOUBLE_TEMPLATED_RE = re.compile(
+    r"^\{\{(\{\{[a-zA-Z_][a-zA-Z0-9_]*\}\}[^{}]+)\}\}$"
+)
+
+
+def _unwrap_double_templated(text: str) -> str:
+    """Fix the ``{{{{var}}suffix}}`` over-templating bug.
+
+    Gemma 4 sometimes wraps an already-templated reference in an extra
+    outer ``{{ ... }}`` pair when the value has a literal suffix,
+    producing patterns like ``{{{{bohemia}}.io}}`` instead of the
+    correct ``{{bohemia}}.io``.  This function detects that outer wrap
+    and strips it.
+
+    Strict matching to avoid false positives on other 4-brace inputs:
+    the text must match ``{{`` + ``{{<identifier>}}`` + non-empty
+    literal suffix + ``}}``.  ``{{{{plain text}}}}`` (no suffix,
+    space-containing inner) is left alone — we can't tell what the
+    user intended.
+
+    Returns the unwrapped text on match, otherwise returns the input
+    unchanged.
+    """
+    if not isinstance(text, str) or len(text) < 8:
+        return text
+    m = _DOUBLE_TEMPLATED_RE.match(text)
+    if m:
+        return m.group(1)
+    return text
+
+
+def _wire_variables_into_steps(
+    steps: list[dict],
+    variables: list[dict],
+) -> int:
+    """Substitute variable example values with ``{{varname}}`` in step text.
+
+    The SOP prompt asks the VLM to declare variables AND weave them into
+    step text in one pass, but it often does the first and skips the
+    second.  Variables end up in ``inputs[]`` while step text still has
+    the literal observed value (e.g. step 13 reads "Type recipient email
+    address" but never references ``{{recipient_email}}``).  This
+    post-pass scans each step's text fields for variable example values
+    and substitutes them with the templated reference.
+
+    Conservative behaviour:
+    - Only substitute when the example is ≥ 4 characters long
+    - Skip generic words ("yes", "no", "true") that would cause false
+      matches across unrelated step text
+    - Sort by example length descending so longer matches go first
+      (avoids "John" being replaced by ``{{name}}`` before
+      "John Smith" gets replaced by ``{{full_name}}``)
+    - Skip steps that already contain ``{{varname}}`` for the variable
+      being substituted (idempotent)
+
+    Returns the number of substitutions applied.  Mutates ``steps`` in
+    place.
+    """
+    if not steps or not variables:
+        return 0
+
+    var_map: dict[str, str] = {}
+    for var in variables:
+        if not isinstance(var, dict):
+            continue
+        name = var.get("name")
+        example = var.get("example", "")
+        if not name or not isinstance(example, str):
+            continue
+        example = example.strip()
+        if len(example) < 4:
+            continue
+        if example.lower() in _GENERIC_VAR_EXAMPLES:
+            continue
+        var_map[name] = example
+
+    if not var_map:
+        return 0
+
+    # Longer examples first so "john@example.com" gets templated before "john".
+    sorted_vars = sorted(var_map.items(), key=lambda kv: -len(kv[1]))
+
+    substitutions = 0
+    text_fields = ("action", "description", "input", "location", "verify", "target")
+    param_fields = ("input", "verify", "location", "target")
+
+    def _substitute(value: str, var_name: str, example: str) -> tuple[str, int]:
+        token = f"{{{{{var_name}}}}}"
+        if example not in value or token in value:
+            return value, 0
+        new_value = value.replace(example, token)
+        return new_value, value.count(example)
+
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        for field in text_fields:
+            current = step.get(field)
+            if isinstance(current, str):
+                for var_name, example in sorted_vars:
+                    new_value, count = _substitute(current, var_name, example)
+                    if count:
+                        step[field] = new_value
+                        current = new_value
+                        substitutions += count
+        params = step.get("parameters")
+        if isinstance(params, dict):
+            for key in param_fields:
+                current = params.get(key)
+                if isinstance(current, str):
+                    for var_name, example in sorted_vars:
+                        new_value, count = _substitute(current, var_name, example)
+                        if count:
+                            params[key] = new_value
+                            current = new_value
+                            substitutions += count
+
+    return substitutions
+
+
 def _vlm_sop_to_template(
     vlm_sop: dict,
     *,
@@ -789,19 +935,35 @@ def _vlm_sop_to_template(
         params = raw_step.get("parameters", {}) if isinstance(raw_step.get("parameters"), dict) else {}
         step_text = (
             (raw_step.get("action") if _non_placeholder(raw_step.get("action")) else None)
-            or (raw_step.get("description") if _non_placeholder(raw_step.get("description")) else None)
             or (raw_step.get("step") if _non_placeholder(raw_step.get("step")) else None)
             or raw_step.get("step_name")
             or raw_step.get("name")
             or raw_step.get("instruction")
+            or (raw_step.get("description") if _non_placeholder(raw_step.get("description")) else None)
             or params.get("description")
             or params.get("verify")
             or raw_step.get("verify")
             or raw_step.get("target")
             or str(raw_step)
         )
+
+        # Description is a SEPARATE field from action — it elaborates on
+        # WHY the step is needed and HOW to do it, while action is the
+        # short verb phrase.  Earlier code treated description as a
+        # fallback for action, which meant every Skill shipped with empty
+        # description.  v0.3.0 (fix A) keeps them distinct.
+        description = ""
+        raw_desc = raw_step.get("description")
+        if isinstance(raw_desc, str) and _non_placeholder(raw_desc):
+            description = raw_desc.strip()
+        elif isinstance(params.get("description"), str):
+            description = params["description"].strip()
+        # Don't fall back to step_text — description being empty is a
+        # quality signal that gets surfaced in validation below.
+
         step = {
             "step": step_text,
+            "description": description,
             "target": raw_step.get("location", ""),
             "parameters": {},
             "confidence": confidence,
@@ -817,6 +979,17 @@ def _vlm_sop_to_template(
             step["parameters"]["verify"] = raw_step["verify"]
         if raw_step.get("location"):
             step["parameters"]["location"] = raw_step["location"]
+
+        # Strip Gemma's over-escaped templating ({{{{var}}suffix}} →
+        # {{var}}suffix).  Applied AFTER parameter copy so both the
+        # top-level fields and the parameters dict get sanitised.
+        for _f in ("step", "description", "target"):
+            if isinstance(step.get(_f), str):
+                step[_f] = _unwrap_double_templated(step[_f])
+        for _pk in ("input", "verify", "location"):
+            v = step["parameters"].get(_pk)
+            if isinstance(v, str):
+                step["parameters"][_pk] = _unwrap_double_templated(v)
 
         # Try to extract CSS selector from DOM nodes
         selector = _extract_selector_for_step(raw_step, timeline, step_idx)
@@ -930,6 +1103,21 @@ def _vlm_sop_to_template(
     # Normalise: lowercase, deduplicate, cap at 3
     tags = list(dict.fromkeys(t.lower().strip() for t in tags if isinstance(t, str)))[:3]
 
+    # First, wire any declared variables into step text where the model
+    # produced raw values instead of {{name}} substitutions. Gemma 4
+    # consistently declared variables in `variables[]` but left the step
+    # text with the literal example values (e.g. "Type john@example.com
+    # into the To field" instead of "Type {{recipient_email}} into the
+    # To field"). The post-pass below substitutes example values with
+    # {{varname}} before the unused-variable drop runs, so wired
+    # variables aren't dropped on the very next pass.
+    _subs = _wire_variables_into_steps(steps, variables)
+    if _subs:
+        logger.info(
+            "Wired %d variable substitution(s) into SOP '%s' steps",
+            _subs, slug,
+        )
+
     # Drop any declared variable that isn't actually referenced in any
     # step text. Gemma 4 (and any other VLM) occasionally hallucinates
     # "would be useful" variables that it then forgets to weave into the
@@ -939,8 +1127,8 @@ def _vlm_sop_to_template(
     # single INFO log so we can still monitor prompt quality.
     #
     # The prompt rule above tells the VLM not to do this in the first
-    # place, but this post-processing pass is the safety net — don't
-    # rely on the model to follow the rule perfectly.
+    # place, AND _wire_variables_into_steps above tries to wire them
+    # post-hoc; this pass is the final safety net.
     from agenthandover_worker.sop_linter import (
         _collect_variable_refs,
         _step_text_fields,
@@ -1365,6 +1553,7 @@ class SOPGenerator:
 
         # Parse response — up to 3 attempts with increasingly strict prompting
         vlm_sop = _parse_sop_response(raw_response)
+
         if vlm_sop is None:
             logger.warning(
                 "SOP generation: invalid JSON on attempt 1 (len=%d), retrying with JSON-only suffix",

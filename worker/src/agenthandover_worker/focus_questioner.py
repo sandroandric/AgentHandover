@@ -45,6 +45,11 @@ class FocusQuestion:
     category: str  # "credentials", "strategy", "decision", "verification", "scope"
     context: str   # why this question matters
     default: str   # suggested default if user skips
+    # Step indexes (0-based) the question relates to.  When the user's answer
+    # corrects a value (e.g. "the subreddit is r/ClaudeAI, not r/midclaw"),
+    # merge_answers() rewrites these specific steps' text.  Empty list means
+    # the answer applies to the procedure as a whole, not a particular step.
+    step_indexes: list[int] = field(default_factory=list)
 
 
 @dataclass
@@ -114,7 +119,8 @@ Return a JSON object:
       "question": "<specific, practical question you need answered>",
       "category": "<short label: e.g. access, data_source, decision_logic, output_format, error_handling, verification, scheduling, permissions, or any other relevant label>",
       "context": "<why you need this to execute reliably>",
-      "default": "<your best guess if the human doesn't answer>"
+      "default": "<your best guess if the human doesn't answer>",
+      "step_numbers": [<list of 1-based step numbers this question is about>]
     }}
   ]
 }}
@@ -124,6 +130,9 @@ Rules:
 - If you could execute this workflow as-is, return {{"questions": []}}
 - Every question must reference specific steps or details from above.
 - Defaults should be your most conservative practical assumption.
+- step_numbers is REQUIRED when the question is about a specific step or
+  steps in the list above. Use [] when the question is general (e.g. about
+  scheduling or overall strategy) and not tied to a single step.
 
 Respond with ONLY the JSON object."""
 
@@ -250,11 +259,30 @@ class FocusQuestioner:
             if not default:
                 default = "Not specified"
 
+            # step_indexes lets the LLM tag a question to specific steps so
+            # merge_answers can rewrite those steps in place.  Accept both
+            # 1-based "step_numbers" (LLM-friendly) and 0-based indexes;
+            # normalise to 0-based here.
+            raw_step_idx = raw.get("step_indexes") or raw.get("step_numbers") or []
+            step_indexes: list[int] = []
+            if isinstance(raw_step_idx, list):
+                for v in raw_step_idx:
+                    try:
+                        i = int(v)
+                    except (TypeError, ValueError):
+                        continue
+                    # If the LLM gave 1-based numbers (>= 1), shift to 0-based.
+                    # 0 stays as 0 (already 0-based).  We can't perfectly tell
+                    # the difference; assume LLM uses 1-based when any value
+                    # >= 1 appears.
+                    step_indexes.append(i - 1 if i >= 1 else i)
+
             questions.append(FocusQuestion(
                 question=question_text,
                 category=category,
                 context=context,
                 default=default,
+                step_indexes=step_indexes,
             ))
 
             if len(questions) >= _MAX_QUESTIONS:
@@ -269,15 +297,28 @@ class FocusQuestioner:
     ) -> dict:
         """Merge user answers into the procedure dict.
 
-        Does NOT mutate the input.  Returns a new dict with answers
-        integrated into the appropriate procedure fields.
+        Does NOT mutate the input.  Returns a new dict.
 
-        Merge rules by category:
-        - credentials -> environment.accounts + inputs with credential=True
-        - strategy -> strategy field
-        - decision -> branches conditions
-        - verification -> expected_outcomes
-        - scope -> recurrence
+        Q&A answers always land in ``agent_clarifications[]``.  They do NOT
+        auto-create ``environment.accounts[]`` or ``branches[]`` entries from
+        free text — earlier behavior corrupted those structured fields with
+        narrative answers like "Assume credentials are provided via a logged
+        in browser" appearing as ``accounts[0].service`` and "Select the top
+        3 trending topics" appearing as ``branches[0].condition``.  Both made
+        downstream Skills harder to execute, not easier.
+
+        Where the answer is a concrete value the user is correcting (e.g.
+        "the subreddit is r/ClaudeAI") AND the question has ``step_indexes``
+        pointing at the affected steps, ``_rewrite_steps_for_clarifications``
+        applies a targeted in-place text substitution so the step body stays
+        self-consistent with the clarification.
+
+        Two narrow categories still update procedure-level fields directly
+        because they are non-corrupting and the field shape matches free text:
+
+        - ``strategy``: only writes if the procedure has no synthesised
+          strategy yet (avoid clobbering behavioral_synthesizer output).
+        - ``scope`` (recurrence): writes the recurrence string verbatim.
         """
         proc = json.loads(json.dumps(procedure))  # deep copy
 
@@ -292,7 +333,9 @@ class FocusQuestioner:
 
             cat = q.category.lower().replace(" ", "_")
 
-            # Always store in agent_clarifications so the UI shows all answers
+            # Every answer is recorded in agent_clarifications. This is the
+            # canonical home for Q&A — UI reads from here, audit reads from
+            # here, downstream consumers read from here.
             clarifications = proc.setdefault("agent_clarifications", [])
             clarifications.append({
                 "category": q.category,
@@ -301,68 +344,35 @@ class FocusQuestioner:
                 "context": q.context,
             })
 
-            # Additionally merge into specific procedure fields by category
-            if cat in ("credentials", "access", "login", "auth", "permissions"):
-                self._merge_credentials(proc, answer, q)
-            elif cat in ("strategy", "goal", "purpose", "approach"):
+            # Strategy: free text, but only fill if we don't already have one
+            # from behavioral synthesis (which is structurally richer).
+            if cat in ("strategy", "goal", "purpose", "approach"):
                 self._merge_strategy(proc, answer)
-            elif cat in ("decision", "decision_logic", "branching", "condition"):
-                self._merge_decision(proc, answer, q)
-            elif cat in ("verification", "success", "done", "outcome", "output_format"):
-                self._merge_verification(proc, answer)
+            # Scope/recurrence: the answer maps directly to a single field.
             elif cat in ("scope", "scheduling", "recurrence", "frequency"):
                 self._merge_scope(proc, answer)
+            # All other categories (credentials, decision, verification, etc.)
+            # are recorded in agent_clarifications only.  No structural-field
+            # auto-population from free text.
+
+        # After all answers are recorded, sweep the steps for in-place
+        # text substitutions when the user's answer corrects a specific
+        # value referenced by a step (e.g. "the subreddit is r/ClaudeAI").
+        self._rewrite_steps_for_clarifications(proc, qa_result)
 
         return proc
 
     @staticmethod
-    def _merge_credentials(proc: dict, answer: str, question: FocusQuestion) -> None:
-        """Merge credential-related answer into procedure."""
-        lower = answer.lower()
-        if lower in ("no", "none", "no login required", "n/a"):
-            return  # No credentials needed
-
-        env = proc.setdefault("environment", {})
-        accounts = env.setdefault("accounts", [])
-        accounts.append({
-            "service": answer,
-            "note": f"User indicated: {answer}",
-        })
-
-        inputs = proc.setdefault("inputs", [])
-        inputs.append({
-            "name": "login_credentials",
-            "description": f"Credentials for: {answer}",
-            "credential": True,
-        })
-
-    @staticmethod
     def _merge_strategy(proc: dict, answer: str) -> None:
-        """Merge strategy answer into procedure."""
-        existing = proc.get("strategy", "")
-        if existing:
-            proc["strategy"] = f"{existing} User clarification: {answer}"
-        else:
+        """Merge strategy answer into procedure.
+
+        Only fills ``strategy`` when behavioral_synthesizer hasn't already
+        produced one — Q&A clarifications are coarser than synthesised
+        strategy and shouldn't clobber it.
+        """
+        existing = (proc.get("strategy") or "").strip()
+        if not existing:
             proc["strategy"] = answer
-
-    @staticmethod
-    def _merge_decision(proc: dict, answer: str, question: FocusQuestion) -> None:
-        """Merge decision/branch answer into procedure."""
-        branches = proc.setdefault("branches", [])
-        branches.append({
-            "condition": answer,
-            "source": "user_clarification",
-            "context": question.context,
-        })
-
-    @staticmethod
-    def _merge_verification(proc: dict, answer: str) -> None:
-        """Merge verification/outcome answer into procedure."""
-        outcomes = proc.setdefault("expected_outcomes", [])
-        outcomes.append({
-            "description": answer,
-            "source": "user_clarification",
-        })
 
     @staticmethod
     def _merge_scope(proc: dict, answer: str) -> None:
@@ -372,6 +382,71 @@ class FocusQuestioner:
             proc["recurrence"] = None
         else:
             proc["recurrence"] = answer
+
+    @staticmethod
+    def _rewrite_steps_for_clarifications(
+        proc: dict,
+        qa_result: FocusQAResult,
+    ) -> None:
+        """In-place rewrite of step text based on user clarifications.
+
+        When a question carries ``step_indexes`` and the answer is a concrete
+        replacement value (e.g. "r/ClaudeAI" correcting an observed
+        "r/midclaw"), substitute the answer into the relevant step's
+        ``action``, ``target``, ``location``, and ``parameters`` fields.
+
+        Strategy is conservative — substitute only when:
+        1. The question explicitly names step indexes
+        2. The answer is short enough to plausibly be a value (≤ 80 chars)
+        3. The category is one where corrections are expected (decision,
+           data, verification, scope) — not for free-text strategy answers
+
+        Falls back to no-op when none of the above hold.  This avoids
+        false-positive substitutions on long narrative answers.
+        """
+        steps = proc.get("steps", [])
+        if not isinstance(steps, list) or not steps:
+            return
+
+        rewrite_categories = {
+            "decision", "decision_logic", "branching", "condition",
+            "data", "data_source", "input", "parameter",
+            "verification", "success", "done", "outcome", "output_format",
+            "scope", "target", "destination",
+        }
+
+        for idx, answer in qa_result.answers.items():
+            if idx < 0 or idx >= len(qa_result.questions):
+                continue
+            q = qa_result.questions[idx]
+            ans = answer.strip() or q.default
+            if not ans or len(ans) > 80:
+                continue
+            cat = q.category.lower().replace(" ", "_")
+            if cat not in rewrite_categories:
+                continue
+            if not q.step_indexes:
+                continue
+
+            for step_idx in q.step_indexes:
+                if not isinstance(step_idx, int) or step_idx < 0 or step_idx >= len(steps):
+                    continue
+                step = steps[step_idx]
+                if not isinstance(step, dict):
+                    continue
+                # Replace the most-specific reference field first.
+                # If the answer looks like a URL fragment (starts with /,
+                # http, or r/) we treat it as a target/location override.
+                if ans.startswith(("r/", "/r/", "http://", "https://", "/")):
+                    if "target" in step:
+                        step["target"] = ans
+                    if isinstance(step.get("parameters"), dict):
+                        step["parameters"]["target"] = ans
+                        if "location" in step["parameters"]:
+                            step["parameters"]["location"] = ans
+                # Otherwise leave the answer in agent_clarifications only —
+                # we don't have enough information to know what specific
+                # field the answer should overwrite.
 
 
 # ---------------------------------------------------------------------------

@@ -991,6 +991,151 @@ class TestTypedVariables:
         template = _vlm_sop_to_template(vlm_sop)
         assert template["variables"][0]["sensitive"] is True
 
+    def test_unwrap_double_templated_basic(self):
+        """v0.3.0 fix: collapse Gemma's {{{{var}}suffix}} → {{var}}suffix.
+
+        Caught in domain-lead-may.json (v0.3.0 first dogfood) — Gemma 4
+        e4b sometimes wraps an already-templated reference in an extra
+        outer {{ ... }} pair when there's a literal suffix.
+        """
+        from agenthandover_worker.sop_generator import _unwrap_double_templated
+        # Bug pattern: outer {{ + inner {{var}} + suffix + outer }}
+        assert _unwrap_double_templated("{{{{bohemia}}.io}}") == "{{bohemia}}.io"
+        assert _unwrap_double_templated("{{{{bohemia}}dubai.com}}") == "{{bohemia}}dubai.com"
+
+    def test_unwrap_double_templated_leaves_correct_alone(self):
+        """Valid {{var}} references must NOT be modified."""
+        from agenthandover_worker.sop_generator import _unwrap_double_templated
+        assert _unwrap_double_templated("{{bohemia}}") == "{{bohemia}}"
+        assert _unwrap_double_templated("{{bohemia}}.io") == "{{bohemia}}.io"
+        assert _unwrap_double_templated("google.com/{{bohemia}}") == "google.com/{{bohemia}}"
+        assert _unwrap_double_templated("plain text no braces") == "plain text no braces"
+        assert _unwrap_double_templated("") == ""
+
+    def test_unwrap_double_templated_handles_non_strings(self):
+        from agenthandover_worker.sop_generator import _unwrap_double_templated
+        # Should not crash on None or non-string
+        assert _unwrap_double_templated(None) is None  # type: ignore
+        assert _unwrap_double_templated(42) == 42  # type: ignore
+
+    def test_unwrap_double_templated_skips_when_no_inner_template(self):
+        """If the outer wrap has no nested {{...}} inside, leave it alone."""
+        from agenthandover_worker.sop_generator import _unwrap_double_templated
+        # This is just text in 4 braces with no real inner template — leave it
+        # because we can't tell what the user intended.
+        assert _unwrap_double_templated("{{{{plain text}}}}") == "{{{{plain text}}}}"
+
+    def test_wire_variables_substitutes_example_in_step_text(self):
+        """v0.3.0 fix F: post-pass substitutes literal values with {{var}}.
+
+        VLM declares variables in `variables[]` but often leaves the step
+        text with the raw observed value. _wire_variables_into_steps
+        scans each step's text fields for the example value and replaces
+        it with the templated reference, so the agent can fill in the
+        slot at execution time.
+        """
+        from agenthandover_worker.sop_generator import (
+            _wire_variables_into_steps,
+        )
+        steps = [
+            {"action": "Type john@example.com into the To field"},
+        ]
+        variables = [
+            {"name": "recipient_email", "type": "email", "example": "john@example.com"},
+        ]
+        substitutions = _wire_variables_into_steps(steps, variables)
+        assert substitutions == 1
+        assert steps[0]["action"] == "Type {{recipient_email}} into the To field"
+
+    def test_wire_variables_skips_generic_examples(self):
+        """Examples like "yes"/"no"/"true" don't trigger substitution.
+
+        These short generic words would cause false-positive matches in
+        unrelated step text (e.g. "Type yes button" being rewritten).
+        The wiring function skips them entirely.
+        """
+        from agenthandover_worker.sop_generator import (
+            _wire_variables_into_steps,
+        )
+        steps = [{"action": "Click yes button"}]
+        variables = [
+            {"name": "confirm_choice", "type": "text", "example": "yes"},
+        ]
+        substitutions = _wire_variables_into_steps(steps, variables)
+        assert substitutions == 0
+        assert steps[0]["action"] == "Click yes button"
+
+    def test_wire_variables_idempotent_when_already_templated(self):
+        """If the step already has {{var}}, no double substitution occurs."""
+        from agenthandover_worker.sop_generator import (
+            _wire_variables_into_steps,
+        )
+        steps = [{"action": "Type {{email}} into the field"}]
+        variables = [
+            {"name": "email", "type": "email", "example": "user@example.com"},
+        ]
+        substitutions = _wire_variables_into_steps(steps, variables)
+        assert substitutions == 0
+        assert steps[0]["action"] == "Type {{email}} into the field"
+
+    def test_wire_variables_handles_multiple_in_one_step(self):
+        """Multiple variables can be wired into the same step text."""
+        from agenthandover_worker.sop_generator import (
+            _wire_variables_into_steps,
+        )
+        steps = [
+            {"action": "Send Project Update to john@example.com"},
+        ]
+        variables = [
+            {"name": "subject", "type": "text", "example": "Project Update"},
+            {"name": "recipient", "type": "email", "example": "john@example.com"},
+        ]
+        substitutions = _wire_variables_into_steps(steps, variables)
+        assert substitutions == 2
+        assert "{{subject}}" in steps[0]["action"]
+        assert "{{recipient}}" in steps[0]["action"]
+
+    def test_wire_variables_substitutes_in_parameters_dict(self):
+        """Substitution also targets step.parameters.{input,verify,location,target}."""
+        from agenthandover_worker.sop_generator import (
+            _wire_variables_into_steps,
+        )
+        steps = [
+            {
+                "action": "Open form",
+                "parameters": {
+                    "input": "Submit weekly_report.pdf",
+                    "target": "https://example.com/report-form",
+                },
+            }
+        ]
+        variables = [
+            {"name": "filename", "type": "text", "example": "weekly_report.pdf"},
+        ]
+        substitutions = _wire_variables_into_steps(steps, variables)
+        assert substitutions == 1
+        assert steps[0]["parameters"]["input"] == "Submit {{filename}}"
+
+    def test_wire_variables_longer_example_first(self):
+        """When examples overlap, the longer one is substituted first.
+
+        This matters when one variable's example is a prefix/substring
+        of another (e.g. "John" vs "John Smith").  Without length-sorted
+        substitution, the shorter one would clobber the longer one.
+        """
+        from agenthandover_worker.sop_generator import (
+            _wire_variables_into_steps,
+        )
+        steps = [{"action": "Greet John Smith"}]
+        variables = [
+            {"name": "first_name", "type": "text", "example": "John"},
+            {"name": "full_name", "type": "text", "example": "John Smith"},
+        ]
+        _wire_variables_into_steps(steps, variables)
+        # The full_name should win, leaving first_name unused.
+        assert "{{full_name}}" in steps[0]["action"]
+        assert "{{first_name}}" not in steps[0]["action"]
+
     def test_unused_variables_are_dropped(self):
         """v0.2.3 cleanup: VLM-declared variables that aren't referenced
         in any step's text must be silently dropped from the final SOP.

@@ -229,7 +229,15 @@ class TestMergeAnswers:
     def _make_qa(self, questions, answers):
         return FocusQAResult(questions=questions, answers=answers)
 
-    def test_merge_credentials_answer(self):
+    def test_merge_credentials_does_not_corrupt_accounts(self):
+        """Credentials Q&A answers stay in agent_clarifications only.
+
+        Regression test for v0.2.x bug: free-text credential answers like
+        "Assume credentials are provided via a logged in browser" used to
+        be inserted into ``environment.accounts[0].service`` as if the
+        narrative answer were a service name, then exposed downstream as
+        a Skill account requirement.
+        """
         questions = [
             FocusQuestion(
                 question="Requires login?",
@@ -238,19 +246,36 @@ class TestMergeAnswers:
                 default="No login required",
             )
         ]
-        qa = self._make_qa(questions, {0: "Reddit account (personal)"})
+        qa = self._make_qa(
+            questions,
+            {0: "Assume credentials are provided via a logged in browser"},
+        )
         reasoner = _make_reasoner()
         questioner = FocusQuestioner(llm_reasoner=reasoner)
 
         result = questioner.merge_answers(_make_procedure(), qa)
 
-        assert "environment" in result
-        assert len(result["environment"]["accounts"]) == 1
-        assert "Reddit" in result["environment"]["accounts"][0]["service"]
-        assert len(result["inputs"]) == 1
-        assert result["inputs"][0]["credential"] is True
+        # The free-text answer must NOT corrupt the accounts list.
+        assert result.get("environment", {}).get("accounts", []) == []
+        # And it must NOT appear as a fake credential input variable.
+        cred_inputs = [
+            i for i in result.get("inputs", [])
+            if isinstance(i, dict) and i.get("credential")
+        ]
+        assert cred_inputs == []
+        # The answer is preserved in agent_clarifications for the UI.
+        clarifications = result.get("agent_clarifications", [])
+        assert len(clarifications) == 1
+        assert "logged in browser" in clarifications[0]["answer"]
 
     def test_merge_credentials_no_login(self):
+        """A "No login required" answer still produces no account entry.
+
+        This already worked under the old code (early return on the
+        no-login string match) and continues to work because the new
+        code routes credential answers exclusively to
+        agent_clarifications.
+        """
         questions = [
             FocusQuestion(
                 question="Requires login?",
@@ -266,6 +291,7 @@ class TestMergeAnswers:
         result = questioner.merge_answers(_make_procedure(), qa)
 
         assert result.get("environment", {}).get("accounts", []) == []
+        assert len(result["agent_clarifications"]) == 1
 
     def test_merge_strategy_answer(self):
         questions = [
@@ -283,7 +309,13 @@ class TestMergeAnswers:
         result = questioner.merge_answers(_make_procedure(), qa)
         assert "Find and engage with SaaS founders" in result["strategy"]
 
-    def test_merge_strategy_appends_to_existing(self):
+    def test_merge_strategy_does_not_clobber_existing(self):
+        """Synthesised strategy stays intact when Q&A also provides one.
+
+        The behavioral_synthesizer pass is structurally richer than user
+        Q&A clarifications, so we only fill ``strategy`` when it's empty.
+        Q&A clarifications still land in ``agent_clarifications``.
+        """
         proc = _make_procedure(strategy="Existing strategy.")
         questions = [
             FocusQuestion(
@@ -298,10 +330,22 @@ class TestMergeAnswers:
         questioner = FocusQuestioner(llm_reasoner=reasoner)
 
         result = questioner.merge_answers(proc, qa)
-        assert "Existing strategy." in result["strategy"]
-        assert "Focus on B2B posts" in result["strategy"]
+        # Existing strategy preserved verbatim.
+        assert result["strategy"] == "Existing strategy."
+        # New answer recorded in clarifications for visibility.
+        assert any(
+            "B2B posts" in c.get("answer", "")
+            for c in result.get("agent_clarifications", [])
+        )
 
-    def test_merge_decision_answer(self):
+    def test_merge_decision_does_not_corrupt_branches(self):
+        """Decision Q&A answers stay in agent_clarifications only.
+
+        Regression test: free-text decision answers like "Skip posts older
+        than 24h" used to be auto-inserted into ``branches[0].condition``
+        as if they were boolean conditions, then exposed downstream as
+        Skill branches that an executing agent could not evaluate.
+        """
         questions = [
             FocusQuestion(
                 question="How do you decide?",
@@ -315,11 +359,19 @@ class TestMergeAnswers:
         questioner = FocusQuestioner(llm_reasoner=reasoner)
 
         result = questioner.merge_answers(_make_procedure(), qa)
-        assert len(result["branches"]) == 1
-        assert result["branches"][0]["condition"] == "Skip posts older than 24h"
-        assert result["branches"][0]["source"] == "user_clarification"
+        # No bogus branch created from free-text answer.
+        assert result.get("branches", []) == []
+        # Answer preserved in agent_clarifications.
+        assert len(result["agent_clarifications"]) == 1
+        assert "Skip posts older than 24h" in result["agent_clarifications"][0]["answer"]
 
-    def test_merge_verification_answer(self):
+    def test_merge_verification_does_not_create_outcomes(self):
+        """Verification Q&A answers stay in agent_clarifications only.
+
+        Q&A produces narrative free text ("At least 3 comments posted")
+        that doesn't fit the structured ``expected_outcomes`` schema.
+        Behavioral synthesis is the canonical producer of expected outcomes.
+        """
         questions = [
             FocusQuestion(
                 question="What does done look like?",
@@ -333,8 +385,10 @@ class TestMergeAnswers:
         questioner = FocusQuestioner(llm_reasoner=reasoner)
 
         result = questioner.merge_answers(_make_procedure(), qa)
-        assert len(result["expected_outcomes"]) == 1
-        assert "3 comments" in result["expected_outcomes"][0]["description"]
+        # Don't auto-create expected_outcomes from Q&A.
+        assert result.get("expected_outcomes", []) == []
+        # Answer recorded in agent_clarifications.
+        assert "3 comments" in result["agent_clarifications"][0]["answer"]
 
     def test_merge_scope_recurring(self):
         questions = [
@@ -420,6 +474,7 @@ class TestMergeAnswers:
         assert result.get("strategy", "") == ""
 
     def test_merge_multiple_answers(self):
+        """Each answer routes correctly without corrupting structured fields."""
         questions = [
             FocusQuestion("Login?", "credentials", "ctx", "No"),
             FocusQuestion("Goal?", "strategy", "ctx", "Browse"),
@@ -434,9 +489,108 @@ class TestMergeAnswers:
         questioner = FocusQuestioner(llm_reasoner=reasoner)
 
         result = questioner.merge_answers(_make_procedure(), qa)
-        assert len(result["environment"]["accounts"]) == 1
+        # Credentials answer goes to clarifications only — no fake account.
+        assert result.get("environment", {}).get("accounts", []) == []
+        # Strategy is filled because procedure had no synthesised one.
         assert "SaaS" in result["strategy"]
+        # Scope answer maps to recurrence directly.
         assert result["recurrence"] == "Weekly on Monday"
+        # All three answers recorded in clarifications.
+        assert len(result["agent_clarifications"]) == 3
+
+    def test_merge_step_rewrite_for_target_clarification(self):
+        """A target clarification with explicit step_indexes rewrites that step.
+
+        This covers the v0.2.x bug where Q&A asked "Which subreddit?" and
+        the user answered "r/ClaudeAI", but the step text kept the wrongly
+        inferred "r/midclaw" target. With step_indexes specified, the
+        answer now propagates into the step's target field.
+        """
+        proc = _make_procedure()
+        proc["steps"] = [
+            {
+                "step_id": "step_1",
+                "action": "Navigate to subreddit",
+                "target": "r/midclaw",
+                "parameters": {"target": "r/midclaw", "location": "r/midclaw"},
+            }
+        ]
+        questions = [
+            FocusQuestion(
+                question="Which subreddit?",
+                category="decision",
+                context="Step 1 references a subreddit",
+                default="r/all",
+                step_indexes=[0],
+            )
+        ]
+        qa = self._make_qa(questions, {0: "r/ClaudeAI"})
+        reasoner = _make_reasoner()
+        questioner = FocusQuestioner(llm_reasoner=reasoner)
+
+        result = questioner.merge_answers(proc, qa)
+        step = result["steps"][0]
+        assert step["target"] == "r/ClaudeAI"
+        assert step["parameters"]["target"] == "r/ClaudeAI"
+        assert step["parameters"]["location"] == "r/ClaudeAI"
+
+    def test_merge_step_rewrite_skips_when_no_step_indexes(self):
+        """Free-text answers with no step_indexes do not modify steps.
+
+        The step-rewrite logic is conservative: when the LLM tags a
+        question as general (no step_indexes), we never touch step text.
+        """
+        proc = _make_procedure()
+        proc["steps"] = [{"action": "Navigate to subreddit", "target": "r/midclaw"}]
+        questions = [
+            FocusQuestion(
+                question="What's the strategy?",
+                category="strategy",
+                context="Overall approach",
+                default="Browse",
+                step_indexes=[],
+            )
+        ]
+        qa = self._make_qa(questions, {0: "r/ClaudeAI"})
+        reasoner = _make_reasoner()
+        questioner = FocusQuestioner(llm_reasoner=reasoner)
+
+        result = questioner.merge_answers(proc, qa)
+        # Step target unchanged because question had no step_indexes.
+        assert result["steps"][0]["target"] == "r/midclaw"
+
+    def test_merge_step_rewrite_skips_long_narrative_answers(self):
+        """Answers longer than 80 chars are not used to rewrite step text.
+
+        Long narrative answers (e.g. "I usually decide based on the
+        sender's relationship to the company and the urgency of the
+        request, but only between 9am and 5pm") shouldn't be substituted
+        into step targets — they're context, not values.
+        """
+        proc = _make_procedure()
+        proc["steps"] = [{"action": "Navigate", "target": "r/midclaw"}]
+        long_answer = (
+            "I usually decide based on the sender relationship and urgency "
+            "but only between 9am and 5pm during weekdays only"
+        )
+        questions = [
+            FocusQuestion(
+                question="How do you decide?",
+                category="decision",
+                context="Branch detected",
+                default="default",
+                step_indexes=[0],
+            )
+        ]
+        qa = self._make_qa(questions, {0: long_answer})
+        reasoner = _make_reasoner()
+        questioner = FocusQuestioner(llm_reasoner=reasoner)
+
+        result = questioner.merge_answers(proc, qa)
+        # Step target unchanged: long answer doesn't override step text.
+        assert result["steps"][0]["target"] == "r/midclaw"
+        # Answer still recorded in clarifications for the agent to consult.
+        assert long_answer in result["agent_clarifications"][0]["answer"]
 
 
 # ---------------------------------------------------------------------------
