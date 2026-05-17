@@ -24,7 +24,8 @@
   <a href="#how-it-works">How It Works</a> &middot;
   <a href="#connect-your-agent">Connect Your Agent</a> &middot;
   <a href="#install">Install</a> &middot;
-  <a href="#privacy">Privacy</a>
+  <a href="#privacy">Privacy</a> &middot;
+  <a href="#contact">Contact</a>
 </p>
 
 ---
