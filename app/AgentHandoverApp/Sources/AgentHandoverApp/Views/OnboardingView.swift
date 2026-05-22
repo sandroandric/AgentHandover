@@ -23,6 +23,7 @@ struct OnboardingView: View {
         case openai = "openai"
         case anthropic = "anthropic"
         case google = "google"
+        case minimax = "minimax"
 
         var id: String { rawValue }
 
@@ -31,6 +32,7 @@ struct OnboardingView: View {
             case .openai: return "OpenAI"
             case .anthropic: return "Anthropic (Claude)"
             case .google: return "Google (Gemini)"
+            case .minimax: return "MiniMax (M-series)"
             }
         }
 
@@ -39,6 +41,7 @@ struct OnboardingView: View {
             case .openai: return "gpt-4.1-mini"
             case .anthropic: return "claude-sonnet-4-6-20260320"
             case .google: return "gemini-2.5-flash"
+            case .minimax: return "MiniMax-M2.7"
             }
         }
 
@@ -47,6 +50,7 @@ struct OnboardingView: View {
             case .openai: return "OPENAI_API_KEY"
             case .anthropic: return "ANTHROPIC_API_KEY"
             case .google: return "GOOGLE_API_KEY"
+            case .minimax: return "MINIMAX_API_KEY"
             }
         }
     }

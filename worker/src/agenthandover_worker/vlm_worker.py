@@ -24,6 +24,7 @@ class VLMBackend(str, Enum):
     OPENAI_COMPAT = "openai-compat"  # OpenAI-compatible API
     ANTHROPIC = "anthropic"        # Anthropic Claude API
     GOOGLE_GENAI = "google-genai"  # Google Generative AI API
+    MINIMAX = "minimax"             # MiniMax M-series (Anthropic-compatible)
     MOCK = "mock"                  # For testing
 
 
@@ -187,6 +188,9 @@ class VLMWorker:
         elif self.config.backend == VLMBackend.GOOGLE_GENAI:
             from agenthandover_worker.backends.google_genai import GoogleGenAIBackend
             return GoogleGenAIBackend(self.config)
+        elif self.config.backend == VLMBackend.MINIMAX:
+            from agenthandover_worker.backends.minimax import MiniMaxBackend
+            return MiniMaxBackend(self.config)
         raise ValueError(f"Unknown backend: {self.config.backend}")
 
     def _check_daily_reset(self) -> None:

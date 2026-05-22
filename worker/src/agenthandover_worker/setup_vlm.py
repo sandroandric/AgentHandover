@@ -108,6 +108,12 @@ _REMOTE_PROVIDERS = {
         "default_model": "gemini-2.0-flash",
         "key_prefix": "AI",
     },
+    "minimax": {
+        "name": "MiniMax (M-series)",
+        "env_var": "MINIMAX_API_KEY",
+        "default_model": "MiniMax-M2.7",
+        "key_prefix": "",
+    },
 }
 
 
