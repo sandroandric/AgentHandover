@@ -1,4 +1,10 @@
 <p align="center">
+  <sub>Created by Sandro Andric</sub>
+  <br/>
+  <a href="https://www.sandric.co/"><img src="resources/sandric-logo.png" width="110" alt="sandric — Product Studio by Sandro Andric" /></a>
+</p>
+
+<p align="center">
   <img src="resources/favicon.png" width="140" alt="AgentHandover" />
 </p>
 
@@ -493,6 +499,12 @@ The Discord is where the community actually talks in real time:
 - **#announcements** — release notes and updates
 
 GitHub [Discussions](https://github.com/sandroandric/AgentHandover/discussions) and [Issues](https://github.com/sandroandric/AgentHandover/issues) are still the right home for anything that should be public and searchable long-term — bug reports with reproductions, feature proposals, design discussions. Discord is for the ephemeral stuff in between.
+
+## Sponsor
+
+[![MyClaw.ai — Your OpenClaw Agent, Always On.](https://raw.githubusercontent.com/LeoYeAI/myclaw-sponsor-preview/main/banner.svg)](https://myclaw.ai?utm_source=github&utm_campaign=awesome-openclaw-skills)
+
+**[MyClaw.ai](https://myclaw.ai?utm_source=github&utm_campaign=awesome-openclaw-skills)** · Run all these skills without managing a server. Get a full cloud-hosted OpenClaw instance with one-click setup, 24/7 uptime, and complete data ownership. [Get started now →](https://myclaw.ai?utm_source=github&utm_campaign=awesome-openclaw-skills)
 
 ## Contact
 
