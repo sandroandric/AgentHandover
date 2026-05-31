@@ -1,7 +1,7 @@
 <p align="center">
   <sub>Created by Sandro Andric</sub>
   <br/>
-  <a href="https://www.sandric.co/"><img src="resources/sandric-logo.png" width="110" alt="sandric — Product Studio by Sandro Andric" /></a>
+  <a href="https://www.sandric.co/"><img src="resources/sandric-wordmark.png" width="120" alt="sandric — Product Studio by Sandro Andric" /></a>
 </p>
 
 <p align="center">
