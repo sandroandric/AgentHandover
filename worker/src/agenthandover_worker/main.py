@@ -4639,9 +4639,12 @@ def main(argv: list[str] | None = None) -> None:
             ollama_host = v2_cfg.get("ollama_host", "http://localhost:11434") if v2_cfg else "http://localhost:11434"
             if not ollama_supports_gemma4(ollama_host):
                 logger.warning(
-                    "Gemma 4 models require Ollama 0.20.0+. "
-                    "Current version may not support them. "
-                    "Upgrade: brew upgrade ollama"
+                    "Gemma 4 QAT models require Ollama 0.30.6+. "
+                    "Current version is too old (pulls will fail with HTTP 412). "
+                    "Update the official app: https://ollama.com/download "
+                    "(or: brew install --cask ollama-app). "
+                    "Note: the Homebrew 'ollama' formula does not bundle the "
+                    "GGUF runner — use the official app instead."
                 )
 
         # Log active model profiles

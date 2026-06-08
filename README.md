@@ -283,15 +283,15 @@ AgentHandover auto-detects your Mac's RAM during onboarding and recommends the b
 | RAM | Tier | Model | Download |
 |-----|------|-------|----------|
 | 8 GB | Standard | Qwen 3.5 (2B + 4B) | ~6 GB |
-| 16 GB | Recommended | Gemma 4 E4B | ~10 GB |
-| 24 GB | Performance | Gemma 4 E4B Q8 | ~12 GB |
-| 48 GB+ | Max Quality | Gemma 4 31B | ~20 GB |
+| 16 GB | Recommended | Gemma 4 12B QAT | ~7 GB |
+| 24 GB | Performance | Gemma 4 12B QAT | ~7 GB |
+| 48 GB+ | Max Quality | Gemma 4 31B QAT | ~18 GB |
 
-Gemma 4 models require Ollama 0.20.0+. All models run fully local via Ollama.
+The Gemma 4 tiers use Google's QAT (Quantization-Aware Training) checkpoints — near-original quality at a much smaller footprint. They require **Ollama 0.30.6+** (install the [official app](https://ollama.com/download), or `brew install --cask ollama-app` — the Homebrew `ollama` *formula* does not bundle the GGUF runner). The 8 GB Qwen tier works on older Ollama. All models run fully local.
 
 ```bash
 # Or pull manually:
-ollama pull gemma4              # Recommended for 16 GB+ (~10 GB)
+ollama pull gemma4:12b-it-qat   # Recommended for 16 GB+ (~7 GB)
 ollama pull nomic-embed-text    # Semantic search (~274 MB)
 ```
 
@@ -323,7 +323,7 @@ sudo installer -pkg target/AgentHandover-*.pkg -target /
 
 ### Choose your AI model
 
-AgentHandover defaults to local models via Ollama (Gemma 4 for 16 GB+ Macs, Qwen 3.5 for 8 GB) -- free, fast, private. Six backends supported:
+AgentHandover defaults to local models via Ollama (Gemma 4 QAT for 16 GB+ Macs, Qwen 3.5 for 8 GB): free, fast, private. Six backends supported:
 
 | Backend | Best for |
 |---------|----------|
@@ -511,6 +511,27 @@ GitHub [Discussions](https://github.com/sandroandric/AgentHandover/discussions) 
 [sandro@sandric.co](mailto:sandro@sandric.co)
 
 ## Changelog
+
+### v0.4.0 (2026-06-09)
+
+New default local models — Google's **QAT (Quantization-Aware Training) Gemma 4** checkpoints — chosen by a head-to-head A/B test on a real focus recording, not by spec sheets.
+
+**The 16 GB tier moves from Gemma 4 E4B to Gemma 4 **12B QAT** (and uses *less* memory: ~7 GB vs ~9.6 GB).** In the A/B, the E4B model couldn't even identify what the recorded workflow was — it returned *"Unclear … the user does not complete a final artifact"* on both runs. The 12B QAT model correctly identified the task both runs (*"Drafts a daily news digest email, subject 'Thursday Daily News', aggregating updates from X, Reddit, and Hacker News"*), extracted a typed variable, and produced goal-directed steps. A 12B-dense model fits where a 4B-effective one used to, and reasons dramatically better about *why* you did what you did — which is where Skill quality lives.
+
+New tier table:
+
+| RAM | Was | Now | Download |
+|-----|-----|-----|----------|
+| 8 GB | Qwen 3.5 | Qwen 3.5 (unchanged) | ~6 GB |
+| 16 GB | Gemma 4 E4B | **Gemma 4 12B QAT** | ~7 GB (was ~10) |
+| 24 GB | Gemma 4 E4B Q8 | **Gemma 4 12B QAT** | ~7 GB (was ~12) |
+| 48 GB+ | Gemma 4 31B | **Gemma 4 31B QAT** | ~18 GB (was ~20) |
+
+The 8 GB tier **stays on Qwen 3.5** — we A/B-tested the smallest Gemma QAT (e2b) there too, and it was a *regression*: the 2B model got the task wrong both runs while Qwen 3.5:4b nailed it. Small models lose the plot; we didn't ship that to the most constrained users.
+
+**Ollama 0.30.6+ now required for the Gemma tiers.** The QAT tags need it (older Ollama returns HTTP 412 on pull). Install the [official Ollama app](https://ollama.com/download) or `brew install --cask ollama-app` — note the Homebrew `ollama` *formula* does not bundle the GGUF runner and cannot run these models, so onboarding now points to the official app. The 8 GB Qwen tier still works on older Ollama.
+
+3026/3026 Python tests pass. Existing installs keep their current model until re-onboarded; new installs and `agenthandover setup --vlm` get the new defaults.
 
 ### v0.3.0 (2026-05-06)
 

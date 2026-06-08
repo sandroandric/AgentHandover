@@ -7,6 +7,39 @@ and the project follows [Semantic Versioning](https://semver.org/) within the 0.
 (minor bumps may include breaking changes; the README's Changelog section has the
 prose version of every release).
 
+## [0.4.0] — 2026-06-09
+
+New default local models — Google's QAT (Quantization-Aware Training) Gemma 4
+checkpoints — chosen by a head-to-head A/B test on a real focus recording.
+
+### Changed
+- **16 GB tier: Gemma 4 E4B → Gemma 4 12B QAT** (`gemma4:12b-it-qat`, ~7 GB,
+  down from ~9.6 GB). A/B on the dailynews recording: E4B returned "Unclear …
+  does not complete a final artifact" on both runs; 12B QAT correctly
+  identified the digest-email task, extracted a typed variable, and produced
+  goal-directed steps both runs. A 12B-dense model now fits where a
+  4B-effective one used to, and reasons far better.
+- **24 GB tier: Gemma 4 E4B Q8 → Gemma 4 12B QAT** (~7 GB, down from ~12 GB).
+- **48 GB tier: Gemma 4 31B → Gemma 4 31B QAT** (`gemma4:31b-it-qat`, ~18 GB,
+  down from ~20 GB).
+- **8 GB tier: unchanged (Qwen 3.5).** We A/B-tested the smallest Gemma QAT
+  (e2b) here too — it was a regression (got the task wrong both runs while
+  Qwen 3.5:4b nailed it), so the most constrained tier stays on Qwen.
+- New `_PROFILES` entries for `gemma4:12b-it-qat` and `gemma4:31b-it-qat`.
+
+### Required
+- **Ollama 0.30.6+** for the Gemma tiers (QAT tags return HTTP 412 on older
+  Ollama). `MINIMUM_OLLAMA_VERSION_FOR_GEMMA4` bumped 0.20.0 → 0.30.6.
+- Onboarding, README, and the Homebrew cask now direct users to the **official
+  Ollama app** (`ollama.com/download` / `brew install --cask ollama-app`)
+  instead of the Homebrew `ollama` formula, which does not bundle the GGUF
+  runner and cannot run these models. The 8 GB Qwen tier still works on older
+  Ollama.
+
+### Tests
+- 3026/3026 Python tests pass. Tier/profile changes validated; Swift + Rust
+  builds clean.
+
 ## [0.3.0] — 2026-05-06
 
 The biggest Skill-quality jump since v0.2.0. Fixes a chain of silent data losses between
@@ -122,6 +155,7 @@ compose-specific structured fields, post-SOP synthesizer rich observations.
 
 First public release.
 
+[0.4.0]: https://github.com/sandroandric/AgentHandover/releases/tag/v0.4.0
 [0.3.0]: https://github.com/sandroandric/AgentHandover/releases/tag/v0.3.0
 [0.2.10]: https://github.com/sandroandric/AgentHandover/releases/tag/v0.2.10
 [0.2.9]: https://github.com/sandroandric/AgentHandover/releases/tag/v0.2.9

@@ -1,6 +1,6 @@
 cask "agenthandover" do
-  version "0.3.0"
-  sha256 "20de3341f76d2bf6e2b69048dcf7bbf636370082300df979a502bf5245ce652e"
+  version "0.4.0"
+  sha256 "4c7c270afd5bac741726b9bc10b30a598f348225a7ea78e7803d3ab7753535df"
 
   url "https://github.com/sandroandric/AgentHandover/releases/download/v#{version}/AgentHandover-#{version}.pkg",
       verified: "github.com/sandroandric/AgentHandover/"
@@ -50,11 +50,13 @@ cask "agenthandover" do
 
       1. Accessibility + Screen Recording permissions (System Settings)
       2. Installing Ollama (opens https://ollama.com/download/mac) or
-         `brew install ollama` — required for local AI models
+         `brew install --cask ollama-app` — required for local AI models
       3. Pulling the Gemma 4 model tier that matches your Mac's RAM
       4. Loading the Chrome extension (optional, for in-browser capture)
 
-    Gemma 4 models require Ollama 0.20.0 or later.
+    The Gemma 4 tiers use QAT checkpoints that require Ollama 0.30.6 or
+    later.  Install the official Ollama app (the Homebrew `ollama` formula
+    does not bundle the GGUF runner — use `--cask ollama-app` instead).
 
     To connect an agent after onboarding:
       agenthandover connect claude-code

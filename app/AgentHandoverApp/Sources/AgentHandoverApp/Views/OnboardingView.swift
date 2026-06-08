@@ -73,27 +73,27 @@ struct OnboardingView: View {
         var annotationModel: String {
             switch self {
             case .standard: return "qwen3.5:2b"
-            case .recommended: return "gemma4"
-            case .performance: return "gemma4:e4b-it-q8_0"
-            case .maxQuality: return "gemma4:31b"
+            case .recommended: return "gemma4:12b-it-qat"
+            case .performance: return "gemma4:12b-it-qat"
+            case .maxQuality: return "gemma4:31b-it-qat"
             }
         }
 
         var sopModel: String {
             switch self {
             case .standard: return "qwen3.5:4b"
-            case .recommended: return "gemma4"
-            case .performance: return "gemma4:e4b-it-q8_0"
-            case .maxQuality: return "gemma4:31b"
+            case .recommended: return "gemma4:12b-it-qat"
+            case .performance: return "gemma4:12b-it-qat"
+            case .maxQuality: return "gemma4:31b-it-qat"
             }
         }
 
         var diskSize: String {
             switch self {
             case .standard: return "~6 GB"
-            case .recommended: return "~10 GB"
-            case .performance: return "~12 GB"
-            case .maxQuality: return "~20 GB"
+            case .recommended: return "~7 GB"
+            case .performance: return "~7 GB"
+            case .maxQuality: return "~18 GB"
             }
         }
 
@@ -109,9 +109,9 @@ struct OnboardingView: View {
         var subtitle: String {
             switch self {
             case .standard: return "Qwen 3.5 — works on 8 GB Macs"
-            case .recommended: return "Gemma 4 E4B — best speed and quality"
-            case .performance: return "Gemma 4 E4B Q8 — higher precision"
-            case .maxQuality: return "Gemma 4 31B — frontier intelligence"
+            case .recommended: return "Gemma 4 12B QAT — 12B dense reasoning"
+            case .performance: return "Gemma 4 12B QAT — with frame headroom"
+            case .maxQuality: return "Gemma 4 31B QAT — frontier intelligence"
             }
         }
 
@@ -1720,7 +1720,7 @@ struct OnboardingView: View {
                     )
                     .buttonStyle(.plain)
 
-                    Text("Or install via: brew install ollama")
+                    Text("Or install via: brew install --cask ollama-app")
                         .font(.system(size: 11, design: .monospaced))
                         .foregroundColor(darkNavy.opacity(0.4))
 
@@ -2667,13 +2667,18 @@ struct OnboardingView: View {
             sopModel = selectedTier.sopModel
         }
 
-        // Check Ollama version if Gemma 4 is selected
+        // Check Ollama version if Gemma 4 is selected. The QAT Gemma 4 tags
+        // (12b-it-qat, 31b-it-qat) require Ollama 0.30.6+ — older Ollama
+        // returns HTTP 412 ("requires a newer version of Ollama") on pull.
         let needsGemma = annModel.contains("gemma4") || sopModel.contains("gemma4")
         if needsGemma {
             let ollamaVersion = getOllamaVersion(ollamaPath)
-            if let version = ollamaVersion, !isOllamaVersionSufficient(version, minimum: "0.20.0") {
+            if let version = ollamaVersion, !isOllamaVersionSufficient(version, minimum: "0.30.6") {
                 vlmPullInProgress = false
-                vlmPullOutput = "Gemma 4 requires Ollama 0.20.0+. You have \(version). Please update: brew upgrade ollama"
+                vlmPullOutput = "Gemma 4 QAT models require Ollama 0.30.6+. You have \(version). "
+                    + "Update the official app at ollama.com/download (or run: "
+                    + "brew install --cask ollama-app). The Homebrew 'ollama' "
+                    + "formula does not bundle the GGUF runner — use the official app."
                 return
             }
         }

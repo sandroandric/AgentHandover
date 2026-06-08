@@ -181,6 +181,38 @@ _PROFILES: dict[str, ModelProfile] = {
         diff_presence_penalty=1.0,
         diff_think=False,
     ),
+    # QAT 12B — the v0.4.0 default for the 16GB and 24GB tiers.  Settings
+    # mirror the base ``gemma4`` profile, which is exactly what the
+    # dailynews A/B validation ran on (the 12B QAT inherited the gemma4
+    # family profile via fallback and produced the winning output).
+    "gemma4:12b-it-qat": ModelProfile(
+        model="gemma4:12b-it-qat",
+        family="gemma4",
+        ann_system=_GEMMA_ANN_SYSTEM,
+        ann_temperature=0.3,
+        ann_num_predict=1500,
+        ann_num_ctx=8192,
+        ann_top_k=64,
+        ann_top_p=0.95,
+        ann_presence_penalty=1.0,
+        ann_think=False,
+        ann_image_before_text=True,
+        sop_system=_GEMMA_SOP_SYSTEM,
+        sop_temperature=0.3,
+        sop_num_predict=6000,
+        sop_num_ctx=16384,
+        sop_top_k=64,
+        sop_top_p=0.95,
+        sop_presence_penalty=1.0,
+        sop_think=True,
+        diff_system=_GEMMA_DIFF_SYSTEM,
+        diff_temperature=0.3,
+        diff_num_predict=500,
+        diff_top_k=64,
+        diff_top_p=0.95,
+        diff_presence_penalty=1.0,
+        diff_think=False,
+    ),
     "gemma4:e4b": ModelProfile(
         model="gemma4:e4b",
         family="gemma4",
@@ -320,6 +352,37 @@ _PROFILES: dict[str, ModelProfile] = {
         diff_presence_penalty=1.0,
         diff_think=False,
     ),
+    # QAT 31B — the v0.4.0 default for the 48GB max-quality tier.  Same
+    # settings as ``gemma4:31b`` (32K SOP context) but the QAT quant runs
+    # in ~18GB instead of 20GB while keeping near-original quality.
+    "gemma4:31b-it-qat": ModelProfile(
+        model="gemma4:31b-it-qat",
+        family="gemma4",
+        ann_system=_GEMMA_ANN_SYSTEM,
+        ann_temperature=0.3,
+        ann_num_predict=1500,
+        ann_num_ctx=8192,
+        ann_top_k=64,
+        ann_top_p=0.95,
+        ann_presence_penalty=1.0,
+        ann_think=False,
+        ann_image_before_text=True,
+        sop_system=_GEMMA_SOP_SYSTEM,
+        sop_temperature=0.3,
+        sop_num_predict=6000,
+        sop_num_ctx=32768,
+        sop_top_k=64,
+        sop_top_p=0.95,
+        sop_presence_penalty=1.0,
+        sop_think=True,
+        diff_system=_GEMMA_DIFF_SYSTEM,
+        diff_temperature=0.3,
+        diff_num_predict=500,
+        diff_top_k=64,
+        diff_top_p=0.95,
+        diff_presence_penalty=1.0,
+        diff_think=False,
+    ),
     "gemma4:31b-it-q8_0": ModelProfile(
         model="gemma4:31b-it-q8_0",
         family="gemma4",
@@ -414,26 +477,26 @@ VRAM_TIERS: list[VRAMTier] = [
     VRAMTier(
         name="recommended",
         min_ram_gb=16,
-        annotation_model="gemma4",
-        sop_model="gemma4",
-        total_disk_gb=9.6,
-        description="Gemma 4 E4B — best balance of speed and quality",
+        annotation_model="gemma4:12b-it-qat",
+        sop_model="gemma4:12b-it-qat",
+        total_disk_gb=7.2,
+        description="Gemma 4 12B QAT — 12B dense reasoning, lighter than E4B",
     ),
     VRAMTier(
         name="performance",
         min_ram_gb=24,
-        annotation_model="gemma4:e4b-it-q8_0",
-        sop_model="gemma4:e4b-it-q8_0",
-        total_disk_gb=12.0,
-        description="Gemma 4 E4B Q8 — higher precision, better extraction",
+        annotation_model="gemma4:12b-it-qat",
+        sop_model="gemma4:12b-it-qat",
+        total_disk_gb=7.2,
+        description="Gemma 4 12B QAT — 12B dense, with headroom for more frames",
     ),
     VRAMTier(
         name="max_quality",
         min_ram_gb=48,
-        annotation_model="gemma4:31b",
-        sop_model="gemma4:31b",
-        total_disk_gb=20.0,
-        description="Gemma 4 31B — maximum quality, frontier intelligence",
+        annotation_model="gemma4:31b-it-qat",
+        sop_model="gemma4:31b-it-qat",
+        total_disk_gb=18.0,
+        description="Gemma 4 31B QAT — maximum quality, frontier intelligence",
     ),
     VRAMTier(
         name="ultra",
@@ -497,7 +560,10 @@ def log_recommendation() -> VRAMTier:
 # Ollama version check
 # ---------------------------------------------------------------------------
 
-MINIMUM_OLLAMA_VERSION_FOR_GEMMA4 = "0.20.0"
+# Bumped to 0.30.6 in v0.4.0: the QAT Gemma 4 tags (gemma4:12b-it-qat,
+# gemma4:31b-it-qat, etc.) require Ollama 0.30.6+ — older Ollama returns
+# HTTP 412 ("requires a newer version of Ollama") on pull.
+MINIMUM_OLLAMA_VERSION_FOR_GEMMA4 = "0.30.6"
 
 
 def check_ollama_version(ollama_host: str = "http://localhost:11434") -> str | None:
