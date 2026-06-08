@@ -25,6 +25,7 @@ class TestProviderMap:
         assert "openai" in _REMOTE_PROVIDERS
         assert "anthropic" in _REMOTE_PROVIDERS
         assert "google" in _REMOTE_PROVIDERS
+        assert "minimax" in _REMOTE_PROVIDERS
 
     def test_provider_metadata_keys(self):
         for name, meta in _REMOTE_PROVIDERS.items():
@@ -50,6 +51,12 @@ class TestProviderMap:
         assert meta["env_var"] == "GOOGLE_API_KEY"
         assert meta["default_model"] == "gemini-2.0-flash"
         assert meta["key_prefix"] == "AI"
+
+    def test_minimax_defaults(self):
+        meta = _REMOTE_PROVIDERS["minimax"]
+        assert meta["env_var"] == "MINIMAX_API_KEY"
+        assert meta["default_model"] == "MiniMax-M2.7"
+        assert meta["key_prefix"] == ""
 
 
 # ---------------------------------------------------------------------------

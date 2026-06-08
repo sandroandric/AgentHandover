@@ -585,14 +585,21 @@ class TestBackendFactory:
         worker = VLMWorker(config=config)
         assert isinstance(worker._backend, OpenAICompatBackend)
 
-    def test_enum_has_7_members(self) -> None:
-        assert len(VLMBackend) == 7
+    def test_creates_minimax_backend(self) -> None:
+        from agenthandover_worker.backends.minimax import MiniMaxBackend
+        config = VLMConfig(backend=VLMBackend.MINIMAX)
+        worker = VLMWorker(config=config)
+        assert isinstance(worker._backend, MiniMaxBackend)
+
+    def test_enum_has_8_members(self) -> None:
+        assert len(VLMBackend) == 8
         assert VLMBackend.MLX_VLM.value == "mlx-vlm"
         assert VLMBackend.LLAMA_CPP.value == "llama-cpp-python"
         assert VLMBackend.OLLAMA.value == "ollama"
         assert VLMBackend.OPENAI_COMPAT.value == "openai-compat"
         assert VLMBackend.ANTHROPIC.value == "anthropic"
         assert VLMBackend.GOOGLE_GENAI.value == "google-genai"
+        assert VLMBackend.MINIMAX.value == "minimax"
         assert VLMBackend.MOCK.value == "mock"
 
 

@@ -304,6 +304,7 @@ def create_llm_backend(
             "openai": VLMBackend.OPENAI_COMPAT,
             "anthropic": VLMBackend.ANTHROPIC,
             "google": VLMBackend.GOOGLE_GENAI,
+            "minimax": VLMBackend.MINIMAX,
         }
         backend_type = _provider_to_backend.get(provider)
         if backend_type is None:

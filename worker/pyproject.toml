@@ -17,6 +17,7 @@ vlm-ollama = ["ollama>=0.3"]
 vlm-openai = ["openai>=1.0"]
 vlm-anthropic = ["anthropic>=0.39"]
 vlm-google = ["google-genai>=1.0"]
+vlm-minimax = ["anthropic>=0.39"]
 vlm-remote = ["openai>=1.0", "anthropic>=0.39", "google-genai>=1.0"]
 vlm = [
     "mlx-vlm>=0.1; platform_machine == 'arm64' and sys_platform == 'darwin'",

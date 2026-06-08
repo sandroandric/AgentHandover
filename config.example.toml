@@ -59,7 +59,7 @@ max_compute_minutes_per_day = 20
 # base_url = ""                # for local providers (vLLM, LM Studio, etc.)
 # --- remote mode (cloud APIs) ---
 # mode = "local"               # "local" (default) or "remote" (cloud API)
-# provider = "openai"          # "openai" | "anthropic" | "google"
+# provider = "openai"          # "openai" | "anthropic" | "google" | "minimax"
 # model = "gpt-4o-mini"        # provider-specific model name
 # api_key_env = "OPENAI_API_KEY"  # env var name (NEVER store keys directly!)
 # --- v2 scene annotation pipeline ---
