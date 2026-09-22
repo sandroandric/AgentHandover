@@ -827,6 +827,48 @@ describe('input value capture (capture_input_values)', () => {
     expect(extractNodeInfo(el, { captureInputValues: true }).innerText).toBeUndefined();
   });
 
+  it('never captures a password revealed by a show-password toggle', () => {
+    const el = document.createElement('input');
+    el.type = 'password';
+    el.value = 'supersecret123';
+    mockBBox(el, {});
+    expect(extractNodeInfo(el, { captureInputValues: true }).innerText).toBeUndefined();
+    el.type = 'text'; // the page's "show password" button
+    expect(extractNodeInfo(el, { captureInputValues: true }).innerText).toBeUndefined();
+  });
+
+  it('never captures one-time codes or card security codes, even when opted in', () => {
+    const otp = document.createElement('input');
+    otp.setAttribute('autocomplete', 'one-time-code');
+    otp.value = '482913';
+    const cvv = document.createElement('input');
+    cvv.name = 'cvv';
+    cvv.value = '123';
+    const totp = document.createElement('textarea');
+    totp.id = 'totp-backup-codes';
+    totp.value = 'abcd-efgh';
+    for (const el of [otp, cvv, totp]) {
+      mockBBox(el, {});
+      expect(extractNodeInfo(el, { captureInputValues: true }).innerText).toBeUndefined();
+    }
+  });
+
+  it('never captures a password inside a shadow root', () => {
+    const host = document.createElement('div');
+    const shadow = host.attachShadow({ mode: 'open' });
+    const pw = document.createElement('input');
+    pw.type = 'password';
+    pw.value = 'shadow-secret';
+    shadow.appendChild(pw);
+    document.body.appendChild(host);
+    mockBBox(host, { x: 0, y: 0, width: 300, height: 100 });
+    mockBBox(pw, { x: 0, y: 0, width: 200, height: 30 });
+
+    const serialised = JSON.stringify(captureViewportDOM({ captureInputValues: true }));
+    expect(serialised).toContain('input[type=password]');
+    expect(serialised).not.toContain('shadow-secret');
+  });
+
   it('does not capture <textarea> values by default, captures them when opted in', () => {
     const el = document.createElement('textarea');
     el.value = 'draft reply';

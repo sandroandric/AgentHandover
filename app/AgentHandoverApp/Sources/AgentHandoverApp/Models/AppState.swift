@@ -115,6 +115,8 @@ final class AppState: ObservableObject {
     @Published var userStopped = UserDefaults.standard.bool(forKey: "observingPaused")
     /// Set when the app had to restart a crashed daemon (see DaemonSupervisor).
     @Published var daemonSupervisorStatus: String?
+    /// Set while ScreenCaptureServer reports stalled captures.
+    @Published var captureStallStatus: String?
 
     // Permissions — app-owned and checked directly by AgentHandover.app.
     @Published var accessibilityGranted = false
@@ -186,6 +188,7 @@ final class AppState: ObservableObject {
 
     private var pollTimer: Timer?
     private var supervisorObserver: NSObjectProtocol?
+    private var captureStallObserver: NSObjectProtocol?
     private let statusDir: URL
 
     init() {
@@ -198,6 +201,15 @@ final class AppState: ObservableObject {
         ) { [weak self] _ in
             Task { @MainActor [weak self] in
                 self?.daemonSupervisorStatus = DaemonSupervisor.shared.statusLine
+            }
+        }
+        captureStallObserver = NotificationCenter.default.addObserver(
+            forName: ScreenCaptureServer.stallStatusChanged, object: nil, queue: .main
+        ) { [weak self] note in
+            let line = (note.object as? ScreenCaptureServer)?.stallStatus
+            Task { @MainActor [weak self] in
+                self?.captureStallStatus = line
+                self?.updateHealth()
             }
         }
         startPolling()
@@ -419,6 +431,7 @@ final class AppState: ObservableObject {
                 || (workerStatus?.consecutive_errors ?? 0) > 0
                 || !daemonRunning || !workerRunning
                 || vlmBacklogged
+                || captureStallStatus != nil
             newHealth = hasWarnings ? .warning : .healthy
         }
         if health != newHealth { health = newHealth }

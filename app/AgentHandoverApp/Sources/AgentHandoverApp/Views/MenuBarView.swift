@@ -71,6 +71,19 @@ struct MenuBarView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
 
+                // Screen capture stalled (ScreenCaptureServer recycled its path)
+                if let stallLine = appState.captureStallStatus {
+                    HStack(spacing: 4) {
+                        Image(systemName: "exclamationmark.triangle")
+                            .font(.system(size: 9))
+                        Text(stallLine)
+                            .font(.system(size: 10))
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .foregroundColor(.orange)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+
                 // Footer: services + quit
                 footerSection
             }

@@ -25,6 +25,7 @@
  */
 
 import type { DomNode } from './types';
+import { isSecureField } from './secure-field';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -53,7 +54,7 @@ export const MIN_ELEMENT_SIZE = 1;
 
 /** Options for a single snapshot. */
 export interface CaptureOptions {
-  /** Include `<input>` / `<textarea>` values (never password values).
+  /** Include `<input>` / `<textarea>` values (never secure-field values).
    *  Mirrors `[privacy] capture_input_values`; default false. */
   captureInputValues?: boolean;
 }
@@ -406,8 +407,9 @@ export function extractNodeInfo(
     if (!node.ariaLabel && !node.name && element.placeholder) {
       node.name = element.placeholder;
     }
-    // Typed values only when the user opted in; password values never.
-    if (options.captureInputValues && element.type !== 'password' && element.value) {
+    // Typed values only when the user opted in; secure fields (passwords,
+    // revealed passwords, one-time codes, card numbers) never.
+    if (options.captureInputValues && !isSecureField(element) && element.value) {
       node.innerText = truncateText(element.value, MAX_INPUT_TEXT_LENGTH);
     }
   } else if (element instanceof HTMLSelectElement) {
@@ -431,8 +433,8 @@ export function extractNodeInfo(
     if (!node.ariaLabel && !node.name && element.placeholder) {
       node.name = element.placeholder;
     }
-    // Typed values only when the user opted in.
-    if (options.captureInputValues && element.value) {
+    // Typed values only when the user opted in; secure fields never.
+    if (options.captureInputValues && !isSecureField(element) && element.value) {
       node.innerText = truncateText(element.value, MAX_INPUT_TEXT_LENGTH);
     }
   }

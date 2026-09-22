@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Info about an active focus recording session.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -89,6 +89,42 @@ pub fn data_dir() -> PathBuf {
 /// Standard location for status files (delegates to `data_dir()`).
 pub fn status_dir() -> PathBuf {
     data_dir()
+}
+
+/// `<data dir>/sockets`: holds `capture.sock`, `observation.sock` (served by
+/// the menu bar app) and `control.sock` (served by the daemon).  Mode 0700,
+/// so no other account can reach the sockets.
+pub fn socket_dir() -> PathBuf {
+    data_dir().join("sockets")
+}
+
+/// Create `dir` mode 0700, or tighten an existing one to 0700.  Refuses a
+/// symlink, a non-directory, or a directory owned by another user.
+#[cfg(unix)]
+pub fn ensure_private_dir(dir: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+
+    if let Some(parent) = dir.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    match std::fs::DirBuilder::new().mode(0o700).create(dir) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(e),
+    }
+    let meta = std::fs::symlink_metadata(dir)?;
+    // SAFETY: getuid has no preconditions and cannot fail.
+    let uid = unsafe { libc::getuid() };
+    if !meta.file_type().is_dir() || meta.uid() != uid {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!("{} is not a directory owned by this user", dir.display()),
+        ));
+    }
+    if meta.mode() & 0o777 != 0o700 {
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
 }
 
 /// Atomically write a status file (tmp + fsync + rename).

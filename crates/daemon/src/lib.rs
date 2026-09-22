@@ -5,4 +5,5 @@ pub mod ipc;
 pub mod maintenance;
 pub mod observation;
 pub mod observer;
+pub mod peer;
 pub mod platform;

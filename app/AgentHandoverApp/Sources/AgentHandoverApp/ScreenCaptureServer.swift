@@ -8,6 +8,11 @@ import Foundation
 /// - Server responds: magic `AHJ1` + width u32 LE + height u32 LE +
 ///   byte length u32 LE + JPEG bytes (the frame after downscaling)
 /// - Or error: `{"error": "..."}\n`
+///
+/// Each connection is handled on a concurrent queue, so one hung
+/// ScreenCaptureKit call never blocks the next request. After
+/// `recycleAfterTimeouts` consecutive timeouts the capture path is replaced
+/// with a fresh `ScreenCaptureService`, and `stallStatus` tells the menu bar.
 final class ScreenCaptureServer {
     typealias CaptureFunction = (CaptureRequest) async -> Result<EncodedFrame, CaptureError>
 
@@ -19,163 +24,99 @@ final class ScreenCaptureServer {
     /// calls cannot be cancelled). Once this many are still pending, new
     /// requests fail fast instead of piling up more hung tasks.
     static let maxPendingCaptures = 2
+    /// Consecutive timeouts (or fail-fast refusals) before the capture path
+    /// is recycled.
+    static let recycleAfterTimeouts = 3
+    /// Recycle at most this often, so a permanently wedged ScreenCaptureKit
+    /// cannot make us spawn hung tasks without bound.
+    static let defaultMinRecycleInterval: TimeInterval = 60
+    /// Posted (on the main queue) whenever `stallStatus` changes.
+    static let stallStatusChanged = Notification.Name("AgentHandoverCaptureStallStatusChanged")
 
     private let socketPath: String
     private let captureTimeout: TimeInterval
-    private let capture: CaptureFunction
-    private var listener: Listener?
+    private let minRecycleInterval: TimeInterval
+    private let makeCapture: () -> CaptureFunction
+    private let policy: PeerPolicy
+    private let handlerQueue = DispatchQueue(
+        label: "com.agenthandover.capture-connections", qos: .userInitiated, attributes: .concurrent)
+    private var listener: UnixSocketListener?
 
-    private let pendingLock = NSLock()
+    private let lock = NSLock()
+    private var capture: CaptureFunction
+    private var generation = 0
     private var pendingCaptures = 0
+    private var consecutiveTimeouts = 0
+    private var lastRecycle: Date?
+    private var status: String?
 
+    /// - Parameter makeCapture: builds a capture path; called once at init
+    ///   and again on every recycle. Defaults to a `ScreenCaptureService`.
     init(
-        socketPath: String = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Application Support/agenthandover/capture.sock").path,
+        socketPath: String = SocketDirectory.socketPath("capture.sock"),
         captureTimeout: TimeInterval = ScreenCaptureServer.defaultCaptureTimeout,
-        capture: CaptureFunction? = nil
+        minRecycleInterval: TimeInterval = ScreenCaptureServer.defaultMinRecycleInterval,
+        policy: PeerPolicy = .production(
+            paths: [PeerPolicy.daemonPath], identifiers: [PeerPolicy.daemonIdentifier]),
+        makeCapture: @escaping () -> CaptureFunction = ScreenCaptureServer.serviceCapture
     ) {
         self.socketPath = socketPath
         self.captureTimeout = captureTimeout
-        if let capture {
-            self.capture = capture
-        } else {
-            let service = ScreenCaptureService()
-            self.capture = { await service.captureFrame($0) }
-        }
+        self.minRecycleInterval = minRecycleInterval
+        self.policy = policy
+        self.makeCapture = makeCapture
+        self.capture = makeCapture()
+    }
+
+    /// A single capture function for every generation (tests).
+    convenience init(
+        socketPath: String,
+        captureTimeout: TimeInterval = ScreenCaptureServer.defaultCaptureTimeout,
+        policy: PeerPolicy,
+        capture: @escaping CaptureFunction
+    ) {
+        self.init(socketPath: socketPath, captureTimeout: captureTimeout, policy: policy,
+                  makeCapture: { capture })
+    }
+
+    static func serviceCapture() -> CaptureFunction {
+        let service = ScreenCaptureService()
+        return { await service.captureFrame($0) }
+    }
+
+    /// One line for the menu bar while capture is stalled, else nil.
+    var stallStatus: String? {
+        lock.lock(); defer { lock.unlock() }
+        return status
+    }
+
+    /// How many times the capture path has been replaced.
+    var recycleCount: Int {
+        lock.lock(); defer { lock.unlock() }
+        return generation
     }
 
     /// Start the server. Runs the accept loop in the background.
     func start() {
         guard listener == nil else { return }
-
-        let dir = (socketPath as NSString).deletingLastPathComponent
-        try? FileManager.default.createDirectory(
-            atPath: dir, withIntermediateDirectories: true, attributes: nil)
-
-        // Remove stale socket file if it exists
-        unlink(socketPath)
-
-        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
-        guard fd >= 0 else {
-            NSLog("ScreenCaptureServer: failed to create socket: errno=%d", errno)
-            return
-        }
-
-        var addr = sockaddr_un()
-        addr.sun_family = sa_family_t(AF_UNIX)
-        let pathBytes = socketPath.utf8CString
-        guard pathBytes.count <= MemoryLayout.size(ofValue: addr.sun_path) else {
-            NSLog("ScreenCaptureServer: socket path too long (%d bytes)", pathBytes.count)
-            Darwin.close(fd)
-            return
-        }
-        withUnsafeMutablePointer(to: &addr.sun_path) { ptr in
-            ptr.withMemoryRebound(to: CChar.self, capacity: pathBytes.count) { dest in
-                for (i, byte) in pathBytes.enumerated() {
-                    dest[i] = byte
-                }
-            }
-        }
-
-        let bindResult = withUnsafePointer(to: &addr) { ptr in
-            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
-                Darwin.bind(fd, sockPtr, socklen_t(MemoryLayout<sockaddr_un>.size))
-            }
-        }
-        guard bindResult == 0 else {
-            NSLog("ScreenCaptureServer: bind failed: errno=%d", errno)
-            Darwin.close(fd)
-            return
-        }
-
-        guard Darwin.listen(fd, 5) == 0 else {
-            NSLog("ScreenCaptureServer: listen failed: errno=%d", errno)
-            Darwin.close(fd)
-            return
-        }
-
-        let listener = Listener(fd: fd)
-        self.listener = listener
-        NSLog("ScreenCaptureServer: listening on %@", socketPath)
-
-        DispatchQueue.global(qos: .userInitiated).async { [self] in
-            acceptLoop(listener)
-        }
+        let listener = UnixSocketListener(
+            name: "ScreenCaptureServer", path: socketPath, policy: policy,
+            handlerQueue: handlerQueue
+        ) { [weak self] fd in self?.handleConnection(fd) }
+        if listener.start() { self.listener = listener }
     }
 
-    /// Stop the server. The accept loop notices within one poll interval and
-    /// closes the listening fd itself after it has exited, so the fd number is
-    /// never closed (and possibly reused) while the loop still uses it.
+    /// Stop the server. The accept loop exits within one poll interval and
+    /// closes the listening fd itself; connections in flight finish.
     func stop() {
         guard let listener else { return }
         self.listener = nil
-        listener.requestStop()
-        unlink(socketPath)
+        listener.stop()
         NSLog("ScreenCaptureServer: stopped")
     }
 
     /// The running listener (tests wait on its `exited` semaphore).
-    var currentListener: Listener? { listener }
-
-    // MARK: - Accept Loop
-
-    final class Listener {
-        let fd: Int32
-        let exited = DispatchSemaphore(value: 0)
-        private let lock = NSLock()
-        private var stopRequested = false
-
-        init(fd: Int32) { self.fd = fd }
-
-        var isStopRequested: Bool {
-            lock.lock(); defer { lock.unlock() }
-            return stopRequested
-        }
-
-        func requestStop() {
-            lock.lock(); stopRequested = true; lock.unlock()
-        }
-    }
-
-    /// Poll interval of the accept loop; bounds how long `stop()` takes to land.
-    static let acceptPollMilliseconds: Int32 = 200
-
-    private func acceptLoop(_ listener: Listener) {
-        defer {
-            Darwin.close(listener.fd)
-            listener.exited.signal()
-        }
-        while !listener.isStopRequested {
-            var pfd = pollfd(fd: listener.fd, events: Int16(POLLIN), revents: 0)
-            let ready = poll(&pfd, 1, Self.acceptPollMilliseconds)
-            if ready < 0 {
-                if errno == EINTR { continue }
-                NSLog("ScreenCaptureServer: poll failed: errno=%d", errno)
-                return
-            }
-            if ready == 0 || listener.isStopRequested { continue }
-
-            let clientFD = accept(listener.fd, nil, nil)
-            guard clientFD >= 0 else {
-                if errno == EINTR || errno == EAGAIN || errno == ECONNABORTED { continue }
-                NSLog("ScreenCaptureServer: accept failed: errno=%d", errno)
-                return
-            }
-
-            var timeout = timeval(tv_sec: 10, tv_usec: 0)
-            setsockopt(clientFD, SOL_SOCKET, SO_RCVTIMEO, &timeout,
-                       socklen_t(MemoryLayout<timeval>.size))
-            setsockopt(clientFD, SOL_SOCKET, SO_SNDTIMEO, &timeout,
-                       socklen_t(MemoryLayout<timeval>.size))
-            // A daemon that hung up must not kill the app with SIGPIPE.
-            var noSigPipe: Int32 = 1
-            setsockopt(clientFD, SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe,
-                       socklen_t(MemoryLayout<Int32>.size))
-
-            handleConnection(clientFD)
-            Darwin.close(clientFD)
-        }
-    }
+    var currentListener: UnixSocketListener? { listener }
 
     // MARK: - Connection Handler
 
@@ -196,7 +137,7 @@ final class ScreenCaptureServer {
         let result = CaptureRequest.parse(json).flatMap { performCapture($0) }
         switch result {
         case .success(let frame):
-            _ = sendAll(fd, Self.encodeFrameResponse(frame))
+            sendAll(fd, Self.encodeFrameResponse(frame))
         case .failure(let error):
             if case .timeout = error {
                 NSLog("ScreenCaptureServer: capture did not return within %.0f s", captureTimeout)
@@ -207,36 +148,71 @@ final class ScreenCaptureServer {
 
     /// Run one capture, bridging async to this blocking thread with a bounded wait.
     func performCapture(_ request: CaptureRequest) -> Result<EncodedFrame, CaptureError> {
-        pendingLock.lock()
+        lock.lock()
         if pendingCaptures >= Self.maxPendingCaptures {
             let pending = pendingCaptures
-            pendingLock.unlock()
+            lock.unlock()
+            recordOutcome(timedOut: true)
             return .failure(.stalled(pending: pending))
         }
         pendingCaptures += 1
-        pendingLock.unlock()
+        let capture = self.capture
+        let myGeneration = generation
+        lock.unlock()
 
         let box = ResultBox()
         let semaphore = DispatchSemaphore(value: 0)
-        let capture = self.capture
         Task { [weak self] in
             let result = await capture(request)
             box.set(result)
-            self?.capturesFinished()
+            self?.captureFinished(generation: myGeneration)
             semaphore.signal()
         }
 
-        guard semaphore.wait(timeout: .now() + captureTimeout) == .success,
-              let result = box.get() else {
+        if semaphore.wait(timeout: .now() + captureTimeout) == .timedOut {
+            recordOutcome(timedOut: true)
             return .failure(.timeout)
         }
-        return result
+        recordOutcome(timedOut: false)
+        return box.get() ?? .failure(.timeout)
     }
 
-    private func capturesFinished() {
-        pendingLock.lock()
-        pendingCaptures -= 1
-        pendingLock.unlock()
+    /// A finished task frees its pending slot, unless the capture path has
+    /// been recycled since it started (the new path starts with no slots used).
+    private func captureFinished(generation finished: Int) {
+        lock.lock()
+        if finished == generation { pendingCaptures -= 1 }
+        lock.unlock()
+    }
+
+    private func recordOutcome(timedOut: Bool) {
+        lock.lock()
+        let before = status
+        if timedOut {
+            consecutiveTimeouts += 1
+            let now = Date()
+            let recycleDue = lastRecycle.map { now.timeIntervalSince($0) >= minRecycleInterval } ?? true
+            if consecutiveTimeouts >= Self.recycleAfterTimeouts && recycleDue {
+                capture = makeCapture()
+                generation += 1
+                pendingCaptures = 0
+                consecutiveTimeouts = 0
+                lastRecycle = now
+                status = "Screen capture stalled; restarted the capture path"
+                NSLog("ScreenCaptureServer: %d captures timed out in a row; capture path recycled",
+                      Self.recycleAfterTimeouts)
+            }
+        } else {
+            consecutiveTimeouts = 0
+            status = nil
+        }
+        let changed = before != status
+        lock.unlock()
+        if changed {
+            DispatchQueue.main.async {
+                NotificationCenter.default.post(name: Self.stallStatusChanged, object: self)
+            }
+        }
     }
 
     private final class ResultBox: @unchecked Sendable {
@@ -270,21 +246,6 @@ final class ScreenCaptureServer {
     }
 
     private func sendError(_ fd: Int32, message: String) {
-        _ = sendAll(fd, Self.encodeErrorResponse(message))
-    }
-
-    /// Write every byte of `data`, looping over partial sends.
-    private func sendAll(_ fd: Int32, _ data: Data) -> Bool {
-        data.withUnsafeBytes { raw in
-            guard let base = raw.baseAddress else { return true }
-            var sent = 0
-            while sent < data.count {
-                let n = Darwin.send(fd, base.advanced(by: sent), data.count - sent, 0)
-                if n < 0 && errno == EINTR { continue }
-                if n <= 0 { return false }
-                sent += n
-            }
-            return true
-        }
+        sendAll(fd, Self.encodeErrorResponse(message))
     }
 }

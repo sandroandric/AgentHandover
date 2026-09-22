@@ -5,6 +5,9 @@
 //! listening there (the API is disabled in config.toml, or the worker is
 //! starting) does it fall back to the trigger spool and poll for the
 //! worker's result file, which waits for the worker's next tick.
+//!
+//! The API refuses a POST without the `X-AgentHandover-Token` header, whose
+//! value the worker keeps in `<data dir>/query-api-token` (mode 0600).
 
 use anyhow::{bail, Result};
 use colored::Colorize;
@@ -21,14 +24,29 @@ const RECALL_RESULT_FILE: &str = "recall-query-result.json";
 /// The worker's query API (`knowledge.query_api_port`, default 9477).
 const QUERY_API_PORT: u16 = 9477;
 const QUERY_API_TIMEOUT: Duration = Duration::from_secs(15);
+/// File in the data dir holding the token every POST must carry.
+const QUERY_API_TOKEN_FILE: &str = "query-api-token";
+const QUERY_API_TOKEN_HEADER: &str = "X-AgentHandover-Token";
+
+/// The worker's API token, or `None` when it has not written one yet.
+fn read_query_api_token(dir: &Path) -> Option<String> {
+    let token = std::fs::read_to_string(dir.join(QUERY_API_TOKEN_FILE)).ok()?;
+    let token = token.trim();
+    (!token.is_empty()).then(|| token.to_string())
+}
 
 /// POST `body` as JSON to the local query API.
 ///
 /// Returns `Ok(None)` when nothing is listening (connection refused), so
 /// the caller can fall back to the trigger spool; any other failure is an
 /// error.  An HTTP error status still returns its JSON body, which carries
-/// an `error` field.
-fn post_query_api(port: u16, path: &str, body: &serde_json::Value) -> Result<Option<serde_json::Value>> {
+/// an `error` field.  `token` goes in the `X-AgentHandover-Token` header.
+fn post_query_api(
+    port: u16,
+    path: &str,
+    token: Option<&str>,
+    body: &serde_json::Value,
+) -> Result<Option<serde_json::Value>> {
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
     let mut stream = match TcpStream::connect_timeout(&addr, Duration::from_secs(1)) {
         Ok(stream) => stream,
@@ -39,10 +57,13 @@ fn post_query_api(port: u16, path: &str, body: &serde_json::Value) -> Result<Opt
     stream.set_write_timeout(Some(QUERY_API_TIMEOUT))?;
 
     let payload = serde_json::to_vec(body)?;
+    let token_header = token
+        .map(|t| format!("{QUERY_API_TOKEN_HEADER}: {t}\r\n"))
+        .unwrap_or_default();
     let mut request = format!(
         "POST {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\
          Content-Type: application/json\r\nContent-Length: {}\r\n\
-         Connection: close\r\n\r\n",
+         {token_header}Connection: close\r\n\r\n",
         payload.len()
     )
     .into_bytes();
@@ -75,7 +96,8 @@ fn query_worker(
     result_file: &str,
     request: &serde_json::Value,
 ) -> Result<serde_json::Value> {
-    if let Some(reply) = post_query_api(QUERY_API_PORT, api_path, request)? {
+    let token = read_query_api_token(&data_dir());
+    if let Some(reply) = post_query_api(QUERY_API_PORT, api_path, token.as_deref(), request)? {
         return Ok(reply);
     }
     // A stale result from an earlier run must not be shown as this one's.
@@ -334,7 +356,7 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         drop(listener);
 
-        let reply = post_query_api(port, "/search", &serde_json::json!({"query": "x"})).unwrap();
+        let reply = post_query_api(port, "/search", None, &serde_json::json!({"query": "x"})).unwrap();
         assert!(reply.is_none());
     }
 
@@ -357,7 +379,7 @@ mod tests {
         });
 
         let started = std::time::Instant::now();
-        let reply = post_query_api(port, "/search", &serde_json::json!({"query": "domains"}))
+        let reply = post_query_api(port, "/search", Some("tok-123"), &serde_json::json!({"query": "domains"}))
             .unwrap()
             .expect("API reply");
         assert!(started.elapsed() < Duration::from_secs(1));
@@ -365,6 +387,7 @@ mod tests {
 
         let request = server.join().unwrap();
         assert!(request.starts_with("POST /search HTTP/1.1\r\n"));
+        assert!(request.contains("\r\nX-AgentHandover-Token: tok-123\r\n"));
         assert!(request.ends_with(r#"{"query":"domains"}"#));
     }
 
@@ -379,8 +402,18 @@ mod tests {
             write!(conn, "HTTP/1.0 501 Not Implemented\r\n\r\n{}", body).unwrap();
         });
 
-        let reply = post_query_api(port, "/recall", &serde_json::json!({})).unwrap().unwrap();
+        let reply = post_query_api(port, "/recall", None, &serde_json::json!({})).unwrap().unwrap();
         assert_eq!(reply["error"], "Search is not available");
         server.join().unwrap();
+    }
+
+    #[test]
+    fn token_is_read_from_the_data_dir_file() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(read_query_api_token(dir.path()), None);
+        std::fs::write(dir.path().join(QUERY_API_TOKEN_FILE), "").unwrap();
+        assert_eq!(read_query_api_token(dir.path()), None);
+        std::fs::write(dir.path().join(QUERY_API_TOKEN_FILE), "abc-DEF_1\n").unwrap();
+        assert_eq!(read_query_api_token(dir.path()).as_deref(), Some("abc-DEF_1"));
     }
 }
