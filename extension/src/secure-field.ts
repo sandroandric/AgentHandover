@@ -6,14 +6,17 @@
  * the secure field is active.
  *
  * Detection covers:
- *   - <input type="password">
- *   - <input autocomplete="current-password">
- *   - <input autocomplete="new-password">
- *   - <input type="hidden" name="...password...">
- *   - Credit card fields (autocomplete: cc-number, cc-exp, cc-exp-month,
- *     cc-exp-year, cc-csc, cc-name, cc-type)
- *   - Credit card fields (name/id patterns: card-number, cardnumber,
- *     cc-num, cvv, cvc, security-code, expiry, card-expiry, card-holder)
+ *   - <input type="password">, and an input that was one before a
+ *     "show password" toggle turned it into type="text"
+ *   - inputs and textareas whose name or id mentions a password
+ *     (reveal toggles, hidden password-manager inputs)
+ *   - autocomplete tokens current-password, new-password, one-time-code
+ *     and the cc-* credit card tokens
+ *   - name/id patterns for credit cards (card-number, cvv, cvc, expiry,
+ *     ...) and one-time codes (otp, mfa, 2fa, totp, verification-code,
+ *     backup-code, recovery-code)
+ *   - fields inside open shadow roots: focus is resolved through
+ *     `composedPath()` / `shadowRoot.activeElement`, not the shadow host
  */
 
 // ---------------------------------------------------------------------------
@@ -28,8 +31,11 @@ export interface SecureFieldState {
 // Constants
 // ---------------------------------------------------------------------------
 
-/** Autocomplete attribute values indicating credit card fields. */
-const CC_AUTOCOMPLETE_VALUES: ReadonlySet<string> = new Set([
+/** Autocomplete tokens that mark a password, one-time code or card field. */
+const SECURE_AUTOCOMPLETE_VALUES: ReadonlySet<string> = new Set([
+  'current-password',
+  'new-password',
+  'one-time-code',
   'cc-number',
   'cc-exp',
   'cc-exp-month',
@@ -42,8 +48,10 @@ const CC_AUTOCOMPLETE_VALUES: ReadonlySet<string> = new Set([
   'cc-additional-name',
 ]);
 
-/** Name/ID substrings indicating credit card fields. */
-const CC_NAME_PATTERNS: readonly string[] = [
+/** Name/ID substrings indicating password, card or one-time-code fields. */
+const SECURE_NAME_PATTERNS: readonly string[] = [
+  'password',
+  'passwd',
   'card-number',
   'cardnumber',
   'cc-num',
@@ -53,54 +61,76 @@ const CC_NAME_PATTERNS: readonly string[] = [
   'expiry',
   'card-expiry',
   'card-holder',
+  'otp',
+  'one-time',
+  'mfa',
+  '2fa',
+  'totp',
+  'verification-code',
+  'backup-code',
+  'recovery-code',
 ];
+
+/** Set on an input once it has been seen as type="password", so a
+ *  "show password" toggle to type="text" does not make it capturable. */
+export const WAS_SECURE_ATTR = 'ahWasSecure';
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
 /**
- * Determine whether a given element is a secure (password or credit card) field.
+ * Determine whether a given element is a secure field (password, one-time
+ * code or credit card).  Inputs and textareas only.
  */
 export function isSecureField(el: Element | null): boolean {
   if (!el) return false;
-  if (!(el instanceof HTMLInputElement)) return false;
+  const isInput = el instanceof HTMLInputElement;
+  if (!isInput && !(el instanceof HTMLTextAreaElement)) return false;
 
-  // Explicit password type
-  if (el.type === 'password') {
+  if (isInput && el.type === 'password') {
+    el.dataset[WAS_SECURE_ATTR] = '1';
+    return true;
+  }
+  if (el.dataset[WAS_SECURE_ATTR] === '1') {
     return true;
   }
 
-  // Autocomplete attributes indicating password or credit card fields
-  const autocomplete = el.getAttribute('autocomplete');
-  if (autocomplete) {
-    const normalised = autocomplete.toLowerCase().trim();
-    if (normalised === 'current-password' || normalised === 'new-password') {
-      return true;
-    }
-    if (CC_AUTOCOMPLETE_VALUES.has(normalised)) {
+  // Autocomplete may be a token list ("section-pay billing cc-number").
+  const autocomplete = (el.getAttribute('autocomplete') || '').toLowerCase();
+  for (const token of autocomplete.split(/\s+/)) {
+    if (SECURE_AUTOCOMPLETE_VALUES.has(token)) {
       return true;
     }
   }
 
-  // Hidden inputs with "password" in their name (e.g. password managers)
-  if (el.type === 'hidden') {
-    const name = (el.name || '').toLowerCase();
-    if (name.includes('password')) {
-      return true;
-    }
-  }
-
-  // Credit card fields detected by name or id patterns
-  const elName = (el.name || '').toLowerCase();
+  const elName = (el.getAttribute('name') || '').toLowerCase();
   const elId = (el.id || '').toLowerCase();
-  for (const pattern of CC_NAME_PATTERNS) {
+  for (const pattern of SECURE_NAME_PATTERNS) {
     if (elName.includes(pattern) || elId.includes(pattern)) {
       return true;
     }
   }
 
   return false;
+}
+
+/**
+ * The element that really has focus: `document.activeElement` is the
+ * shadow host when focus is inside an open shadow root, so descend.
+ */
+export function deepActiveElement(root: Document | ShadowRoot = document): Element | null {
+  let active = root.activeElement;
+  while (active && active.shadowRoot && active.shadowRoot.activeElement) {
+    active = active.shadowRoot.activeElement;
+  }
+  return active;
+}
+
+/** The event's real target, inside open shadow roots (not the retargeted host). */
+function eventTarget(event: Event): Element | null {
+  const first = event.composedPath()[0];
+  return first instanceof Element ? first : (event.target as Element | null);
 }
 
 // ---------------------------------------------------------------------------
@@ -133,7 +163,7 @@ export function initSecureFieldDetection(
 
   function handleFocusIn(event: FocusEvent): void {
     focusSeq++;
-    const target = event.target as Element | null;
+    const target = eventTarget(event);
     if (isSecureField(target)) {
       setSecure(true);
     } else if (currentlySecure) {
@@ -160,7 +190,7 @@ export function initSecureFieldDetection(
     const seq = ++focusSeq;
     requestAnimationFrame(() => {
       if (seq !== focusSeq) return; // Focus changed again, skip
-      const active = document.activeElement;
+      const active = deepActiveElement();
       if (!isSecureField(active)) {
         setSecure(false);
       }
