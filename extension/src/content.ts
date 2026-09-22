@@ -140,7 +140,10 @@ chrome.runtime.onMessage.addListener(
     switch (message.type) {
       case 'request_snapshot': {
         console.log('[AgentHandover:content] Snapshot requested — capturing viewport DOM');
-        const nodes = captureViewportDOM();
+        // The daemon sends `[privacy] capture_input_values` with every request.
+        const nodes = captureViewportDOM({
+          captureInputValues: message.payload?.captureInputValues === true,
+        });
         console.log('[AgentHandover:content] Captured', nodes.length, 'top-level nodes');
         sendToBackground('dom_snapshot', {
           nodes,
