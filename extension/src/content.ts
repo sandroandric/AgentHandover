@@ -14,7 +14,7 @@
  *        - Secure field detection (secure-field)
  */
 
-import { captureViewportDOM } from './dom-capture';
+import { captureSnapshot, noteInteraction } from './dom-capture';
 import { initClickCapture } from './click-capture';
 import { initSecureFieldDetection } from './secure-field';
 import { initDwellTracker, type DwellConfig } from './dwell-tracker';
@@ -139,18 +139,18 @@ chrome.runtime.onMessage.addListener(
 
     switch (message.type) {
       case 'request_snapshot': {
-        console.log('[AgentHandover:content] Snapshot requested — capturing viewport DOM');
+        console.log('[AgentHandover:content] Snapshot requested — capturing anchors and digest');
         // The daemon sends `[privacy] capture_input_values` with every request.
-        const nodes = captureViewportDOM({
+        const snapshot = captureSnapshot({
           captureInputValues: message.payload?.captureInputValues === true,
         });
-        console.log('[AgentHandover:content] Captured', nodes.length, 'top-level nodes');
+        console.log('[AgentHandover:content] Captured', snapshot.anchors.length, 'anchors');
         sendToBackground('dom_snapshot', {
-          nodes,
+          ...snapshot,
           url: window.location.href,
           captureReason: 'request',
         });
-        sendResponse({ ok: true, nodeCount: nodes.length });
+        sendResponse({ ok: true, anchorCount: snapshot.anchors.length });
         break;
       }
 
@@ -248,6 +248,27 @@ sendToBackground('content_ready', {
     destroy() {
       cleanupClick?.();
       cleanupClick = null;
+    },
+  });
+}
+
+// --- Interaction tracking for the snapshot's anchor set ---
+{
+  const onInteraction = (event: Event): void => {
+    // A focused password field's element is never recorded.
+    if (!secureFieldActive) noteInteraction(event.composedPath()[0]);
+  };
+
+  registerModule({
+    name: 'interaction-anchor',
+    init() {
+      document.addEventListener('click', onInteraction, true);
+      document.addEventListener('focusin', onInteraction, true);
+    },
+    destroy() {
+      document.removeEventListener('click', onInteraction, true);
+      document.removeEventListener('focusin', onInteraction, true);
+      noteInteraction(null);
     },
   });
 }

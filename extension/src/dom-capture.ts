@@ -1,8 +1,10 @@
 /**
  * AgentHandover Observer — Viewport-Bounded DOM Snapshot Capture
  *
- * Captures a semantic DOM tree of all elements currently visible within the
- * browser viewport.  The snapshot is designed for downstream workflow learning,
+ * Walks a semantic DOM tree of all elements currently visible within the
+ * browser viewport.  What a snapshot sends (`captureSnapshot`) is not that
+ * tree but the anchor set of the element the user interacted with and a
+ * text digest of the tree, under 8 KB.  The walk is designed for downstream workflow learning,
  * not pixel-perfect rendering — so we extract semantic anchors (ARIA labels,
  * roles, data-testid, visible innerText, bounding boxes) and deliberately
  * strip generated/hashed CSS class names ("CSS rot") that change across
@@ -24,7 +26,7 @@
  * flag arrives with each snapshot request.  Password values never are.
  */
 
-import type { DomNode } from './types';
+import type { DomAnchor, DomNode } from './types';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -782,4 +784,260 @@ export function captureViewportDOM(
   }
 
   return roots;
+}
+
+// ---------------------------------------------------------------------------
+// Snapshot payload: anchors and a text digest, not the tree
+// ---------------------------------------------------------------------------
+//
+// What the worker reads from a snapshot is the anchor of the element the
+// user acted on (to tell an agent what to click) and some visible text (to
+// tell pages apart).  Sending the whole viewport tree wrote hundreds of
+// kilobytes per capture; the snapshot now carries only:
+//   - `anchors`: the element interacted with since the previous snapshot
+//     (flagged `interacted`) and its ancestors up to the nearest landmark,
+//     each with role, accessible name, data-testid, aria-label, href and a
+//     composed-path selector;
+//   - `digest`: visible headings and list-row labels, at most
+//     MAX_DIGEST_CHARS.
+
+/** Cap on the text digest (visible headings and list-row labels). */
+export const MAX_DIGEST_CHARS = 4096;
+
+/** Cap on the serialized anchors + digest, so a snapshot message with its
+ *  url stays under 8 KB. */
+export const MAX_SNAPSHOT_CHARS = 7000;
+
+/** At most this many records: the element and its nearest ancestors. */
+export const MAX_ANCHOR_CHAIN = 8;
+
+const ANCHOR_TEXT_MAX = 80;
+const ANCHOR_HREF_MAX = 200;
+const DIGEST_LINE_MAX = 120;
+
+const LANDMARK_TAGS = new Set(['MAIN', 'NAV', 'HEADER', 'FOOTER', 'ASIDE', 'FORM', 'DIALOG']);
+const LANDMARK_ROLES = new Set([
+  'main', 'navigation', 'banner', 'contentinfo', 'complementary', 'form',
+  'region', 'search', 'dialog', 'alertdialog',
+]);
+const HEADING_TAGS = new Set(['h1', 'h2', 'h3', 'h4', 'h5', 'h6']);
+const ROW_TAGS = new Set(['li', 'tr']);
+const PLAIN_TOKEN = /^[A-Za-z_][\w-]*$/;
+
+/** What a DOM snapshot sends. */
+export interface DomSnapshot {
+  anchors: DomAnchor[];
+  digest: string;
+  /** True when the viewport walk hit MAX_NODE_COUNT. */
+  truncated: boolean;
+}
+
+/** The element the user last clicked or focused, until a snapshot takes it. */
+let interacted: Element | null = null;
+
+/**
+ * Record the element the user interacted with (click or focus target).
+ * The next snapshot reports it and its ancestors, then forgets it, so an
+ * anchor appears once, next to the interaction.
+ */
+export function noteInteraction(target: EventTarget | null | undefined): void {
+  interacted = target instanceof Element ? target : null;
+}
+
+function oneLine(text: string | null | undefined, max: number = ANCHOR_TEXT_MAX): string {
+  return (text ?? '').replace(/\s+/g, ' ').trim().slice(0, max);
+}
+
+function visibleText(el: Element): string {
+  const html = el as HTMLElement;
+  return oneLine(typeof html.innerText === 'string' ? html.innerText : el.textContent);
+}
+
+function isLandmark(el: Element): boolean {
+  const role = el.getAttribute('role');
+  if (role && LANDMARK_ROLES.has(role)) return true;
+  if (LANDMARK_TAGS.has(el.tagName.toUpperCase())) return true;
+  return el.tagName.toUpperCase() === 'SECTION' && el.hasAttribute('aria-label');
+}
+
+/** The parent element, crossing from a shadow root to its host. */
+function composedParent(el: Element): Element | null {
+  if (el.parentElement) return el.parentElement;
+  const root = el.getRootNode();
+  return root instanceof ShadowRoot ? root.host : null;
+}
+
+/** `tag#id.class` for one element; hashed classes (CSS rot) left out. */
+function selectorSegment(el: Element): string {
+  let segment = el.tagName.toLowerCase();
+  if (el.id && PLAIN_TOKEN.test(el.id)) segment += `#${el.id}`;
+  const classes = stripCssRot(Array.from(el.classList)).filter((c) => PLAIN_TOKEN.test(c));
+  for (const cls of classes.slice(0, 2)) segment += `.${cls}`;
+  return segment;
+}
+
+function labelFor(el: Element): string {
+  if (!el.id) return '';
+  const root = el.getRootNode() as Document | ShadowRoot;
+  if (typeof root.querySelector !== 'function') return '';
+  const label = root.querySelector(`label[for="${el.id.replace(/"/g, '\\"')}"]`);
+  return oneLine(label?.textContent);
+}
+
+/** The accessible name an agent would use for the element. */
+function accessibleName(el: Element): string {
+  const aria = oneLine(el.getAttribute('aria-label'));
+  if (aria) return aria;
+  const labelledBy = oneLine(resolveLabelledBy(el));
+  if (labelledBy) return labelledBy;
+  if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement) {
+    return labelFor(el) || oneLine(el.getAttribute('placeholder')) || oneLine(el.getAttribute('title'));
+  }
+  return visibleText(el) || oneLine(el.getAttribute('title'));
+}
+
+/** Origin and path of a link: query strings and fragments carry search
+ *  terms, session ids and tokens (the daemon keeps page URLs the same way). */
+function originAndPath(href: string): string {
+  try {
+    const url = new URL(href, window.location.href);
+    return url.protocol === 'http:' || url.protocol === 'https:' ? url.origin + url.pathname : '';
+  } catch {
+    return '';
+  }
+}
+
+function anchorRecord(el: Element, selector: string, isTarget: boolean, options: CaptureOptions): DomAnchor {
+  const record: DomAnchor = { tag: el.tagName.toLowerCase(), selector };
+  if (el instanceof HTMLInputElement) record.type = (el.type || 'text').toLowerCase();
+  if (el.id) record.id = el.id;
+  const role = el.getAttribute('role');
+  if (role) record.role = role;
+  const name = accessibleName(el);
+  if (name) record.name = name;
+  const aria = el.getAttribute('aria-label');
+  if (aria) record.ariaLabel = oneLine(aria);
+  const testId =
+    el.getAttribute('data-testid') || el.getAttribute('data-test-id') || el.getAttribute('data-cy');
+  if (testId) record.testId = testId;
+  const href = el.getAttribute('href');
+  if (href && el.tagName.toUpperCase() === 'A') {
+    record.href = originAndPath((el as HTMLAnchorElement).href || href).slice(0, ANCHOR_HREF_MAX);
+  }
+  const isField = el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement;
+  if (!isField) {
+    const text = visibleText(el);
+    if (text) record.text = text;
+  }
+  if (isTarget) {
+    record.interacted = true;
+    if (options.captureInputValues) {
+      let value = '';
+      if (el instanceof HTMLInputElement && el.type !== 'password') value = el.value;
+      else if (el instanceof HTMLTextAreaElement) value = el.value;
+      else if (isEditable(el)) value = (el as HTMLElement).innerText ?? el.textContent ?? '';
+      if (value.trim()) record.value = truncateText(value.trim());
+    }
+  }
+  return record;
+}
+
+/**
+ * The anchor records for `el` and its ancestors up to the nearest landmark
+ * (inclusive), innermost first, at most MAX_ANCHOR_CHAIN.  Each record's
+ * selector is the composed path from the outermost collected element down
+ * to it.
+ */
+export function anchorChain(el: Element, options: CaptureOptions = DEFAULT_CAPTURE_OPTIONS): DomAnchor[] {
+  const chain: Element[] = [];
+  let current: Element | null = el;
+  while (current && chain.length < MAX_ANCHOR_CHAIN) {
+    const tag = current.tagName.toUpperCase();
+    if (tag === 'BODY' || tag === 'HTML') break;
+    chain.push(current);
+    if (isLandmark(current)) break;
+    current = composedParent(current);
+  }
+  const segments = chain.map(selectorSegment);
+  return chain.map((node, i) =>
+    anchorRecord(node, segments.slice(i).reverse().join(' > '), i === 0, options),
+  );
+}
+
+function nodeText(node: DomNode): string {
+  const own = oneLine(node.innerText || node.ariaLabel, DIGEST_LINE_MAX);
+  if (own) return own;
+  const parts: string[] = [];
+  for (const child of node.children ?? []) {
+    const text = nodeText(child);
+    if (text) parts.push(text);
+    if (parts.join(' ').length >= DIGEST_LINE_MAX) break;
+  }
+  return oneLine(parts.join(' '), DIGEST_LINE_MAX);
+}
+
+function firstLinkText(node: DomNode): string {
+  for (const child of node.children ?? []) {
+    if (child.tag === 'a' || child.role === 'link') {
+      const text = nodeText(child);
+      if (text) return text;
+    }
+    const nested = firstLinkText(child);
+    if (nested) return nested;
+  }
+  return '';
+}
+
+/**
+ * The visible headings and list-row labels (a row's first link, else its
+ * text) of a viewport tree, one per line, deduplicated, at most
+ * MAX_DIGEST_CHARS.
+ */
+export function buildDigest(nodes: DomNode[]): string {
+  const lines: string[] = [];
+  const seen = new Set<string>();
+  let size = 0;
+  const stack = [...nodes].reverse();
+  while (stack.length > 0 && size < MAX_DIGEST_CHARS) {
+    const node = stack.pop()!;
+    let line = '';
+    if (HEADING_TAGS.has(node.tag) || node.role === 'heading') {
+      line = nodeText(node);
+    } else if (ROW_TAGS.has(node.tag) || node.role === 'row' || node.role === 'listitem') {
+      line = firstLinkText(node) || nodeText(node);
+    }
+    if (line && !seen.has(line)) {
+      seen.add(line);
+      lines.push(line);
+      size += line.length + 1;
+      continue; // a row's label stands for its contents
+    }
+    for (const child of [...(node.children ?? [])].reverse()) stack.push(child);
+  }
+  return lines.join('\n').slice(0, MAX_DIGEST_CHARS);
+}
+
+/**
+ * The snapshot payload: the interacted element's anchor chain (then the
+ * interaction is forgotten) and the viewport's text digest, within
+ * MAX_SNAPSHOT_CHARS (outermost ancestors dropped first, then the digest
+ * shortened).
+ */
+export function captureSnapshot(options: CaptureOptions = DEFAULT_CAPTURE_OPTIONS): DomSnapshot {
+  const tree = captureViewportDOM(options);
+  const target = interacted && interacted.isConnected ? interacted : null;
+  interacted = null;
+  const snapshot: DomSnapshot = {
+    anchors: target ? anchorChain(target, options) : [],
+    digest: buildDigest(tree),
+    truncated: tree.some((node) => node.tag === '#truncated'),
+  };
+  while (JSON.stringify(snapshot).length > MAX_SNAPSHOT_CHARS && snapshot.anchors.length > 1) {
+    snapshot.anchors.pop();
+  }
+  const excess = JSON.stringify(snapshot).length - MAX_SNAPSHOT_CHARS;
+  if (excess > 0) {
+    snapshot.digest = snapshot.digest.slice(0, Math.max(0, snapshot.digest.length - excess));
+  }
+  return snapshot;
 }
