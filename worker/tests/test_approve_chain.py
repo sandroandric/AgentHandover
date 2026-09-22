@@ -148,6 +148,22 @@ class TestApproveForAgents:
         assert env.commands() == []
         assert not env.export_dir.exists()
 
+    def test_a_failing_refresh_does_not_undo_the_promotion(
+        self, env: Env, monkeypatch,
+    ) -> None:
+        from agenthandover_worker import agent_connect
+
+        def broken(**_: object) -> None:
+            raise OSError("disk full")
+
+        monkeypatch.setattr(agent_connect, "connect_claude_code", broken)
+        env.save_focus_draft()
+
+        env.send("lifecycle-promote", {"slug": SLUG, "to_state": "agent_ready"})
+
+        assert env.kb.get_procedure(SLUG)["lifecycle_state"] == "agent_ready"
+        assert env.db.get_generated_sop_by_slug(SLUG)["status"] == "approved"
+
     def test_approving_keeps_the_stored_procedure(self, env: Env) -> None:
         # The stored record is the v3 procedure with the user's answers;
         # approval must not re-convert it and drop them.

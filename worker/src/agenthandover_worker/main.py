@@ -1029,21 +1029,15 @@ def _refresh_claude_commands(
     Skills root.  Never raises: a failed refresh must not undo the
     lifecycle change or approval that asked for it.
     """
-    from agenthandover_worker.agent_connect import (
-        connect_claude_code,
-        prune_claude_skills,
-    )
     try:
-        connect_claude_code(commands_dir=commands_dir)
-        logger.info("Refreshed Claude Code slash commands")
+        from agenthandover_worker.agent_connect import connect_claude_code
+        connect_claude_code(
+            commands_dir=commands_dir,
+            skills_dir=skills_dir if skills_dir is not None else _skills_dir(),
+        )
+        logger.info("Refreshed Claude Code slash commands and Skills")
     except Exception:
         logger.warning("Failed to refresh Claude Code commands", exc_info=True)
-    try:
-        removed = prune_claude_skills(skills_dir if skills_dir is not None else _skills_dir())
-        if removed:
-            logger.info("Removed Skills no longer agent_ready: %s", removed)
-    except Exception:
-        logger.warning("Failed to prune Claude Code Skills", exc_info=True)
 
 
 def _write_sops_index(
