@@ -213,20 +213,20 @@ def build_mcp_server():
         """Report that you are starting to execute a Skill.
 
         Call this BEFORE beginning execution. Returns an execution_id
-        to use in subsequent step reports.
+        to use in subsequent step reports, and the step ids to report
+        (the ids the Skill shows in brackets).
         """
+        from agenthandover_worker.procedure_schema import procedure_steps, step_key
+
         monitor = _monitor()
         execution_id = monitor.start_execution(slug, agent_id)
-        kb = _kb()
-        proc = kb.get_procedure(slug)
-        expected_steps = []
-        if proc:
-            for s in proc.get("steps", []):
-                expected_steps.append(s.get("step_id", s.get("action", "")[:40]))
+        proc = _kb().get_procedure(slug) or {}
         return json.dumps({
             "execution_id": execution_id,
             "slug": slug,
-            "expected_steps": expected_steps,
+            "expected_steps": [
+                step_key(s, i) for i, s in enumerate(procedure_steps(proc))
+            ],
         })
 
     @mcp.tool()
@@ -239,19 +239,27 @@ def build_mcp_server():
     ) -> str:
         """Report the result of a single step during Skill execution.
 
-        Call after each step. Set status to 'completed' or 'deviated'.
-        If deviated, describe what you actually did in actual_action.
+        Call after each step with its id (``step_2``) or its number (``2``).
+        Set status to 'completed' or 'deviated'. If you did something
+        other than the step says, describe what you did in actual_action.
         """
-        monitor = _monitor()
-        monitor.record_step(execution_id, step_id, actual_action or step_id)
-        if status == "deviated" and notes:
-            record = monitor._active_executions.get(execution_id)
-            if record:
-                record.deviations.append({
-                    "step_id": step_id,
-                    "detail": notes,
-                })
-        return json.dumps({"recorded": True, "step_id": step_id})
+        step = _monitor().record_step(
+            execution_id,
+            step_id,
+            actual_action,
+            deviated=status == "deviated",
+            notes=notes,
+        )
+        if step is None:
+            return json.dumps({
+                "recorded": False,
+                "error": f"No active execution '{execution_id}'",
+            })
+        return json.dumps({
+            "recorded": True,
+            "step_id": step.step_id,
+            "deviated": step.status.value == "deviated",
+        })
 
     @mcp.tool()
     def report_execution_complete(
@@ -265,26 +273,26 @@ def build_mcp_server():
         If failed, include the error in notes.
         """
         monitor = _monitor()
-        if status == "failed":
-            record = monitor.fail_execution(execution_id, notes or "unknown error")
-        elif status == "aborted":
-            record = monitor.abort_execution(execution_id)
-        else:
-            record = monitor.complete_execution(execution_id)
-
-        # Trigger Skill improvement (singleton)
-        improvements = []
         try:
-            if "improver" not in _state:
-                from agenthandover_worker.skill_improver import SkillImprover
-                _state["improver"] = SkillImprover(_kb())
-            improvements = _state["improver"].process_execution(record)
-        except Exception:
-            logger.debug("Skill improvement failed", exc_info=True)
+            if status == "failed":
+                record = monitor.fail_execution(execution_id, notes or "unknown error")
+            elif status == "aborted":
+                record = monitor.abort_execution(execution_id)
+            else:
+                record = monitor.complete_execution(execution_id)
+        except KeyError:
+            return json.dumps({
+                "execution_id": execution_id,
+                "error": f"No active execution '{execution_id}'",
+            })
 
+        from agenthandover_worker.skill_improver import SkillImprover
+
+        improvements = SkillImprover(_kb(), monitor).process_execution(record)
         return json.dumps({
             "execution_id": execution_id,
-            "final_status": record.status.value if hasattr(record.status, 'value') else str(record.status),
+            "final_status": record.status.value,
+            "deviations": len(record.deviations),
             "improvements": improvements,
         })
 
@@ -324,12 +332,14 @@ def build_mcp_server():
         if strategy:
             lines.append(f"## Strategy\n{strategy}\n")
 
-        steps = proc.get("steps", [])
+        from agenthandover_worker.procedure_schema import procedure_steps, step_key
+
+        steps = procedure_steps(proc)
         if steps:
             lines.append("## Steps\n")
-            for s in steps:
-                action = s.get("action", s.get("description", ""))
-                lines.append(f"1. {action}")
+            for i, s in enumerate(steps):
+                action = s.get("action") or s.get("description", "")
+                lines.append(f"{i + 1}. [{step_key(s, i)}] {action}")
             lines.append("")
 
         vp = proc.get("voice_profile", {})

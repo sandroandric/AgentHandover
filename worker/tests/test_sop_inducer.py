@@ -88,7 +88,11 @@ class TestSingleRepeatedPattern:
         results = inducer.induce(episodes)
 
         assert len(results) >= 1
-        assert results[0]["confidence_avg"] == pytest.approx(0.9, abs=0.01)
+        # The v1 per-step mean is kept under its own key ...
+        assert results[0]["step_confidence_mean"] == pytest.approx(0.9, abs=0.01)
+        # ... and confidence_avg is on the v2 scale: 3 demos (0.27) + full
+        # consistency (0.30) + no annotations (0.10) + no variables (0.06).
+        assert results[0]["confidence_avg"] == pytest.approx(0.73, abs=0.001)
 
 
 class TestNoRepeatedPattern:

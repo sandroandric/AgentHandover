@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from agenthandover_worker.execution_monitor import ExecutionMonitor
 from agenthandover_worker.knowledge_base import KnowledgeBase
 from agenthandover_worker.trust_advisor import (
     TRUST_LEVELS,
@@ -38,11 +39,32 @@ def _save_procedure(kb: KnowledgeBase, slug: str, trust_level: str = "observe") 
 
 
 def _save_executions(kb: KnowledgeBase, stats: dict) -> None:
-    """Helper: write execution stats to observations/executions.json."""
-    path = kb.root / "observations" / "executions.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w") as f:
-        json.dump({"procedures": stats}, f)
+    """Helper: record finished runs in the ``runs`` table.
+
+    Per slug: ``successes`` completed runs, ``failures`` failed runs (the
+    last one finishing at ``last_failure`` when given) and aborted runs
+    up to ``total``.
+    """
+    monitor = ExecutionMonitor(kb)
+    for slug, st in stats.items():
+        failures = st.get("failures", 0)
+        outcomes = (
+            ["completed"] * st.get("successes", 0)
+            + ["failed"] * failures
+        )
+        outcomes += ["aborted"] * (st.get("total", 0) - len(outcomes))
+        for n, outcome in enumerate(outcomes):
+            eid = monitor.start_execution(slug)
+            if outcome == "completed":
+                monitor.complete_execution(eid)
+            elif outcome == "aborted":
+                monitor.abort_execution(eid)
+            else:
+                record = monitor.fail_execution(eid, "boom")
+                last_failed = st.get("successes", 0) + failures - 1
+                if st.get("last_failure") and n == last_failed:
+                    record.completed_at = st["last_failure"]
+                    monitor._save(record)
 
 
 # ---------------------------------------------------------------------------
@@ -122,7 +144,7 @@ class TestEvaluateProcedure:
 
     def test_no_execution_stats_no_suggestion(self, kb: KnowledgeBase) -> None:
         _save_procedure(kb, "deploy-api", "observe")
-        # No executions.json at all
+        # No runs at all
         advisor = TrustAdvisor(kb)
         assert advisor.evaluate_procedure("deploy-api") is None
 

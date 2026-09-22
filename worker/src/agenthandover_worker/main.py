@@ -1795,6 +1795,15 @@ def _process_focus_sessions_v2(
         procedure_dict["title"] = title  # User's focus session title, not VLM's guess
         procedure_dict["source"] = "focus"
         procedure_dict["lifecycle_state"] = "draft"  # Focus recordings start as draft, not observed
+        # A re-recording of an existing Skill is a new draft, but keeps
+        # its evidence, trust, lifecycle history and agent-run record.
+        if knowledge_base is not None:
+            from agenthandover_worker.procedure_writer import merge_existing_procedure
+            existing_proc = knowledge_base.get_procedure(slug)
+            if existing_proc is not None:
+                merge_existing_procedure(
+                    procedure_dict, existing_proc, keep_lifecycle=False,
+                )
         if behavioral_synthesizer is not None:
             try:
                 # Prefer the rich per-frame observations stashed by the
@@ -2215,9 +2224,14 @@ def _check_focus_answers(
     if db is not None and not db.update_sop_json(slug, procedure_dict):
         logger.warning("No review record for '%s' to merge Q&A answers into", slug)
 
-    # Save enriched procedure to KB (answers merged)
+    # Save enriched procedure to KB (answers merged), keeping any agent
+    # runs reported while the questions were open.
     if knowledge_base is not None:
         try:
+            from agenthandover_worker.procedure_writer import carry_run_history
+            existing_proc = knowledge_base.get_procedure(slug)
+            if existing_proc is not None:
+                carry_run_history(procedure_dict, existing_proc)
             knowledge_base.save_procedure(procedure_dict)
             logger.info("Saved Q&A-enriched procedure '%s' to KB", slug)
             _embed_procedure(vector_kb, procedure_dict)
@@ -4145,7 +4159,7 @@ def main(argv: list[str] | None = None) -> None:
         runtime_validator = RuntimeValidator(knowledge_base)
     execution_monitor = ExecutionMonitor(knowledge_base)
     correction_detector = CorrectionDetector(knowledge_base, llm_reasoner=llm_reasoner)
-    trust_advisor = TrustAdvisor(knowledge_base)
+    trust_advisor = TrustAdvisor(knowledge_base, execution_monitor=execution_monitor)
     session_linker = SessionLinker(knowledge_base, llm_reasoner=llm_reasoner, vector_kb=vector_kb)
     digest_generator = DigestGenerator(knowledge_base)
     continuity_tracker = None

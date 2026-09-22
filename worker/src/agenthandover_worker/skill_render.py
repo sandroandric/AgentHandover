@@ -25,6 +25,7 @@ from typing import Literal
 import yaml
 
 from agenthandover_worker import __version__
+from agenthandover_worker.procedure_schema import procedure_steps, step_key
 
 Target = Literal[
     "claude-skill",
@@ -96,7 +97,7 @@ def allowed_tools(proc: dict) -> list[str]:
     ``apps_involved``.
     """
     apps = [a for a in proc.get("apps_involved") or [] if isinstance(a, str)]
-    apps += [_field(s, "app") for s in _steps(proc)]
+    apps += [_field(s, "app") for s in procedure_steps(proc)]
     tools = {"Read"}
     for app in apps:
         if app:
@@ -105,10 +106,6 @@ def allowed_tools(proc: dict) -> list[str]:
 
 
 # ---- Small readers -------------------------------------------------------
-
-
-def _steps(proc: dict) -> list[dict]:
-    return [s for s in proc.get("steps") or [] if isinstance(s, dict)]
 
 
 def _field(step: dict, key: str) -> str:
@@ -293,7 +290,7 @@ def _section(heading: str, lines: list[str]) -> str | None:
 
 
 def _render_step(num: int, step: dict) -> list[str]:
-    step_id = step.get("step_id") or f"step_{num}"
+    step_id = step_key(step, num - 1)
     intent = str(
         step.get("action") or step.get("step") or step.get("description") or "Perform the action"
     ).strip()
@@ -457,7 +454,7 @@ def body_sections(proc: dict) -> list[str]:
 
     # Steps
     step_lines: list[str] = []
-    for num, step in enumerate(_steps(proc), 1):
+    for num, step in enumerate(procedure_steps(proc), 1):
         step_lines.extend(_render_step(num, step))
     sections.append(_section("Steps", step_lines or ["No steps were recorded."]))
 
@@ -562,7 +559,10 @@ def body_sections(proc: dict) -> list[str]:
     sections.append(_section("Execution protocol", [
         "If you have access to the AgentHandover MCP server, report your progress:",
         f"1. Call `report_execution_start` with slug `{slug}` before starting.",
-        "2. Call `report_step_result` after each step.",
+        "2. Call `report_step_result` after each step with the id shown in"
+        " brackets (for example `step_1`). If you did something other than"
+        " the step says, set `status` to `deviated` and describe what you"
+        " did in `actual_action`.",
         "3. Call `report_execution_complete` when finished.",
         "",
         "This feedback improves the Skill for future runs.",

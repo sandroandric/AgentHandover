@@ -90,7 +90,7 @@ When producing text for this workflow, match the user's writing style:
 
 If you have access to the AgentHandover MCP server, report your progress:
 1. Call `report_execution_start` with slug `check-domain-availability` before starting.
-2. Call `report_step_result` after each step.
+2. Call `report_step_result` after each step with the id shown in brackets (for example `step_1`). If you did something other than the step says, set `status` to `deviated` and describe what you did in `actual_action`.
 3. Call `report_execution_complete` when finished.
 
 This feedback improves the Skill for future runs.
