@@ -72,7 +72,22 @@ final class SOPEntryTests: XCTestCase {
 
     // MARK: - Display Title
 
-    func testDisplayTitleUsesShortTitle() throws {
+    func testDisplayTitleUsesShortTitleForHashSlugTitle() throws {
+        let json = """
+        {
+            "sop_id": "t1", "slug": "s",
+            "title": "passive_3f9a2c1b7e4d_expense_report_workflow",
+            "short_title": "Short",
+            "source": "passive", "status": "ok", "confidence": 0.5,
+            "created_at": "2026-03-10T10:00:00Z"
+        }
+        """.data(using: .utf8)!
+
+        let entry = try JSONDecoder().decode(SOPEntry.self, from: json)
+        XCTAssertEqual(entry.displayTitle, "Short")
+    }
+
+    func testDisplayTitleIgnoresShortTitleForHumanTitle() throws {
         let json = """
         {
             "sop_id": "t1", "slug": "s", "title": "Very Long Title Here",
@@ -83,7 +98,22 @@ final class SOPEntryTests: XCTestCase {
         """.data(using: .utf8)!
 
         let entry = try JSONDecoder().decode(SOPEntry.self, from: json)
-        XCTAssertEqual(entry.displayTitle, "Short")
+        XCTAssertEqual(entry.displayTitle, "Very Long Title Here")
+    }
+
+    func testDisplayTitleTruncatesLongTitleWithEllipsis() throws {
+        let json = """
+        {
+            "sop_id": "t1", "slug": "s",
+            "title": "The user is reconciling all the monthly vendor invoices. Then exports ledger.",
+            "source": "passive", "status": "ok", "confidence": 0.5,
+            "created_at": "2026-03-10T10:00:00Z"
+        }
+        """.data(using: .utf8)!
+
+        let entry = try JSONDecoder().decode(SOPEntry.self, from: json)
+        // Six words, the sixth ending in "." -> period dropped, ellipsis added.
+        XCTAssertEqual(entry.displayTitle, "Reconciling all the monthly vendor invoices…")
     }
 
     func testDisplayTitleStripsNoisePrefix() throws {

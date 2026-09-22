@@ -63,7 +63,12 @@ struct SOPEntry: Identifiable, Codable, Hashable {
         if words.count <= 6 {
             return String(text.trimmingCharacters(in: CharacterSet(charactersIn: ".")))
         }
-        return words.prefix(6).joined(separator: " ")
+        // Cut to 6 words; drop punctuation left dangling before the ellipsis.
+        var truncated = words.prefix(6).joined(separator: " ")
+        while let last = truncated.last, ".,;:".contains(last) {
+            truncated.removeLast()
+        }
+        return truncated + "…"
     }
 
     /// Tag list, empty if none.
