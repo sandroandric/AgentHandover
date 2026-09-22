@@ -1,6 +1,7 @@
 use anyhow::Result;
 use rusqlite::Connection;
-use std::path::Path;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 use tracing::{info, warn};
 
 pub struct MaintenanceRunner<'a> {
@@ -24,6 +25,8 @@ impl<'a> MaintenanceRunner<'a> {
     }
 
     /// Delete old artifact records and return their file paths for cleanup.
+    ///
+    /// Joins on `events`, so it must run before [`Self::purge_old_events`].
     pub fn purge_old_artifacts(&self, retention_days: u32) -> Result<Vec<String>> {
         let mut stmt = self.conn.prepare(
             "SELECT a.file_path FROM artifacts a \
@@ -129,8 +132,8 @@ impl<'a> MaintenanceRunner<'a> {
         }
     }
 
-    /// Evict the oldest artifact records (by event timestamp) until the total
-    /// on-disk folder size drops below `max_bytes`.
+    /// Evict the oldest artifact records until the total on-disk size of
+    /// `artifact_dir` (walked recursively) drops below `max_bytes`.
     ///
     /// Returns the file paths of records removed from the DB; the caller is
     /// responsible for deleting the actual files.
@@ -139,7 +142,7 @@ impl<'a> MaintenanceRunner<'a> {
         artifact_dir: &Path,
         max_bytes: u64,
     ) -> Result<Vec<String>> {
-        let current_size = get_dir_size_shallow(artifact_dir);
+        let current_size = dir_size(artifact_dir);
         if current_size <= max_bytes {
             return Ok(vec![]);
         }
@@ -152,11 +155,12 @@ impl<'a> MaintenanceRunner<'a> {
             "Artifact directory exceeds size cap, evicting oldest artifacts"
         );
 
-        // Fetch oldest artifacts first (by event timestamp ascending).
+        // Oldest first. LEFT JOIN so a row whose event is already gone is
+        // still evictable (ordered by its own creation time).
         let mut stmt = self.conn.prepare(
             "SELECT a.file_path FROM artifacts a \
-             INNER JOIN events e ON a.event_id = e.id \
-             ORDER BY e.timestamp ASC",
+             LEFT JOIN events e ON a.event_id = e.id \
+             ORDER BY COALESCE(e.timestamp, a.created_at) ASC",
         )?;
 
         let all_paths: Vec<String> = stmt
@@ -178,7 +182,6 @@ impl<'a> MaintenanceRunner<'a> {
         }
 
         if !evict_paths.is_empty() {
-            // Delete evicted records from the DB
             let placeholders: String = evict_paths.iter().map(|_| "?").collect::<Vec<_>>().join(",");
             let sql = format!("DELETE FROM artifacts WHERE file_path IN ({})", placeholders);
             let params: Vec<&dyn rusqlite::types::ToSql> = evict_paths
@@ -196,37 +199,108 @@ impl<'a> MaintenanceRunner<'a> {
         Ok(evict_paths)
     }
 
-    /// Run the full nightly maintenance cycle.
-    pub fn run_full_maintenance(
-        &self,
-        db_path: &Path,
-        retention_days_raw: u32,
-        retention_days_episodes: u32,
-        min_free_gb: u64,
-        vacuum_safety_multiplier: f64,
-        artifact_dir: Option<&Path>,
-        artifact_max_bytes: Option<u64>,
-    ) -> Result<MaintenanceReport> {
-        let events_purged = self.purge_old_events(retention_days_raw)?;
-        let mut artifact_paths = self.purge_old_artifacts(retention_days_raw)?;
+    /// Remove artifact state that no retention rule can reach any more:
+    /// rows whose event is gone (left behind by releases that purged events
+    /// before artifacts), and `.bin` / `.bin.tmp` files under `artifact_dir`
+    /// that no row references. Empty date directories are removed too.
+    ///
+    /// Returns `(files_deleted, bytes_freed)`.
+    pub fn sweep_orphan_artifacts(&self, artifact_dir: &Path) -> Result<(usize, u64)> {
+        let orphan_paths: Vec<String> = {
+            let mut stmt = self.conn.prepare(
+                "SELECT file_path FROM artifacts \
+                 WHERE event_id NOT IN (SELECT id FROM events)",
+            )?;
+            let rows = stmt.query_map([], |row| row.get(0))?;
+            rows.filter_map(|r| r.ok()).collect()
+        };
+        if !orphan_paths.is_empty() {
+            self.conn.execute(
+                "DELETE FROM artifacts WHERE event_id NOT IN (SELECT id FROM events)",
+                [],
+            )?;
+        }
+        let (mut deleted, mut bytes) = delete_files(&orphan_paths);
 
-        // Size-based eviction: evict oldest artifacts if folder exceeds cap
-        let mut artifact_size_evicted: usize = 0;
-        if let (Some(dir), Some(max_bytes)) = (artifact_dir, artifact_max_bytes) {
-            let evicted = self.evict_artifacts_by_size(dir, max_bytes)?;
-            artifact_size_evicted = evicted.len();
-            artifact_paths.extend(evicted);
+        let referenced: HashSet<PathBuf> = {
+            let mut stmt = self.conn.prepare("SELECT file_path FROM artifacts")?;
+            let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+            rows.filter_map(|r| r.ok()).map(PathBuf::from).collect()
+        };
+        let mut unreferenced = Vec::new();
+        collect_files(artifact_dir, &mut |path| {
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            if (name.ends_with(".bin") || name.ends_with(".bin.tmp"))
+                && !referenced.contains(path)
+            {
+                unreferenced.push(path.to_string_lossy().into_owned());
+            }
+        });
+        let (d, b) = delete_files(&unreferenced);
+        deleted += d;
+        bytes += b;
+        remove_empty_dirs(artifact_dir);
+
+        if deleted > 0 {
+            info!(deleted, bytes, "Swept orphan artifact files");
+        }
+        Ok((deleted, bytes))
+    }
+
+    /// Run the full daily maintenance cycle and delete the files it releases.
+    pub fn run_full_maintenance(&self, opts: &MaintenanceOptions) -> Result<MaintenanceReport> {
+        let mut artifacts_purged = 0usize;
+        let mut bytes_freed = 0u64;
+
+        if let Some(dir) = opts.artifact_dir {
+            let (d, b) = self.sweep_orphan_artifacts(dir)?;
+            artifacts_purged += d;
+            bytes_freed += b;
         }
 
-        let episodes_purged = self.purge_old_episodes(retention_days_episodes)?;
+        // Artifact paths must be collected while their events still exist:
+        // purge_old_artifacts joins on events.
+        let expired = self.purge_old_artifacts(opts.retention_days_raw)?;
+        let (d, b) = delete_files(&expired);
+        artifacts_purged += d;
+        bytes_freed += b;
+
+        let events_purged = self.purge_old_events(opts.retention_days_raw)?;
+
+        let mut artifact_size_evicted = 0usize;
+        if let (Some(dir), Some(max_bytes)) = (opts.artifact_dir, opts.artifact_max_bytes) {
+            let evicted = self.evict_artifacts_by_size(dir, max_bytes)?;
+            artifact_size_evicted = evicted.len();
+            let (d, b) = delete_files(&evicted);
+            artifacts_purged += d;
+            bytes_freed += b;
+        }
+        if let Some(dir) = opts.artifact_dir {
+            remove_empty_dirs(dir);
+        }
+
+        let mut screenshots_purged = 0usize;
+        if let Some(dir) = opts.screenshots_dir {
+            let (d, b) = sweep_expired_screenshots(dir, opts.screenshot_ttl_days);
+            screenshots_purged = d;
+            bytes_freed += b;
+        }
+
+        let episodes_purged = self.purge_old_episodes(opts.retention_days_episodes)?;
         let vlm_purged = self.purge_expired_vlm_jobs()?;
         self.wal_checkpoint()?;
-        let vacuumed = self.vacuum_if_safe(db_path, min_free_gb, vacuum_safety_multiplier)?;
+        let vacuumed =
+            self.vacuum_if_safe(opts.db_path, opts.min_free_gb, opts.vacuum_safety_multiplier)?;
 
         Ok(MaintenanceReport {
             events_purged,
-            artifact_paths_to_delete: artifact_paths,
+            artifacts_purged,
             artifact_size_evicted,
+            screenshots_purged,
+            bytes_freed,
             episodes_purged,
             vlm_jobs_purged: vlm_purged,
             vacuumed,
@@ -234,38 +308,133 @@ impl<'a> MaintenanceRunner<'a> {
     }
 }
 
+/// Inputs for [`MaintenanceRunner::run_full_maintenance`].
+#[derive(Debug, Clone)]
+pub struct MaintenanceOptions<'p> {
+    pub db_path: &'p Path,
+    pub retention_days_raw: u32,
+    pub retention_days_episodes: u32,
+    pub min_free_gb: u64,
+    pub vacuum_safety_multiplier: f64,
+    /// Legacy encrypted artifact store (`artifacts/yyyy/mm/dd/*.bin`).
+    pub artifact_dir: Option<&'p Path>,
+    pub artifact_max_bytes: Option<u64>,
+    /// Plain JPEGs written for the VLM annotation pipeline.
+    pub screenshots_dir: Option<&'p Path>,
+    /// Screenshots older than this are deleted even if never annotated
+    /// (the VLM job TTL: an unannotated frame past it will never be used).
+    pub screenshot_ttl_days: u32,
+}
+
 #[derive(Debug)]
 pub struct MaintenanceReport {
     pub events_purged: usize,
-    pub artifact_paths_to_delete: Vec<String>,
+    /// Artifact files deleted from disk (retention, size cap and orphans).
+    pub artifacts_purged: usize,
     /// Number of artifacts evicted due to folder size exceeding the cap
     /// (on top of normal retention-based purge).
     pub artifact_size_evicted: usize,
+    /// Screenshot images deleted because they outlived the job TTL.
+    pub screenshots_purged: usize,
+    /// Bytes released by deleted artifact and screenshot files.
+    pub bytes_freed: u64,
     pub episodes_purged: usize,
     pub vlm_jobs_purged: usize,
     pub vacuumed: bool,
 }
 
-/// Sum file sizes in a directory, traversing one level of subdirectories.
-fn get_dir_size_shallow(dir: &Path) -> u64 {
+/// Total size in bytes of all regular files under `dir`, at any depth.
+/// Symlinks are not followed. A missing directory has size 0.
+pub fn dir_size(dir: &Path) -> u64 {
     let mut total = 0u64;
+    collect_files(dir, &mut |path| {
+        total += std::fs::symlink_metadata(path).map(|m| m.len()).unwrap_or(0);
+    });
+    total
+}
+
+/// Delete screenshot images (`.jpg`, `.jpeg`, `.png`) directly under `dir`
+/// whose modification time is more than `ttl_days` days ago.
+///
+/// Returns `(files_deleted, bytes_freed)`.
+pub fn sweep_expired_screenshots(dir: &Path, ttl_days: u32) -> (usize, u64) {
+    let cutoff = std::time::SystemTime::now()
+        .checked_sub(std::time::Duration::from_secs(u64::from(ttl_days) * 86_400))
+        .unwrap_or(std::time::UNIX_EPOCH);
+    let mut expired = Vec::new();
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.is_file() {
-                total += path.metadata().map(|m| m.len()).unwrap_or(0);
-            } else if path.is_dir() {
-                if let Ok(sub_entries) = std::fs::read_dir(&path) {
-                    for sub_entry in sub_entries.flatten() {
-                        if sub_entry.path().is_file() {
-                            total += sub_entry.path().metadata().map(|m| m.len()).unwrap_or(0);
-                        }
-                    }
-                }
+            let is_image = path
+                .extension()
+                .map(|e| {
+                    let e = e.to_string_lossy().to_ascii_lowercase();
+                    e == "jpg" || e == "jpeg" || e == "png"
+                })
+                .unwrap_or(false);
+            let Ok(meta) = entry.metadata() else { continue };
+            if !is_image || !meta.is_file() {
+                continue;
+            }
+            if meta.modified().map(|m| m < cutoff).unwrap_or(false) {
+                expired.push(path.to_string_lossy().into_owned());
             }
         }
     }
-    total
+    let (deleted, bytes) = delete_files(&expired);
+    if deleted > 0 {
+        info!(deleted, bytes, ttl_days, "Deleted screenshots past the job TTL");
+    }
+    (deleted, bytes)
+}
+
+/// Delete each path; missing files are skipped. Returns `(deleted, bytes)`.
+fn delete_files(paths: &[String]) -> (usize, u64) {
+    let mut deleted = 0usize;
+    let mut bytes = 0u64;
+    for path_str in paths {
+        let path = Path::new(path_str);
+        let size = match std::fs::symlink_metadata(path) {
+            Ok(m) => m.len(),
+            Err(_) => continue,
+        };
+        match std::fs::remove_file(path) {
+            Ok(()) => {
+                deleted += 1;
+                bytes += size;
+            }
+            Err(e) => warn!(path = %path.display(), error = %e, "Failed to delete file"),
+        }
+    }
+    (deleted, bytes)
+}
+
+/// Call `f` for every regular file under `dir`, recursively, without
+/// following symlinks.
+fn collect_files(dir: &Path, f: &mut dyn FnMut(&Path)) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let Ok(ft) = entry.file_type() else { continue };
+        let path = entry.path();
+        if ft.is_dir() {
+            collect_files(&path, f);
+        } else if ft.is_file() {
+            f(&path);
+        }
+    }
+}
+
+/// Remove empty subdirectories below `dir` (bottom-up); `dir` itself stays.
+fn remove_empty_dirs(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            let path = entry.path();
+            remove_empty_dirs(&path);
+            // Fails (harmlessly) when the directory is not empty.
+            let _ = std::fs::remove_dir(&path);
+        }
+    }
 }
 
 #[cfg(unix)]

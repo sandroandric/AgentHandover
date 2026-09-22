@@ -20,6 +20,10 @@ fn sample_daemon_status() -> DaemonStatus {
         uptime_seconds: 3600,
         last_extension_message: None,
         focus_session: None,
+        last_maintenance: None,
+        events_purged: None,
+        artifacts_purged: None,
+        bytes_freed: None,
     }
 }
 
@@ -226,6 +230,10 @@ fn daemon_status_with_extension_message_roundtrip() {
         uptime_seconds: 600,
         last_extension_message: Some(now),
         focus_session: None,
+        last_maintenance: None,
+        events_purged: None,
+        artifacts_purged: None,
+        bytes_freed: None,
     };
 
     let json = serde_json::to_string_pretty(&status).expect("serialize");

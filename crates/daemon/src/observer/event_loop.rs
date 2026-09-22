@@ -2,7 +2,7 @@ use anyhow::Result;
 use chrono::Utc;
 use agenthandover_common::event::*;
 use agenthandover_common::redaction::Redactor;
-use agenthandover_storage::artifact_store::{ArtifactMeta, ArtifactStore};
+use agenthandover_storage::artifact_store::ArtifactStore;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -20,12 +20,7 @@ use uuid::Uuid;
 /// `main.rs` guarantees all producers are stopped before we await the
 /// writer task.
 pub enum ObserverMessage {
-    Event {
-        event: Event,
-        /// Metadata for artifacts associated with this event, so the storage
-        /// writer can insert rows into the `artifacts` table.
-        artifacts: Vec<ArtifactMeta>,
-    },
+    Event { event: Event },
 }
 
 /// Configuration for the observer event loop.
@@ -288,7 +283,7 @@ pub async fn run_observer_loop(
 
                         tag_focus_session(&mut event, &active_focus_session_id);
                         redact_event(&mut event, &redactor);
-                        let _ = tx.send(ObserverMessage::Event { event, artifacts: vec![] }).await;
+                        let _ = tx.send(ObserverMessage::Event { event }).await;
                         dwell.on_manipulation_input();
                     }
                     last_app_id = current_app.clone();
@@ -306,7 +301,7 @@ pub async fn run_observer_loop(
                         );
                         tag_focus_session(&mut event, &active_focus_session_id);
                         redact_event(&mut event, &redactor);
-                        let _ = tx.send(ObserverMessage::Event { event, artifacts: vec![] }).await;
+                        let _ = tx.send(ObserverMessage::Event { event }).await;
                     }
                     last_window_title = current_title;
                 }
@@ -337,10 +332,9 @@ pub async fn run_observer_loop(
                     && config.capture_screenshots
                     && screenshot_count_this_minute < config.screenshot_max_per_minute
                 {
-                    if let Some(ref store) = artifact_store {
+                    if artifact_store.is_some() {
                         // dHash threshold = 0 means always capture (bypass dedup)
-                        let result = capture_and_store_screenshot(
-                            store,
+                        let result = capture_screenshot(
                             last_dhash,
                             0, // Focus mode: capture every frame
                             &config.screenshots_dir,
@@ -365,11 +359,9 @@ pub async fn run_observer_loop(
                                 cursor_global_px.clone(),
                             );
 
-                            let mut focus_artifacts: Vec<ArtifactMeta> = vec![];
-
-                            screenshot_count_this_minute += result.artifact_ids.len() as u32;
-                            event.artifact_ids = result.artifact_ids;
-                            focus_artifacts = result.artifact_metas;
+                            if result.raw_pixels.is_some() {
+                                screenshot_count_this_minute += 1;
+                            }
 
                             if let Some(ref path) = result.screenshot_path {
                                 event.metadata["screenshot_path"] = serde_json::Value::String(
@@ -391,7 +383,7 @@ pub async fn run_observer_loop(
                             tag_focus_session(&mut event, &active_focus_session_id);
                             redact_event(&mut event, &redactor);
                             debug!("Focus capture: DwellSnapshot with screenshot");
-                            let _ = tx.send(ObserverMessage::Event { event, artifacts: focus_artifacts }).await;
+                            let _ = tx.send(ObserverMessage::Event { event }).await;
                         }
                     }
                 }
@@ -407,9 +399,8 @@ pub async fn run_observer_loop(
                     if config.capture_screenshots
                         && screenshot_count_this_minute < config.screenshot_max_per_minute
                     {
-                        if let Some(ref store) = artifact_store {
-                            let result = capture_and_store_screenshot(
-                                store,
+                        if artifact_store.is_some() {
+                            let result = capture_screenshot(
                                 last_dhash,
                                 config.dhash_threshold,
                                 &config.screenshots_dir,
@@ -441,12 +432,10 @@ pub async fn run_observer_loop(
                         cursor_global_px.clone(),
                     );
 
-                    let mut dwell_artifacts: Vec<ArtifactMeta> = vec![];
-
                     if let Some(result) = captured_result {
-                        screenshot_count_this_minute += result.artifact_ids.len() as u32;
-                        event.artifact_ids = result.artifact_ids;
-                        dwell_artifacts = result.artifact_metas;
+                        if result.raw_pixels.is_some() {
+                            screenshot_count_this_minute += 1;
+                        }
 
                         // Store screenshot path for VLM annotation pipeline
                         if let Some(ref path) = result.screenshot_path {
@@ -468,7 +457,7 @@ pub async fn run_observer_loop(
 
                     tag_focus_session(&mut event, &active_focus_session_id);
                     redact_event(&mut event, &redactor);
-                    let _ = tx.send(ObserverMessage::Event { event, artifacts: dwell_artifacts }).await;
+                    let _ = tx.send(ObserverMessage::Event { event }).await;
                 }
 
                 if dwell.is_scroll_reading() {
@@ -479,9 +468,8 @@ pub async fn run_observer_loop(
                     if config.capture_screenshots
                         && screenshot_count_this_minute < config.screenshot_max_per_minute
                     {
-                        if let Some(ref store) = artifact_store {
-                            let result = capture_and_store_screenshot(
-                                store,
+                        if artifact_store.is_some() {
+                            let result = capture_screenshot(
                                 last_dhash,
                                 config.dhash_threshold,
                                 &config.screenshots_dir,
@@ -512,12 +500,10 @@ pub async fn run_observer_loop(
                         cursor_global_px.clone(),
                     );
 
-                    let mut scroll_artifacts: Vec<ArtifactMeta> = vec![];
-
                     if let Some(result) = captured_result {
-                        screenshot_count_this_minute += result.artifact_ids.len() as u32;
-                        event.artifact_ids = result.artifact_ids;
-                        scroll_artifacts = result.artifact_metas;
+                        if result.raw_pixels.is_some() {
+                            screenshot_count_this_minute += 1;
+                        }
 
                         // Store screenshot path for VLM annotation pipeline
                         if let Some(ref path) = result.screenshot_path {
@@ -539,7 +525,7 @@ pub async fn run_observer_loop(
 
                     tag_focus_session(&mut event, &active_focus_session_id);
                     redact_event(&mut event, &redactor);
-                    let _ = tx.send(ObserverMessage::Event { event, artifacts: scroll_artifacts }).await;
+                    let _ = tx.send(ObserverMessage::Event { event }).await;
                 }
 
                 // (Focus capture runs in step 5b above, before dwell detection)
@@ -582,25 +568,10 @@ pub async fn run_storage_writer(
     // recv() returns None only when ALL senders have been dropped, so every
     // in-flight event is guaranteed to be processed before we exit.
     while let Some(msg) = rx.recv().await {
-        let ObserverMessage::Event { event, artifacts } = msg;
+        let ObserverMessage::Event { event } = msg;
         if let Err(e) = store.insert_event(&event) {
             error!(error = %e, "Failed to insert event");
         } else {
-            // Insert artifact records so maintenance can find real files.
-            let event_id_str = event.id.to_string();
-            for meta in &artifacts {
-                if let Err(e) = store.insert_artifact(
-                    &meta.artifact_id,
-                    &event_id_str,
-                    &meta.artifact_type,
-                    &meta.file_path.display().to_string(),
-                    meta.original_size_bytes,
-                    meta.stored_size_bytes,
-                ) {
-                    warn!(error = %e, artifact_id = %meta.artifact_id, "Failed to insert artifact record");
-                }
-            }
-
             event_count += 1;
             if let Some(ref counter) = shared_counter {
                 counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -615,12 +586,10 @@ pub async fn run_storage_writer(
     Ok(())
 }
 
-/// Result of screenshot capture: artifact metadata and optional raw pixel data for OCR.
+/// Result of screenshot capture: the VLM JPEG path and raw pixel data for OCR.
 struct ScreenshotResult {
-    artifact_ids: Vec<String>,
-    /// Full metadata for DB insertion.
-    artifact_metas: Vec<ArtifactMeta>,
     /// Raw BGRA pixels + dimensions, available for OCR processing.
+    /// `Some` exactly when a new frame was captured.
     raw_pixels: Option<(usize, usize, Vec<u8>)>,
     /// Path to the plain JPEG screenshot for VLM annotation pipeline.
     screenshot_path: Option<PathBuf>,
@@ -630,14 +599,13 @@ struct ScreenshotResult {
     skipped_dhash: bool,
 }
 
-/// Capture a screenshot, check dHash for change detection, store as artifact,
-/// and save a plain JPEG for the VLM annotation pipeline.
+/// Capture a screenshot, check dHash for change detection, and save a plain
+/// JPEG for the VLM annotation pipeline (the only on-disk copy of the frame).
 ///
 /// If the screenshot is too similar to the previous one (hamming distance < threshold),
 /// returns a result with `skipped_dhash = true` — the caller should skip the event.
 #[cfg(target_os = "macos")]
-async fn capture_and_store_screenshot(
-    store: &ArtifactStore,
+async fn capture_screenshot(
     last_dhash: u64,
     dhash_threshold: u32,
     screenshots_dir: &Path,
@@ -661,8 +629,6 @@ async fn capture_and_store_screenshot(
                         "Screenshot similar to previous, skipping"
                     );
                     return ScreenshotResult {
-                        artifact_ids: vec![],
-                        artifact_metas: vec![],
                         raw_pixels: None,
                         screenshot_path: None,
                         dhash,
@@ -670,47 +636,22 @@ async fn capture_and_store_screenshot(
                     };
                 }
 
-                // Store encrypted artifact (existing behavior for audit trail)
-                match store.store(&raw_pixels, "screenshot") {
-                    Ok(meta) => {
-                        debug!(
-                            artifact_id = %meta.artifact_id,
-                            dhash_distance = distance,
-                            "Screenshot captured and stored"
-                        );
-                        let id = meta.artifact_id.clone();
+                debug!(dhash_distance = distance, "Screenshot captured");
+                let screenshot_path = save_vlm_jpeg(
+                    &raw_pixels,
+                    width,
+                    height,
+                    screenshots_dir,
+                    screenshot_scale,
+                    screenshot_quality,
+                );
 
-                        // Save plain JPEG for VLM annotation pipeline
-                        let screenshot_path = save_vlm_jpeg(
-                            &raw_pixels,
-                            width,
-                            height,
-                            screenshots_dir,
-                            screenshot_scale,
-                            screenshot_quality,
-                        );
-
-                        return ScreenshotResult {
-                            artifact_ids: vec![id],
-                            artifact_metas: vec![meta],
-                            raw_pixels: Some((width, height, raw_pixels)),
-                            screenshot_path,
-                            dhash,
-                            skipped_dhash: false,
-                        };
-                    }
-                    Err(e) => {
-                        warn!(error = %e, "Failed to store screenshot artifact");
-                        return ScreenshotResult {
-                            artifact_ids: vec![],
-                            artifact_metas: vec![],
-                            raw_pixels: None,
-                            screenshot_path: None,
-                            dhash,
-                            skipped_dhash: false,
-                        };
-                    }
-                }
+                return ScreenshotResult {
+                    raw_pixels: Some((width, height, raw_pixels)),
+                    screenshot_path,
+                    dhash,
+                    skipped_dhash: false,
+                };
             }
             None => {
                 if attempt < MAX_RETRIES {
@@ -723,8 +664,6 @@ async fn capture_and_store_screenshot(
         }
     }
     ScreenshotResult {
-        artifact_ids: vec![],
-        artifact_metas: vec![],
         raw_pixels: None,
         screenshot_path: None,
         dhash: 0,
@@ -733,8 +672,7 @@ async fn capture_and_store_screenshot(
 }
 
 #[cfg(not(target_os = "macos"))]
-async fn capture_and_store_screenshot(
-    _store: &ArtifactStore,
+async fn capture_screenshot(
     _last_dhash: u64,
     _dhash_threshold: u32,
     _screenshots_dir: &Path,
@@ -742,8 +680,6 @@ async fn capture_and_store_screenshot(
     _screenshot_quality: u8,
 ) -> ScreenshotResult {
     ScreenshotResult {
-        artifact_ids: vec![],
-        artifact_metas: vec![],
         raw_pixels: None,
         screenshot_path: None,
         dhash: 0,
@@ -754,7 +690,8 @@ async fn capture_and_store_screenshot(
 /// Save a plain (unencrypted) half-resolution JPEG for the VLM annotation pipeline.
 ///
 /// The Python worker's scene annotator reads these directly via the `screenshot_path`
-/// stored in event metadata. Screenshots are deleted after successful VLM annotation.
+/// stored in event metadata. The worker deletes each file once it has been
+/// annotated; daily maintenance deletes any left older than `vlm.job_ttl_days`.
 fn save_vlm_jpeg(
     raw_pixels: &[u8],
     width: usize,

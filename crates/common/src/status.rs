@@ -30,6 +30,16 @@ pub struct DaemonStatus {
     /// Active focus recording session, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub focus_session: Option<FocusSessionInfo>,
+    /// When the daily storage maintenance last completed, and what it
+    /// removed. Absent until the first run on this machine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_maintenance: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub events_purged: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifacts_purged: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bytes_freed: Option<u64>,
 }
 
 /// Status written by the worker each poll cycle to worker-status.json

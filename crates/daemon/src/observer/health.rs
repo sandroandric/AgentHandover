@@ -1,4 +1,5 @@
-use std::path::{Path, PathBuf};
+use agenthandover_storage::maintenance::dir_size;
+use std::path::PathBuf;
 use tracing::warn;
 
 /// Default artifact directory size threshold: 10 GB.
@@ -67,7 +68,7 @@ impl HealthWatcher {
         let artifact_dir_bytes = self
             .artifact_path
             .as_ref()
-            .map(|p| get_dir_size_shallow(p))
+            .map(|p| dir_size(p))
             .unwrap_or(0);
         let artifact_dir_ok = artifact_dir_bytes <= self.artifact_max_bytes;
         if !artifact_dir_ok {
@@ -88,30 +89,6 @@ impl HealthWatcher {
             artifact_dir_ok,
         }
     }
-}
-
-/// Sum file sizes in a directory, traversing one level of subdirectories.
-fn get_dir_size_shallow(dir: &Path) -> u64 {
-    let mut total = 0u64;
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_file() {
-                total += path.metadata().map(|m| m.len()).unwrap_or(0);
-            } else if path.is_dir() {
-                // One level deep (date directories like yyyy/mm/dd)
-                if let Ok(sub_entries) = std::fs::read_dir(&path) {
-                    for sub_entry in sub_entries.flatten() {
-                        let sub_path = sub_entry.path();
-                        if sub_path.is_file() {
-                            total += sub_path.metadata().map(|m| m.len()).unwrap_or(0);
-                        }
-                    }
-                }
-            }
-        }
-    }
-    total
 }
 
 fn get_free_disk_gb() -> Option<u64> {
