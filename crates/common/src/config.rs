@@ -194,7 +194,8 @@ pub struct OpenClawConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExportConfig {
-    /// Which adapter to use: "openclaw" or "generic"
+    /// Which adapter the worker exports through: "openclaw", "generic",
+    /// "skill-md", "claude-skill" or "all" (read by the worker)
     pub adapter: String,
     /// Enable JSON export alongside Markdown
     pub json_export: bool,

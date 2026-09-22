@@ -24,7 +24,7 @@ from pathlib import Path
 
 from agenthandover_worker import trigger_spool
 from agenthandover_worker.clipboard_linker import ClipboardLinker
-from agenthandover_worker.config import load_config
+from agenthandover_worker.config import EXPORT_ADAPTERS, load_config
 from agenthandover_worker.confidence import ConfidenceScorer, is_native_app_context
 from agenthandover_worker.db import WorkerDB
 from agenthandover_worker.episode_builder import EpisodeBuilder
@@ -54,17 +54,11 @@ logger = logging.getLogger("agenthandover_worker")
 
 # Default paths assume a single-user system. Use --db-path and --sops-dir
 # CLI args to override for multi-user or containerized deployments.
-# Must match the daemon's default — see crates/daemon/src/main.rs.
 import platform as _platform
 
-if _platform.system() == "Darwin":
-    DEFAULT_DB_PATH = (
-        Path.home() / "Library" / "Application Support" / "agenthandover" / "events.db"
-    )
-else:
-    DEFAULT_DB_PATH = Path.home() / ".local" / "share" / "agenthandover" / "events.db"
+from agenthandover_worker.paths import DEFAULT_DB_PATH, KNOWLEDGE_BASE_DIR, data_dir
+
 DEFAULT_SOPS_DIR = Path.home() / ".openclaw" / "workspace" / "memory" / "apprentice"
-KNOWLEDGE_BASE_DIR = Path.home() / ".agenthandover" / "knowledge"
 POLL_INTERVAL_SECONDS = 2.0
 VLM_REJECT_THRESHOLD = 0.60
 
@@ -464,9 +458,9 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--adapter",
-        choices=["openclaw", "generic", "skill-md", "claude-skill", "all"],
-        default="openclaw",
-        help="SOP export adapter (default: openclaw)",
+        choices=list(EXPORT_ADAPTERS),
+        default=None,
+        help="SOP export adapter (default: [export] adapter in config.toml, else openclaw)",
     )
     parser.add_argument(
         "--json-export",
@@ -539,9 +533,7 @@ def _next_poll_interval(
 
 def _status_dir() -> Path:
     """Return the standard data directory for status/PID files."""
-    if _platform.system() == "Darwin":
-        return Path.home() / "Library" / "Application Support" / "agenthandover"
-    return Path.home() / ".local" / "share" / "agenthandover"
+    return data_dir()
 
 
 def _atomic_write_result(path: Path, data: dict) -> None:
@@ -4060,6 +4052,9 @@ def main(argv: list[str] | None = None) -> None:
     # One read of config.toml for the whole worker run.
     cfg = load_config()
     vlm_cfg = cfg.vlm
+    if args.adapter is None:
+        args.adapter = cfg.export.adapter
+    logger.info("Export adapter: %s", args.adapter)
 
     # Config validation
     try:
