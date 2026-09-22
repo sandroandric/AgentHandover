@@ -29,7 +29,20 @@ from datetime import datetime
 
 from prefixspan import PrefixSpan
 
+from agenthandover_worker.confidence import compute_v2_confidence
+
 logger = logging.getLogger(__name__)
+
+
+def _v2_confidence(template: dict, *, is_focus: bool) -> float:
+    """``confidence_avg`` on the v2 generator's scale (``compute_v2_confidence``).
+
+    A mined pattern occurs in every instance its support counts, so step
+    consistency is full (no ``demonstrations``); the v1 path has no scene
+    annotations, so annotation quality takes the scorer's conservative
+    default.
+    """
+    return compute_v2_confidence(template, is_focus=is_focus).total
 
 
 class SOPInducer:
@@ -165,8 +178,9 @@ class SOPInducer:
             # Abstract variables
             variables = self._abstract_variables(pattern_steps, all_instances)
 
-            # Compute average confidence
-            confidence_avg = self._compute_avg_confidence(all_instances)
+            # The per-step mean of the v1 translator's confidences, kept
+            # under its own key: ``confidence_avg`` has one scale (v2).
+            step_confidence_mean = self._compute_avg_confidence(all_instances)
 
             # Generate slug and title
             slug = self._generate_slug(pattern_steps)
@@ -176,19 +190,21 @@ class SOPInducer:
             preconditions = self._detect_preconditions(all_instances)
             postconditions = self._detect_postconditions(all_instances)
 
-            results.append({
+            template = {
                 "slug": slug,
                 "title": title,
                 "steps": pattern_steps,
                 "variables": variables,
-                "confidence_avg": round(confidence_avg, 4),
+                "step_confidence_mean": round(step_confidence_mean, 4),
                 "episode_count": support_count,
                 "abs_support": support_count,
                 "apps_involved": sorted(set(apps)),
                 "preconditions": preconditions,
                 "postconditions": postconditions,
                 "exceptions_seen": exceptions,
-            })
+            }
+            template["confidence_avg"] = _v2_confidence(template, is_focus=False)
+            results.append(template)
 
         # Deduplicate: prefer longer patterns over their sub-patterns,
         # and cap total output to avoid flooding the export pipeline.
@@ -966,8 +982,7 @@ class SOPInducer:
         # Generate slug from title
         slug = self._generate_slug_from_title(title)
 
-        # Compute average confidence
-        confidence_avg = self._compute_avg_confidence([all_steps])
+        step_confidence_mean = self._compute_avg_confidence([all_steps])
 
         # Detect pre/postconditions from the single instance
         preconditions = self._detect_preconditions([all_steps])
@@ -978,7 +993,7 @@ class SOPInducer:
             "title": title,
             "steps": [s.copy() for s in all_steps],
             "variables": [],  # single demo — no variable abstraction possible
-            "confidence_avg": round(confidence_avg, 4),
+            "step_confidence_mean": round(step_confidence_mean, 4),
             "episode_count": 1,
             "abs_support": 1,
             "apps_involved": sorted(apps),
@@ -988,12 +1003,13 @@ class SOPInducer:
             "source": "focus_recording",
             "focus_title": title,
         }
+        template["confidence_avg"] = _v2_confidence(template, is_focus=True)
 
         logger.info(
             "Focus session SOP: '%s' with %d steps (confidence=%.2f)",
             title,
             len(all_steps),
-            confidence_avg,
+            template["confidence_avg"],
         )
 
         return [template]

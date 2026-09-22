@@ -77,6 +77,21 @@ _V3_SECTIONS = {
 }
 
 
+def step_key(step: dict, index: int) -> str:
+    """The id of the step at 0-based *index*: its ``step_id``, else ``step_<n>``.
+
+    The one definition shared by the packet (which prints it in brackets),
+    the MCP server's ``expected_steps`` and the execution monitor, so an
+    agent reporting the id it was shown lands on that step.
+    """
+    return str(step.get("step_id") or f"step_{index + 1}")
+
+
+def procedure_steps(proc: dict) -> list[dict]:
+    """The procedure's steps that are dicts (the only ones with an id)."""
+    return [s for s in proc.get("steps") or [] if isinstance(s, dict)]
+
+
 def _confidence_label(score: float) -> str:
     """Map an average confidence score to high / medium / low."""
     if score >= 0.85:

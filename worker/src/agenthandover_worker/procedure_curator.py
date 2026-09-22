@@ -39,6 +39,19 @@ from agenthandover_worker.trust_advisor import TrustAdvisor
 logger = logging.getLogger(__name__)
 
 
+def upgrade_score(proc: dict) -> float:
+    """The score lifecycle upgrades compare against their thresholds.
+
+    ``0.7 * confidence_avg`` (how well the synthesis is grounded in what
+    was observed, one scale for every source) ``+ 0.3 *
+    execution_confidence`` (how agent runs went; 0.5 before any run).
+    """
+    return (
+        0.7 * float(proc.get("confidence_avg") or 0.0)
+        + 0.3 * float(proc.get("execution_confidence", 0.5))
+    )
+
+
 # ------------------------------------------------------------------
 # Data structures
 # ------------------------------------------------------------------
@@ -263,7 +276,7 @@ class ProcedureCurator:
                 continue
 
             episode_count = proc.get("episode_count", 0)
-            confidence_avg = proc.get("confidence_avg", 0.0)
+            score = upgrade_score(proc)
             evidence = proc.get("evidence", {})
             staleness_data = proc.get("staleness", {})
             contradictions = evidence.get("contradictions", [])
@@ -275,21 +288,21 @@ class ProcedureCurator:
             proposed: str | None = None
 
             if lifecycle_str == "observed":
-                if episode_count >= 3 and confidence_avg >= 0.65:
+                if episode_count >= 3 and score >= 0.65:
                     proposed = "draft"
                     reasons.append(f"Episode count {episode_count} >= 3")
-                    reasons.append(f"Confidence {confidence_avg:.2f} >= 0.65")
+                    reasons.append(f"Score {score:.2f} >= 0.65")
 
             elif lifecycle_str == "draft":
                 if (
                     episode_count >= 5
-                    and confidence_avg >= 0.75
+                    and score >= 0.75
                     and freshness >= 0.7
                     and not contradictions
                 ):
                     proposed = "reviewed"
                     reasons.append(f"Episode count {episode_count} >= 5")
-                    reasons.append(f"Confidence {confidence_avg:.2f} >= 0.75")
+                    reasons.append(f"Score {score:.2f} >= 0.75")
                     reasons.append(f"Freshness {freshness:.2f} >= 0.70")
                     reasons.append("No contradictions")
 
