@@ -727,8 +727,26 @@ class TestProcessPassiveDiscovery:
             mock_writer.get_sops_dir.return_value = Path("/fake")
             mock_index = MagicMock()
 
+            # A procedure already learned for this task carries the
+            # evidence extracted from earlier observations.
+            from agenthandover_worker.knowledge_base import KnowledgeBase
+            from agenthandover_worker.procedure_schema import sop_to_procedure
+            kb = KnowledgeBase(root=Path(tempfile.mkdtemp()) / "knowledge")
+            kb.ensure_structure()
+            prior = sop_to_procedure(generated_sop_template(
+                "check_domain_availability", mode="passive",
+            ))
+            prior["id"] = "filing-expense-report"
+            prior_extracted = {
+                "timing_patterns": {"total_duration_seconds": 1260},
+                "domains": ["expensify.com"],
+            }
+            prior["evidence"]["extracted_evidence"] = prior_extracted
+            kb.save_procedure(prior)
+
             sops = _process_passive_discovery(
                 db,
+                knowledge_base=kb,
                 segmenter=segmenter,
                 sop_generator=mock_sop_gen,
                 openclaw_writer=mock_writer,
@@ -738,6 +756,10 @@ class TestProcessPassiveDiscovery:
             assert sops >= 1
             mock_sop_gen.generate_from_passive.assert_called_once()
             mock_writer.write_sop.assert_called()
+            # Prior-evidence enrichment ran: the new template carries the
+            # duration and domains accumulated by the earlier observation.
+            generated = mock_sop_gen.generate_from_passive.return_value.sop
+            assert generated["_extracted_evidence"] == prior_extracted
             db.close()
         finally:
             conn.close()
@@ -784,8 +806,13 @@ class TestProcessPassiveDiscovery:
             mock_writer.get_sops_dir.return_value = Path("/fake")
             mock_index = MagicMock()
 
+            from agenthandover_worker.knowledge_base import KnowledgeBase
+            kb = KnowledgeBase(root=Path(tempfile.mkdtemp()) / "knowledge")
+            kb.ensure_structure()
+
             sops = _process_passive_discovery(
                 db,
+                knowledge_base=kb,
                 segmenter=segmenter,
                 sop_generator=mock_sop_gen,
                 openclaw_writer=mock_writer,

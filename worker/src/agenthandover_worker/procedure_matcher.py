@@ -34,6 +34,7 @@ from agenthandover_worker.sop_dedup import (
 
 if TYPE_CHECKING:
     from agenthandover_worker.continuity_tracker import ContinuitySpan
+    from agenthandover_worker.daily_processor import TaskBoundary
     from agenthandover_worker.task_segmenter import TaskSegment
 
 logger = logging.getLogger(__name__)
@@ -145,6 +146,17 @@ class ProcedureMatcher:
         span_fp = self._span_to_fingerprint(span)
         return self._match_fingerprint(span_fp)
 
+    def match_boundary(self, boundary: TaskBoundary) -> list[tuple[str, float]]:
+        """Find procedure candidates for a daily-summary task boundary.
+
+        Returns [(slug, similarity)] sorted descending by similarity,
+        filtered to only include matches above the threshold.
+        """
+        if self._proc_fingerprints is None:
+            self._refresh_procedure_fingerprints()
+
+        return self._match_fingerprint(self._boundary_to_fingerprint(boundary))
+
     def invalidate_cache(self) -> None:
         """Force a refresh of the procedure fingerprint cache.
 
@@ -235,6 +247,31 @@ class ProcedureMatcher:
             "domains": sorted(domains),
             "action_verbs": sorted(action_verbs),
             "title_tokens": sorted(title_tokens(span.goal_summary)),
+        }
+
+    def _boundary_to_fingerprint(self, boundary: TaskBoundary) -> dict:
+        """Build a fingerprint from a daily task boundary.
+
+        Components:
+        - ``apps``: from ``boundary.apps``, normalized
+        - ``domains``: from ``boundary.urls``, extracted via ``_url_to_domain``
+        - ``action_verbs``: first word of ``boundary.intent``, normalized
+        - ``title_tokens``: content words of ``boundary.intent``
+        """
+        apps = {_normalize_app(app) for app in boundary.apps} - {""}
+        domains = {_url_to_domain(url) for url in boundary.urls} - {""}
+
+        action_verbs: set[str] = set()
+        words = boundary.intent.strip().split()
+        if words:
+            first_word = words[0].lower()
+            action_verbs.add(_VERB_MAP.get(first_word, first_word))
+
+        return {
+            "apps": sorted(apps),
+            "domains": sorted(domains),
+            "action_verbs": sorted(action_verbs),
+            "title_tokens": sorted(title_tokens(boundary.intent)),
         }
 
     # ------------------------------------------------------------------

@@ -329,18 +329,19 @@ class TestTaskBoundaryDetection:
         summary = processor.process_day("2026-03-10", events)
         assert summary.task_count == 1
 
-    def test_intent_change_creates_new_boundary(
+    def test_intent_change_alone_does_not_split(
         self, processor: DailyBatchProcessor
     ) -> None:
-        """Changing what_doing intent creates a new task boundary."""
+        """The annotator rewords one task frame to frame: what_doing is not a boundary."""
         events = [
-            make_event("e1", "2026-03-10T09:00:00Z", "Chrome", "Reading email"),
-            make_event("e2", "2026-03-10T09:01:00Z", "Chrome", "Writing report"),
+            make_event("e1", "2026-03-10T09:00:00Z", "Chrome", "Reviewing expense report"),
+            make_event("e2", "2026-03-10T09:01:00Z", "Chrome", "Checking receipts in the report"),
+            make_event("e3", "2026-03-10T09:02:00Z", "Chrome", "Reviewing expense report"),
         ]
         summary = processor.process_day("2026-03-10", events)
-        assert summary.task_count == 2
-        assert summary.tasks[0].intent == "Reading email"
-        assert summary.tasks[1].intent == "Writing report"
+        assert summary.task_count == 1
+        assert summary.tasks[0].intent == "Reviewing expense report"
+        assert summary.tasks[0].event_ids == ["e1", "e2", "e3"]
 
     def test_empty_app_does_not_trigger_app_change(
         self, processor: DailyBatchProcessor
@@ -983,3 +984,78 @@ class TestNormalizeIntent:
         """Punctuation is removed, remaining words sorted."""
         result = _normalize_intent("review PR #123")
         assert result == "123 pr review"
+
+
+# ---------------------------------------------------------------------------
+# Procedure matching
+# ---------------------------------------------------------------------------
+
+
+class TestMatchedProcedure:
+    """Task boundaries carry the slug of the known procedure they match."""
+
+    @staticmethod
+    def _save_expense_procedure(kb: KnowledgeBase) -> None:
+        from agenthandover_worker.procedure_schema import sop_to_procedure
+
+        kb.save_procedure(sop_to_procedure({
+            "slug": "file-expense-report",
+            "title": "File expense report",
+            "steps": [
+                {"step": "Open Expensify reports", "action": "Open Expensify reports",
+                 "app": "Chrome", "location": "https://expensify.com/reports"},
+                {"step": "Submit the report", "action": "Submit the report",
+                 "app": "Chrome"},
+            ],
+            "variables": [],
+            "confidence_avg": 0.85,
+            "episode_count": 3,
+            "apps_involved": ["Chrome"],
+            "preconditions": [],
+            "source": "passive",
+        }))
+
+    def test_boundary_matching_known_procedure_is_observed(
+        self, kb: KnowledgeBase
+    ) -> None:
+        from agenthandover_worker.procedure_matcher import ProcedureMatcher
+
+        self._save_expense_procedure(kb)
+        processor = DailyBatchProcessor(kb, matcher=ProcedureMatcher(kb=kb))
+        events = [
+            make_event("e1", "2026-03-10T09:00:00Z", "Chrome",
+                       "Filing expense report", "https://expensify.com/reports"),
+            make_event("e2", "2026-03-10T09:02:00Z", "Chrome",
+                       "Filing expense report", "https://expensify.com/reports/new"),
+            make_event("e3", "2026-03-10T11:00:00Z", "Terminal",
+                       "Running database migrations"),
+        ]
+        summary = processor.process_day("2026-03-10", events)
+
+        assert summary.task_count == 2
+        assert summary.tasks[0].matched_procedure == "file-expense-report"
+        assert summary.tasks[1].matched_procedure is None
+        assert summary.procedures_observed == ["file-expense-report"]
+
+        # The digest reads the saved summary and counts the match.
+        from agenthandover_worker.daily_digest import DigestGenerator
+
+        digest = DigestGenerator(kb).generate("2026-03-10")
+        assert digest.procedures_observed == 1
+
+    def test_procedure_added_after_first_day_is_matched_next_day(
+        self, kb: KnowledgeBase
+    ) -> None:
+        from agenthandover_worker.procedure_matcher import ProcedureMatcher
+
+        processor = DailyBatchProcessor(kb, matcher=ProcedureMatcher(kb=kb))
+        events = [
+            make_event("e1", "2026-03-10T09:00:00Z", "Chrome",
+                       "Filing expense report", "https://expensify.com/reports"),
+        ]
+        assert processor.process_day("2026-03-10", events).procedures_observed == []
+
+        self._save_expense_procedure(kb)
+        events[0]["timestamp"] = "2026-03-11T09:00:00Z"
+        summary = processor.process_day("2026-03-11", events)
+        assert summary.procedures_observed == ["file-expense-report"]

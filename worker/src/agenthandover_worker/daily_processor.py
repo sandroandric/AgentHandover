@@ -33,6 +33,7 @@ from agenthandover_worker.event_helpers import (
 
 if TYPE_CHECKING:
     from agenthandover_worker.knowledge_base import KnowledgeBase
+    from agenthandover_worker.procedure_matcher import ProcedureMatcher
 
 logger = logging.getLogger(__name__)
 
@@ -149,8 +150,13 @@ class DailyBatchProcessor:
     statistics, and persists the result in the knowledge base.
     """
 
-    def __init__(self, knowledge_base: KnowledgeBase) -> None:
+    def __init__(
+        self,
+        knowledge_base: KnowledgeBase,
+        matcher: ProcedureMatcher | None = None,
+    ) -> None:
         self._kb = knowledge_base
+        self._matcher = matcher
 
     # ------------------------------------------------------------------
     # Public API
@@ -173,6 +179,10 @@ class DailyBatchProcessor:
             A ``DailySummary`` with task boundaries, app usage, and
             active-hours calculation.
         """
+        # Procedures change between days: match against the current set.
+        if self._matcher is not None:
+            self._matcher.invalidate_cache()
+
         # 1. Parse events into an activity stream
         activities = self._build_activity_stream(events)
 
@@ -265,10 +275,12 @@ class DailyBatchProcessor:
         """Group sequential activities into tasks.
 
         A new task boundary is created when:
-        - The primary app changes (different app from the majority of the
-          current task).
-        - The ``what_doing`` intent changes (a different task context).
+        - The app changes between consecutive events.
         - There is a gap > 5 minutes between consecutive events.
+
+        The ``what_doing`` text is not a boundary: the annotator words the
+        same task differently from frame to frame, so splitting on it cuts
+        one task into many fragments.
         """
         if not activities:
             return []
@@ -291,14 +303,7 @@ class DailyBatchProcessor:
                 and prev["app"] != ""
             )
 
-            # Check for intent change (normalized comparison)
-            intent_changed = (
-                curr["what_doing"] != ""
-                and prev["what_doing"] != ""
-                and _normalize_intent(curr["what_doing"]) != _normalize_intent(prev["what_doing"])
-            )
-
-            if time_gap or app_changed or intent_changed:
+            if time_gap or app_changed:
                 # Finalize the current group as a task
                 tasks.append(self._group_to_task(current_group, curr))
                 current_group = [curr]
@@ -379,7 +384,7 @@ class DailyBatchProcessor:
                 or next_app == ""
             )
 
-        return TaskBoundary(
+        task = TaskBoundary(
             start_time=group[0]["timestamp"],
             end_time=group[-1]["timestamp"],
             duration_minutes=duration,
@@ -389,6 +394,11 @@ class DailyBatchProcessor:
             event_ids=event_ids,
             is_complete=is_complete,
         )
+        if self._matcher is not None:
+            matches = self._matcher.match_boundary(task)
+            if matches:
+                task.matched_procedure = matches[0][0]
+        return task
 
     # ------------------------------------------------------------------
     # Statistics
