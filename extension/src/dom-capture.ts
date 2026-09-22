@@ -228,82 +228,98 @@ export function truncateText(text: string, maxChars: number = MAX_TEXT_LENGTH): 
 
 /**
  * Given a `<table>` element, builds a DomNode tree that includes at most
- * `maxRows` visible rows.  This prevents huge data tables from bloating
- * the snapshot.
+ * `maxRows` visible rows per section.  This prevents huge data tables from
+ * bloating the snapshot.
  *
  * Strategy:
- *   - Always include `<thead>` / `<tfoot>` rows.
- *   - For `<tbody>` (or direct `<tr>` children), include only the first
- *     `maxRows` rows that are visible in the viewport.
- *   - If rows were truncated, append a synthetic marker node.
+ *   - `<thead>` / `<tfoot>`: their first `maxRows` rows.
+ *   - `<tbody>` (or direct `<tr>` children): the first `maxRows` rows that
+ *     are visible in the viewport.
+ *   - Cells keep their own text and their children (the links, buttons and
+ *     inputs an agent clicks), walked like any other element.
+ *   - Every emitted node (table, section, row, cell, cell content) counts
+ *     against the snapshot's `MAX_NODE_COUNT`; at the cap emission stops
+ *     and `counter.truncated` is set.
+ *   - If rows were left out, append a synthetic marker node.
  */
 export function truncateTable(
   table: HTMLTableElement,
   maxRows: number = MAX_TABLE_ROWS,
+  depth: number = 0,
+  counter: NodeCounter = { count: 0, truncated: false },
+  options: CaptureOptions = DEFAULT_CAPTURE_OPTIONS,
 ): DomNode {
-  const node = extractNodeInfo(table);
+  const node = extractNodeInfo(table, options);
+  counter.count++;
   node.children = [];
 
-  // Collect all row-containing sections (<thead>, <tbody>, <tfoot>, or loose <tr>).
-  const sections = Array.from(table.children);
+  const full = (): boolean => {
+    if (counter.count >= MAX_NODE_COUNT) {
+      counter.truncated = true;
+      return true;
+    }
+    return false;
+  };
+
   let visibleBodyRowCount = 0;
   let totalBodyRowCount = 0;
 
-  for (const section of sections) {
-    if (!(section instanceof HTMLElement)) continue;
+  const bodyRow = (row: HTMLTableRowElement, into: DomNode[]): void => {
+    // Skip invisible rows (display:none or visibility:hidden) from the count
+    try {
+      const rowStyle = window.getComputedStyle(row);
+      if (rowStyle.display === 'none' || rowStyle.visibility === 'hidden') {
+        return;
+      }
+    } catch {
+      // getComputedStyle can throw for detached elements; include the row
+    }
+    totalBodyRowCount++;
+    if (visibleBodyRowCount < maxRows && isInViewport(row) && !full()) {
+      into.push(buildRowNode(row, depth + 2, counter, options));
+      visibleBodyRowCount++;
+    }
+  };
+
+  for (const section of Array.from(table.children)) {
+    if (!(section instanceof HTMLElement) || full()) continue;
 
     const sectionTag = section.tagName.toUpperCase();
 
     if (sectionTag === 'THEAD' || sectionTag === 'TFOOT') {
-      // Always include head/foot — they contain column headers/summaries.
-      const sectionNode = extractNodeInfo(section);
+      // Head/foot rows carry the column headers and summaries.
+      const sectionNode = extractNodeInfo(section, options);
+      counter.count++;
       sectionNode.children = [];
+      let rows = 0;
       for (const row of Array.from(section.children)) {
-        if (row instanceof HTMLTableRowElement) {
-          sectionNode.children.push(buildRowNode(row));
-        }
+        if (!(row instanceof HTMLTableRowElement)) continue;
+        if (rows >= maxRows || full()) break;
+        sectionNode.children.push(buildRowNode(row, depth + 2, counter, options));
+        rows++;
       }
       node.children.push(sectionNode);
     } else if (sectionTag === 'TBODY') {
-      const bodyNode = extractNodeInfo(section);
+      const bodyNode = extractNodeInfo(section, options);
+      counter.count++;
       bodyNode.children = [];
-
       for (const row of Array.from(section.children)) {
-        if (!(row instanceof HTMLTableRowElement)) continue;
-
-        // Skip invisible rows (display:none or visibility:hidden) from the count
-        try {
-          const rowStyle = window.getComputedStyle(row);
-          if (rowStyle.display === 'none' || rowStyle.visibility === 'hidden') {
-            continue;
-          }
-        } catch {
-          // getComputedStyle can throw for detached elements; include the row
-        }
-
-        totalBodyRowCount++;
-
-        if (visibleBodyRowCount < maxRows && isInViewport(row)) {
-          bodyNode.children.push(buildRowNode(row));
-          visibleBodyRowCount++;
-        }
+        if (row instanceof HTMLTableRowElement) bodyRow(row, bodyNode.children);
       }
-
       node.children.push(bodyNode);
     } else if (sectionTag === 'TR') {
       // Loose <tr> directly under <table> (non-standard but common).
-      totalBodyRowCount++;
-      if (visibleBodyRowCount < maxRows && isInViewport(section as HTMLTableRowElement)) {
-        node.children.push(buildRowNode(section as HTMLTableRowElement));
-        visibleBodyRowCount++;
-      }
+      bodyRow(section as HTMLTableRowElement, node.children);
     } else if (sectionTag === 'CAPTION' || sectionTag === 'COLGROUP') {
-      // Include caption and colgroup as-is.
-      node.children.push(extractNodeInfo(section));
+      const extra = extractNodeInfo(section, options);
+      counter.count++;
+      const text = getDirectText(section);
+      if (text) extra.innerText = truncateText(text);
+      node.children.push(extra);
     }
   }
 
-  // If we truncated rows, add a marker so consumers know the data is partial.
+  // If we left rows out, add a marker so consumers know the data is partial.
   if (visibleBodyRowCount < totalBodyRowCount) {
     node.children.push({
       tag: '#truncated',
@@ -315,18 +331,40 @@ export function truncateTable(
 }
 
 /**
- * Build a DomNode for a single table row, including its cells.
+ * Build a DomNode for a single table row: its cells with their own text,
+ * and each cell's element children walked like the rest of the page.
  */
-function buildRowNode(row: HTMLTableRowElement): DomNode {
-  const rowNode = extractNodeInfo(row);
+function buildRowNode(
+  row: HTMLTableRowElement,
+  depth: number,
+  counter: NodeCounter,
+  options: CaptureOptions,
+): DomNode {
+  const rowNode = extractNodeInfo(row, options);
+  counter.count++;
   rowNode.children = [];
 
   for (const cell of Array.from(row.cells)) {
-    const cellNode = extractNodeInfo(cell);
+    if (counter.count >= MAX_NODE_COUNT) {
+      counter.truncated = true;
+      break;
+    }
+    const cellNode = extractNodeInfo(cell, options);
+    counter.count++;
     const text = getDirectText(cell);
     if (text) {
       cellNode.innerText = truncateText(text);
     }
+    const children: DomNode[] = [];
+    for (const child of Array.from(cell.children)) {
+      if (counter.count >= MAX_NODE_COUNT) {
+        counter.truncated = true;
+        break;
+      }
+      const childNode = walkDOM(child, depth + 1, counter, options);
+      if (childNode) children.push(childNode);
+    }
+    if (children.length > 0) cellNode.children = children;
     rowNode.children.push(cellNode);
   }
 
@@ -607,21 +645,30 @@ export function walkDOM(
     }
   }
 
-  // Viewport check — skip leaf elements completely outside the viewport.
-  // For container elements (those with children), we always recurse into
-  // their children even if the container itself is off-viewport, because
-  // children may be positioned independently and still be visible.
+  // Viewport check, for leaves only.  Containers are always walked (their
+  // children may be positioned independently and still be visible).  A
+  // leaf with a box is kept when the box is on screen.  A zero-size leaf
+  // is kept only when it carries an anchor (its own text, an aria-label, a
+  // test id or a role): `display: contents` wrappers and `<slot>`s report a
+  // 0x0 box yet hold the text an agent reads, while an empty 0x0 element
+  // is noise in the node budget.
   const rect = element.getBoundingClientRect();
   const hasNonTrivialSize = rect.width >= MIN_ELEMENT_SIZE && rect.height >= MIN_ELEMENT_SIZE;
-
-  if (hasNonTrivialSize && !isInViewport(element) && element.children.length === 0) {
-    return null; // Skip leaf nodes outside viewport
+  const isLeaf = element.children.length === 0;
+  if (isLeaf) {
+    const hasAnchor =
+      getDirectText(element).length > 0 ||
+      element.hasAttribute('aria-label') ||
+      element.hasAttribute('data-testid') ||
+      element.hasAttribute('role');
+    if (hasNonTrivialSize ? !isInViewport(element) : !hasAnchor) {
+      return null;
+    }
   }
-  // For containers: continue to process children even if container is off-viewport
 
   // Special handling for tables.
   if (element instanceof HTMLTableElement) {
-    return truncateTable(element);
+    return truncateTable(element, MAX_TABLE_ROWS, depth, counter, options);
   }
 
   // Build the DomNode for this element.
