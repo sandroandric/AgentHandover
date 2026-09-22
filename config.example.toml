@@ -10,7 +10,7 @@ capture_screenshots = true
 screenshot_max_per_minute = 20
 screenshot_format = "jpeg"       # "jpeg" (half-res, recommended) or "png" (full-res)
 screenshot_quality = 70          # JPEG quality 1-100 (only used for jpeg format)
-screenshot_scale = 0.5           # 0.5 = half resolution (recommended for VLM)
+screenshot_scale = 0.5           # fraction of native (Retina) pixels; 0.5 recommended for VLM
 dhash_threshold = 10             # perceptual hash dedup threshold (lower = stricter)
 
 [privacy]

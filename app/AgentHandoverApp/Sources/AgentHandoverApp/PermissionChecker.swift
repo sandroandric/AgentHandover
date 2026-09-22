@@ -76,10 +76,10 @@ enum PermissionChecker {
     static func resolveScreenRecordingStatus(
         timeoutNanoseconds: UInt64 = 4_000_000_000
     ) async -> ScreenRecordingStatus {
-        let service = ScreenCaptureService()
+        let probe = ScreenRecordingProbe.shared
         var granted = isScreenRecordingGranted()
 
-        if granted, await service.captureMainDisplay() != nil {
+        if granted, await probe.isCaptureReady() {
             return ScreenRecordingStatus(granted: true, captureReady: true)
         }
 
@@ -87,7 +87,7 @@ enum PermissionChecker {
         while DispatchTime.now().uptimeNanoseconds - startedAt < timeoutNanoseconds {
             try? await Task.sleep(nanoseconds: 250_000_000)
             granted = isScreenRecordingGranted() || granted
-            if granted, await service.captureMainDisplay() != nil {
+            if granted, await probe.isCaptureReady() {
                 return ScreenRecordingStatus(granted: true, captureReady: true)
             }
         }

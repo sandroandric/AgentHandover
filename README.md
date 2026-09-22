@@ -351,7 +351,7 @@ Review the strategy, steps, and guardrails. Click "Approve for Agents" when it l
 Everything runs on your machine:
 
 - **Local-first.** VLM inference via Ollama. Cloud APIs are opt-in with explicit consent.
-- **Screenshots are temporary.** Each frame is a half-resolution JPEG, deleted after VLM annotation. Frames never annotated are deleted by the daily maintenance run once they are older than `job_ttl_days` (default 7). Only structured text survives. Image embeddings computed before deletion.
+- **Screenshots are temporary.** Each frame is a JPEG of the focused window (or the display under it when no window resolves) at half its native pixel resolution, deleted after VLM annotation. Frames never annotated are deleted by the daily maintenance run once they are older than `job_ttl_days` (default 7). Only structured text survives. Image embeddings computed before deletion.
 - **Auto-redaction.** API keys, tokens, passwords, credit card numbers scrubbed before storage.
 - **Secure field exclusion.** Password and credit card inputs are never captured.
 - **Knowledge base is local.** Vector store, voice profiles, and all Skills live on your machine. Never uploaded.

@@ -55,7 +55,7 @@ pub struct OcrResult {
 /// Recognize text in raw BGRA pixel data using Apple Vision framework.
 ///
 /// Returns `Some(OcrResult)` on success, `None` on failure.
-/// The pixel data must be in BGRA format (as returned by `CGDisplay::image()`).
+/// The pixel data must be in BGRA format (as decoded by `capture::screenshot`).
 pub fn recognize_text(pixels: &[u8], width: usize, height: usize) -> Option<OcrResult> {
     if pixels.is_empty() || width == 0 || height == 0 {
         return None;
