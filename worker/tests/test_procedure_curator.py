@@ -95,9 +95,9 @@ class TestMergeCandidates:
     """Tests for detect_merge_candidates()."""
 
     def test_same_apps_similar_verbs_detected(self, kb, curator):
-        """Two procedures with same apps and overlapping step verbs are detected."""
+        """Same apps, overlapping step verbs and shared task vocabulary are detected."""
         proc_a = _make_proc(
-            "open-gmail", ["Chrome"],
+            "send-email-gmail", ["Chrome"],
             ["Navigate to gmail.com", "Click compose", "Enter recipient", "Review draft"],
         )
         proc_b = _make_proc(
@@ -109,7 +109,7 @@ class TestMergeCandidates:
 
         candidates = curator.detect_merge_candidates()
         slugs = {frozenset({c.slug_a, c.slug_b}) for c in candidates}
-        assert frozenset({"open-gmail", "send-email"}) in slugs
+        assert frozenset({"send-email-gmail", "send-email"}) in slugs
 
     def test_nearly_identical_excluded(self, kb, curator):
         """Similarity >= 0.95 should NOT be detected (already deduped)."""

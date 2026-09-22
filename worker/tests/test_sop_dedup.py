@@ -1,7 +1,7 @@
 """Tests for SOP Deduplication — fingerprint, matching, merging, registry.
 
 Tests cover:
-- Fingerprint computation (apps, domains, action verbs)
+- Fingerprint computation (apps, domains, action verbs, title tokens)
 - App normalization (PIDs, bundle IDs, arrow notation)
 - Domain extraction (URLs, preconditions)
 - Action verb canonicalization (synonyms)
@@ -39,6 +39,7 @@ from agenthandover_worker.sop_dedup import (
     load_registry,
     merge_sops,
     save_registry,
+    title_tokens,
 )
 from agenthandover_worker.llm_reasoning import LLMReasoner, ReasoningResult
 
@@ -267,7 +268,8 @@ class TestSimilarity:
         assert _jaccard({"a", "b", "c"}, {"a", "b"}) == pytest.approx(2 / 3)
 
     def test_jaccard_both_empty(self):
-        assert _jaccard(set(), set()) == 1.0
+        # An absent signal is not evidence of sameness.
+        assert _jaccard(set(), set()) == 0.0
 
     def test_same_sop_different_wording(self):
         """Two Amazon SOPs with different VLM wording should be similar."""
@@ -296,10 +298,39 @@ class TestSimilarity:
 
     def test_no_domains_redistribution(self):
         """Desktop-only workflows (no URLs) redistribute domain weight."""
-        fp1 = {"apps": ["vs code"], "domains": [], "action_verbs": ["open", "enter"]}
-        fp2 = {"apps": ["vs code"], "domains": [], "action_verbs": ["open", "enter"]}
+        fp1 = {"apps": ["vs code"], "domains": [], "action_verbs": ["open", "enter"],
+               "title_tokens": ["deploy", "staging"]}
+        fp2 = dict(fp1)
         sim = fingerprint_similarity(fp1, fp2)
-        assert sim == 1.0
+        assert sim == pytest.approx(1.0)
+
+    def test_no_domains_weight_goes_to_title_not_apps(self):
+        """Two different tasks in one desktop app do not merge on the app."""
+        fp1 = {"apps": ["vs code"], "domains": [], "action_verbs": ["open", "enter"],
+               "title_tokens": ["deploy", "staging"]}
+        fp2 = {"apps": ["vs code"], "domains": [], "action_verbs": ["open", "enter"],
+               "title_tokens": ["rename", "variable"]}
+        # apps 0.25 + verbs 0.20; the 0.55 title share scores nothing.
+        assert fingerprint_similarity(fp1, fp2) == pytest.approx(0.45)
+
+    def test_weights(self):
+        """apps 0.25, domains 0.25, verbs 0.20, title 0.30."""
+        base = {"apps": ["chrome"], "domains": ["mail.google.com"],
+                "action_verbs": ["open"], "title_tokens": ["send", "email"]}
+        other = {"apps": ["safari"], "domains": ["mail.google.com"],
+                 "action_verbs": ["click"], "title_tokens": ["send", "email"]}
+        assert fingerprint_similarity(base, other) == pytest.approx(0.55)
+
+    def test_title_tokens(self):
+        assert title_tokens("Triage the GitHub Issues") == {"triage", "github", "issue"}
+        assert title_tokens("Review Pull Request on GitHub") == {
+            "review", "pull", "request", "github",
+        }
+        assert title_tokens("") == set()
+
+    def test_fingerprint_title_falls_back_to_slug(self):
+        fp = compute_fingerprint({"slug": "send-weekly-report", "steps": []})
+        assert fp["title_tokens"] == ["report", "send", "weekly"]
 
 
 # ------------------------------------------------------------------
@@ -332,6 +363,30 @@ class TestMatching:
         new = _amazon_sop_v2()
         idx = find_matching_sop(new, existing)
         assert idx == 1  # Amazon SOP is best match
+
+    def test_disjoint_titles_never_match_even_at_threshold(self):
+        """Regression pin (#143): same app, same site, same verbs, different
+        task.  The composite reaches 0.70 on where the work happened alone;
+        no shared title token means not the same task."""
+        steps = [
+            {"step": "Open Gmail", "parameters": {"app": "Chrome", "location": "https://mail.google.com"}},
+            {"step": "Click the button", "parameters": {"app": "Chrome"}},
+        ]
+        a = {"slug": "send-weekly-report", "title": "Send Weekly Report",
+             "steps": steps, "apps_involved": ["Chrome"]}
+        b = {"slug": "archive-newsletters", "title": "Archive Newsletters",
+             "steps": steps, "apps_involved": ["Chrome"]}
+        composite = fingerprint_similarity(compute_fingerprint(a), compute_fingerprint(b))
+        assert composite >= 0.70
+        assert find_matching_sop(b, [a]) is None
+
+    def test_legacy_registry_fingerprint_is_recomputed(self):
+        """A registry entry stored before title_tokens existed still matches."""
+        existing = _amazon_sop()
+        legacy_fp = compute_fingerprint(existing)
+        del legacy_fp["title_tokens"]
+        existing["_fingerprint"] = legacy_fp
+        assert find_matching_sop(_amazon_sop_v2(), [existing]) == 0
 
     def test_threshold_respected(self):
         """High threshold prevents loose matches."""
@@ -418,6 +473,66 @@ class TestMerging:
 # ------------------------------------------------------------------
 # Tests: Variable merging
 # ------------------------------------------------------------------
+
+
+class TestEvidenceMerge:
+    """merge_sops routes SOP templates (slug + steps) through
+    EvidenceNormalizer.merge_with_evidence."""
+
+    @staticmethod
+    def _normalizer():
+        from agenthandover_worker.evidence_normalizer import EvidenceNormalizer
+        from agenthandover_worker.variant_detector import VariantDetector
+
+        return EvidenceNormalizer(variant_detector=VariantDetector())
+
+    def test_template_steps_accumulate_evidence(self):
+        existing = _amazon_sop(episode_count=2)
+        merged = merge_sops(
+            existing, _amazon_sop(slug="again", episode_count=1),
+            evidence_normalizer=self._normalizer(),
+        )
+        # Same four steps observed again: aligned, not duplicated.
+        assert [s["step"] for s in merged["steps"]] == [
+            s["step"] for s in existing["steps"]
+        ]
+        assert all(s["observation_count"] == 2 for s in merged["steps"])
+        # The rest of the template merge still happens.
+        assert merged["episode_count"] == 3
+        assert merged["_merge_count"] == 1
+        assert merged["_fingerprint"] == compute_fingerprint(merged)
+
+    def test_alignment_keys_do_not_leak_into_template(self):
+        merged = merge_sops(
+            _amazon_sop(), _amazon_sop_v2(),
+            evidence_normalizer=self._normalizer(),
+        )
+        for step in merged["steps"]:
+            assert "step" in step
+            assert "_dedup_view_keys" not in step
+            assert "action" not in step
+            assert "app" not in step
+            assert "location" not in step
+
+    def test_new_step_is_recorded_as_variant(self):
+        existing = _amazon_sop()
+        new = _amazon_sop(slug="again")
+        new["steps"] = existing["steps"] + [
+            {"step": "Add item to cart", "parameters": {"app": "Chrome"}},
+        ]
+        merged = merge_sops(existing, new, evidence_normalizer=self._normalizer())
+        assert len(merged["steps"]) == 5
+        assert merged["steps"][-1]["step"] == "Add item to cart"
+        assert merged["steps"][-1]["_variant"] is True
+
+    def test_normalizer_failure_falls_back_to_length_rule(self):
+        broken = MagicMock()
+        broken.merge_with_evidence.side_effect = RuntimeError("boom")
+        existing = _amazon_sop()
+        new = _amazon_sop_v2()
+        merged = merge_sops(existing, new, evidence_normalizer=broken)
+        broken.merge_with_evidence.assert_called_once()
+        assert merged["steps"] == new["steps"]
 
 
 class TestVariableMerging:
@@ -537,6 +652,46 @@ class TestDeduplicateTemplates:
 
         registry = load_registry(self.tmpdir)
         assert len(registry) == 1
+
+    def test_two_different_gmail_tasks_stay_two(self):
+        """Two different tasks on the same site produce two entries, and a
+        re-recording of one of them still merges into it."""
+        send = {
+            "slug": "send-weekly-report-email",
+            "title": "Send Weekly Report Email",
+            "steps": [
+                {"step": "Open Gmail", "parameters": {"app": "Chrome", "location": "https://mail.google.com/mail/u/0/#inbox"}},
+                {"step": "Click compose", "parameters": {"app": "Chrome", "location": "https://mail.google.com/mail/u/0/#inbox"}},
+                {"step": "Enter recipient", "parameters": {"app": "Chrome", "location": "https://mail.google.com/mail/u/0/#inbox?compose=new"}},
+                {"step": "Enter subject", "parameters": {"app": "Chrome", "location": "https://mail.google.com/mail/u/0/#inbox?compose=new"}},
+                {"step": "Click send", "parameters": {"app": "Chrome", "location": "https://mail.google.com/mail/u/0/#inbox?compose=new"}},
+            ],
+            "episode_count": 1,
+            "apps_involved": ["Chrome"],
+        }
+        label = {
+            "slug": "label-invoice-emails",
+            "title": "Label Invoice Emails",
+            "steps": [
+                {"step": "Open Gmail", "parameters": {"app": "Chrome", "location": "https://mail.google.com/mail/u/0/#inbox"}},
+                {"step": "Search for invoices", "parameters": {"app": "Chrome", "location": "https://mail.google.com/mail/u/0/#search/invoice"}},
+                {"step": "Select all messages", "parameters": {"app": "Chrome", "location": "https://mail.google.com/mail/u/0/#search/invoice"}},
+                {"step": "Click label", "parameters": {"app": "Chrome", "location": "https://mail.google.com/mail/u/0/#search/invoice"}},
+            ],
+            "episode_count": 1,
+            "apps_involved": ["Chrome"],
+        }
+        deduplicate_templates([send], self.tmpdir)
+        deduplicate_templates([label], self.tmpdir)
+        assert [s["slug"] for s in load_registry(self.tmpdir)] == [
+            "send-weekly-report-email", "label-invoice-emails",
+        ]
+
+        again = dict(send, slug="send-the-weekly-report", title="Send the Weekly Report Email")
+        result = deduplicate_templates([again], self.tmpdir)
+        assert result[0]["slug"] == "send-weekly-report-email"
+        assert result[0]["episode_count"] == 2
+        assert len(load_registry(self.tmpdir)) == 2
 
     def test_batch_dedup(self):
         """Multiple SOPs in one batch are deduped individually."""
