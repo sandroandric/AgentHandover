@@ -1,5 +1,6 @@
 import SwiftUI
 import Sparkle
+import ServiceManagement
 
 @main
 struct AgentHandoverApp: App {
@@ -10,6 +11,7 @@ struct AgentHandoverApp: App {
         MenuBarExtra {
             MenuBarView()
                 .environmentObject(delegate.sharedAppState)
+                .environmentObject(delegate.observationToggle)
                 .environmentObject(delegate)
                 .onAppear {
                     if !delegate.hasTriggeredOnboarding
@@ -71,6 +73,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     /// Single shared AppState used by onboarding, menu bar, and all windows.
     @MainActor let sharedAppState = AppState()
 
+    /// Starts/stops services off the main thread; shared so the menu shows
+    /// "Starting…" for the launch-time start too.
+    @MainActor let observationToggle = ObservationToggle()
+
     /// Sparkle auto-updater — starts on launch per SUEnableAutomaticChecks in Info.plist.
     let updaterController = SPUStandardUpdaterController(
         startingUpdater: true,
@@ -117,11 +123,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             ServiceController.installNativeMessagingHostManifest()
             hideFromDock()
 
-            // Onboarding done — start services if user hasn't paused
+            registerLoginItemOnce()
+
+            // Onboarding done — start services if user hasn't paused.
+            // Off the main thread: startAll waits for the daemon.
             let userPaused = UserDefaults.standard.bool(forKey: "observingPaused")
             if !userPaused {
-                ServiceController.startAll()
+                MainActor.assumeIsolated {
+                    observationToggle.start { [weak self] _ in
+                        self?.sharedAppState.refreshStatus()
+                    }
+                }
             }
+        }
+    }
+
+    /// Open AgentHandover at login so a reboot restores capture (the app
+    /// spawns the daemon; nothing else would). Registered once, after
+    /// onboarding: if the user later removes it in System Settings > General
+    /// > Login Items, we respect that instead of re-adding it every launch.
+    func registerLoginItemOnce() {
+        let key = "loginItemRegistered"
+        guard !UserDefaults.standard.bool(forKey: key) else { return }
+        do {
+            if SMAppService.mainApp.status != .enabled {
+                try SMAppService.mainApp.register()
+            }
+            UserDefaults.standard.set(true, forKey: key)
+        } catch {
+            NSLog("AgentHandover: could not register as a login item (%@)", error.localizedDescription)
         }
     }
 
@@ -138,6 +168,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             self?.onboardingWindow?.close()
             self?.onboardingWindow = nil
             self?.hideFromDock()
+            self?.registerLoginItemOnce()
             // Install NM manifest on background (no services started yet)
             DispatchQueue.global(qos: .utility).async {
                 ServiceController.installNativeMessagingHostManifest()

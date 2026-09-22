@@ -4,7 +4,7 @@
     <welcome file="welcome.html"/>
     <conclusion file="conclusion.html"/>
     <options customize="never" require-scripts="false"/>
-    <os-version min="13.0"/>
+    <os-version min="14.0"/>
     <domains enable_localSystem="true" enable_currentUserHome="false"/>
     <choices-outline>
         <line choice="default">

@@ -2,27 +2,40 @@ import ScreenCaptureKit
 import CoreGraphics
 import AppKit
 
-/// Captures screenshots using ScreenCaptureKit (macOS 14+).
-/// Falls back to CGDisplayCreateImage on older systems.
+/// Captures screenshots with ScreenCaptureKit.
 /// This runs in the main app process, which is the Screen Recording TCC principal.
 final class ScreenCaptureService {
+
+    private let preflight: () -> Bool
+    private let registrationProbe: () async -> Void
+    private let pollIntervalNanoseconds: UInt64
+
+    /// - Parameters:
+    ///   - preflight: whether Screen Recording is granted (TCC preflight).
+    ///   - registrationProbe: the capture attempt that makes macOS register
+    ///     this app for Screen Recording (defaults to the ScreenCaptureKit
+    ///     probe; injectable for tests).
+    ///   - pollIntervalNanoseconds: how often to re-check after the probe.
+    init(
+        preflight: @escaping () -> Bool = { CGPreflightScreenCaptureAccess() },
+        registrationProbe: @escaping () async -> Void = ScreenCaptureService.exerciseScreenCaptureKitRegistrationProbe,
+        pollIntervalNanoseconds: UInt64 = 250_000_000
+    ) {
+        self.preflight = preflight
+        self.registrationProbe = registrationProbe
+        self.pollIntervalNanoseconds = pollIntervalNanoseconds
+    }
 
     /// Capture the main display as raw BGRA pixel data.
     /// Returns (width, height, bgra_bytes) or nil if capture fails.
     func captureMainDisplay() async -> (Int, Int, Data)? {
         guard hasPermission() else { return nil }
-
-        // Use SCScreenshotManager on macOS 14+
-        if #available(macOS 14.0, *) {
-            return await captureViaSCK()
-        }
-        // Fallback to CoreGraphics
-        return captureViaCG()
+        return await captureViaSCK()
     }
 
     /// Check if Screen Recording permission is granted.
     func hasPermission() -> Bool {
-        CGPreflightScreenCaptureAccess()
+        preflight()
     }
 
     /// Request Screen Recording permission from the main app bundle.
@@ -40,36 +53,33 @@ final class ScreenCaptureService {
             NSApp.setActivationPolicy(.regular)
         }
         NSApp.activate(ignoringOtherApps: true)
-
-        // TCC registers the app for Screen Recording after its first capture
-        // attempt. CGDisplayCreateImage is the most reliable trigger — it
-        // works even without prior permission (unlike SCShareableContent which
-        // throws before reaching the capture call).
-        // DO NOT use CGRequestScreenCaptureAccess — it triggers stale prompts
-        // for previously-seen binaries from the same developer on Tahoe.
-        _ = CGDisplayCreateImage(CGMainDisplayID())
-
-        // Tahoe can lag between the request call and the Settings pane showing
-        // the new app entry. Poll preflight for a short bounded window before
-        // deciding we need to send the user to System Settings manually.
-        for _ in 0..<20 {
-            if hasPermission() {
-                if previousPolicy == .accessory {
-                    NSApp.setActivationPolicy(.accessory)
-                }
-                return true
+        defer {
+            if previousPolicy == .accessory {
+                NSApp.setActivationPolicy(.accessory)
             }
-            try? await Task.sleep(nanoseconds: 250_000_000)
         }
-
-        if previousPolicy == .accessory {
-            NSApp.setActivationPolicy(.accessory)
-        }
-        return false
+        return await registerAndAwaitGrant()
     }
 
-    @available(macOS 14.0, *)
-    private func exerciseScreenCaptureKitRegistrationProbe() async {
+    /// Make the capture attempt that registers the app with TCC, then poll
+    /// the preflight for up to 5 s (Tahoe can lag between the attempt and
+    /// the Settings pane showing the app) before reporting.
+    ///
+    /// On macOS 14+ a real ScreenCaptureKit capture attempt is what registers
+    /// the app for Screen Recording. The previous trigger,
+    /// `CGDisplayCreateImage`, is obsoleted in macOS 15. Do NOT use
+    /// `CGRequestScreenCaptureAccess`: it triggers stale prompts for
+    /// previously seen binaries from the same developer on Tahoe.
+    func registerAndAwaitGrant() async -> Bool {
+        await registrationProbe()
+        for _ in 0..<20 {
+            if hasPermission() { return true }
+            try? await Task.sleep(nanoseconds: pollIntervalNanoseconds)
+        }
+        return hasPermission()
+    }
+
+    static func exerciseScreenCaptureKitRegistrationProbe() async {
         guard let content = try? await SCShareableContent.excludingDesktopWindows(
             false, onScreenWindowsOnly: true
         ) else {
@@ -91,9 +101,8 @@ final class ScreenCaptureService {
         )
     }
 
-    // MARK: - ScreenCaptureKit (macOS 14+)
+    // MARK: - ScreenCaptureKit
 
-    @available(macOS 14.0, *)
     private func captureViaSCK() async -> (Int, Int, Data)? {
         guard let content = try? await SCShareableContent.excludingDesktopWindows(
             false, onScreenWindowsOnly: true
@@ -119,15 +128,6 @@ final class ScreenCaptureService {
             return nil
         }
 
-        return cgImageToBGRA(cgImage)
-    }
-
-    // MARK: - CoreGraphics fallback
-
-    private func captureViaCG() -> (Int, Int, Data)? {
-        guard let cgImage = CGDisplayCreateImage(CGMainDisplayID()) else {
-            return nil
-        }
         return cgImageToBGRA(cgImage)
     }
 

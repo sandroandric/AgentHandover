@@ -20,6 +20,9 @@
     <string>0.4.0</string>
     <key>CFBundleShortVersionString</key>
     <string>0.4.0</string>
+    <!-- Must match Package.swift platforms and the cask depends_on. -->
+    <key>LSMinimumSystemVersion</key>
+    <string>14.0</string>
     <key>NSPrincipalClass</key>
     <string>NSApplication</string>
     <!-- LSUIElement=true makes this a menu-bar-only (accessory) app.

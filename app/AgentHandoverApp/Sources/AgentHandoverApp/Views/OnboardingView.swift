@@ -2759,14 +2759,29 @@ struct OnboardingView: View {
                 }
             }
 
+            // Image embeddings need the optional embeddings-apple extra,
+            // which the installer no longer installs up front (it is large
+            // and Apple-Silicon-only). Install it now, only if asked for.
+            var imageEmbEnabled = self.enableImageEmbeddings
+            var embeddingsNote = ""
+            if imageEmbEnabled {
+                if let failure = Self.installImageEmbeddingsExtra(progress: { line in
+                    DispatchQueue.main.async {
+                        vlmPullOutput = "Image embeddings: \(String(line.prefix(60)))"
+                    }
+                }) {
+                    imageEmbEnabled = false
+                    embeddingsNote = " Image embeddings stay off: \(failure)"
+                }
+            }
+
             // Save embedding config + model config (always, to persist tier selection)
-            let imageEmbEnabled = self.enableImageEmbeddings
             self.saveEmbeddingConfig(imageEmbeddings: imageEmbEnabled)
             self.saveCustomModelConfig(annotation: annModel, sop: sopModel)
 
             DispatchQueue.main.async {
                 vlmPullInProgress = false
-                vlmPullOutput = "All models downloaded successfully!"
+                vlmPullOutput = "All models downloaded successfully!" + embeddingsNote
                 refreshVLMSetupState(force: true)
             }
         }
@@ -2894,6 +2909,58 @@ struct OnboardingView: View {
                 refreshVLMSetupState(force: true)
             }
         }
+    }
+
+    /// `pip install "<lib>/worker[embeddings-apple]"` into the worker venv,
+    /// streaming pip's output lines to `progress` and appending them to
+    /// logs/pip-install.log. Returns nil on success, else a short reason.
+    /// Blocking: call off the main thread.
+    static func installImageEmbeddingsExtra(progress: @escaping (String) -> Void) -> String? {
+        let libDir = ServiceController.daemonExecutableURL.deletingLastPathComponent()
+        let pip = libDir.appendingPathComponent("venv/bin/pip")
+        guard FileManager.default.isExecutableFile(atPath: pip.path) else {
+            return "the worker environment is missing (\(pip.path))"
+        }
+        let logURL = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/agenthandover/logs/pip-install.log")
+        try? FileManager.default.createDirectory(
+            at: logURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        if !FileManager.default.fileExists(atPath: logURL.path) {
+            FileManager.default.createFile(atPath: logURL.path, contents: nil)
+        }
+        let log = try? FileHandle(forWritingTo: logURL)
+        log?.seekToEndOfFile()
+        defer { try? log?.close() }
+
+        let process = Process()
+        process.executableURL = pip
+        process.arguments = [
+            "install", "--disable-pip-version-check", "--progress-bar", "off",
+            libDir.appendingPathComponent("worker").path + "[embeddings-apple]",
+        ]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+        pipe.fileHandleForReading.readabilityHandler = { handle in
+            let data = handle.availableData
+            guard !data.isEmpty else { return }
+            log?.write(data)
+            if let text = String(data: data, encoding: .utf8),
+               let last = text.split(separator: "\n").last {
+                progress(String(last))
+            }
+        }
+        do {
+            try process.run()
+        } catch {
+            pipe.fileHandleForReading.readabilityHandler = nil
+            return "could not run pip (\(error.localizedDescription))"
+        }
+        process.waitUntilExit()
+        pipe.fileHandleForReading.readabilityHandler = nil
+        return process.terminationStatus == 0
+            ? nil
+            : "pip failed (see logs/pip-install.log)"
     }
 
     private func saveEmbeddingConfig(imageEmbeddings: Bool) {

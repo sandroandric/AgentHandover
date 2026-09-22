@@ -4,10 +4,11 @@ import PackageDescription
 let package = Package(
     name: "AgentHandoverApp",
     platforms: [
-        .macOS(.v13)
+        .macOS(.v14)
     ],
     dependencies: [
-        .package(url: "https://github.com/sparkle-project/Sparkle", from: "2.6.0"),
+        // 2.9.x only: 2.10 is in beta.
+        .package(url: "https://github.com/sparkle-project/Sparkle", .upToNextMinor(from: "2.9.6")),
     ],
     targets: [
         .executableTarget(

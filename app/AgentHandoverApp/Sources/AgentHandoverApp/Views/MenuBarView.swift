@@ -8,6 +8,7 @@ struct MenuBarView: View {
 
     @EnvironmentObject var appState: AppState
     @EnvironmentObject var delegate: AppDelegate
+    @EnvironmentObject var observationToggle: ObservationToggle
     @AppStorage("hasCompletedOnboarding") private var hasCompletedOnboarding = false
     @StateObject private var agentDetector = AgentDetector()
     @Environment(\.openWindow) private var openWindow
@@ -56,6 +57,19 @@ struct MenuBarView: View {
 
                 // Connected agents
                 agentsSection
+
+                // Daemon supervision: why it was restarted, if it was
+                if let supervisorLine = appState.daemonSupervisorStatus {
+                    HStack(spacing: 4) {
+                        Image(systemName: "arrow.clockwise.circle")
+                            .font(.system(size: 9))
+                        Text(supervisorLine)
+                            .font(.system(size: 10))
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .foregroundColor(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
 
                 // Footer: services + quit
                 footerSection
@@ -656,11 +670,21 @@ struct MenuBarView: View {
         HStack(spacing: 0) {
             // Service toggle — based on user intent, not process state.
             // Daemon may be running for focus processing even when paused.
-            if !appState.userStopped {
+            // Start/stop run off the main thread (ObservationToggle); while
+            // one is in flight the button shows it and is disabled.
+            if let phase = observationToggle.phase {
+                HStack(spacing: 4) {
+                    ProgressView()
+                        .controlSize(.mini)
+                    Text(phase.label)
+                        .font(.system(size: 11))
+                }
+                .foregroundColor(.secondary)
+            } else if !appState.userStopped {
                 Button(action: {
                     appState.userStopped = true
                     UserDefaults.standard.set(true, forKey: "observingPaused")
-                    ServiceController.stopAll()
+                    observationToggle.stop { appState.refreshStatus() }
                 }) {
                     HStack(spacing: 4) {
                         Image(systemName: "eye.slash.fill")
@@ -686,7 +710,7 @@ struct MenuBarView: View {
                 Button(action: {
                     appState.userStopped = false
                     UserDefaults.standard.set(false, forKey: "observingPaused")
-                    ServiceController.startAll()
+                    observationToggle.start { _ in appState.refreshStatus() }
                 }) {
                     HStack(spacing: 4) {
                         Image(systemName: "eye.fill")
