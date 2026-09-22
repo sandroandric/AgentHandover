@@ -61,7 +61,7 @@ def build_mcp_server():
 
     mcp = FastMCP(
         "AgentHandover",
-        description="Access your learned workflows, procedures, and handoff bundles. "
+        instructions="Access your learned workflows, procedures, and handoff bundles. "
         "AgentHandover watches how you work and turns your workflows into "
         "step-by-step procedures that AI agents can follow.",
     )

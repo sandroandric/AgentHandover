@@ -241,7 +241,8 @@ def frontmatter(proc: dict, target: Target) -> dict:
     fm["description"] = description(proc)
 
     if target in ("claude-skill", "claude-command"):
-        names = [i["name"] for i in _inputs(proc)]
+        # Credentials are never passed as command arguments.
+        names = [i["name"] for i in _inputs(proc) if not _is_credential(i)]
         if names:
             fm["argument-hint"] = " ".join(f"[{n}]" for n in names)
         fm["allowed-tools"] = ", ".join(allowed_tools(proc))
