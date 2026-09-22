@@ -3766,29 +3766,15 @@ def _export_sop_templates(
     sop_templates = deduplicate_templates(sop_templates, _status_dir())
 
     # Write v3 procedures to the knowledge base first so all adapters
-    # (including OpenClaw) can use the richer v3 format.  A record that
-    # already is a v3 procedure (focus drafts store one, with the user's
-    # Q&A answers merged in) is saved as-is: converting it again would
-    # drop its goal, strategy and answers.  Its lifecycle stays whatever
-    # the knowledge base already records.
+    # (including OpenClaw) can use the richer v3 format.
     if procedure_writer is not None:
-        kb = procedure_writer._kb
         for tpl in sop_templates:
             try:
-                if tpl.get("schema_version") and tpl.get("id"):
-                    existing = kb.get_procedure(tpl["id"]) or {}
-                    lifecycle = {
-                        k: existing[k]
-                        for k in ("lifecycle_state", "lifecycle_history")
-                        if k in existing
-                    }
-                    kb.save_procedure({**tpl, **lifecycle})
-                else:
-                    procedure_writer.write_procedure(
-                        tpl,
-                        source="sop_pipeline",
-                        source_id=tpl.get("slug", "unknown"),
-                    )
+                procedure_writer.write_procedure(
+                    tpl,
+                    source="sop_pipeline",
+                    source_id=tpl.get("slug", "unknown"),
+                )
             except Exception:
                 logger.debug(
                     "Failed to write procedure for %s",
