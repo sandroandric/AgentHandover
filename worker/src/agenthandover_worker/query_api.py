@@ -160,6 +160,8 @@ class QueryAPIHandler(http.server.BaseHTTPRequestHandler):
                 self._handle_curation_dismiss_drift()
             elif path == "/search/semantic":
                 self._handle_semantic_search()
+            elif path == "/recall":
+                self._handle_recall()
             else:
                 self._send_error(404, f"Not found: {path}")
         except Exception:
@@ -273,6 +275,30 @@ class QueryAPIHandler(http.server.BaseHTTPRequestHandler):
             "results": serialized,
             "count": len(serialized),
         })
+
+    def _handle_recall(self) -> None:
+        """POST /recall — session recall (what the CLI's ``recall`` shows)."""
+        searcher = getattr(self.server, "activity_searcher", None)
+        if searcher is None:
+            self._send_error(
+                501,
+                "Recall is not available — no ActivitySearcher configured",
+            )
+            return
+
+        content_length = int(self.headers.get("Content-Length", 0))
+        raw = self.rfile.read(content_length) if content_length else b"{}"
+        try:
+            body = json.loads(raw)
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            self._send_error(400, f"Invalid JSON: {exc}")
+            return
+        if not isinstance(body, dict):
+            self._send_error(400, "Request body must be a JSON object")
+            return
+
+        from agenthandover_worker.activity_search import recall_payload
+        self._send_json(recall_payload(searcher, body))
 
     def _handle_semantic_search(self) -> None:
         """POST /search/semantic — vector similarity search across the KB."""

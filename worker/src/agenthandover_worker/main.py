@@ -3390,44 +3390,11 @@ def _process_recall_trigger(
     result_path.unlink(missing_ok=True)
 
     try:
-        date = trigger.get("date")
-        app = trigger.get("app")
-        start_time = trigger.get("start_time")
-        end_time = trigger.get("end_time")
-
-        # Convert HH:MM shorthand to full ISO timestamps.
-        # The searcher expects ISO format (e.g. "2026-03-12T09:30:00")
-        # but the CLI / trigger file may use bare "HH:MM".
-        import re as _re
-        _hhmm_re = _re.compile(r"^\d{2}:\d{2}$")
-        _date_prefix = date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        if start_time and _hhmm_re.match(start_time):
-            start_time = f"{_date_prefix}T{start_time}:00"
-        if end_time and _hhmm_re.match(end_time):
-            end_time = f"{_date_prefix}T{end_time}:00"
-
         if activity_searcher is None:
             result = {"error": "Activity search not available (v2 schema required)"}
         else:
-            timeline = activity_searcher.session_recall(
-                date=date, app=app,
-                start_time=start_time, end_time=end_time,
-            )
-            result = {
-                "date": timeline.date,
-                "total_active_minutes": timeline.total_active_minutes,
-                "apps_used": timeline.apps_used,
-                "entries": [
-                    {
-                        "timestamp": e.timestamp,
-                        "app": e.app,
-                        "location": e.location,
-                        "what_doing": e.what_doing,
-                        "event_id": e.event_id,
-                    }
-                    for e in timeline.entries
-                ],
-            }
+            from agenthandover_worker.activity_search import recall_payload
+            result = recall_payload(activity_searcher, trigger)
 
         result_path = state_dir / "recall-query-result.json"
         _atomic_write_result(result_path, result)
