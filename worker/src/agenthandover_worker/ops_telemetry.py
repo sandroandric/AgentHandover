@@ -7,10 +7,15 @@ to daily JSON files for trend analysis and health monitoring.
 from __future__ import annotations
 import json
 import logging
+import threading
 from dataclasses import dataclass, asdict, field
 from datetime import datetime, timezone
 from pathlib import Path
-from agenthandover_worker.knowledge_base import KnowledgeBase
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from agenthandover_worker.knowledge_base import KnowledgeBase
+    from agenthandover_worker.ollama import Response
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +37,66 @@ class PipelineMetrics:
     drift_signals_new: int = 0
     execution_success_count: int = 0
     execution_failure_count: int = 0
+
+class ModelUsage:
+    """Per-model counters from every Ollama reply since the worker started.
+
+    ``OllamaClient`` records each successful generate and embed call here;
+    the worker publishes :meth:`snapshot` as ``model_calls`` in
+    ``worker-status.json``.  Counts only, no prompt or output text.
+    Durations are Ollama's own (reported in nanoseconds, kept in seconds).
+    """
+
+    _COUNTS = ("prompt_eval_count", "eval_count")
+    _DURATIONS = (
+        "prompt_eval_duration", "eval_duration", "load_duration", "total_duration",
+    )
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._by_model: dict[str, dict] = {}
+
+    def record(self, model: str, endpoint: str, response: "Response") -> None:
+        with self._lock:
+            entry = self._by_model.setdefault(model, {
+                "generate_calls": 0,
+                "embed_calls": 0,
+                "truncated_calls": 0,
+                **{name: 0 for name in self._COUNTS},
+                **{name.replace("_duration", "_seconds"): 0.0
+                   for name in self._DURATIONS},
+                "wall_seconds": 0.0,
+            })
+            entry[f"{endpoint}_calls"] += 1
+            if response.done_reason == "length":
+                entry["truncated_calls"] += 1
+            for name in self._COUNTS:
+                entry[name] += getattr(response, name) or 0
+            for name in self._DURATIONS:
+                entry[name.replace("_duration", "_seconds")] += (
+                    (getattr(response, name) or 0) / 1e9
+                )
+            entry["wall_seconds"] += response.elapsed
+
+    def snapshot(self) -> dict[str, dict]:
+        """Counters per model, seconds rounded to milliseconds."""
+        with self._lock:
+            return {
+                model: {
+                    key: round(value, 3) if isinstance(value, float) else value
+                    for key, value in entry.items()
+                }
+                for model, entry in self._by_model.items()
+            }
+
+    def reset(self) -> None:
+        with self._lock:
+            self._by_model.clear()
+
+
+# The worker's one usage ledger (a worker is one process).
+MODEL_USAGE = ModelUsage()
+
 
 class OpsTelemetry:
     """Local-first telemetry that never leaves the machine."""

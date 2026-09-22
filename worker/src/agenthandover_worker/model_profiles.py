@@ -430,16 +430,10 @@ def check_ollama_version(ollama_host: str = "http://localhost:11434") -> str | N
 
     Returns the version string, or None if unavailable.
     """
+    from agenthandover_worker.ollama import OllamaClient
+
     try:
-        import urllib.request
-        req = urllib.request.Request(
-            f"{ollama_host}/api/version",
-            method="GET",
-        )
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            import json
-            data = json.loads(resp.read())
-            return data.get("version", "")
+        return OllamaClient(ollama_host).version(timeout=5)
     except Exception:
         return None
 

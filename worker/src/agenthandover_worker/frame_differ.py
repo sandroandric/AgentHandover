@@ -20,6 +20,8 @@ import logging
 import time
 from dataclasses import dataclass
 
+from agenthandover_worker.json_extract import extract_json
+
 logger = logging.getLogger(__name__)
 
 # Time gap threshold for session_gap marker (seconds)
@@ -244,25 +246,11 @@ def _format_annotation_for_diff(annotation: dict) -> str:
 # JSON validation for diff output
 # ---------------------------------------------------------------------------
 
-import re
-
-_FENCE_RE = re.compile(r"```(?:json)?\s*\n?(.*?)\n?\s*```", re.DOTALL)
-_THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
-
-
 def _validate_diff(raw: str) -> dict | None:
     """Parse and validate a diff JSON response."""
-    text = _THINK_RE.sub("", raw).strip()
-    match = _FENCE_RE.search(text)
-    if match:
-        text = match.group(1).strip()
-
     try:
-        data = json.loads(text)
-    except json.JSONDecodeError:
-        return None
-
-    if not isinstance(data, dict):
+        data = extract_json(raw)
+    except ValueError:
         return None
 
     # Must have diff_type and at least step_description or actions

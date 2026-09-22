@@ -31,6 +31,8 @@ from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from agenthandover_worker.ollama import OllamaClient
+
 if TYPE_CHECKING:
     from agenthandover_worker.llm_reasoning import LLMReasoner
     from agenthandover_worker.vector_kb import VectorKB
@@ -233,45 +235,7 @@ def _compute_embeddings(
     Returns a list of embedding vectors (one per input text).
     Raises ConnectionError if Ollama is not reachable.
     """
-    import urllib.request
-    import urllib.error
-
-    if not texts:
-        return []
-
-    url = f"{host}/api/embed"
-    payload = {
-        "model": model,
-        "input": texts,
-    }
-
-    body = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(
-        url,
-        data=body,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            result = json.loads(resp.read().decode("utf-8"))
-    except urllib.error.URLError as exc:
-        raise ConnectionError(
-            f"Ollama not reachable at {host}: {exc}"
-        ) from exc
-
-    embeddings = result.get("embeddings", [])
-    if len(embeddings) != len(texts):
-        logger.warning(
-            "Embedding count mismatch: expected %d, got %d",
-            len(texts), len(embeddings),
-        )
-        # Pad with empty vectors if needed
-        while len(embeddings) < len(texts):
-            embeddings.append([])
-
-    return embeddings
+    return OllamaClient(host).embed(model, texts, timeout=timeout)
 
 
 def _cosine_similarity(a: list[float], b: list[float]) -> float:

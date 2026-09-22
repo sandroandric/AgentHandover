@@ -28,6 +28,7 @@ from agenthandover_worker.exporter import IndexGenerator
 from agenthandover_worker.focus_processor import FocusProcessor
 from agenthandover_worker.frame_differ import DiffConfig, FrameDiffer
 from agenthandover_worker.negative_demo import NegativeDemoPruner
+from agenthandover_worker.ops_telemetry import MODEL_USAGE
 from agenthandover_worker.export_adapter import SOPExportAdapter
 from agenthandover_worker.openclaw_writer import OpenClawWriter
 from agenthandover_worker.scene_annotator import AnnotationConfig, SceneAnnotator
@@ -837,6 +838,8 @@ def _write_worker_status(
         status["v2_annotation_enabled"] = True
         status["v2_annotations_today"] = v2_annotations_today
         status["v2_diffs_today"] = v2_diffs_today
+    # Tokens and Ollama timings per model since the worker started.
+    status["model_calls"] = MODEL_USAGE.snapshot()
     sdir = _status_dir()
     sdir.mkdir(parents=True, exist_ok=True)
     target = sdir / "worker-status.json"

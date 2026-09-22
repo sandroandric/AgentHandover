@@ -20,7 +20,6 @@ from agenthandover_worker.scene_annotator import (
     SceneAnnotator,
     _StaleTracker,
     _extract_ocr_text_from_event,
-    _strip_markdown_fences,
     _validate_annotation,
     build_annotation_prompt,
     annotation_system_prompt,
@@ -107,37 +106,6 @@ def _thinking_vlm_call(*args, **kwargs) -> tuple[str, float]:
 # ---------------------------------------------------------------------------
 # JSON validation tests
 # ---------------------------------------------------------------------------
-
-class TestStripMarkdownFences:
-
-    def test_plain_json(self):
-        raw = '{"key": "value"}'
-        assert _strip_markdown_fences(raw) == raw
-
-    def test_json_code_fence(self):
-        raw = '```json\n{"key": "value"}\n```'
-        assert _strip_markdown_fences(raw) == '{"key": "value"}'
-
-    def test_plain_code_fence(self):
-        raw = '```\n{"key": "value"}\n```'
-        assert _strip_markdown_fences(raw) == '{"key": "value"}'
-
-    def test_thinking_tags(self):
-        raw = '<think>reasoning here</think>\n{"key": "value"}'
-        result = _strip_markdown_fences(raw)
-        assert result == '{"key": "value"}'
-
-    def test_combined_thinking_and_fences(self):
-        raw = '<think>hmm</think>\n```json\n{"k": 1}\n```'
-        result = _strip_markdown_fences(raw)
-        assert result == '{"k": 1}'
-
-    def test_empty_string(self):
-        assert _strip_markdown_fences("") == ""
-
-    def test_whitespace(self):
-        assert _strip_markdown_fences("   ") == ""
-
 
 class TestValidateAnnotation:
 
