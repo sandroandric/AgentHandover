@@ -530,3 +530,76 @@ class TestKBRoundTrip:
         assert loaded["steps"][0]["action"] == proc["steps"][0]["action"]
         errors = validate_procedure(loaded)
         assert errors == []
+
+
+# ---------------------------------------------------------------------------
+# Backfill of procedures saved by older versions (WP-P1)
+# ---------------------------------------------------------------------------
+
+def _legacy_procedure() -> dict:
+    """A procedure as v0.4.0's sop_to_procedure saved generator output:
+    empty description, step fields present only under ``parameters``."""
+    return {
+        "schema_version": "3.2.0",
+        "id": "legacy-flow",
+        "title": "Legacy Flow",
+        "description": "",
+        "task_description": "Do the legacy flow end to end.",
+        "steps": [{
+            "step_id": "step_1",
+            "index": 0,
+            "action": "Open the page",
+            "description": "Start here.",
+            "target": "",
+            "app": "",
+            "location": "",
+            "input": "",
+            "verify": "",
+            "parameters": {
+                "app": "Safari",
+                "location": "https://example.com",
+                "verify": "The page loads.",
+            },
+        }],
+    }
+
+
+class TestBackfillProcedures:
+
+    def test_backfill_fills_description_and_step_fields(
+        self, kb: KnowledgeBase,
+    ) -> None:
+        path = kb.save_procedure(_legacy_procedure())
+        (kb.root / "procedures" / "complete.json").write_text(json.dumps({
+            "id": "complete", "title": "C", "description": "Has one.",
+            "steps": [],
+        }))
+        assert kb.backfill_procedures() == 1
+        data = json.loads(path.read_text())
+        assert data["description"] == "Do the legacy flow end to end."
+        step = data["steps"][0]
+        assert step["app"] == "Safari"
+        assert step["location"] == "https://example.com"
+        assert step["target"] == "https://example.com"
+        assert step["verify"] == "The page loads."
+        # Idempotent: a second run changes nothing
+        assert kb.backfill_procedures() == 0
+
+    def test_backfill_empty_kb(self, tmp_path: Path) -> None:
+        assert KnowledgeBase(root=tmp_path / "none").backfill_procedures() == 0
+
+    def test_cli_flag_backfills_and_exits(
+        self, kb: KnowledgeBase, capsys: pytest.CaptureFixture[str],
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from agenthandover_worker import main as worker_main
+
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        kb.save_procedure(_legacy_procedure())
+        worker_main.main([
+            "--backfill-procedures", "--knowledge-dir", str(kb.root),
+        ])
+        assert "Backfilled 1 procedure(s)" in capsys.readouterr().out
+        assert kb.get_procedure("legacy-flow")["description"]
+        # One-shot: no PID/status files written for the service
+        assert not (tmp_path / "home").exists()

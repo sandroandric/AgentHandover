@@ -520,3 +520,35 @@ def validate_procedure(data: dict) -> list[str]:
             )
 
     return errors
+
+
+_STEP_PARAMETER_FIELDS = ("app", "location", "input", "verify")
+
+
+def backfill_procedure_fields(procedure: dict) -> bool:
+    """Repair a stored procedure written before the field-mapping fix.
+
+    Fills an empty ``description`` from ``task_description``, and empty
+    step ``app``/``location``/``input``/``verify`` from the step's
+    ``parameters`` (where older ``sop_to_procedure`` left them), then an
+    empty ``target`` from ``location``.  Mutates *procedure* in place.
+
+    Returns True if anything changed.
+    """
+    changed = False
+    if not procedure.get("description") and procedure.get("task_description"):
+        procedure["description"] = procedure["task_description"]
+        changed = True
+    for step in procedure.get("steps") or []:
+        if not isinstance(step, dict):
+            continue
+        params = step.get("parameters")
+        if isinstance(params, dict):
+            for key in _STEP_PARAMETER_FIELDS:
+                if not step.get(key) and params.get(key):
+                    step[key] = params[key]
+                    changed = True
+        if not step.get("target") and step.get("location"):
+            step["target"] = step["location"]
+            changed = True
+    return changed

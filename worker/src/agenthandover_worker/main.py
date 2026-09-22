@@ -679,6 +679,15 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             f"(default: {KNOWLEDGE_BASE_DIR})"
         ),
     )
+    parser.add_argument(
+        "--backfill-procedures",
+        action="store_true",
+        default=False,
+        help=(
+            "Repair saved procedures (fill empty descriptions and step "
+            "fields lost by older versions), print the count, and exit"
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -4354,6 +4363,16 @@ def _wait_for_db(db_path: Path, shutdown_flag: list[bool]) -> bool:
 def main(argv: list[str] | None = None) -> None:
     """Worker entry-point: connect to DB, poll for work, run until shutdown."""
     args = _parse_args(argv)
+
+    if args.backfill_procedures:
+        # One-shot maintenance: no PID file, status file or DB, so it is
+        # safe to run while the worker service is running.
+        from agenthandover_worker.knowledge_base import KnowledgeBase
+
+        logging.basicConfig(level=getattr(logging, args.log_level))
+        count = KnowledgeBase(root=args.knowledge_dir).backfill_procedures()
+        print(f"Backfilled {count} procedure(s) in {args.knowledge_dir}")
+        return
 
     from logging.handlers import RotatingFileHandler
 
