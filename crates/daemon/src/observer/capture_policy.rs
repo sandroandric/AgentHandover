@@ -153,7 +153,7 @@ impl CapturePolicy {
         let focus_due = focus_recording
             && self
                 .last_focus_shutter
-                .map_or(true, |t| now.duration_since(t) >= FOCUS_INTERVAL);
+                .is_none_or(|t| now.duration_since(t) >= FOCUS_INTERVAL);
         let trigger = transitions
             .iter()
             .copied()
