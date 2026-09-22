@@ -741,6 +741,7 @@ _PERSONAL = ("sandro", "andric", "incentive.ae", "sandric.co")
 # Legitimate attribution: README, CHANGELOG history, the license and
 # copyright lines, and the public repository URL.
 _ALLOWED_FILES = {"README.md", "CHANGELOG.md", "LICENSE"}
+_THIS_FILE = Path(__file__).resolve().relative_to(REPO_ROOT).as_posix()  # lists the patterns
 _ALLOWED_SUBSTRINGS = ("github.com/sandroandric/agenthandover", "copyright 2026 sandro andric")
 
 
@@ -754,7 +755,9 @@ def test_no_maintainer_personal_data_outside_readme():
         pytest.skip("not a git checkout")
     offenders = []
     for rel in files:
-        if rel in _ALLOWED_FILES or rel.endswith((".png", ".jpg", ".icns", ".ico")):
+        if rel in _ALLOWED_FILES or rel == _THIS_FILE or rel.endswith(
+            (".png", ".jpg", ".icns", ".ico")
+        ):
             continue
         try:
             text = (REPO_ROOT / rel).read_text(encoding="utf-8")
