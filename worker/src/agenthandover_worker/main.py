@@ -1896,6 +1896,7 @@ def _process_focus_sessions_v2(
     # --- Check for pending focus Q&A answers from a previous cycle ---
     pending_export = _check_focus_answers(
         state_dir,
+        db=db,
         focus_questioner=focus_questioner,
         openclaw_writer=openclaw_writer,
         skill_md_writer=skill_md_writer,
@@ -2340,6 +2341,7 @@ def _focus_v2_export(
 def _check_focus_answers(
     state_dir: Path,
     *,
+    db: "WorkerDB | None" = None,
     focus_questioner: "FocusQuestioner | None",
     openclaw_writer: "SOPExportAdapter",
     skill_md_writer: "SOPExportAdapter | None" = None,
@@ -2405,6 +2407,11 @@ def _check_focus_answers(
 
     sop_templates = [procedure_dict]
 
+    # The review-queue row was saved before the answers; update it in
+    # place so the app and a later approval read the merged procedure.
+    if db is not None and not db.update_sop_json(slug, procedure_dict):
+        logger.warning("No review record for '%s' to merge Q&A answers into", slug)
+
     # Save enriched procedure to KB (answers merged)
     if knowledge_base is not None:
         try:
@@ -2428,6 +2435,9 @@ def _check_focus_answers(
             procedure_writer=procedure_writer,
             kb_export_adapter=kb_export_adapter,
         )
+        record = db.get_generated_sop_by_slug(slug) if db is not None else None
+        if record is not None:
+            db.update_sop_status(record["sop_id"], "approved")
 
     # Clean up Q&A files
     clear_focus_qa_files(state_dir)
@@ -3720,15 +3730,29 @@ def _export_sop_templates(
     sop_templates = deduplicate_templates(sop_templates, _status_dir())
 
     # Write v3 procedures to the knowledge base first so all adapters
-    # (including OpenClaw) can use the richer v3 format.
+    # (including OpenClaw) can use the richer v3 format.  A record that
+    # already is a v3 procedure (focus drafts store one, with the user's
+    # Q&A answers merged in) is saved as-is: converting it again would
+    # drop its goal, strategy and answers.  Its lifecycle stays whatever
+    # the knowledge base already records.
     if procedure_writer is not None:
+        kb = procedure_writer._kb
         for tpl in sop_templates:
             try:
-                procedure_writer.write_procedure(
-                    tpl,
-                    source="sop_pipeline",
-                    source_id=tpl.get("slug", "unknown"),
-                )
+                if tpl.get("schema_version") and tpl.get("id"):
+                    existing = kb.get_procedure(tpl["id"]) or {}
+                    lifecycle = {
+                        k: existing[k]
+                        for k in ("lifecycle_state", "lifecycle_history")
+                        if k in existing
+                    }
+                    kb.save_procedure({**tpl, **lifecycle})
+                else:
+                    procedure_writer.write_procedure(
+                        tpl,
+                        source="sop_pipeline",
+                        source_id=tpl.get("slug", "unknown"),
+                    )
             except Exception:
                 logger.debug(
                     "Failed to write procedure for %s",
