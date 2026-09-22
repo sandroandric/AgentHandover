@@ -1,8 +1,7 @@
 //! AppleScript bridge for querying native app state.
 //!
 //! Queries known macOS apps via `osascript -e` to extract context like
-//! current folder, document name, email subject, etc. Follows the
-//! app-specific adapter pattern used in `electron_detect.rs`.
+//! current folder, document name, email subject, etc.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

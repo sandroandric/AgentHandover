@@ -4488,7 +4488,7 @@ def main(argv: list[str] | None = None) -> None:
     pruner = NegativeDemoPruner()
     translator = SemanticTranslator()
     scorer = ConfidenceScorer()
-    # vlm_queue + llm_reasoner already created above (before decision_extractor)
+    # vlm_queue + llm_reasoner already created above
     index_generator = IndexGenerator()
     # Create export adapter based on config
     skill_md_writer = None
