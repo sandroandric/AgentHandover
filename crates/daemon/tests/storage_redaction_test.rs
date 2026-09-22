@@ -85,7 +85,7 @@ async fn clipboard_and_chrome_events_are_redacted_before_insert() {
 
     // Clipboard: the user copied an API key and a labelled password.
     let clip = clipboard_event(&format!("key {ANTHROPIC_KEY} password: hunter2"));
-    tx.send(ObserverMessage::Event { event: clip, artifacts: vec![] }).await.unwrap();
+    tx.send(ObserverMessage::Event { event: clip }).await.unwrap();
 
     // Chrome: a token in the tab title, a JWT in a DOM node, a Stripe key in
     // a click target, and a reset token in the URL query.
@@ -125,7 +125,7 @@ async fn clipboard_and_chrome_events_are_redacted_before_insert() {
     ])
     .await;
     for event in chrome {
-        tx.send(ObserverMessage::Event { event, artifacts: vec![] }).await.unwrap();
+        tx.send(ObserverMessage::Event { event }).await.unwrap();
     }
 
     drop(tx);
