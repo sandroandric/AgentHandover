@@ -16,6 +16,29 @@ pub fn hash_content(data: &[u8]) -> String {
     hex::encode(hasher.finalize())
 }
 
+/// Build the text preview stored with a clipboard event.
+///
+/// `max_chars` is `None` unless the user turned on
+/// `[privacy] enable_clipboard_preview` (off by default); it then carries
+/// `clipboard_preview_max_chars`.  The preview exists only for plaintext
+/// that is valid UTF-8 and not high-entropy: the entropy gate is a second
+/// line of defence behind the opt-in, and the storage writer's redactor is
+/// the third.  Truncation counts chars, so multi-byte UTF-8 never panics.
+pub fn clipboard_preview(
+    data: &[u8],
+    is_plaintext: bool,
+    high_entropy: bool,
+    max_chars: Option<usize>,
+) -> Option<String> {
+    let max_chars = max_chars?;
+    if !is_plaintext || high_entropy || max_chars == 0 {
+        return None;
+    }
+    let text = std::str::from_utf8(data).ok()?.trim();
+    let preview: String = text.chars().take(max_chars).collect();
+    (!preview.is_empty()).then_some(preview)
+}
+
 /// Estimate if content is high-entropy (potential secret).
 /// Uses Shannon entropy calculation.
 pub fn is_high_entropy(data: &[u8]) -> bool {

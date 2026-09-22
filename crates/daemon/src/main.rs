@@ -313,7 +313,7 @@ async fn main() -> Result<()> {
 
         // Run the native messaging server on stdio
         // Full daemon mode doesn't send outbound commands to Chrome — use a dummy channel
-        let mut server = native_messaging::stdio_server();
+        let server = native_messaging::stdio_server();
         let (_dummy_cmd_tx, dummy_cmd_rx) =
             mpsc::channel::<native_messaging::DaemonCommand>(1);
         if let Err(e) = server.run(nm_event_tx, dummy_cmd_rx).await {
@@ -476,6 +476,11 @@ async fn main() -> Result<()> {
         use agenthandover_daemon::platform::clipboard_monitor;
         let clip_tx = tx.clone();
         let clip_shutdown_rx = shutdown_tx.subscribe();
+        // Clipboard text is stored only when the user opted in.
+        let clip_preview_max_chars = app_config
+            .privacy
+            .enable_clipboard_preview
+            .then_some(app_config.privacy.clipboard_preview_max_chars);
         tokio::spawn(async move {
             let (clip_event_tx, mut clip_event_rx) = mpsc::channel(256);
 
@@ -522,7 +527,7 @@ async fn main() -> Result<()> {
                 }
             });
 
-            clipboard_monitor::run_clipboard_monitor(clip_event_tx, clip_shutdown_rx).await;
+            clipboard_monitor::run_clipboard_monitor(clip_event_tx, clip_shutdown_rx, clip_preview_max_chars).await;
             forwarder.abort();
         })
     };
@@ -648,7 +653,7 @@ async fn run_native_messaging_bridge() -> Result<()> {
     }
 
     // Run native messaging — this blocks until Chrome closes the pipe
-    let mut server = native_messaging::stdio_server();
+    let server = native_messaging::stdio_server();
     let (nm_event_tx, mut nm_event_rx) = mpsc::channel::<agenthandover_common::event::Event>(256);
 
     // Track the last active Chrome tab ID for outbound DOM snapshot requests.

@@ -12,7 +12,7 @@
 use anyhow::{bail, Context, Result};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
@@ -144,6 +144,100 @@ pub fn decode_frame(data: &[u8]) -> Result<serde_json::Value> {
 }
 
 // ---------------------------------------------------------------------------
+// Inbound frame reading
+// ---------------------------------------------------------------------------
+
+/// Chrome caps a single extension-to-host message at 64 MiB.  A length
+/// header above this cannot have come from Chrome, so the stream is out of
+/// sync and the only safe recovery is to close the pipe (the extension
+/// reconnects and a fresh host process starts with a clean stream).
+pub const MAX_INBOUND_FRAME_SIZE: u32 = 64 * 1024 * 1024;
+
+/// Why an inbound frame could not be turned into a JSON value.
+#[derive(Debug, thiserror::Error)]
+pub enum FrameError {
+    /// The pipe closed or failed (EOF, possibly mid-frame).  Nothing more
+    /// can be read; the server stops.
+    #[error("native messaging stream closed: {0}")]
+    Closed(#[source] std::io::Error),
+    /// The length header exceeded [`MAX_INBOUND_FRAME_SIZE`]; the stream is
+    /// out of sync and the server stops.
+    #[error("length header {0} exceeds Chrome's {max} byte limit; stream out of sync", max = MAX_INBOUND_FRAME_SIZE)]
+    Desynced(u32),
+    /// The frame exceeded [`MAX_MESSAGE_SIZE`].  Its payload was read and
+    /// discarded, so the stream stays aligned on the next frame.
+    #[error("message size {len} bytes exceeds maximum {max} bytes (payload discarded)", max = MAX_MESSAGE_SIZE)]
+    Oversized { len: u32 },
+    /// The frame was read completely but is not UTF-8 JSON.  The stream
+    /// stays aligned.
+    #[error("malformed message: {0}")]
+    Malformed(String),
+}
+
+impl FrameError {
+    /// True when no further frame can be read from the stream.
+    pub fn is_fatal(&self) -> bool {
+        matches!(self, FrameError::Closed(_) | FrameError::Desynced(_))
+    }
+}
+
+/// Read one length-prefixed frame.  Every return leaves the stream either
+/// aligned on the next frame's header or unusable (`is_fatal()`), never
+/// part-way through a payload.
+async fn read_frame<R: AsyncRead + Unpin>(
+    reader: &mut R,
+) -> std::result::Result<serde_json::Value, FrameError> {
+    let mut len_buf = [0u8; 4];
+    reader
+        .read_exact(&mut len_buf)
+        .await
+        .map_err(FrameError::Closed)?;
+    let len = u32::from_le_bytes(len_buf);
+
+    if len > MAX_INBOUND_FRAME_SIZE {
+        return Err(FrameError::Desynced(len));
+    }
+    if len > MAX_MESSAGE_SIZE {
+        // Consume exactly `len` bytes so the next read starts on a header.
+        let discarded = tokio::io::copy(&mut (&mut *reader).take(u64::from(len)), &mut tokio::io::sink())
+            .await
+            .map_err(FrameError::Closed)?;
+        if discarded < u64::from(len) {
+            return Err(FrameError::Closed(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "EOF while discarding an oversized payload",
+            )));
+        }
+        return Err(FrameError::Oversized { len });
+    }
+
+    let mut payload = vec![0u8; len as usize];
+    reader
+        .read_exact(&mut payload)
+        .await
+        .map_err(FrameError::Closed)?;
+    let json_str = std::str::from_utf8(&payload)
+        .map_err(|e| FrameError::Malformed(format!("message payload is not valid UTF-8: {e}")))?;
+    serde_json::from_str(json_str)
+        .map_err(|e| FrameError::Malformed(format!("message payload is not valid JSON: {e}")))
+}
+
+/// Reader task body: owns the reader and forwards every frame outcome until
+/// the stream becomes unusable or `run()` stops listening.
+async fn forward_frames<R: AsyncRead + Unpin>(
+    mut reader: R,
+    tx: mpsc::Sender<std::result::Result<serde_json::Value, FrameError>>,
+) {
+    loop {
+        let frame = read_frame(&mut reader).await;
+        let fatal = frame.as_ref().err().map_or(false, FrameError::is_fatal);
+        if tx.send(frame).await.is_err() || fatal {
+            break;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // NativeMessageServer
 // ---------------------------------------------------------------------------
 
@@ -162,11 +256,7 @@ pub struct NativeMessageServer<R, W> {
     last_processed_seq: u64,
 }
 
-impl<R, W> NativeMessageServer<R, W>
-where
-    R: AsyncReadExt + Unpin,
-    W: AsyncWriteExt + Unpin,
-{
+impl<R, W> NativeMessageServer<R, W> {
     /// Create a new server with the given reader (stdin) and writer (stdout).
     pub fn new(reader: R, writer: W) -> Self {
         Self {
@@ -176,42 +266,19 @@ where
             last_processed_seq: 0,
         }
     }
+}
 
+impl<R: AsyncRead + Unpin, W> NativeMessageServer<R, W> {
     /// Read a single framed message from the reader.
     ///
-    /// Returns `Ok(value)` on success. Returns an error on EOF, oversized
-    /// messages, or malformed JSON.
-    pub async fn read_message(&mut self) -> Result<serde_json::Value> {
-        // Read 4-byte length prefix
-        let mut len_buf = [0u8; 4];
-        self.reader
-            .read_exact(&mut len_buf)
-            .await
-            .context("failed to read message length prefix (EOF?)")?;
-
-        let len = u32::from_le_bytes(len_buf);
-
-        if len > MAX_MESSAGE_SIZE {
-            bail!(
-                "message size {} bytes exceeds maximum {} bytes",
-                len,
-                MAX_MESSAGE_SIZE,
-            );
-        }
-
-        // Read JSON payload
-        let mut payload_buf = vec![0u8; len as usize];
-        self.reader
-            .read_exact(&mut payload_buf)
-            .await
-            .context("failed to read message payload")?;
-
-        let json_str = std::str::from_utf8(&payload_buf)
-            .context("message payload is not valid UTF-8")?;
-
-        serde_json::from_str(json_str).context("message payload is not valid JSON")
+    /// An oversized frame is consumed and reported as
+    /// [`FrameError::Oversized`], so the next call reads the next frame.
+    pub async fn read_message(&mut self) -> std::result::Result<serde_json::Value, FrameError> {
+        read_frame(&mut self.reader).await
     }
+}
 
+impl<R, W: AsyncWrite + Unpin> NativeMessageServer<R, W> {
     /// Write a single framed message to the writer.
     pub async fn write_message(&mut self, msg: &serde_json::Value) -> Result<()> {
         let frame = encode_frame(msg)?;
@@ -242,29 +309,38 @@ where
         let value = serde_json::to_value(&msg).context("failed to serialize daemon message")?;
         self.write_message(&value).await
     }
+}
 
+impl<R, W> NativeMessageServer<R, W>
+where
+    R: AsyncRead + Unpin + Send + 'static,
+    W: AsyncWrite + Unpin,
+{
     /// Main event loop: read messages, parse them, convert to `Event`s, and
     /// send through the provided channel.  Also processes outbound commands
     /// received via `cmd_rx` (e.g. `request_snapshot` for DOM capture).
     ///
     /// Runs until the reader reaches EOF or an unrecoverable error occurs.
-    /// Malformed JSON messages are logged and skipped.
+    /// Malformed and oversized messages are logged and skipped.
     ///
     /// # Cancel-safety
     ///
-    /// `tokio::select!` with `biased` ensures commands are checked first.
-    /// `read_message()` blocks on `read_exact` for the 4-byte header.  If
-    /// cancelled before any bytes arrive, no data is consumed — the message
-    /// stays in the pipe buffer and is read on the next iteration.  Chrome NM
-    /// writes complete framed messages atomically, so the header read either
-    /// completes instantly (all 4 bytes available) or blocks with zero bytes
-    /// consumed.
+    /// A spawned task owns the reader and pushes whole decoded frames into
+    /// a channel, so the `select!` below only races two `mpsc::recv()`
+    /// futures, both cancel-safe.  A command arriving while a frame is only
+    /// half-written by Chrome never drops the bytes already read.
     pub async fn run(
-        &mut self,
+        self,
         event_tx: mpsc::Sender<Event>,
         mut cmd_rx: mpsc::Receiver<DaemonCommand>,
     ) -> Result<()> {
         info!("Native messaging server starting");
+
+        let NativeMessageServer { reader, writer, outbound_seq, last_processed_seq } = self;
+        // The writer half stays here; the reader moves into its own task.
+        let mut out = NativeMessageServer { reader: (), writer, outbound_seq, last_processed_seq };
+        let (inbound_tx, mut inbound_rx) = mpsc::channel(64);
+        let reader_task = tokio::spawn(forward_frames(reader, inbound_tx));
 
         // Track whether the command channel is still open.  Once closed
         // (all senders dropped — normal when the DOM request task ends),
@@ -280,7 +356,7 @@ where
                     match cmd {
                         Some(DaemonCommand::SendMessage { msg_type, payload }) => {
                             debug!(?msg_type, "Native messaging: sending outbound command");
-                            if let Err(e) = self.send_daemon_message(msg_type, payload).await {
+                            if let Err(e) = out.send_daemon_message(msg_type, payload).await {
                                 warn!("Failed to send outbound command: {}", e);
                             }
                         }
@@ -294,25 +370,25 @@ where
                     }
                 }
 
-                // Branch 2: Read inbound message from extension (existing behavior)
-                msg_result = self.read_message() => {
-                    let raw = match msg_result {
-                        Ok(v) => v,
-                        Err(e) => {
-                            let msg = format!("{:#}", e);
-                            if msg.contains("EOF")
-                                || msg.contains("UnexpectedEof")
-                                || msg.contains("unexpected eof")
-                            {
-                                info!("Native messaging: stdin closed (extension disconnected)");
-                                break;
-                            }
-                            if msg.contains("not valid JSON") || msg.contains("not valid UTF-8") {
-                                warn!("Native messaging: malformed message, skipping: {}", msg);
-                                continue;
-                            }
-                            warn!("Native messaging: read error, skipping: {}", msg);
+                // Branch 2: Inbound frame decoded by the reader task
+                frame = inbound_rx.recv() => {
+                    let raw = match frame {
+                        Some(Ok(v)) => v,
+                        Some(Err(FrameError::Closed(e))) => {
+                            info!("Native messaging: stdin closed (extension disconnected): {}", e);
+                            break;
+                        }
+                        Some(Err(e @ FrameError::Desynced(_))) => {
+                            error!("Native messaging: {}; closing so the extension reconnects", e);
+                            break;
+                        }
+                        Some(Err(e)) => {
+                            warn!("Native messaging: skipping frame: {}", e);
                             continue;
+                        }
+                        None => {
+                            info!("Native messaging: reader task ended");
+                            break;
                         }
                     };
 
@@ -330,13 +406,13 @@ where
                     };
 
                     // Dedup: skip messages already processed (e.g. reconnect replays)
-                    if ext_msg.seq <= self.last_processed_seq {
+                    if ext_msg.seq <= out.last_processed_seq {
                         debug!(
                             seq = ext_msg.seq,
-                            last = self.last_processed_seq,
+                            last = out.last_processed_seq,
                             "Native messaging: duplicate seq, ack-ing but not forwarding"
                         );
-                        if let Err(e) = self
+                        if let Err(e) = out
                             .send_daemon_message(
                                 DaemonMessageType::Ack,
                                 serde_json::json!({ "ackSeq": ext_msg.seq }),
@@ -358,8 +434,8 @@ where
                                 info!("Native messaging: event channel closed, shutting down");
                                 break;
                             }
-                            self.last_processed_seq = ext_msg.seq;
-                            if let Err(e) = self
+                            out.last_processed_seq = ext_msg.seq;
+                            if let Err(e) = out
                                 .send_daemon_message(
                                     DaemonMessageType::Ack,
                                     serde_json::json!({ "ackSeq": ext_msg.seq }),
@@ -382,6 +458,7 @@ where
             }
         }
 
+        reader_task.abort();
         info!("Native messaging server stopped");
         Ok(())
     }
@@ -422,13 +499,19 @@ fn convert_to_event(msg: &ExtensionMessage) -> Option<Event> {
         ExtensionMessageType::SecureFieldStatus => EventKind::SecureFieldFocus,
     };
 
-    // Extract window info from the payload if available
-    let url = msg
-        .payload
-        .get("url")
-        .and_then(|v| v.as_str())
-        .unwrap_or("unknown")
-        .to_string();
+    // Only origin + pathname of the page URL is stored: query strings and
+    // fragments carry search terms, session ids, reset tokens and email
+    // addresses.  The sanitized URL replaces the payload's `url` so neither
+    // the window title fallback nor the metadata keeps the original.
+    let mut metadata = msg.payload.clone();
+    let url = match metadata.get("url").and_then(|v| v.as_str()) {
+        Some(raw) => {
+            let stripped = strip_url_to_origin_and_path(raw);
+            metadata["url"] = serde_json::Value::String(stripped.clone());
+            stripped
+        }
+        None => "unknown".to_string(),
+    };
     let tab_id = msg
         .payload
         .get("tabId")
@@ -459,9 +542,25 @@ fn convert_to_event(msg: &ExtensionMessage) -> Option<Event> {
         cursor_global_px: None,
         ui_scale: None,
         artifact_ids: vec![],
-        metadata: msg.payload.clone(),
+        metadata,
         display_ids_spanned: None,
     })
+}
+
+/// Reduce a URL to origin + pathname: drop the query string, the fragment
+/// and any `user:password@` userinfo.  Strings that are not URLs lose only
+/// what follows a `?` or `#`.
+pub fn strip_url_to_origin_and_path(url: &str) -> String {
+    let end = url.find(['?', '#']).unwrap_or(url.len());
+    let base = &url[..end];
+    if let Some(scheme_end) = base.find("://") {
+        let after_scheme = &base[scheme_end + 3..];
+        let authority_end = after_scheme.find('/').unwrap_or(after_scheme.len());
+        if let Some(at) = after_scheme[..authority_end].rfind('@') {
+            return format!("{}{}", &base[..scheme_end + 3], &after_scheme[at + 1..]);
+        }
+    }
+    base.to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -609,7 +708,7 @@ mod tests {
         // Drop sender so command channel closes after the one message
         drop(cmd_tx);
 
-        let mut server = NativeMessageServer::new(reader, wr);
+        let server = NativeMessageServer::new(reader, wr);
         // run() will: process the command (write to writer), then cmd_rx returns None → break
         let result = server.run(event_tx, cmd_rx).await;
         assert!(result.is_ok());
@@ -668,7 +767,7 @@ mod tests {
             .unwrap();
         drop(reader_wr); // Close → EOF on the reader side
 
-        let mut server = NativeMessageServer::new(reader_rd, writer_wr);
+        let server = NativeMessageServer::new(reader_rd, writer_wr);
         let result = server.run(event_tx, cmd_rx).await;
         assert!(result.is_ok());
 
@@ -676,8 +775,7 @@ mod tests {
         let event = event_rx.try_recv().expect("should have received an event");
         assert_eq!(event.kind, EventKind::FocusChange);
 
-        // Drop the server/writer so the writer_rd side sees EOF
-        drop(server);
+        // run() consumed the server and dropped the writer, so writer_rd sees EOF.
 
         // Verify outbound messages were written (ping command + ack for content_ready)
         let mut messages = Vec::new();
@@ -732,7 +830,7 @@ mod tests {
             .unwrap();
         drop(cmd_tx);
 
-        let mut server = NativeMessageServer::new(reader, wr);
+        let server = NativeMessageServer::new(reader, wr);
         server.run(event_tx, cmd_rx).await.unwrap();
 
         // Parse the framed output
@@ -786,10 +884,10 @@ mod tests {
         input_bytes.extend_from_slice(&encode_frame(&msg2).unwrap());
         input_bytes.extend_from_slice(&encode_frame(&msg1_replay).unwrap());
 
-        let reader = tokio::io::BufReader::new(&input_bytes[..]);
+        let reader = std::io::Cursor::new(input_bytes);
         let mut writer = Vec::new();
 
-        let mut server = NativeMessageServer::new(reader, &mut writer);
+        let server = NativeMessageServer::new(reader, &mut writer);
 
         let (tx, mut rx) = mpsc::channel(10);
         let (_dummy_cmd_tx, dummy_cmd_rx) = mpsc::channel::<DaemonCommand>(1);

@@ -4,7 +4,7 @@
 //! On change, captures content types, byte size, SHA-256 hash, and entropy score.
 //! Emits ClipboardChange events and tracks recent hashes for paste matching.
 
-use crate::capture::clipboard::{hash_content, is_high_entropy};
+use crate::capture::clipboard::{clipboard_preview, hash_content, is_high_entropy};
 use chrono::{DateTime, Utc};
 use std::collections::VecDeque;
 use std::ffi::CStr;
@@ -38,8 +38,9 @@ pub struct ClipboardChangeEvent {
     pub high_entropy: bool,
     pub content_hash: String,
     pub timestamp: DateTime<Utc>,
-    /// First 500 chars of plaintext clipboard content.
-    /// None for non-text types or high-entropy content (potential secrets).
+    /// Leading chars of plaintext clipboard content, present only when the
+    /// user enabled `[privacy] enable_clipboard_preview`.  None for non-text
+    /// types or high-entropy content (potential secrets).
     pub content_preview: Option<String>,
 }
 
@@ -134,10 +135,10 @@ fn get_pasteboard_data_for_type(_type_name: &str) -> Option<Vec<u8>> {
     Some(data)
 }
 
-/// Capture current clipboard metadata, including a text preview for
-/// non-secret plaintext content.  High-entropy data (potential passwords
-/// or tokens) never gets a content preview.
-pub fn capture_clipboard_meta() -> Option<ClipboardChangeEvent> {
+/// Capture current clipboard metadata.  A text preview is attached only
+/// when `preview_max_chars` is `Some` (the user opted in via
+/// `[privacy] enable_clipboard_preview`); see [`clipboard_preview`].
+pub fn capture_clipboard_meta(preview_max_chars: Option<usize>) -> Option<ClipboardChangeEvent> {
     let types = get_pasteboard_types();
     if types.is_empty() {
         return None;
@@ -168,21 +169,7 @@ pub fn capture_clipboard_meta() -> Option<ClipboardChangeEvent> {
                 let hash = hash_content(&data);
                 let entropy = is_high_entropy(&data);
 
-                // Store text preview only for plaintext, non-secret content.
-                // Uses char boundary-safe truncation to avoid panic on
-                // multi-byte UTF-8 (emoji, CJK, etc.).
-                let preview = if is_plaintext && !entropy {
-                    std::str::from_utf8(&data)
-                        .ok()
-                        .map(|s| {
-                            let trimmed = s.trim();
-                            let truncated: String = trimmed.chars().take(500).collect();
-                            truncated
-                        })
-                        .filter(|s| !s.is_empty())
-                } else {
-                    None
-                };
+                let preview = clipboard_preview(&data, is_plaintext, entropy, preview_max_chars);
 
                 (size, hash, entropy, preview)
             }
@@ -213,9 +200,11 @@ pub enum ClipboardMessage {
 ///
 /// Polls NSPasteboard.generalPasteboard changeCount every 500ms.
 /// On change: captures metadata and sends a ClipboardMessage::Change.
+/// `preview_max_chars` is passed to [`capture_clipboard_meta`].
 pub async fn run_clipboard_monitor(
     tx: mpsc::Sender<ClipboardMessage>,
     mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
+    preview_max_chars: Option<usize>,
 ) {
     let poll_interval = Duration::from_millis(500);
     let mut interval = tokio::time::interval(poll_interval);
@@ -265,7 +254,7 @@ pub async fn run_clipboard_monitor(
 
                     // Capture clipboard metadata in a blocking thread.
                     // No timeout — same reasoning as changeCount above.
-                    let meta = match tokio::task::spawn_blocking(capture_clipboard_meta).await {
+                    let meta = match tokio::task::spawn_blocking(move || capture_clipboard_meta(preview_max_chars)).await {
                         Ok(Some(m)) => m,
                         Ok(None) => continue,
                         Err(e) => {
@@ -328,7 +317,10 @@ mod tests {
     #[test]
     #[serial(macos_ffi)]
     fn test_capture_clipboard_meta() {
-        let meta = capture_clipboard_meta();
+        let meta = capture_clipboard_meta(None);
+        if let Some(ref m) = meta {
+            assert!(m.content_preview.is_none(), "preview must stay off unless opted in");
+        }
         if let Some(m) = meta {
             assert!(!m.content_types.is_empty());
             assert!(!m.content_hash.is_empty());
@@ -367,7 +359,7 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(16);
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
-        let handle = tokio::spawn(run_clipboard_monitor(tx, shutdown_rx));
+        let handle = tokio::spawn(run_clipboard_monitor(tx, shutdown_rx, None));
 
         // Signal shutdown immediately.
         shutdown_tx.send(true).unwrap();
