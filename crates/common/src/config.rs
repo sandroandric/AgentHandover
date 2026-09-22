@@ -57,6 +57,12 @@ pub struct PrivacyConfig {
     pub enable_clipboard_preview: bool,
     pub clipboard_preview_max_chars: usize,
     pub secure_field_drop: bool,
+    /// Capture the values typed into `<input>` and `<textarea>` elements in
+    /// browser DOM snapshots.  Off by default: form values are the most
+    /// sensitive thing on a page.  Contenteditable text (compose windows,
+    /// docs) is captured regardless, like any other visible page text.
+    #[serde(default)]
+    pub capture_input_values: bool,
     #[serde(default)]
     pub zones: PrivacyZonesConfig,
 }
@@ -238,6 +244,7 @@ impl Default for PrivacyConfig {
             enable_clipboard_preview: false,
             clipboard_preview_max_chars: 200,
             secure_field_drop: true,
+            capture_input_values: false,
             zones: PrivacyZonesConfig::default(),
         }
     }

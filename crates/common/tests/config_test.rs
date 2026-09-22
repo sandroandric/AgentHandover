@@ -9,6 +9,7 @@ fn test_default_config_is_valid() {
     assert_eq!(config.observer.screenshot_max_per_minute, 20);
     assert!(config.privacy.enable_inline_secret_redaction);
     assert!(!config.privacy.enable_clipboard_preview);
+    assert!(!config.privacy.capture_input_values);
     assert!(config.privacy.secure_field_drop);
     assert_eq!(config.storage.retention_days_raw, 14);
     assert!(config.storage.sqlite_wal_mode);
@@ -30,6 +31,7 @@ screenshot_max_per_minute = 10
 [privacy]
 enable_clipboard_preview = true
 clipboard_preview_max_chars = 100
+capture_input_values = true
 
 [storage]
 retention_days_raw = 7
@@ -39,6 +41,7 @@ retention_days_raw = 7
     assert_eq!(config.observer.screenshot_max_per_minute, 10);
     assert!(config.privacy.enable_clipboard_preview);
     assert_eq!(config.privacy.clipboard_preview_max_chars, 100);
+    assert!(config.privacy.capture_input_values);
     assert_eq!(config.storage.retention_days_raw, 7);
     // defaults still apply for unset fields
     assert!(config.observer.capture_screenshots);

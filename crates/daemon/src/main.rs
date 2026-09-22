@@ -142,41 +142,7 @@ async fn main() -> Result<()> {
     // 0 = no message received yet.  Updated by the NM forwarder task.
     let last_nm_message_epoch_ms = Arc::new(AtomicI64::new(0));
 
-    // Load AppConfig from standard config file location, fall back to defaults
-    let app_config = {
-        use agenthandover_common::config::AppConfig;
-
-        let config_path = if cfg!(target_os = "macos") {
-            std::env::var("HOME").ok().map(|home| {
-                std::path::PathBuf::from(home)
-                    .join("Library/Application Support/agenthandover/config.toml")
-            })
-        } else {
-            std::env::var("HOME").ok().map(|home| {
-                std::path::PathBuf::from(home)
-                    .join(".config/agenthandover/config.toml")
-            })
-        };
-
-        match config_path {
-            Some(ref path) if path.is_file() => {
-                match AppConfig::from_file(path) {
-                    Ok(cfg) => {
-                        info!(path = %path.display(), "Loaded configuration from file");
-                        cfg
-                    }
-                    Err(e) => {
-                        error!(path = %path.display(), error = %e, "Failed to parse config, using defaults");
-                        AppConfig::default()
-                    }
-                }
-            }
-            _ => {
-                info!("No config file found, using defaults");
-                AppConfig::default()
-            }
-        }
-    };
+    let app_config = load_app_config();
 
     // Convert AppConfig -> ObserverConfig
     let config = ObserverConfig {
@@ -722,7 +688,10 @@ async fn run_native_messaging_bridge() -> Result<()> {
     });
 
     // Spawn DOM request task: polls focus signal file every 2s and sends
-    // `request_snapshot` to Chrome when focus recording is active.
+    // `request_snapshot` to Chrome when focus recording is active.  Each
+    // request carries `[privacy] capture_input_values` so the content
+    // script knows whether to include form-field values in the snapshot.
+    let capture_input_values = load_app_config().privacy.capture_input_values;
     let dom_tab_id = Arc::clone(&last_active_tab_id);
     let dom_cmd_tx = cmd_tx.clone();
     let dom_request_handle = tokio::spawn(async move {
@@ -755,6 +724,7 @@ async fn run_native_messaging_bridge() -> Result<()> {
             let payload = serde_json::json!({
                 "tabId": tab_id,
                 "reason": "focus_recording",
+                "captureInputValues": capture_input_values,
             });
 
             if dom_cmd_tx
@@ -803,6 +773,43 @@ async fn run_native_messaging_bridge() -> Result<()> {
 
     info!("NM bridge exiting");
     Ok(())
+}
+
+/// Load AppConfig from the standard config file location, falling back to
+/// defaults when the file is missing or unparseable.
+fn load_app_config() -> agenthandover_common::config::AppConfig {
+    use agenthandover_common::config::AppConfig;
+
+    let config_path = if cfg!(target_os = "macos") {
+        std::env::var("HOME").ok().map(|home| {
+            std::path::PathBuf::from(home)
+                .join("Library/Application Support/agenthandover/config.toml")
+        })
+    } else {
+        std::env::var("HOME").ok().map(|home| {
+            std::path::PathBuf::from(home)
+                .join(".config/agenthandover/config.toml")
+        })
+    };
+
+    match config_path {
+        Some(ref path) if path.is_file() => {
+            match AppConfig::from_file(path) {
+                Ok(cfg) => {
+                    info!(path = %path.display(), "Loaded configuration from file");
+                    cfg
+                }
+                Err(e) => {
+                    error!(path = %path.display(), error = %e, "Failed to parse config, using defaults");
+                    AppConfig::default()
+                }
+            }
+        }
+        _ => {
+            info!("No config file found, using defaults");
+            AppConfig::default()
+        }
+    }
 }
 
 /// Derive an encryption key unique to this machine.
