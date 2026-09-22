@@ -288,10 +288,11 @@ check "'agenthandover logs daemon' prints daemon.<date>.log" contains "${WORK}/l
 # ---------------------------------------------------------------------------
 echo ""
 echo "== upgrade over the fresh prefix, stub app running =="
-# A copy of sleep named like the app; a copied system binary must be
-# re-signed (ad hoc) or the kernel kills it on launch.
-cp /bin/sleep "${WORK}/${STUB_NAME}"
-codesign --force --sign - "${WORK}/${STUB_NAME}" 2>/dev/null
+# A tiny compiled binary named like the app. (Copying /bin/sleep and
+# re-signing it ad hoc no longer launches on macOS 26: platform binaries
+# lose their entitlements when re-signed.)
+printf '#include <unistd.h>\n#include <stdlib.h>\nint main(int c, char **v) { sleep(c > 1 ? atoi(v[1]) : 600); return 0; }\n' \
+    | cc -x c -o "${WORK}/${STUB_NAME}" -
 if [ "${IS_ROOT}" -eq 1 ]; then
     sudo -u "${INSTALL_USER}" "${WORK}/${STUB_NAME}" 600 &
 else
