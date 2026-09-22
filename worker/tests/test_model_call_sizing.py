@@ -46,7 +46,7 @@ from agenthandover_worker.sop_generator import (
     SOPGeneratorConfig,
 )
 
-from conftest import DAEMON_SCHEMA
+from daemon_db import DAEMON_SCHEMA
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -333,7 +333,12 @@ class TestAnnotationPrompt:
 
 
 class TestDeferral:
-    @pytest.mark.parametrize("error", [_refused(), _http_error(404), ConnectionResetError()])
+    @pytest.mark.parametrize("error", [
+        _refused(), _http_error(404), _http_error(500), _http_error(503),
+        ConnectionResetError(),
+        urllib.error.URLError(TimeoutError("timed out")),  # cold model load
+        TimeoutError("timed out"),
+    ])
     def test_transport_error_defers_and_keeps_the_jpeg(self, tmp_path, error):
         event = _event_with_screenshot(tmp_path)
         annotator = SceneAnnotator(AnnotationConfig())
@@ -343,9 +348,7 @@ class TestDeferral:
         assert Path(json.loads(event["metadata_json"])["screenshot_path"]).exists()
         assert annotator.stats["deferred"] == 1
 
-    @pytest.mark.parametrize("error", [
-        urllib.error.URLError(TimeoutError("timed out")), _http_error(500),
-    ])
+    @pytest.mark.parametrize("error", [_http_error(400), ValueError("bad body")])
     def test_other_errors_fail_and_delete(self, tmp_path, error):
         event = _event_with_screenshot(tmp_path)
         annotator = SceneAnnotator(AnnotationConfig())

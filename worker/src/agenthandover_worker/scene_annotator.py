@@ -699,7 +699,7 @@ def ollama_generate(host: str, payload: dict, timeout: float) -> dict:
 
     Raises:
         OllamaUnavailable: Ollama unreachable (refused, reset, DNS) or the
-            model is not pulled (HTTP 404).
+            model is not pulled (HTTP 404), or it answered 5xx.
         TimeoutError: no reply within *timeout*.
         RuntimeError: any other HTTP error.
     """
@@ -720,6 +720,12 @@ def ollama_generate(host: str, payload: dict, timeout: float) -> dict:
         if exc.code == 404:
             raise OllamaUnavailable(
                 f"model {host_model!r} not available at {host}"
+            ) from exc
+        if exc.code >= 500:
+            # Ollama answers 5xx while a model fails to load or runs out of
+            # memory: the server is there but cannot serve now, so defer.
+            raise OllamaUnavailable(
+                f"Ollama HTTP {exc.code} at {host}: {exc.reason}"
             ) from exc
         raise RuntimeError(f"Ollama HTTP {exc.code} at {host}: {exc.reason}") from exc
     except urllib.error.URLError as exc:
@@ -981,8 +987,8 @@ class SceneAnnotator:
                 keep_alive=self.config.keep_alive,
                 extra_options=profile.ann_options(),
             )
-        except ConnectionError as exc:  # OllamaUnavailable and kin
-            # Transport error: keep the JPEG, leave the row pending.
+        except (ConnectionError, TimeoutError) as exc:  # OllamaUnavailable, cold-load timeouts
+            # Transport error or timeout: keep the JPEG, leave the row pending.
             self._stats["deferred"] += 1
             self._defer()
             return AnnotationResult(
