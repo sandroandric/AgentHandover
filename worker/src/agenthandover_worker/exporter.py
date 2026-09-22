@@ -14,6 +14,8 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
+from agenthandover_worker.export_adapter import procedure_to_sop_template
+
 logger = logging.getLogger(__name__)
 
 
@@ -178,8 +180,6 @@ def load_disk_entries(sops_dir: Path) -> list[dict]:
     Only the top level is read, so archived versions never appear.
     Unreadable files are skipped with a warning.
     """
-    from agenthandover_worker.export_adapter import procedure_to_sop_template
-
     entries: list[dict] = []
     if not sops_dir.is_dir():
         return entries
