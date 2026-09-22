@@ -23,7 +23,6 @@ from pathlib import Path
 from agenthandover_worker.clipboard_linker import ClipboardLinker
 from agenthandover_worker.confidence import ConfidenceScorer, is_native_app_context
 from agenthandover_worker.db import WorkerDB
-from agenthandover_worker.deep_scan import DeepScanner
 from agenthandover_worker.episode_builder import EpisodeBuilder
 from agenthandover_worker.exporter import IndexGenerator
 from agenthandover_worker.focus_processor import FocusProcessor
@@ -3997,20 +3996,6 @@ def _remove_trigger(trigger_path: Path) -> None:
         logger.debug("Failed to remove export-trigger.json", exc_info=True)
 
 
-def _run_deep_scan(scanner: DeepScanner, artifacts: list[dict]) -> None:
-    """Background callback for Tier 2 deep scan."""
-    try:
-        scan_result = scanner.scan_artifacts(artifacts)
-        if scan_result.has_pii:
-            logger.warning(
-                "Deep scan found %d PII match(es) in %d artifact(s)",
-                scan_result.total_pii,
-                scan_result.artifacts_scanned,
-            )
-    except Exception:
-        logger.exception("Background deep scan failed")
-
-
 def _persist_vlm_jobs(db: "WorkerDB", vlm_queue: VLMFallbackQueue) -> None:
     """Persist in-memory VLM queue jobs to the database."""
     from agenthandover_worker.vlm_queue import VLMJobStatus
@@ -4874,14 +4859,10 @@ def main(argv: list[str] | None = None) -> None:
     sop_auto_approve = sop_config["auto_approve"]
     logger.info("SOP auto_approve: %s", sop_auto_approve)
 
-    # Initialize scheduler gate (GAP 5) and deep scanner (GAP 6)
+    # Initialize scheduler gate (GAP 5)
     # Read idle_jobs config from config.toml if available
     _idle_cfg = _read_idle_jobs_config()
     idle_gate = IdleJobGate(SchedulerConfig(**_idle_cfg))
-    deep_scanner = DeepScanner()
-
-    # Single-thread pool for background deep scan (non-blocking privacy check)
-    deep_scan_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="deep-scan")
 
     # Cumulative counters for status reporting
     started_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -5208,33 +5189,6 @@ def main(argv: list[str] | None = None) -> None:
 
                     # Reset consecutive error counter after successful processing
                     consecutive_errors = 0
-
-                    # --- Heavy jobs gated behind idle window ---
-                    # VLM inference and deep privacy scans are CPU/GPU
-                    # intensive and deferred to the idle window
-                    # (default 01:00-05:00, AC power, low CPU).
-                    gate_result = idle_gate.check()
-                    if gate_result.can_run:
-                        # Run Tier 2 deep scan in background (non-blocking)
-                        text_artifacts = []
-                        for ev in unprocessed:
-                            window_json = ev.get("window_json")
-                            if window_json:
-                                text_artifacts.append({
-                                    "id": ev.get("id", "unknown"),
-                                    "text": window_json,
-                                })
-                            metadata_json = ev.get("metadata_json")
-                            if metadata_json:
-                                text_artifacts.append({
-                                    "id": ev.get("id", "unknown"),
-                                    "text": metadata_json,
-                                })
-
-                        if text_artifacts:
-                            deep_scan_pool.submit(
-                                _run_deep_scan, deep_scanner, text_artifacts
-                            )
 
                 # Process pending VLM jobs only in idle window
                 if pending_vlm and vlm_worker is not None:
@@ -5826,9 +5780,6 @@ def main(argv: list[str] | None = None) -> None:
             logger.info("Query API server stopped")
         except Exception:
             pass
-
-    # Wait for any in-flight deep scan to finish before exit
-    deep_scan_pool.shutdown(wait=True)
 
     # Remove PID file and status file on clean shutdown
     try:
