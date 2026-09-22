@@ -27,8 +27,14 @@ final class ScreenCaptureTests: XCTestCase {
     }
 
     private func temporarySocketPath() -> String {
-        let name = "ahcap-\(UUID().uuidString.prefix(8)).sock"
-        return (NSTemporaryDirectory() as NSString).appendingPathComponent(name)
+        let dir = (NSTemporaryDirectory() as NSString)
+            .appendingPathComponent("ahcap-\(UUID().uuidString.prefix(8))")
+        return (dir as NSString).appendingPathComponent("capture.sock")
+    }
+
+    /// Lets this test process (and only it) connect.
+    private var testRunnerPolicy: PeerPolicy {
+        PeerPolicy(allowedPaths: [PeerPolicy.executablePath(of: getpid())!], identifiers: [], teamID: nil)
     }
 
     /// Connect to `path`, send `request`, read until the server closes.
@@ -156,7 +162,7 @@ final class ScreenCaptureTests: XCTestCase {
 
     func testHungCaptureReturnsTimeoutWithinEightSeconds() {
         XCTAssertEqual(ScreenCaptureServer.defaultCaptureTimeout, 8)
-        let server = ScreenCaptureServer(socketPath: temporarySocketPath()) { _ in
+        let server = ScreenCaptureServer(socketPath: temporarySocketPath(), policy: testRunnerPolicy) { _ in
             try? await Task.sleep(nanoseconds: 60_000_000_000)
             return .failure(.captureFailed("unreachable"))
         }
@@ -172,7 +178,7 @@ final class ScreenCaptureTests: XCTestCase {
     }
 
     func testPendingHungCapturesFailFastInsteadOfPilingUp() {
-        let server = ScreenCaptureServer(socketPath: temporarySocketPath(), captureTimeout: 0.2) { _ in
+        let server = ScreenCaptureServer(socketPath: temporarySocketPath(), captureTimeout: 0.2, policy: testRunnerPolicy) { _ in
             try? await Task.sleep(nanoseconds: 60_000_000_000)
             return .failure(.captureFailed("unreachable"))
         }
@@ -186,7 +192,7 @@ final class ScreenCaptureTests: XCTestCase {
     }
 
     func testCaptureRecoversAfterPendingCaptureFinishes() {
-        let server = ScreenCaptureServer(socketPath: temporarySocketPath(), captureTimeout: 0.1) { _ in
+        let server = ScreenCaptureServer(socketPath: temporarySocketPath(), captureTimeout: 0.1, policy: testRunnerPolicy) { _ in
             try? await Task.sleep(nanoseconds: 300_000_000)
             return .failure(.captureFailed("slow"))
         }
@@ -203,7 +209,7 @@ final class ScreenCaptureTests: XCTestCase {
         let path = temporarySocketPath()
         let expected = sampleFrame()
         var seen: CaptureRequest?
-        let server = ScreenCaptureServer(socketPath: path) { request in
+        let server = ScreenCaptureServer(socketPath: path, policy: testRunnerPolicy) { request in
             seen = request
             return .success(expected)
         }
@@ -224,7 +230,7 @@ final class ScreenCaptureTests: XCTestCase {
 
     func testSocketReportsErrorsAsJSON() throws {
         let path = temporarySocketPath()
-        let server = ScreenCaptureServer(socketPath: path) { _ in .failure(.timeout) }
+        let server = ScreenCaptureServer(socketPath: path, policy: testRunnerPolicy) { _ in .failure(.timeout) }
         server.start()
         defer { server.stop() }
 
@@ -239,7 +245,7 @@ final class ScreenCaptureTests: XCTestCase {
 
     func testStopEndsAcceptLoopAndClosesSocket() throws {
         let path = temporarySocketPath()
-        let server = ScreenCaptureServer(socketPath: path) { _ in .success(self.sampleFrame()) }
+        let server = ScreenCaptureServer(socketPath: path, policy: testRunnerPolicy) { _ in .success(self.sampleFrame()) }
         server.start()
         let listener = try XCTUnwrap(server.currentListener)
         _ = try roundTrip(path, request: #"{"command":"capture"}"#)
@@ -254,6 +260,265 @@ final class ScreenCaptureTests: XCTestCase {
         server.start()
         defer { server.stop() }
         XCTAssertFalse(try roundTrip(path, request: #"{"command":"capture"}"#).isEmpty)
+    }
+
+    // MARK: - Concurrency and recycling (coverage audit #110)
+
+    func testHungCaptureDoesNotBlockTheNextRequest() throws {
+        let path = temporarySocketPath()
+        let frame = sampleFrame()
+        let calls = Counter()
+        let server = ScreenCaptureServer(socketPath: path, captureTimeout: 1.5, policy: testRunnerPolicy) { _ in
+            await calls.increment()
+            if await calls.value == 1 {
+                try? await Task.sleep(nanoseconds: 60_000_000_000)  // the hung call
+                return .failure(.captureFailed("unreachable"))
+            }
+            return .success(frame)
+        }
+        server.start()
+        let listener = try XCTUnwrap(server.currentListener)
+
+        var first = Data()
+        let firstDone = expectation(description: "first request answered")
+        let firstStarted = Date()
+        var firstElapsed: TimeInterval = 0
+        DispatchQueue.global().async {
+            first = (try? self.roundTrip(path, request: #"{"command":"capture"}"#)) ?? Data()
+            firstElapsed = Date().timeIntervalSince(firstStarted)
+            firstDone.fulfill()
+        }
+        Thread.sleep(forTimeInterval: 0.2)  // the first capture is now hung
+
+        let started = Date()
+        let second = try roundTrip(path, request: #"{"command":"capture"}"#)
+        XCTAssertLessThan(Date().timeIntervalSince(started), 1.0,
+                          "a hung capture must not park the acceptor")
+        XCTAssertEqual(Array(second.prefix(4)), ScreenCaptureServer.frameMagic)
+
+        wait(for: [firstDone], timeout: 5)
+        let error = try JSONSerialization.jsonObject(with: first) as? [String: String]
+        XCTAssertEqual(error?["error"], "capture timeout")
+        XCTAssertGreaterThanOrEqual(firstElapsed, 1.4)
+
+        server.stop()
+        XCTAssertEqual(listener.exited.wait(timeout: .now() + 1), .success)
+    }
+
+    func testThreeTimeoutsRecycleTheCapturePathAndSurfaceAStall() {
+        let built = Counter()
+        let frame = sampleFrame()
+        let server = ScreenCaptureServer(
+            socketPath: temporarySocketPath(), captureTimeout: 0.1, minRecycleInterval: 60,
+            policy: testRunnerPolicy,
+            makeCapture: {
+                let generation = built.incrementNow()
+                return { _ in
+                    if generation == 1 {  // the first ScreenCaptureService is wedged
+                        try? await Task.sleep(nanoseconds: 60_000_000_000)
+                        return .failure(.captureFailed("unreachable"))
+                    }
+                    return .success(frame)
+                }
+            })
+        let stalled = expectation(forNotification: ScreenCaptureServer.stallStatusChanged, object: server)
+
+        XCTAssertEqual(server.performCapture(CaptureRequest()).failureValue, .timeout)
+        XCTAssertEqual(server.performCapture(CaptureRequest()).failureValue, .timeout)
+        XCTAssertNil(server.stallStatus)
+        XCTAssertEqual(server.recycleCount, 0)
+        // Third: two hung captures pending, so it fails fast, and recycles.
+        XCTAssertEqual(server.performCapture(CaptureRequest()).failureValue, .stalled(pending: 2))
+        XCTAssertEqual(server.recycleCount, 1)
+        XCTAssertEqual(built.valueNow, 2, "a fresh capture path was built")
+        XCTAssertEqual(server.stallStatus, "Screen capture stalled; restarted the capture path")
+        wait(for: [stalled], timeout: 1)
+
+        // The fresh path works (the old hung tasks no longer hold slots).
+        guard case .success = server.performCapture(CaptureRequest()) else {
+            return XCTFail("the recycled capture path should answer")
+        }
+        XCTAssertNil(server.stallStatus, "a successful capture clears the stall")
+    }
+
+    func testRecyclingIsRateLimited() {
+        let built = Counter()
+        let server = ScreenCaptureServer(
+            socketPath: temporarySocketPath(), captureTimeout: 0.05, minRecycleInterval: 60,
+            policy: testRunnerPolicy,
+            makeCapture: {
+                _ = built.incrementNow()
+                return { _ in
+                    try? await Task.sleep(nanoseconds: 60_000_000_000)
+                    return .failure(.captureFailed("unreachable"))
+                }
+            })
+        for _ in 0..<9 { _ = server.performCapture(CaptureRequest()) }
+        XCTAssertEqual(server.recycleCount, 1, "at most one recycle per minRecycleInterval")
+        XCTAssertEqual(built.valueNow, 2)
+    }
+
+    // MARK: - Socket directory and peer checks (coverage audit #2)
+
+    func testSocketDirectoryIsPrivate() throws {
+        let path = temporarySocketPath()
+        let dir = (path as NSString).deletingLastPathComponent
+        try FileManager.default.createDirectory(
+            atPath: dir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o755])
+        let server = ScreenCaptureServer(socketPath: path, policy: testRunnerPolicy) { _ in .failure(.timeout) }
+        server.start()
+        defer { server.stop() }
+        let mode = try XCTUnwrap(
+            FileManager.default.attributesOfItem(atPath: dir)[.posixPermissions] as? Int)
+        XCTAssertEqual(mode, 0o700, "an existing socket directory is tightened to 0700")
+        let sockMode = try XCTUnwrap(
+            FileManager.default.attributesOfItem(atPath: path)[.posixPermissions] as? Int)
+        XCTAssertEqual(sockMode & 0o077, 0)
+    }
+
+    func testSymlinkedSocketDirectoryIsRefused() throws {
+        let base = (NSTemporaryDirectory() as NSString)
+            .appendingPathComponent("ahlink-\(UUID().uuidString.prefix(8))")
+        let real = base + "-real"
+        try FileManager.default.createDirectory(atPath: real, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(atPath: base, withDestinationPath: real)
+        XCTAssertFalse(SocketDirectory.preparePrivate(base))
+        let server = ScreenCaptureServer(
+            socketPath: (base as NSString).appendingPathComponent("capture.sock"),
+            policy: testRunnerPolicy) { _ in .failure(.timeout) }
+        server.start()
+        XCTAssertNil(server.currentListener, "no socket is bound in a symlinked directory")
+    }
+
+    /// A tiny Unix-socket client compiled for this test: `client <socket> <request>`
+    /// sends the request and prints the reply. Stands in for the daemon.
+    private func buildSocketClient(in dir: String) throws -> String {
+        let source = (dir as NSString).appendingPathComponent("client.c")
+        try """
+        #include <string.h>
+        #include <sys/socket.h>
+        #include <sys/un.h>
+        #include <unistd.h>
+        int main(int argc, char **argv) {
+            int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+            struct sockaddr_un a = {0};
+            a.sun_family = AF_UNIX;
+            strncpy(a.sun_path, argv[1], sizeof(a.sun_path) - 1);
+            if (connect(fd, (struct sockaddr *)&a, sizeof(a)) != 0) return 2;
+            write(fd, argv[2], strlen(argv[2]));
+            char buf[65536];
+            ssize_t n;
+            while ((n = read(fd, buf, sizeof(buf))) > 0) write(1, buf, (size_t)n);
+            return 0;
+        }
+        """.write(toFile: source, atomically: true, encoding: .utf8)
+        let binary = (dir as NSString).appendingPathComponent("ah-observer")
+        let cc = Process()
+        cc.executableURL = URL(fileURLWithPath: "/usr/bin/cc")
+        cc.arguments = ["-o", binary, source]
+        try cc.run()
+        cc.waitUntilExit()
+        XCTAssertEqual(cc.terminationStatus, 0, "cc failed")
+        return String(cString: try XCTUnwrap(realpath(binary, nil)))
+    }
+
+    private func runClient(_ executable: String, _ socketPath: String) throws -> Data {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = [socketPath, #"{"command":"capture"}"# + "\n"]
+        let output = Pipe()
+        process.standardOutput = output
+        try process.run()
+        let data = output.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        return data
+    }
+
+    func testOnlyTheAllowedExecutableMayConnect() throws {
+        let dir = (NSTemporaryDirectory() as NSString)
+            .appendingPathComponent("ahpeer-\(UUID().uuidString.prefix(8))")
+        try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        let daemon = try buildSocketClient(in: dir)
+        // A byte-identical copy of the allowed binary at another path.
+        let copyDir = (dir as NSString).appendingPathComponent("elsewhere")
+        try FileManager.default.createDirectory(atPath: copyDir, withIntermediateDirectories: true)
+        let copy = (copyDir as NSString).appendingPathComponent("ah-observer")
+        try FileManager.default.copyItem(atPath: daemon, toPath: copy)
+
+        let path = temporarySocketPath()
+        let policy = PeerPolicy(allowedPaths: [daemon], identifiers: [], teamID: nil)
+        let server = ScreenCaptureServer(socketPath: path, policy: policy) { _ in .success(self.sampleFrame()) }
+        server.start()
+        defer { server.stop() }
+
+        XCTAssertEqual(Array(try runClient(daemon, path).prefix(4)), ScreenCaptureServer.frameMagic)
+        XCTAssertTrue(try runClient(copy, path).isEmpty,
+                      "a copy of the allowed binary at a different path is refused")
+        // This (unlisted) test process is refused too.
+        XCTAssertTrue(try roundTrip(path, request: #"{"command":"capture"}"#).isEmpty)
+
+        // Control: the copy works once its own path is the allowed one, so the
+        // refusal above was the path check and nothing else.
+        let path2 = temporarySocketPath()
+        let server2 = ScreenCaptureServer(
+            socketPath: path2,
+            policy: PeerPolicy(allowedPaths: [String(cString: try XCTUnwrap(realpath(copy, nil)))],
+                               identifiers: [], teamID: nil)
+        ) { _ in .success(self.sampleFrame()) }
+        server2.start()
+        defer { server2.stop() }
+        XCTAssertEqual(Array(try runClient(copy, path2).prefix(4)), ScreenCaptureServer.frameMagic)
+
+        // With a Team ID pinned, the (ad hoc signed) helper at the allowed
+        // path is refused by the code-signature check.
+        let path3 = temporarySocketPath()
+        let server3 = ScreenCaptureServer(
+            socketPath: path3,
+            policy: PeerPolicy(allowedPaths: [daemon], identifiers: [PeerPolicy.daemonIdentifier],
+                               teamID: "ABCDE12345")
+        ) { _ in .success(self.sampleFrame()) }
+        server3.start()
+        defer { server3.stop() }
+        XCTAssertTrue(try runClient(daemon, path3).isEmpty,
+                      "an unsigned helper fails the pinned code requirement")
+    }
+
+    func testCodeRequirementPinsTeamAndIdentifier() throws {
+        let policy = PeerPolicy(
+            allowedPaths: [], identifiers: ["com.agenthandover.observer", "agenthandover"],
+            teamID: "ABCDE12345")
+        XCTAssertEqual(
+            policy.requirement,
+            #"anchor apple generic and certificate leaf[subject.OU] = "ABCDE12345" and (identifier "com.agenthandover.observer" or identifier "agenthandover")"#)
+        XCTAssertNil(PeerPolicy(allowedPaths: [], identifiers: ["x"], teamID: nil).requirement)
+
+        // An unsigned / ad hoc helper (this test runner) fails the pinned requirement ...
+        XCTAssertNotEqual(PeerPolicy.check(pid: getpid(), requirement: try XCTUnwrap(policy.requirement)),
+                          errSecSuccess)
+        // ... while a validly signed binary satisfies a requirement it meets.
+        let sleeper = Process()
+        sleeper.executableURL = URL(fileURLWithPath: "/bin/sleep")
+        sleeper.arguments = ["5"]
+        try sleeper.run()
+        defer { sleeper.terminate() }
+        XCTAssertEqual(PeerPolicy.check(pid: sleeper.processIdentifier, requirement: "anchor apple"),
+                       errSecSuccess)
+        XCTAssertNotEqual(PeerPolicy.check(pid: sleeper.processIdentifier,
+                                           requirement: try XCTUnwrap(policy.requirement)),
+                          errSecSuccess)
+    }
+
+    func testObservationServerUsesThePrivateListener() throws {
+        let path = (temporarySocketPath() as NSString).deletingLastPathComponent + "/observation.sock"
+        let server = ObservationServer(socketPath: path, policy: testRunnerPolicy)
+        server.start()
+        let listener = try XCTUnwrap(server.currentListener)
+        let reply = try roundTrip(path, request: #"{"command":"nope"}"# + "\n")
+        let json = try JSONSerialization.jsonObject(with: reply) as? [String: String]
+        XCTAssertEqual(json?["error"], "unknown command: nope")
+        server.stop()
+        XCTAssertEqual(listener.exited.wait(timeout: .now() + 1), .success)
+        XCTAssertThrowsError(try roundTrip(path, request: #"{"command":"snapshot"}"#))
     }
 
     // MARK: - Screen Recording readiness probe
@@ -353,6 +618,18 @@ final class ScreenCaptureTests: XCTestCase {
 private actor Counter {
     private(set) var value = 0
     func increment() { value += 1 }
+
+    /// Synchronous access for non-async test code (makeCapture factories).
+    private let box = LockedInt()
+    nonisolated func incrementNow() -> Int { box.increment() }
+    nonisolated var valueNow: Int { box.value }
+}
+
+private final class LockedInt: @unchecked Sendable {
+    private let lock = NSLock()
+    private var current = 0
+    func increment() -> Int { lock.lock(); defer { lock.unlock() }; current += 1; return current }
+    var value: Int { lock.lock(); defer { lock.unlock() }; return current }
 }
 
 private actor Flag {

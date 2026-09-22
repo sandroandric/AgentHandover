@@ -7,11 +7,9 @@ import Foundation
 @MainActor
 final class CaptureAgentClient {
 
-    /// Path to the daemon's Unix domain socket.
+    /// Path to the daemon's Unix domain socket (in the private socket dir).
     private var socketPath: String {
-        FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Application Support/agenthandover/control.sock")
-            .path
+        SocketDirectory.socketPath("control.sock")
     }
 
     // MARK: - Commands
