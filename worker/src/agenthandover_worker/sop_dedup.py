@@ -1,10 +1,12 @@
 """SOP Deduplication — structural fingerprint matching and merging.
 
 Prevents duplicate SOPs from accumulating when users record the same
-workflow multiple times.  Uses a structural fingerprint (apps, URL
-domains, action verbs) with Jaccard similarity to detect when a newly
+workflow multiple times.  Uses a fingerprint (apps, URL domains, action
+verbs, title tokens) with Jaccard similarity to detect when a newly
 generated SOP matches an existing one, and merges them instead of
-creating a duplicate.
+creating a duplicate.  Apps and domains say *where* the work happened;
+the title tokens say *which task* it was, so two different tasks on the
+same site do not merge.
 
 When an ``LLMReasoner`` is provided, step-level merge conflicts (where
 two versions of a step differ textually) are resolved by the LLM
@@ -48,19 +50,46 @@ def compute_fingerprint(sop: dict) -> dict:
     - ``apps``: sorted list of normalized app names
     - ``domains``: sorted list of URL domains extracted from steps/preconditions
     - ``action_verbs``: sorted list of action verb types (first word of each step)
+    - ``title_tokens``: sorted content words of the title (the slug when
+      there is no title), see :func:`title_tokens`
 
     All components are lowercased and deduplicated.
     """
     apps = _extract_apps(sop)
     domains = _extract_domains(sop)
     action_verbs = _extract_action_verbs(sop)
+    title = sop.get("title") or sop.get("slug", "").replace("-", " ")
 
     return {
         "apps": sorted(apps),
         "domains": sorted(domains),
         "action_verbs": sorted(action_verbs),
+        "title_tokens": sorted(title_tokens(title)),
         "variant_family": sop.get("variant_family"),
     }
+
+
+# Words that say nothing about which task a title names.
+_TITLE_STOPWORDS = frozenset({
+    "a", "an", "and", "as", "at", "by", "for", "from", "in", "into", "of",
+    "on", "or", "the", "to", "via", "with", "your", "my", "new",
+})
+
+
+def title_tokens(text: str) -> set[str]:
+    """Content words of a task title: lowercased, stopwords dropped.
+
+    A trailing plural ``s`` is stripped so "Triage issues" and "Triage
+    issue" share their tokens.
+    """
+    tokens: set[str] = set()
+    for word in re.findall(r"[a-z0-9]+", (text or "").lower()):
+        if word in _TITLE_STOPWORDS:
+            continue
+        if len(word) > 3 and word.endswith("s") and not word.endswith("ss"):
+            word = word[:-1]
+        tokens.add(word)
+    return tokens
 
 
 def _extract_apps(sop: dict) -> set[str]:
@@ -215,31 +244,37 @@ def fingerprint_similarity(fp1: dict, fp2: dict) -> float:
     """Compute weighted Jaccard similarity between two fingerprints.
 
     Weights:
-    - apps: 0.35 (strongest signal — same apps = likely same task)
-    - domains: 0.35 (same websites = likely same task)
-    - action_verbs: 0.30 (same action types = structural match)
+    - apps: 0.25 (where the work happened)
+    - domains: 0.25 (where the work happened)
+    - action_verbs: 0.20 (same action types = structural match)
+    - title_tokens: 0.30 (which task it was: the strongest single signal,
+      because apps and domains are shared by every task on one site)
 
     Returns a float in [0.0, 1.0].
     """
     apps_sim = _jaccard(set(fp1.get("apps", [])), set(fp2.get("apps", [])))
     domains_sim = _jaccard(set(fp1.get("domains", [])), set(fp2.get("domains", [])))
     verbs_sim = _jaccard(set(fp1.get("action_verbs", [])), set(fp2.get("action_verbs", [])))
+    title_sim = _jaccard(set(fp1.get("title_tokens", [])), set(fp2.get("title_tokens", [])))
 
-    # If both have no domains (e.g. desktop-only workflows), redistribute
-    # domain weight to apps and verbs equally
+    # If both have no domains (e.g. desktop-only workflows), the domain
+    # weight moves to the task identity, never to the apps: two different
+    # tasks in one desktop app must not merge on the app alone.
     if not fp1.get("domains") and not fp2.get("domains"):
-        return apps_sim * 0.55 + verbs_sim * 0.45
+        return apps_sim * 0.25 + verbs_sim * 0.20 + title_sim * 0.55
 
-    return apps_sim * 0.35 + domains_sim * 0.35 + verbs_sim * 0.30
+    return apps_sim * 0.25 + domains_sim * 0.25 + verbs_sim * 0.20 + title_sim * 0.30
 
 
 def _jaccard(a: set, b: set) -> float:
-    """Jaccard similarity coefficient: |A ∩ B| / |A ∪ B|."""
-    if not a and not b:
-        return 1.0  # Both empty = identical (no signal)
+    """Jaccard similarity coefficient: |A ∩ B| / |A ∪ B|.
+
+    Two empty sets share nothing we can observe, so they score 0.0: an
+    absent signal is not evidence of sameness.
+    """
     union = a | b
     if not union:
-        return 1.0
+        return 0.0
     return len(a & b) / len(union)
 
 
@@ -306,14 +341,22 @@ def find_matching_sop(
             pass  # fall through to fingerprint matching
 
     new_fp = compute_fingerprint(new_sop)
+    new_title = set(new_fp["title_tokens"])
 
     best_idx: int | None = None
     best_score = 0.0
 
     for i, existing in enumerate(existing_sops):
         existing_fp = existing.get("_fingerprint")
-        if existing_fp is None:
+        # Registry entries written before title_tokens existed are
+        # re-fingerprinted so their title counts.
+        if existing_fp is None or "title_tokens" not in existing_fp:
             existing_fp = compute_fingerprint(existing)
+
+        # No shared task vocabulary means not the same task, however
+        # much the apps, domains and verbs overlap.
+        if _jaccard(new_title, set(existing_fp["title_tokens"])) == 0.0:
+            continue
 
         score = fingerprint_similarity(new_fp, existing_fp)
         if score > best_score:
@@ -387,63 +430,62 @@ def _resolve_conflict_with_llm(
     return None
 
 
-def merge_sops(
-    existing: dict,
-    new_sop: dict,
-    evidence_normalizer=None,
-    llm_reasoner: "LLMReasoner | None" = None,
-) -> dict:
-    """Merge a new SOP into an existing one.
+def _merge_steps_with_evidence(
+    evidence_normalizer,
+    existing_steps: list[dict],
+    new_steps: list[dict],
+) -> list[dict]:
+    """Merge two template step lists through ``merge_with_evidence``.
 
-    Strategy:
-    - ``slug``: keep existing (stable identity)
-    - ``title``: keep latest (VLM may improve wording)
-    - ``task_description``: keep latest
-    - ``steps``: keep the version with more steps; if tied, keep latest
-    - ``variables``: union by name (add new variables, update existing)
-    - ``episode_count``: accumulate
-    - ``confidence_avg``: will be recomputed by caller
-    - ``apps_involved``: union
-    - ``preconditions``: union (deduped)
-    - ``execution_overview``: keep latest
-    - ``source``: keep existing
-    - ``_timeline``: keep latest (most recent recording)
+    The normalizer aligns steps by their ``action``, ``app`` and
+    ``location`` keys (the v3 procedure shape).  Template steps carry the
+    action as ``step`` and app/location in ``parameters``, so each step is
+    given those keys for the alignment and they are removed again from
+    the merged result wherever the template step did not have them.
     """
-    if evidence_normalizer is not None:
-        try:
-            # evidence_normalizer.merge_with_evidence expects v3 procedure
-            # dicts, but merge_sops operates on SOP templates.  Only use
-            # evidence-based merge when the existing dict looks like a v3
-            # procedure (has "schema_version" and "id").
-            if existing.get("schema_version") and existing.get("id"):
-                return evidence_normalizer.merge_with_evidence(
-                    existing, new_sop.get("steps", []),
-                )
-        except Exception:
-            logger.debug("Evidence-based merge failed, using default", exc_info=True)
-    # ... existing logic continues as fallback ...
+    added_key = "_dedup_view_keys"
 
-    merged = dict(existing)  # Shallow copy
+    def as_procedure_step(step: dict) -> dict:
+        view = dict(step)
+        params = step.get("parameters") if isinstance(step.get("parameters"), dict) else {}
+        fallbacks = {
+            "action": step.get("step", ""),
+            "app": params.get("app", ""),
+            "location": params.get("location", ""),
+        }
+        added = [k for k, v in fallbacks.items() if not step.get(k) and v]
+        for k in added:
+            view[k] = fallbacks[k]
+        view[added_key] = added
+        return view
 
-    # Accumulate episode count
-    merged["episode_count"] = (
-        existing.get("episode_count", 0) + new_sop.get("episode_count", 0)
+    merged_view = evidence_normalizer.merge_with_evidence(
+        {"steps": [as_procedure_step(s) for s in existing_steps]},
+        [as_procedure_step(s) for s in new_steps],
     )
 
-    # Keep latest title and description (VLM may improve)
-    merged["title"] = new_sop.get("title", existing.get("title", ""))
-    if new_sop.get("task_description"):
-        merged["task_description"] = new_sop["task_description"]
+    merged_steps: list[dict] = []
+    for step in merged_view["steps"]:
+        step = dict(step)
+        for k in step.pop(added_key, []):
+            step.pop(k, None)
+        merged_steps.append(step)
+    return merged_steps
 
-    # Steps: keep the version with more steps; if tied, keep latest.
-    # When step counts are close (within 1) and an LLM reasoner is
-    # available, attempt per-step conflict resolution instead.
-    existing_steps = existing.get("steps", [])
-    new_steps = new_sop.get("steps", [])
+
+def _merge_steps_by_length(
+    existing_steps: list[dict],
+    new_steps: list[dict],
+    llm_reasoner: "LLMReasoner | None",
+) -> list[dict]:
+    """Keep the version with more steps; if tied, keep latest.
+
+    When step counts are close (within 1) and an LLM reasoner is
+    available, attempt per-step conflict resolution instead.
+    """
     step_diff = abs(len(existing_steps) - len(new_steps))
 
     if step_diff <= 1 and llm_reasoner is not None and existing_steps and new_steps:
-        # Attempt LLM-based step-by-step conflict resolution
         min_len = min(len(existing_steps), len(new_steps))
         resolved_steps: list[dict] = []
         used_llm = False
@@ -474,13 +516,74 @@ def merge_sops(
             resolved_steps.extend(new_steps[min_len:])
 
         if used_llm:
-            merged["steps"] = resolved_steps
-        elif len(new_steps) >= len(existing_steps):
-            merged["steps"] = new_steps
-        # else: keep existing steps
-    elif len(new_steps) >= len(existing_steps):
-        merged["steps"] = new_steps
-    # else: keep existing steps (more comprehensive)
+            return resolved_steps
+
+    if len(new_steps) >= len(existing_steps):
+        return new_steps
+    return existing_steps  # more comprehensive
+
+
+def merge_sops(
+    existing: dict,
+    new_sop: dict,
+    evidence_normalizer=None,
+    llm_reasoner: "LLMReasoner | None" = None,
+) -> dict:
+    """Merge a new SOP into an existing one.
+
+    Strategy:
+    - ``slug``: keep existing (stable identity)
+    - ``title``: keep latest (VLM may improve wording)
+    - ``task_description``: keep latest
+    - ``steps``: aligned through ``evidence_normalizer.merge_with_evidence``
+      when a normalizer is given (steps accumulate observation counts and
+      alternatives); otherwise keep the version with more steps, if tied
+      keep latest, with LLM conflict resolution when counts are close
+    - ``variables``: union by name (add new variables, update existing)
+    - ``episode_count``: accumulate
+    - ``confidence_avg``: will be recomputed by caller
+    - ``apps_involved``: union
+    - ``preconditions``: union (deduped)
+    - ``execution_overview``: keep latest
+    - ``source``: keep existing
+    - ``_timeline``: keep latest (most recent recording)
+    """
+    merged = dict(existing)  # Shallow copy
+
+    # Accumulate episode count
+    merged["episode_count"] = (
+        existing.get("episode_count", 0) + new_sop.get("episode_count", 0)
+    )
+
+    # Keep latest title and description (VLM may improve)
+    merged["title"] = new_sop.get("title", existing.get("title", ""))
+    if new_sop.get("task_description"):
+        merged["task_description"] = new_sop["task_description"]
+
+    existing_steps = existing.get("steps", [])
+    new_steps = new_sop.get("steps", [])
+
+    evidence_steps = None
+    if (
+        evidence_normalizer is not None
+        and existing.get("slug")
+        and existing_steps
+        and new_steps
+    ):
+        try:
+            evidence_steps = _merge_steps_with_evidence(
+                evidence_normalizer, existing_steps, new_steps,
+            )
+        except Exception:
+            logger.debug("Evidence-based merge failed, using default", exc_info=True)
+
+    if evidence_steps is not None:
+        # Aligned steps accumulate observation counts and alternatives.
+        merged["steps"] = evidence_steps
+    else:
+        merged["steps"] = _merge_steps_by_length(
+            existing_steps, new_steps, llm_reasoner,
+        )
 
     # Variables: union by name
     merged["variables"] = _merge_variables(

@@ -29,6 +29,7 @@ from agenthandover_worker.sop_dedup import (
     _url_to_domain,
     compute_fingerprint,
     fingerprint_similarity,
+    title_tokens,
 )
 
 if TYPE_CHECKING:
@@ -79,8 +80,8 @@ _VERB_MAP: dict[str, str] = {
 class ProcedureMatcher:
     """Match task segments and continuity spans to known procedures.
 
-    Uses structural fingerprint similarity (apps, domains, action verbs)
-    from sop_dedup.py. Threshold is 0.50 (lower than dedup's 0.70) to
+    Uses fingerprint similarity (apps, domains, action verbs, title
+    tokens) from sop_dedup.py. Threshold is 0.50 (lower than dedup's 0.70) to
     catch partial matches as supporting evidence for continuity.
     """
 
@@ -167,6 +168,7 @@ class ProcedureMatcher:
           via ``_url_to_domain``
         - ``action_verbs``: first word of each frame's ``what_doing``,
           normalized via the verb map
+        - ``title_tokens``: content words of ``segment.task_label``
         """
         # Apps: normalize each app name
         apps: set[str] = set()
@@ -197,6 +199,7 @@ class ProcedureMatcher:
             "apps": sorted(apps),
             "domains": sorted(domains),
             "action_verbs": sorted(action_verbs),
+            "title_tokens": sorted(title_tokens(segment.task_label)),
         }
 
     def _span_to_fingerprint(self, span: ContinuitySpan) -> dict:
@@ -206,6 +209,7 @@ class ProcedureMatcher:
         - ``apps``: from ``span.apps_involved``, normalized
         - ``domains``: empty (spans don't store frame-level locations)
         - ``action_verbs``: first word of ``span.goal_summary``, normalized
+        - ``title_tokens``: content words of ``span.goal_summary``
         """
         # Apps: normalize each app name
         apps: set[str] = set()
@@ -230,6 +234,7 @@ class ProcedureMatcher:
             "apps": sorted(apps),
             "domains": sorted(domains),
             "action_verbs": sorted(action_verbs),
+            "title_tokens": sorted(title_tokens(span.goal_summary)),
         }
 
     # ------------------------------------------------------------------
