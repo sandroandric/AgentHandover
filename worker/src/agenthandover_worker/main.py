@@ -4547,7 +4547,7 @@ def main(argv: list[str] | None = None) -> None:
     query_api_server = None
     try:
         if cfg.knowledge.query_api_enabled:
-            from agenthandover_worker.query_api import QueryAPIServer
+            from agenthandover_worker.query_api import TOKEN_FILE, QueryAPIServer
             from agenthandover_worker.procedure_verifier import ProcedureVerifier
             procedure_verifier = ProcedureVerifier(knowledge_base, runtime_validator=runtime_validator)
             bundle_compiler = BundleCompiler(
@@ -4568,12 +4568,14 @@ def main(argv: list[str] | None = None) -> None:
                 runtime_validator=runtime_validator,
                 ops_telemetry=ops_telemetry,
                 vector_kb=vector_kb,
+                token_path=_status_dir() / TOKEN_FILE,
             )
             query_api_server.start()
             logger.info(
-                "Query API server started on 127.0.0.1:%d (localhost-only, no auth). "
+                "Query API server started on 127.0.0.1:%d (localhost-only; POST "
+                "requires the X-AgentHandover-Token header from %s). "
                 "Set knowledge.query_api_enabled = false in config.toml to disable.",
-                _api_port,
+                _api_port, TOKEN_FILE,
             )
         else:
             logger.info("Query API server disabled (knowledge.query_api_enabled = false)")

@@ -14,7 +14,7 @@ from typing import Any
 import pytest
 
 from agenthandover_worker.knowledge_base import KnowledgeBase
-from agenthandover_worker.query_api import QueryAPIServer
+from agenthandover_worker.query_api import TOKEN_HEADER, QueryAPIServer
 
 
 # ---------------------------------------------------------------------------
@@ -40,14 +40,14 @@ def _get(port: int, path: str) -> tuple[int, dict]:
         return exc.code, body
 
 
-def _post(port: int, path: str, data: dict) -> tuple[int, dict]:
-    """Send a POST request with JSON body and return (status_code, json_body)."""
-    url = f"http://127.0.0.1:{port}{path}"
+def _post(srv: QueryAPIServer, path: str, data: dict) -> tuple[int, dict]:
+    """POST ``data`` as JSON with the server's token; return (status, json_body)."""
+    url = f"http://127.0.0.1:{srv.port}{path}"
     payload = json.dumps(data).encode("utf-8")
     req = urllib.request.Request(
         url,
         data=payload,
-        headers={"Content-Type": "application/json"},
+        headers={"Content-Type": "application/json", TOKEN_HEADER: srv.token},
         method="POST",
     )
     try:
@@ -410,8 +410,8 @@ class TestDailyEndpoint:
 class TestSearchEndpoint:
     """Test POST /search."""
 
-    def test_search_without_searcher_returns_501(self, port: int) -> None:
-        status, body = _post(port, "/search", {"query": "domains"})
+    def test_search_without_searcher_returns_501(self, server: QueryAPIServer) -> None:
+        status, body = _post(server, "/search", {"query": "domains"})
         assert status == 501
         assert "error" in body
 
@@ -459,7 +459,7 @@ class TestSearchEndpoint:
         srv.start()
         time.sleep(0.1)
         try:
-            status, body = _post(p, "/search", {
+            status, body = _post(srv, "/search", {
                 "query": "domains",
                 "limit": 10,
                 "date": "2026-03-10",
@@ -494,7 +494,8 @@ class TestSearchEndpoint:
             req = urllib.request.Request(
                 url,
                 data=b"",
-                headers={"Content-Type": "application/json", "Content-Length": "0"},
+                headers={"Content-Type": "application/json", "Content-Length": "0",
+                         TOKEN_HEADER: srv.token},
                 method="POST",
             )
             try:
@@ -523,7 +524,7 @@ class TestSearchEndpoint:
         srv.start()
         time.sleep(0.1)
         try:
-            status, body = _post(p, "/search", {"limit": 10})
+            status, body = _post(srv, "/search", {"limit": 10})
             assert status == 400
             assert "query" in body["error"].lower()
         finally:
@@ -551,7 +552,7 @@ class TestSearchEndpoint:
             req = urllib.request.Request(
                 url,
                 data=b"not valid json{{{",
-                headers={"Content-Type": "application/json"},
+                headers={"Content-Type": "application/json", TOKEN_HEADER: srv.token},
                 method="POST",
             )
             try:
@@ -570,8 +571,8 @@ class TestSearchEndpoint:
 class TestRecallEndpoint:
     """POST /recall: the CLI's ``recall`` without waiting for a worker tick."""
 
-    def test_recall_without_searcher_returns_501(self, port: int) -> None:
-        status, body = _post(port, "/recall", {})
+    def test_recall_without_searcher_returns_501(self, server: QueryAPIServer) -> None:
+        status, body = _post(server, "/recall", {})
         assert status == 501
 
     def test_recall_expands_hhmm_and_returns_the_timeline(
@@ -603,7 +604,7 @@ class TestRecallEndpoint:
         srv.start()
         time.sleep(0.1)
         try:
-            status, body = _post(p, "/recall", {
+            status, body = _post(srv, "/recall", {
                 "date": "2026-03-10", "start_time": "09:30", "app": "Chrome",
             })
         finally:
@@ -625,8 +626,8 @@ class TestErrorHandling:
         assert status == 404
         assert "error" in body
 
-    def test_unknown_post_route_returns_404(self, port: int) -> None:
-        status, body = _post(port, "/nonexistent", {})
+    def test_unknown_post_route_returns_404(self, server: QueryAPIServer) -> None:
+        status, body = _post(server, "/nonexistent", {})
         assert status == 404
         assert "error" in body
 
@@ -680,3 +681,109 @@ class TestSequentialRequests:
         for endpoint in endpoints:
             status, _ = _get(port, endpoint)
             assert status == 200, f"Failed on {endpoint}"
+
+
+# ---------------------------------------------------------------------------
+# Local-only access: Host, Origin and the POST token
+# ---------------------------------------------------------------------------
+
+def _raw(port: int, method: str, path: str, headers: dict, body: bytes = b"") -> int:
+    """Send a request with exactly ``headers`` (no implicit Host); return the status."""
+    import http.client
+
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    try:
+        conn.putrequest(method, path, skip_host=True, skip_accept_encoding=True)
+        for name, value in headers.items():
+            conn.putheader(name, value)
+        if body:
+            conn.putheader("Content-Length", str(len(body)))
+        conn.endheaders(body or None)
+        return conn.getresponse().status
+    finally:
+        conn.close()
+
+
+class _RecordingSearcher:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def search(self, query: str, **kwargs: Any) -> list:
+        self.calls.append(query)
+        return []
+
+
+class TestLocalOnlyAccess:
+    """A browser page must not be able to drive or read the API."""
+
+    @pytest.fixture()
+    def guarded(self, populated_kb: KnowledgeBase):
+        searcher = _RecordingSearcher()
+        srv = QueryAPIServer(populated_kb, port=0, activity_searcher=searcher)
+        srv.start()
+        yield srv, searcher
+        srv.stop()
+
+    def test_csrf_post_without_token_is_403_and_does_nothing(self, guarded) -> None:
+        srv, searcher = guarded
+        body = json.dumps({"query": "passwords"}).encode()
+        host = {"Host": f"127.0.0.1:{srv.port}", "Content-Type": "application/json"}
+        assert _raw(srv.port, "POST", "/search", host, body) == 403
+        wrong = {**host, TOKEN_HEADER: "not-the-token"}
+        assert _raw(srv.port, "POST", "/search", wrong, body) == 403
+        assert searcher.calls == []
+        right = {**host, TOKEN_HEADER: srv.token}
+        assert _raw(srv.port, "POST", "/search", right, body) == 200
+        assert searcher.calls == ["passwords"]
+
+    def test_origin_header_is_refused_even_with_token(self, guarded) -> None:
+        srv, searcher = guarded
+        base = {"Host": f"127.0.0.1:{srv.port}"}
+        assert _raw(srv.port, "GET", "/procedures", {**base, "Origin": "https://evil.example"}) == 403
+        assert _raw(srv.port, "GET", "/procedures", {**base, "Origin": "null"}) == 403
+        body = json.dumps({"query": "x"}).encode()
+        post = {**base, TOKEN_HEADER: srv.token, "Origin": "https://evil.example"}
+        assert _raw(srv.port, "POST", "/search", post, body) == 403
+        assert searcher.calls == []
+
+    def test_rebound_or_missing_host_is_refused(self, guarded) -> None:
+        srv, _ = guarded
+        assert _raw(srv.port, "GET", "/procedures", {"Host": f"evil.example:{srv.port}"}) == 403
+        assert _raw(srv.port, "GET", "/procedures", {"Host": "127.0.0.1:1"}) == 403
+        assert _raw(srv.port, "GET", "/procedures", {}) == 403
+        assert _raw(srv.port, "GET", "/procedures", {"Host": f"127.0.0.1:{srv.port}"}) == 200
+        assert _raw(srv.port, "GET", "/procedures", {"Host": f"localhost:{srv.port}"}) == 200
+
+
+class TestTokenFile:
+    def test_created_private_and_reused(self, populated_kb: KnowledgeBase, tmp_path: Path) -> None:
+        import stat
+
+        path = tmp_path / "state" / "query-api-token"
+        srv = QueryAPIServer(populated_kb, port=0, token_path=path)
+        srv.start()
+        srv.stop()
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+        assert path.read_text().strip() == srv.token
+        assert len(srv.token) >= 32
+        again = QueryAPIServer(populated_kb, port=0, token_path=path)
+        again.start()
+        again.stop()
+        assert again.token == srv.token
+        assert [p.name for p in path.parent.iterdir()] == ["query-api-token"]
+
+    def test_loose_permissions_tightened_and_empty_file_replaced(self, tmp_path: Path) -> None:
+        import stat
+
+        from agenthandover_worker.query_api import load_or_create_token
+
+        path = tmp_path / "query-api-token"
+        path.write_text("existing-token\n")
+        path.chmod(0o644)
+        assert load_or_create_token(path) == "existing-token"
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+        path.write_text("")
+        token = load_or_create_token(path)
+        assert token and token != "existing-token"
+        assert path.read_text().strip() == token

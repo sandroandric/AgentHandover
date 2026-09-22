@@ -249,12 +249,18 @@ mcp:
 
 ### REST API
 
-Already running on localhost:9477:
+Already running on localhost:9477 (loopback only). Every POST needs the
+`X-AgentHandover-Token` header; the worker keeps the token in a file only
+your user can read. Requests that carry a browser `Origin` header, or a
+`Host` other than `127.0.0.1:9477` / `localhost:9477`, are refused, so a
+web page cannot reach the API.
 
 ```bash
 curl http://localhost:9477/ready              # Agent-ready Skills
 curl http://localhost:9477/bundle/my-workflow  # Full handoff bundle
+TOKEN=$(cat ~/Library/Application\ Support/agenthandover/query-api-token)
 curl -X POST http://localhost:9477/search/semantic \
+  -H "X-AgentHandover-Token: $TOKEN" \
   -d '{"query": "deploy to production"}'      # Semantic search
 ```
 
