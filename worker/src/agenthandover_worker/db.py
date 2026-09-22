@@ -591,8 +591,14 @@ class WorkerDB:
         finally:
             write_conn.close()
 
-    def mark_events_processed(self, event_ids: list[str]) -> int:
-        """Mark the given events as processed (``processed = 1``).
+    # ``events.processed`` values.  Anything non-zero is out of the
+    # unprocessed queue; the daemon's retention purges every non-zero row.
+    PROCESSED = 1
+    UNPROCESSED = 0
+    QUARANTINED = -1
+
+    def _set_processed(self, event_ids: list[str], value: int, what: str) -> int:
+        """Set ``processed = value`` on the given events.
 
         Opens a **separate** writable connection for this operation since
         the main connection is read-only.  The writable connection is
@@ -619,18 +625,22 @@ class WorkerDB:
             placeholders = ",".join("?" for _ in event_ids)
             write_conn.execute("BEGIN IMMEDIATE")
             cursor = write_conn.execute(
-                f"UPDATE events SET processed = 1 WHERE id IN ({placeholders})",
-                event_ids,
+                f"UPDATE events SET processed = ? WHERE id IN ({placeholders})",
+                [value, *event_ids],
             )
             write_conn.commit()
             updated = cursor.rowcount
-            logger.info("Marked %d events as processed", updated)
+            logger.info("%s %d events", what, updated)
             return updated
         except sqlite3.Error as exc:
-            logger.error("Failed to mark events as processed: %s", exc)
+            logger.error("Failed to update events (%s): %s", what, exc)
             return 0
         finally:
             write_conn.close()
+
+    def mark_events_processed(self, event_ids: list[str]) -> int:
+        """Mark the given events as processed (``processed = 1``)."""
+        return self._set_processed(event_ids, self.PROCESSED, "Marked processed:")
 
     def mark_events_unprocessed(self, event_ids: list[str]) -> int:
         """Reset events to unprocessed so the pipeline re-evaluates them.
@@ -638,35 +648,15 @@ class WorkerDB:
         Used after VLM job completion to re-score translations with the
         VLM confidence boost applied.
         """
-        if not event_ids:
-            return 0
+        return self._set_processed(
+            event_ids, self.UNPROCESSED, "Reset to unprocessed (VLM reconciliation):"
+        )
 
-        if not all(isinstance(eid, str) and len(eid) <= 36 for eid in event_ids):
-            raise ValueError("Invalid event IDs")
-
-        db_path = self._get_writable_path()
-        if not db_path:
-            logger.error("Cannot determine database path for writable connection")
-            return 0
-
-        write_conn = sqlite3.connect(db_path)
-        try:
-            write_conn.execute("PRAGMA busy_timeout = 5000;")
-            placeholders = ",".join("?" for _ in event_ids)
-            write_conn.execute("BEGIN IMMEDIATE")
-            cursor = write_conn.execute(
-                f"UPDATE events SET processed = 0 WHERE id IN ({placeholders})",
-                event_ids,
-            )
-            write_conn.commit()
-            updated = cursor.rowcount
-            logger.info("Reset %d events to unprocessed (VLM reconciliation)", updated)
-            return updated
-        except sqlite3.Error as exc:
-            logger.error("Failed to reset events to unprocessed: %s", exc)
-            return 0
-        finally:
-            write_conn.close()
+    def quarantine_events(self, event_ids: list[str]) -> int:
+        """Take events the pipeline keeps failing on out of the queue
+        (``processed = -1``) so one poison row cannot stall the worker.
+        """
+        return self._set_processed(event_ids, self.QUARANTINED, "Quarantined")
 
     def get_completed_vlm_boost(self, event_id: str) -> float:
         """Return the VLM confidence boost for a completed VLM job on this event.

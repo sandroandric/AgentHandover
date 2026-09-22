@@ -1,42 +1,73 @@
 #!/bin/bash
-# AgentHandover pre-install script — stops existing services if upgrading
+# AgentHandover pre-install script: stops the running app and services
+# before the payload replaces them.
+#
+# Honours the same AH_* overrides as postinstall (see there) so the install
+# test harness can run it unprivileged against a temporary prefix.
 
-# Resolve the real user's home — installer runs as root so $USER may be "root".
-CONSOLE_USER=$(stat -f '%Su' /dev/console 2>/dev/null || echo "$USER")
-USER_HOME=$(dscl . -read /Users/"${CONSOLE_USER}" NFSHomeDirectory 2>/dev/null | awk '{print $2}')
-if [ -z "$USER_HOME" ] || [ ! -d "$USER_HOME" ]; then
-    USER_HOME=$(eval echo ~"$CONSOLE_USER")
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=resolve-user.sh
+. "${SCRIPT_DIR}/resolve-user.sh"
+ah_resolve_user || exit 1
+
+LIB_DIR="${AH_LIB_DIR:-/usr/local/lib/agenthandover}"
+LAUNCH_AGENTS="${AH_LAUNCH_AGENTS:-${USER_HOME}/Library/LaunchAgents}"
+APP_PATH="${AH_APP_PATH:-/Applications/AgentHandover.app}"
+NO_SERVICES="${AH_NO_SERVICES:-0}"
+# The app to quit. Overridable so the install test harness can point this
+# at a stub process instead of a real AgentHandover.app on the machine; an
+# empty AH_APP_BUNDLE_ID skips the AppleScript quit (a stub has no bundle).
+APP_BUNDLE_ID="${AH_APP_BUNDLE_ID-com.agenthandover.app}"
+APP_PROCESS="${AH_APP_PROCESS:-AgentHandover}"
+
+# Quit the menu bar app so the payload does not land under a live process
+# and postinstall's `open` starts the new binary instead of re-attaching to
+# the old one. Ask politely first (the app stops the daemon it spawned on
+# quit), then wait up to 5 s, then kill whatever is left. AppleScript runs
+# only while the process is up, and the `is running` guard stays: a bare
+# `tell application` would launch the app just to quit it.
+if [ -n "${APP_BUNDLE_ID}" ] && pgrep -x -u "${CONSOLE_UID}" "${APP_PROCESS}" >/dev/null; then
+    as_user /usr/bin/osascript \
+        -e "if application id \"${APP_BUNDLE_ID}\" is running then" \
+        -e "tell application id \"${APP_BUNDLE_ID}\" to quit" \
+        -e 'end if' >/dev/null 2>&1 || true
 fi
-LAUNCH_AGENTS="${USER_HOME}/Library/LaunchAgents"
-CONSOLE_UID=$(id -u "${CONSOLE_USER}" 2>/dev/null || echo "501")
+for _ in 1 2 3 4 5; do
+    pgrep -x -u "${CONSOLE_UID}" "${APP_PROCESS}" >/dev/null || break
+    sleep 1
+done
+pkill -x -u "${CONSOLE_UID}" "${APP_PROCESS}" 2>/dev/null || true
 
-# Stop existing services using modern launchd API (bootout).
-# The deprecated launchctl unload is broken on macOS 13+.
-# Stop and remove daemon launchd job (daemon is now app-launched, not launchd)
-sudo -u "${CONSOLE_USER}" launchctl bootout "gui/${CONSOLE_UID}/com.agenthandover.daemon" 2>/dev/null || true
-sudo -u "${CONSOLE_USER}" launchctl disable "gui/${CONSOLE_UID}/com.agenthandover.daemon" 2>/dev/null || true
+if [ "${NO_SERVICES}" != "1" ]; then
+    # Stop the daemon launchd job left by pre-v0.2.1 installs (the daemon
+    # is app-launched now) and the worker, using bootout (the deprecated
+    # `launchctl unload` is broken on macOS 13+).
+    as_user launchctl bootout "gui/${CONSOLE_UID}/com.agenthandover.daemon" 2>/dev/null || true
+    as_user launchctl disable "gui/${CONSOLE_UID}/com.agenthandover.daemon" 2>/dev/null || true
+    as_user launchctl bootout "gui/${CONSOLE_UID}/com.agenthandover.worker" 2>/dev/null || true
+    as_user launchctl bootout "gui/${CONSOLE_UID}/com.openmimic.daemon" 2>/dev/null || true
+    as_user launchctl bootout "gui/${CONSOLE_UID}/com.openmimic.worker" 2>/dev/null || true
 
-# Remove the stale daemon launchd plist from ALL known locations.
-# Prior to v0.2.1 the build shipped a com.agenthandover.daemon.plist
-# pointing at a path inside the app bundle that no longer exists.  The
-# macOS pkg installer only REPLACES files that are in the new Bom —
-# files the new pkg never heard of (like this one) are left untouched
-# on an upgrade-in-place.  Explicitly delete from every location it
-# could be hiding so upgrading from v0.2.0 is clean.  See issue #1.
+    # Kill any daemon the app did not stop.
+    killall ah-observer 2>/dev/null || true
+
+    rm -f /Library/LaunchAgents/com.agenthandover.daemon.plist 2>/dev/null
+    rm -f /Library/LaunchDaemons/com.agenthandover.daemon.plist 2>/dev/null
+fi
+
+# Remove the stale daemon launchd plist. Prior to v0.2.1 the build shipped
+# a com.agenthandover.daemon.plist pointing into the app bundle; the pkg
+# installer only replaces files in the new Bom, so it survives an upgrade
+# unless deleted explicitly. See issue #1.
 rm -f "${LAUNCH_AGENTS}/com.agenthandover.daemon.plist" 2>/dev/null
-rm -f /usr/local/lib/agenthandover/launchd/com.agenthandover.daemon.plist 2>/dev/null
-rm -f /Library/LaunchAgents/com.agenthandover.daemon.plist 2>/dev/null
-rm -f /Library/LaunchDaemons/com.agenthandover.daemon.plist 2>/dev/null
+rm -f "${LIB_DIR}/launchd/com.agenthandover.daemon.plist" 2>/dev/null
+rm -f "${LAUNCH_AGENTS}/com.openmimic.daemon.plist" 2>/dev/null
+rm -f "${LAUNCH_AGENTS}/com.openmimic.worker.plist" 2>/dev/null
 
-# Remove old daemon from inside app bundle (moved to /usr/local/lib/agenthandover/).
-# Having it inside the bundle caused codesign --deep to register it as a second TCC principal.
-rm -rf /Applications/AgentHandover.app/Contents/Helpers/AgentHandoverDaemon.app 2>/dev/null || true
-rm -f /Applications/AgentHandover.app/Contents/Helpers/ah-observer 2>/dev/null || true
-
-sudo -u "${CONSOLE_USER}" launchctl bootout "gui/${CONSOLE_UID}/com.agenthandover.worker" 2>/dev/null || true
-
-# Kill any running daemon process (may have been app-launched)
-killall ah-observer 2>/dev/null || true
+# Remove the old daemon from inside the app bundle (moved to LIB_DIR).
+# Inside the bundle, codesign --deep registered it as a second TCC principal.
+rm -rf "${APP_PATH}/Contents/Helpers/AgentHandoverDaemon.app" 2>/dev/null || true
+rm -f "${APP_PATH}/Contents/Helpers/ah-observer" 2>/dev/null || true
 
 # Remove Chromium-family native host manifests until the app reaches
 # extension setup. Any stale manifest can respawn ah-observer during
@@ -46,15 +77,10 @@ for browser_dir in \
     "Chromium" \
     "BraveSoftware/Brave-Browser" \
     "Microsoft Edge" \
-    "Arc/User Data"; do
+    "Arc/User Data" \
+    "Comet"; do
     rm -f "${USER_HOME}/Library/Application Support/${browser_dir}/NativeMessagingHosts/com.agenthandover.host.json" 2>/dev/null || true
 done
-
-# Remove legacy openmimic services
-sudo -u "${CONSOLE_USER}" launchctl bootout "gui/${CONSOLE_UID}/com.openmimic.daemon" 2>/dev/null || true
-sudo -u "${CONSOLE_USER}" launchctl bootout "gui/${CONSOLE_UID}/com.openmimic.worker" 2>/dev/null || true
-rm -f "${LAUNCH_AGENTS}/com.openmimic.daemon.plist" 2>/dev/null
-rm -f "${LAUNCH_AGENTS}/com.openmimic.worker.plist" 2>/dev/null
 
 echo "Pre-install complete."
 exit 0

@@ -2,14 +2,16 @@ use anyhow::Result;
 use chrono::Utc;
 use colored::Colorize;
 
+use agenthandover_common::observation::{
+    capture_socket_path, observation_socket_path, snapshot_at,
+};
+
 use crate::paths;
 
 /// Detect which install channel produced this AgentHandover installation.
 fn detect_install_channel() -> &'static str {
-    // Check for pkg install
-    if std::path::Path::new("/usr/local/bin/agenthandover-daemon").exists()
-        && std::path::Path::new("/usr/local/lib/agenthandover").exists()
-    {
+    // Check for pkg install (the daemon is installed as <lib dir>/ah-observer)
+    if paths::lib_dir().join("ah-observer").exists() {
         return "pkg";
     }
     // Check for Homebrew
@@ -117,42 +119,15 @@ pub fn run() -> Result<()> {
         check_skip(&mut counts, "Config file", "Using defaults");
     }
 
-    // Check 5 + 6: TCC permissions (Accessibility + Screen Recording)
+    // Check 5-8: the app's capture servers and its TCC grants.
     //
-    // macOS TCC permissions are granted PER APP BUNDLE, not system-wide.
-    // The daemon runs under the AgentHandover.app TCC principal (because
-    // the menu bar app spawns it via Process() — see ServiceController
-    // .daemonExecutableURL), so what we actually need to check is whether
-    // AgentHandover.app has the permissions, NOT whether this CLI
-    // process has them.
-    //
-    // Calling AXIsProcessTrusted() / CGDisplayCreateImage() from the
-    // CLI checks THIS process, which is the wrong thing — the CLI will
-    // always read "no accessibility" because you never granted it, but
-    // the app can have full permissions. The previous version of doctor
-    // had this bug and falsely reported Accessibility as failed on
-    // every pkg install.
-    //
-    // There is no clean API to query TCC for a different bundle id
-    // without reading the TCC sqlite database, which itself requires
-    // Full Disk Access (ironic). Since we can't definitively check,
-    // print an advisory info line instead and let the user verify in
-    // System Settings directly.
-    #[cfg(target_os = "macos")]
-    {
-        println!(
-            "  {} Accessibility permission ({})",
-            "info".dimmed(),
-            "verify AgentHandover in System Settings > Privacy & Security > Accessibility"
-                .dimmed()
-        );
-        println!(
-            "  {} Screen Recording permission ({})",
-            "info".dimmed(),
-            "verify AgentHandover in System Settings > Privacy & Security > Screen Recording"
-                .dimmed()
-        );
-    }
+    // Accessibility and Screen Recording are granted to AgentHandover.app,
+    // not to this CLI (the app spawns the daemon, so the daemon runs under
+    // the app's grants). Asking TCC about this process would always say
+    // "no", so we ask the app: its observation server reports both grants.
+    // If it does not answer, the app is not running or its server failed
+    // to bind, and the daemon captures nothing.
+    check_capture_servers(&mut counts);
 
     // Check 7: Database exists and is writable
     let db_path = data_dir.join("events.db");
@@ -215,18 +190,10 @@ pub fn run() -> Result<()> {
         check_fail(&mut counts, "Disk space (>1GB free)");
     }
 
-    // Check 12: Python virtual environment (optional — not present in source builds)
-    if paths::find_venv_python().is_some() {
-        check_pass(&mut counts, "Python virtual environment");
-    } else {
-        let hint = match channel {
-            "pkg" => "Re-run .pkg installer to repair",
-            "homebrew" => "brew reinstall agenthandover",
-            "source" => "venv not found — expected for source builds",
-            _ => "Re-install AgentHandover (.pkg recommended)",
-        };
-        check_skip(&mut counts, "Python virtual environment", hint);
-    }
+    // Check 12: Python virtual environment. Absent is fine for a source
+    // build; when the lib dir exists (a pkg install) a missing or broken
+    // venv means the worker cannot run at all, so it is a failure.
+    check_venv(&mut counts, channel);
 
     // Check 13: Chrome extension (optional — not all users need it)
     if paths::find_any_extension_path().is_some() {
@@ -358,7 +325,134 @@ pub fn run() -> Result<()> {
         println!("{}", "All checks passed!".green().bold());
     }
 
+    if counts.failures > 0 {
+        anyhow::bail!("{} doctor check(s) failed", counts.failures);
+    }
     Ok(())
+}
+
+fn check_capture_servers(counts: &mut CheckCounts) {
+    let obs_sock = observation_socket_path();
+    match snapshot_at(&obs_sock) {
+        Ok(snap) => {
+            check_pass(
+                counts,
+                &format!("Observation server ({})", obs_sock.display()),
+            );
+            if snap.accessibility_granted {
+                check_pass(counts, "Accessibility permission (AgentHandover.app)");
+            } else {
+                check_fail(counts, "Accessibility permission (AgentHandover.app)");
+                eprintln!(
+                    "  Fix: System Settings > Privacy & Security > Accessibility: enable AgentHandover"
+                );
+            }
+            if snap.screen_recording_granted {
+                check_pass(counts, "Screen Recording permission (AgentHandover.app)");
+            } else {
+                check_fail(counts, "Screen Recording permission (AgentHandover.app)");
+                eprintln!(
+                    "  Fix: System Settings > Privacy & Security > Screen Recording: enable AgentHandover"
+                );
+            }
+        }
+        Err(e) => {
+            check_fail(
+                counts,
+                &format!("Observation server ({})", obs_sock.display()),
+            );
+            eprintln!(
+                "  AgentHandover.app is not running or its capture server failed to bind \
+                 — the daemon captures nothing without it ({})",
+                e
+            );
+            eprintln!("  Fix: open AgentHandover.app (it lives in /Applications)");
+        }
+    }
+
+    let cap_sock = capture_socket_path();
+    if is_socket(&cap_sock) {
+        check_pass(counts, &format!("Capture socket ({})", cap_sock.display()));
+    } else {
+        check_fail(counts, &format!("Capture socket ({})", cap_sock.display()));
+        eprintln!("  AgentHandover.app serves screenshots on this socket; open the app.");
+    }
+}
+
+#[cfg(unix)]
+fn is_socket(path: &std::path::Path) -> bool {
+    use std::os::unix::fs::FileTypeExt;
+    std::fs::metadata(path)
+        .map(|m| m.file_type().is_socket())
+        .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+fn is_socket(_path: &std::path::Path) -> bool {
+    false
+}
+
+/// Python run in the venv: the worker and its MCP dependency must import,
+/// and it prints the installed worker version.
+const VENV_PROBE: &str = "import importlib.metadata as m, agenthandover_worker, mcp; \
+                          print(m.version('agenthandover-worker'))";
+
+fn check_venv(counts: &mut CheckCounts, channel: &str) {
+    const NAME: &str = "Python virtual environment";
+    let lib_dir = paths::lib_dir();
+    let Some(python) = paths::find_venv_python() else {
+        if lib_dir.exists() {
+            check_fail(counts, NAME);
+            eprintln!("  {} has no working venv/bin/python", lib_dir.display());
+            print_install_hint(channel);
+        } else {
+            let hint = match channel {
+                "homebrew" => "brew reinstall agenthandover",
+                "source" => "venv not found — expected for source builds",
+                _ => "Re-install AgentHandover (.pkg recommended)",
+            };
+            check_skip(counts, NAME, hint);
+        }
+        return;
+    };
+
+    let probe = std::process::Command::new(&python)
+        .args(["-c", VENV_PROBE])
+        .output();
+    let outcome = match probe {
+        Ok(out) if out.status.success() => {
+            venv_version_verdict(&String::from_utf8_lossy(&out.stdout), env!("CARGO_PKG_VERSION"))
+        }
+        Ok(out) => Err(format!(
+            "worker does not import: {}",
+            String::from_utf8_lossy(&out.stderr)
+                .lines()
+                .last()
+                .unwrap_or("unknown error")
+        )),
+        Err(e) => Err(format!("cannot run {}: {}", python.display(), e)),
+    };
+    match outcome {
+        Ok(version) => check_pass(counts, &format!("{} (worker {})", NAME, version)),
+        Err(reason) => {
+            check_fail(counts, &format!("{} ({})", NAME, reason));
+            print_install_hint(channel);
+        }
+    }
+}
+
+/// Compare the venv's reported worker version with the CLI's own.
+fn venv_version_verdict(probe_stdout: &str, cli_version: &str) -> Result<String, String> {
+    let worker_version = probe_stdout.trim();
+    if worker_version == cli_version {
+        Ok(worker_version.to_string())
+    } else {
+        Err(format!(
+            "worker {} does not match CLI {}",
+            if worker_version.is_empty() { "?" } else { worker_version },
+            cli_version
+        ))
+    }
 }
 
 fn check_pass(counts: &mut CheckCounts, name: &str) {
@@ -527,7 +621,12 @@ fn native_messaging_manifest_path() -> std::path::PathBuf {
     )
 }
 
+/// `AH_LAUNCH_AGENTS` (a temporary-prefix install, as in postinstall) or
+/// `~/Library/LaunchAgents`.
 fn launch_agents_dir() -> std::path::PathBuf {
+    if let Some(dir) = std::env::var_os("AH_LAUNCH_AGENTS").filter(|d| !d.is_empty()) {
+        return std::path::PathBuf::from(dir);
+    }
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
     std::path::PathBuf::from(home).join("Library/LaunchAgents")
 }
@@ -630,4 +729,25 @@ fn check_native_messaging_manifest() -> bool {
     }
 
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn venv_version_matches_cli() {
+        assert_eq!(venv_version_verdict("0.4.0\n", "0.4.0"), Ok("0.4.0".to_string()));
+    }
+
+    #[test]
+    fn venv_version_mismatch_fails() {
+        let err = venv_version_verdict("0.3.2\n", "0.4.0").unwrap_err();
+        assert!(err.contains("0.3.2") && err.contains("0.4.0"), "{err}");
+    }
+
+    #[test]
+    fn venv_version_empty_output_fails() {
+        assert!(venv_version_verdict("", "0.4.0").is_err());
+    }
 }

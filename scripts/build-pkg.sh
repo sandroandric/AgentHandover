@@ -6,7 +6,12 @@ REPO_ROOT="$(cd "$SCRIPTS_DIR/.." && pwd)"
 # Read version from Info.plist (source of truth)
 VERSION="${VERSION:-$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "${REPO_ROOT}/app/AgentHandoverApp/Sources/AgentHandoverApp/Info.plist" 2>/dev/null || echo "0.1.0")}"
 PKG_ROOT="$(mktemp -d)"
+SCRIPTS_STAGING="$(mktemp -d)"
 OUTPUT="${REPO_ROOT}/target/AgentHandover-${VERSION}.pkg"
+trap 'rm -rf "${PKG_ROOT}" "${SCRIPTS_STAGING}"' EXIT
+
+# Oldest Sparkle we ship (2.9.6 carries the dockless-app update-window fix).
+MIN_SPARKLE_VERSION="2.9.6"
 
 echo "=== Building AgentHandover ${VERSION} ==="
 
@@ -80,47 +85,70 @@ mkdir -p "${PKG_ROOT}/usr/local/lib/agenthandover/worker"
 cp -R "${REPO_ROOT}/worker/src" "${PKG_ROOT}/usr/local/lib/agenthandover/worker/src"
 cp "${REPO_ROOT}/worker/pyproject.toml" "${PKG_ROOT}/usr/local/lib/agenthandover/worker/"
 
-# Copy SwiftUI app if built — SPM produces a binary, not a .app bundle.
-# Wrap it in a minimal .app structure for /Applications.
+# Build the SwiftUI app. It owns Screen Recording and spawns the daemon, so
+# a package without it is broken: fail instead of shipping one.
+# SPM produces a binary, not a .app bundle; wrap it in a minimal .app for
+# /Applications.
+echo "Building app..."
 APP_BINARY="${REPO_ROOT}/app/AgentHandoverApp/.build/release/AgentHandoverApp"
-if [ -f "${APP_BINARY}" ]; then
-    APP_BUNDLE="${PKG_ROOT}/Applications/AgentHandover.app/Contents/MacOS"
-    mkdir -p "${APP_BUNDLE}"
-    cp "${APP_BINARY}" "${APP_BUNDLE}/AgentHandover"
-    cp "${REPO_ROOT}/app/AgentHandoverApp/Sources/AgentHandoverApp/Info.plist" \
-       "${PKG_ROOT}/Applications/AgentHandover.app/Contents/Info.plist"
+( cd "${REPO_ROOT}/app/AgentHandoverApp" && swift build -c release )
+[ -f "${APP_BINARY}" ] || { echo "FATAL: ${APP_BINARY} missing after swift build" >&2; exit 1; }
+APP_BUNDLE="${PKG_ROOT}/Applications/AgentHandover.app/Contents/MacOS"
+mkdir -p "${APP_BUNDLE}"
+cp "${APP_BINARY}" "${APP_BUNDLE}/AgentHandover"
+cp "${REPO_ROOT}/app/AgentHandoverApp/Sources/AgentHandoverApp/Info.plist" \
+   "${PKG_ROOT}/Applications/AgentHandover.app/Contents/Info.plist"
 
-    # Add rpath for embedded frameworks so Sparkle.framework loads at runtime
-    install_name_tool -add_rpath @loader_path/../Frameworks "${APP_BUNDLE}/AgentHandover" 2>/dev/null || true
+# Add rpath for embedded frameworks so Sparkle.framework loads at runtime
+install_name_tool -add_rpath @loader_path/../Frameworks "${APP_BUNDLE}/AgentHandover" 2>/dev/null || true
 
-    # Copy frameworks (Sparkle) to Contents/Frameworks
-    FRAMEWORKS_DIR="${PKG_ROOT}/Applications/AgentHandover.app/Contents/Frameworks"
-    mkdir -p "${FRAMEWORKS_DIR}"
-    for FW in "${REPO_ROOT}"/app/AgentHandoverApp/.build/release/*.framework; do
-        [ -d "${FW}" ] || continue
-        cp -R "${FW}" "${FRAMEWORKS_DIR}/"
-        echo "  Framework included: $(basename "${FW}")"
-    done
+# Copy frameworks (Sparkle) to Contents/Frameworks
+FRAMEWORKS_DIR="${PKG_ROOT}/Applications/AgentHandover.app/Contents/Frameworks"
+mkdir -p "${FRAMEWORKS_DIR}"
+for FW in "${REPO_ROOT}"/app/AgentHandoverApp/.build/release/*.framework; do
+    [ -d "${FW}" ] || continue
+    cp -R "${FW}" "${FRAMEWORKS_DIR}/"
+    echo "  Framework included: $(basename "${FW}")"
+done
 
-    # Copy SPM resource bundle + icon to Contents/Resources
-    RESOURCES_DIR="${PKG_ROOT}/Applications/AgentHandover.app/Contents/Resources"
-    mkdir -p "${RESOURCES_DIR}"
-    found_resource_bundle=false
-    for RESOURCE_BUNDLE in "${REPO_ROOT}"/app/AgentHandoverApp/.build/release/*.bundle; do
-        [ -d "${RESOURCE_BUNDLE}" ] || continue
-        cp -R "${RESOURCE_BUNDLE}" "${RESOURCES_DIR}/"
-        found_resource_bundle=true
-        echo "  App resource bundle included: $(basename "${RESOURCE_BUNDLE}")"
-        # Copy icon to top-level Resources for Finder/Dock
-        if [ -f "${RESOURCE_BUNDLE}/AppIcon.icns" ]; then
-            cp "${RESOURCE_BUNDLE}/AppIcon.icns" "${RESOURCES_DIR}/AppIcon.icns"
-            echo "  App icon included."
-        fi
-    done
-    if [ "${found_resource_bundle}" = false ]; then
-        echo "  Warning: no SPM resource bundle found for AgentHandoverApp."
+# Copy SPM resource bundle + icon to Contents/Resources
+RESOURCES_DIR="${PKG_ROOT}/Applications/AgentHandover.app/Contents/Resources"
+mkdir -p "${RESOURCES_DIR}"
+found_resource_bundle=false
+for RESOURCE_BUNDLE in "${REPO_ROOT}"/app/AgentHandoverApp/.build/release/*.bundle; do
+    [ -d "${RESOURCE_BUNDLE}" ] || continue
+    cp -R "${RESOURCE_BUNDLE}" "${RESOURCES_DIR}/"
+    found_resource_bundle=true
+    echo "  App resource bundle included: $(basename "${RESOURCE_BUNDLE}")"
+    # Copy icon to top-level Resources for Finder/Dock
+    if [ -f "${RESOURCE_BUNDLE}/AppIcon.icns" ]; then
+        cp "${RESOURCE_BUNDLE}/AppIcon.icns" "${RESOURCES_DIR}/AppIcon.icns"
+        echo "  App icon included."
     fi
+done
+if [ "${found_resource_bundle}" = false ]; then
+    echo "  Warning: no SPM resource bundle found for AgentHandoverApp."
 fi
+
+# Staging assertions: never build a package without a runnable app and
+# its updater.
+STAGED_APP="${PKG_ROOT}/Applications/AgentHandover.app"
+STAGED_SPARKLE="${STAGED_APP}/Contents/Frameworks/Sparkle.framework"
+if [ ! -x "${STAGED_APP}/Contents/MacOS/AgentHandover" ]; then
+    echo "FATAL: ${STAGED_APP}/Contents/MacOS/AgentHandover is missing or not executable" >&2
+    exit 1
+fi
+if [ ! -d "${STAGED_SPARKLE}" ]; then
+    echo "FATAL: ${STAGED_SPARKLE} is missing" >&2
+    exit 1
+fi
+SPARKLE_VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" \
+    "${STAGED_SPARKLE}/Resources/Info.plist" 2>/dev/null || echo "0")
+if [ "$(printf '%s\n%s\n' "${MIN_SPARKLE_VERSION}" "${SPARKLE_VERSION}" | sort -V | head -1)" != "${MIN_SPARKLE_VERSION}" ]; then
+    echo "FATAL: staged Sparkle is ${SPARKLE_VERSION}; need >= ${MIN_SPARKLE_VERSION}" >&2
+    exit 1
+fi
+echo "  Staged app and Sparkle ${SPARKLE_VERSION} verified."
 
 # Codesign all binaries with Developer ID Application + hardened runtime + timestamp
 CODESIGN_IDENTITY="${CODESIGN_IDENTITY:-}"
@@ -170,11 +198,12 @@ else
     echo "  Notarization will fail without codesigned binaries."
 fi
 
-# Copy install scripts
-SCRIPTS_STAGING="$(mktemp -d)"
+# Copy install scripts (resolve-user.sh is sourced by both)
 cp "${REPO_ROOT}/resources/pkg/scripts/preinstall" "${SCRIPTS_STAGING}/"
 cp "${REPO_ROOT}/resources/pkg/scripts/postinstall" "${SCRIPTS_STAGING}/"
+cp "${REPO_ROOT}/resources/pkg/scripts/resolve-user.sh" "${SCRIPTS_STAGING}/"
 chmod +x "${SCRIPTS_STAGING}/preinstall" "${SCRIPTS_STAGING}/postinstall"
+
 
 # Generate component plist to disable app relocation.
 # Without this, macOS Installer "relocates" the app back to wherever
@@ -228,8 +257,8 @@ else
     echo "  Users will need to right-click → Open to bypass Gatekeeper."
 fi
 
-# Cleanup
-rm -rf "${PKG_ROOT}" "${SCRIPTS_STAGING}" "${COMPONENT_PKG}"
+# Cleanup (PKG_ROOT and SCRIPTS_STAGING go in the EXIT trap)
+rm -rf "${COMPONENT_PKG}"
 
 echo ""
 echo "=== Package built: ${OUTPUT} ==="

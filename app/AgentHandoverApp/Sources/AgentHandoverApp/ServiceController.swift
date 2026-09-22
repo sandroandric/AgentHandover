@@ -51,9 +51,32 @@ final class ServiceController {
         }
     }
 
+    // MARK: - Bounded polling
+
+    /// Poll `condition` every `interval` until it holds or `timeout` passes.
+    /// Returns whether it held. Replaces fixed sleeps: the common fast case
+    /// returns after the first check or two instead of a full sleep.
+    @discardableResult
+    static func waitUntil(
+        timeout: TimeInterval = 5,
+        interval: TimeInterval = 0.05,
+        _ condition: () -> Bool
+    ) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while true {
+            if condition() { return true }
+            if Date() >= deadline { return false }
+            Thread.sleep(forTimeInterval: interval)
+        }
+    }
+
     // MARK: - Daemon (app-launched)
 
     /// Start daemon as a detached helper executable. Returns true if process is running.
+    ///
+    /// A daemon this app spawns is supervised: if it exits abnormally while
+    /// the user wants observation on, it is restarted with backoff (see
+    /// `DaemonSupervisor`).
     @discardableResult
     static func startDaemon() -> Bool {
 
@@ -86,10 +109,17 @@ final class ServiceController {
             process.standardError = FileHandle.nullDevice
         }
 
+        process.terminationHandler = { finished in
+            DaemonSupervisor.shared.daemonExited(
+                reason: finished.terminationReason,
+                status: finished.terminationStatus
+            )
+        }
+
         do {
+            DaemonSupervisor.shared.daemonWillStart()
             try process.run()
-            Thread.sleep(forTimeInterval: 0.5)
-            return isDaemonRunning()
+            return waitUntil { isDaemonRunning() }
         } catch {
             NSLog("ServiceController: failed to launch daemon executable %@ (%@)", daemonExecPath, error.localizedDescription)
             return false
@@ -109,8 +139,10 @@ final class ServiceController {
     /// files (lines 97-101) and other code still uses it as the source of
     /// truth for which process to signal.
     static func stopDaemon() {
+        DaemonSupervisor.shared.stopRequested()
         guard let pid = daemonPid() else { return }
         kill(pid, SIGTERM)
+        waitUntil { !isDaemonRunning() }
 
         // Remove stale status file so status tooling reports a clean "stopped"
         // state instead of "not responding". Best-effort — file may not exist.
@@ -155,11 +187,7 @@ final class ServiceController {
 
     /// Block until the daemon process exits (up to timeout).
     static func waitForDaemonExit(timeoutSeconds: Int = 5) {
-        let iterations = timeoutSeconds * 5
-        for _ in 0..<iterations {
-            if !isDaemonRunning() { return }
-            Thread.sleep(forTimeInterval: 0.2)
-        }
+        waitUntil(timeout: TimeInterval(timeoutSeconds)) { !isDaemonRunning() }
     }
 
     // MARK: - Worker (launchd-managed)
@@ -168,8 +196,7 @@ final class ServiceController {
     static func startWorker() -> Bool {
         bootstrapIfNeeded(label: workerLabel)
         kickstart(label: workerLabel)
-        Thread.sleep(forTimeInterval: 0.5)
-        return isJobRunning(label: workerLabel)
+        return waitUntil { isJobRunning(label: workerLabel) }
     }
 
     static func stopWorker() {
@@ -211,7 +238,7 @@ final class ServiceController {
 
     static func restartWorker() {
         stopWorker()
-        Thread.sleep(forTimeInterval: 0.5)
+        waitUntil { !isJobRunning(label: workerLabel) }
         startWorker()
     }
 

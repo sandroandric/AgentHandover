@@ -113,6 +113,11 @@ test-extension:
     cd extension
     npm test 2>/dev/null || npx vitest run
 
+# Install journey: pre/postinstall into temp prefixes, doctor, build-pkg guards
+# (run with sudo on a test Mac to also check root ownership)
+test-install:
+    bash tests/install/test_install.sh
+
 # Package .pkg installer
 package-pkg: build-all build-app
     #!/usr/bin/env bash

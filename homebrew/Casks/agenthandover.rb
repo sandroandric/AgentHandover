@@ -21,7 +21,7 @@ cask "agenthandover" do
   # all of that by running the exact same signed pkg that release users
   # install, so brew users get bit-identical behavior.
 
-  depends_on macos: ">= :ventura"
+  depends_on macos: ">= :sonoma"
 
   pkg "AgentHandover-#{version}.pkg"
 

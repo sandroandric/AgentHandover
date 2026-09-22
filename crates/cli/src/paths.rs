@@ -5,6 +5,19 @@
 
 use std::path::PathBuf;
 
+/// Where the .pkg installs the daemon, worker venv and extension.
+pub const DEFAULT_LIB_DIR: &str = "/usr/local/lib/agenthandover";
+
+/// The install's lib dir: `AH_LIB_DIR` when set (a test or developer
+/// install into a temporary prefix, the same variable postinstall honours),
+/// else [`DEFAULT_LIB_DIR`].
+pub fn lib_dir() -> PathBuf {
+    match std::env::var_os("AH_LIB_DIR") {
+        Some(dir) if !dir.is_empty() => PathBuf::from(dir),
+        _ => PathBuf::from(DEFAULT_LIB_DIR),
+    }
+}
+
 /// Resolve the Homebrew `libexec` directory by tracing the running binary
 /// back through its symlink chain.  Returns `None` when not a Homebrew install.
 ///
@@ -45,12 +58,12 @@ pub fn find_homebrew_libexec() -> Option<PathBuf> {
 /// extension in Chrome, or `None` if not found.
 ///
 /// Search order:
-/// 1. Pkg installer: `/usr/local/lib/agenthandover/extension/dist`
+/// 1. Pkg installer: `<lib dir>/extension`
 /// 2. Homebrew libexec: `<libexec>/extension/` (flat layout with manifest.json)
 /// 3. Well-known Homebrew opt paths
 pub fn find_extension_dir() -> Option<PathBuf> {
     // Pkg installer path (flat layout: manifest.json + JS files at root)
-    let pkg_path = PathBuf::from("/usr/local/lib/agenthandover/extension");
+    let pkg_path = lib_dir().join("extension");
     if pkg_path.join("manifest.json").exists() {
         return Some(pkg_path);
     }
@@ -101,7 +114,7 @@ pub fn find_any_extension_path() -> Option<PathBuf> {
 /// Returns the path to the venv's `python` binary, or `None` if not found.
 pub fn find_venv_python() -> Option<PathBuf> {
     // Pkg installer path
-    let pkg_python = PathBuf::from("/usr/local/lib/agenthandover/venv/bin/python");
+    let pkg_python = lib_dir().join("venv/bin/python");
     if pkg_python.exists() {
         return Some(pkg_python);
     }
@@ -126,7 +139,7 @@ pub fn find_venv_python() -> Option<PathBuf> {
 /// installed setups find `ah-observer`.
 ///
 /// Search order:
-/// 1. Pkg/cask install: `/usr/local/lib/agenthandover/ah-observer`
+/// 1. Pkg/cask install: `<lib dir>/ah-observer`
 /// 2. Legacy pkg install (pre-v0.2.1): `/usr/local/bin/agenthandover-daemon`
 /// 3. Homebrew libexec: `<libexec>/bin/agenthandover-daemon` (old HEAD formula)
 /// 4. Cargo source build: `target/{release,debug,universal-release}/agenthandover-daemon`
@@ -136,7 +149,7 @@ pub fn find_daemon_binary() -> Option<PathBuf> {
     // 1. Pkg/cask install (v0.2.1+). The Swift app hardcodes this exact
     //    path as `ServiceController.daemonExecutableURL`, so any install
     //    that goes through the pkg installer produces this layout.
-    let pkg_observer = PathBuf::from("/usr/local/lib/agenthandover/ah-observer");
+    let pkg_observer = lib_dir().join("ah-observer");
     if is_executable(&pkg_observer) {
         return Some(pkg_observer);
     }

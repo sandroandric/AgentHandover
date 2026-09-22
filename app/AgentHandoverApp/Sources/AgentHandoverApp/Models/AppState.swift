@@ -113,6 +113,8 @@ final class AppState: ObservableObject {
     @Published var extensionConnected = false
     @Published var health: ServiceHealth = .down
     @Published var userStopped = UserDefaults.standard.bool(forKey: "observingPaused")
+    /// Set when the app had to restart a crashed daemon (see DaemonSupervisor).
+    @Published var daemonSupervisorStatus: String?
 
     // Permissions — app-owned and checked directly by AgentHandover.app.
     @Published var accessibilityGranted = false
@@ -183,6 +185,7 @@ final class AppState: ObservableObject {
     // MARK: - Polling
 
     private var pollTimer: Timer?
+    private var supervisorObserver: NSObjectProtocol?
     private let statusDir: URL
 
     init() {
@@ -190,6 +193,13 @@ final class AppState: ObservableObject {
         self.statusDir = home
             .appendingPathComponent("Library/Application Support/agenthandover")
 
+        supervisorObserver = NotificationCenter.default.addObserver(
+            forName: DaemonSupervisor.statusChanged, object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.daemonSupervisorStatus = DaemonSupervisor.shared.statusLine
+            }
+        }
         startPolling()
     }
 

@@ -13,10 +13,21 @@
     </array>
 
     <key>RunAtLoad</key>
-    <false/>
+    <true/>
 
+    <!-- Restart after a crash or error exit; a clean exit (stop) stays stopped. -->
     <key>KeepAlive</key>
-    <false/>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <!-- launchd's default PATH lacks Homebrew, so `ollama` would not resolve. -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
 
     <key>ThrottleInterval</key>
     <integer>3</integer>

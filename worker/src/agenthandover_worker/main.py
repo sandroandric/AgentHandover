@@ -43,6 +43,12 @@ from agenthandover_worker.task_segmenter import TaskSegmenter, SegmenterConfig
 from agenthandover_worker.scheduler import IdleJobGate, SchedulerConfig
 from agenthandover_worker.translator import SemanticTranslator
 from agenthandover_worker.vlm_queue import VLMFallbackQueue, VLMJob
+from agenthandover_worker.loop_guard import (
+    ERROR_THRESHOLD,
+    EventRetryGuard,
+    error_backoff_seconds,
+    interruptible_sleep,
+)
 
 logger = logging.getLogger("agenthandover_worker")
 
@@ -4685,6 +4691,7 @@ def main(argv: list[str] | None = None) -> None:
 
         current_interval = args.poll_interval
         consecutive_errors = 0
+        event_guard = EventRetryGuard(max_batch=100)
 
         # App and CLI requests arrive through the trigger spool; each kind
         # maps to one handler.
@@ -4776,6 +4783,9 @@ def main(argv: list[str] | None = None) -> None:
             if vector_kb is not None:
                 vector_kb.reset_cycle_budget()
 
+            # Events handed to run_pipeline and not yet marked processed;
+            # an error while this is non-empty counts against them.
+            inflight_event_ids: list[str] = []
             try:
                 # App and CLI requests first, oldest first
                 triggers_consumed = trigger_spool.drain(
@@ -4843,7 +4853,9 @@ def main(argv: list[str] | None = None) -> None:
                     )
                     _write_sops_index(db, knowledge_base)
 
-                unprocessed = db.get_unprocessed_events(limit=100)
+                unprocessed = db.get_unprocessed_events(
+                    limit=event_guard.batch_limit
+                )
                 pending_vlm = db.get_pending_vlm_jobs(limit=10)
 
                 if unprocessed or pending_vlm:
@@ -4879,6 +4891,9 @@ def main(argv: list[str] | None = None) -> None:
                     # Core pipeline ALWAYS runs — episodes, translation,
                     # SOP mining, and export happen immediately so users
                     # see SOPs as soon as patterns are detected.
+                    inflight_event_ids = [
+                        ev["id"] for ev in unprocessed if "id" in ev
+                    ]
                     pipeline_start = time.monotonic()
                     summary = run_pipeline(
                         unprocessed,
@@ -4923,16 +4938,14 @@ def main(argv: list[str] | None = None) -> None:
                         )
 
                     # Mark processed events so they are not re-read (GAP 4)
-                    event_ids = [ev["id"] for ev in unprocessed if "id" in ev]
-                    if event_ids:
-                        db.mark_events_processed(event_ids)
+                    if inflight_event_ids:
+                        db.mark_events_processed(inflight_event_ids)
+                    event_guard.succeeded(inflight_event_ids)
+                    inflight_event_ids = []
 
                     # Persist in-memory VLM queue jobs to the DB so they survive restarts
                     if summary["vlm_enqueued"] > 0:
                         _persist_vlm_jobs(db, vlm_queue)
-
-                    # Reset consecutive error counter after successful processing
-                    consecutive_errors = 0
 
                 # Process pending VLM jobs only in idle window
                 if pending_vlm and vlm_worker is not None:
@@ -5500,6 +5513,10 @@ def main(argv: list[str] | None = None) -> None:
 
                     _last_staleness_check = _now_mono
 
+                # Any iteration that gets here without raising is healthy,
+                # whether or not it had events to process.
+                consecutive_errors = 0
+
             except Exception:
                 consecutive_errors += 1
                 logger.error(
@@ -5507,14 +5524,42 @@ def main(argv: list[str] | None = None) -> None:
                     consecutive_errors,
                     exc_info=True,
                 )
-                if consecutive_errors >= 10:
-                    logger.critical(
-                        "10 consecutive errors without successful processing, shutting down"
+                to_quarantine = event_guard.failed(inflight_event_ids)
+                if to_quarantine:
+                    db.quarantine_events(to_quarantine)
+                    logger.error(
+                        "Quarantined event %s: the pipeline failed on it "
+                        "alone repeatedly",
+                        ", ".join(to_quarantine),
                     )
-                    break
+                if consecutive_errors == ERROR_THRESHOLD:
+                    logger.critical(
+                        "%d consecutive errors; backing off (up to 5 minutes "
+                        "between attempts) and staying up",
+                        ERROR_THRESHOLD,
+                    )
+                # Keep the heartbeat fresh so the app and doctor see a
+                # worker that is alive but failing, not a dead one.
+                try:
+                    _write_worker_status(
+                        started_at=started_at,
+                        events_processed_today=total_events_processed,
+                        sops_generated=total_sops_generated,
+                        last_pipeline_duration_ms=last_pipeline_duration_ms,
+                        consecutive_errors=consecutive_errors,
+                        vlm_available=vlm_available,
+                        sop_inducer_available=sop_inducer_available,
+                        vlm_mode=vlm_mode_str,
+                        vlm_provider=vlm_provider_str or None,
+                    )
+                except Exception:
+                    logger.debug("Failed to write worker status", exc_info=True)
                 if args.once:
                     break
-                time.sleep(5)
+                interruptible_sleep(
+                    error_backoff_seconds(consecutive_errors),
+                    lambda: shutdown_flag[0],
+                )
                 continue
 
             if args.once:
