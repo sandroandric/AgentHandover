@@ -85,7 +85,14 @@ async fn main() -> Result<()> {
     };
     std::fs::create_dir_all(&log_dir).ok();
 
-    let file_appender = rolling::daily(&log_dir, "daemon.log");
+    // One file per day, `daemon.YYYY-MM-DD.log`, the newest 7 kept.
+    // `agenthandover logs daemon` resolves the newest of these.
+    let file_appender = rolling::Builder::new()
+        .rotation(rolling::Rotation::DAILY)
+        .filename_prefix("daemon")
+        .filename_suffix("log")
+        .max_log_files(7)
+        .build(&log_dir)?;
     let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
 
     tracing_subscriber::fmt()

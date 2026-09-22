@@ -112,7 +112,8 @@ fn start_daemon_direct() -> Result<()> {
             } else {
                 bail!(
                     "daemon failed to start (binary spawned but no pid file appeared). \
-                     Check logs at ~/Library/Application Support/agenthandover/logs/daemon.log*"
+                     Check the log with `agenthandover logs daemon` \
+                     (~/Library/Application Support/agenthandover/logs/daemon.*.log)"
                 );
             }
         }
