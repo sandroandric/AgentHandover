@@ -180,3 +180,16 @@ class TestCheckAll:
         assert len(reports) == 1
         assert reports[0].status == "stale"
         assert reports[0].recommended_action == "re-observe"
+
+
+class TestProcedureFreshnessNow:
+    """``procedure_freshness`` takes an explicit ``now`` (time seam)."""
+
+    def test_age_is_measured_from_given_now(self) -> None:
+        from agenthandover_worker.staleness_detector import procedure_freshness
+
+        proc = {"staleness": {"last_observed": "2026-03-13T12:00:00Z"}}
+        at_observation = datetime(2026, 3, 13, 12, tzinfo=timezone.utc)
+        one_half_life = at_observation + timedelta(days=30)
+        assert procedure_freshness(proc, now=at_observation) == 1.0
+        assert procedure_freshness(proc, now=one_half_life) == pytest.approx(0.5, abs=0.01)

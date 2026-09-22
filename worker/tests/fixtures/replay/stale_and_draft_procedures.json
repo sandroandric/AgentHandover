@@ -1,5 +1,6 @@
 {
-  "description": "Six pre-built v3 procedures at various trust levels, freshness states, and completeness. Tests procedure readiness: which procedures can execute, which can draft, and which are blocked by staleness, trust level, missing steps, or blocked domains. Uses 2026-03-13T12:00:00Z as 'today' for deterministic staleness calculations.",
+  "description": "Six pre-built v3 procedures at various trust levels, freshness states, and completeness. Tests procedure readiness: which procedures can execute, which can draft, and which are blocked by staleness, trust level, missing steps, or blocked domains. reference_date is the fixture's 'today': the replay runner shifts every procedure timestamp by (now - reference_date), so staleness ages stay the same whenever the suite runs.",
+  "reference_date": "2026-03-13T12:00:00Z",
   "events": [],
   "procedures": [
     {

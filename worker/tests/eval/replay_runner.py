@@ -10,13 +10,42 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from itertools import combinations
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
 logger = logging.getLogger(__name__)
+
+_ISO_DATETIME = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}")
+
+
+def _parse_iso(value: str) -> datetime:
+    dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def _shift_datetimes(value: Any, delta: timedelta) -> Any:
+    """Return *value* with every ISO-8601 datetime string moved by *delta*.
+
+    Date-only strings are left alone (no fixture with a ``reference_date``
+    uses them).  The output keeps the ``Z`` suffix style of the input.
+    """
+    if isinstance(value, dict):
+        return {k: _shift_datetimes(v, delta) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_shift_datetimes(v, delta) for v in value]
+    if isinstance(value, str) and _ISO_DATETIME.match(value):
+        try:
+            shifted = _parse_iso(value) + delta
+        except ValueError:
+            return value
+        text = shifted.astimezone(timezone.utc).isoformat()
+        return text.replace("+00:00", "Z") if value.endswith("Z") else text
+    return value
 
 
 # ---------------------------------------------------------------------------
@@ -47,11 +76,18 @@ class ReplayScenario:
     ground_truth: dict
 
     @classmethod
-    def load(cls, path: Path) -> ReplayScenario:
+    def load(cls, path: Path, now: datetime | None = None) -> ReplayScenario:
         """Load a single scenario from a JSON fixture file.
+
+        A fixture may declare ``reference_date`` (the ISO datetime its
+        author treated as "today").  Every datetime in its events,
+        procedures and daily summaries is then shifted by
+        ``now - reference_date``, so time-dependent checks such as
+        freshness see the same ages whenever the suite runs.
 
         Args:
             path: Path to the JSON file.
+            now: The "today" to shift to; defaults to the current UTC time.
 
         Returns:
             A fully parsed ``ReplayScenario``.
@@ -63,6 +99,13 @@ class ReplayScenario:
         """
         with open(path, encoding="utf-8") as f:
             data = json.load(f)
+
+        reference = data.get("reference_date")
+        if reference:
+            delta = (now or datetime.now(timezone.utc)) - _parse_iso(reference)
+            for key in ("events", "procedures", "daily_summaries"):
+                if key in data:
+                    data[key] = _shift_datetimes(data[key], delta)
 
         # scenario_id: prefer explicit field, fall back to filename stem
         scenario_id = data.get("scenario_id", path.stem)

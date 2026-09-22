@@ -10,8 +10,10 @@ fixture format to the format expected by ``Scorer`` methods.
 from __future__ import annotations
 
 import pytest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from agenthandover_worker.staleness_detector import procedure_freshness
 from eval.replay_runner import ReplayScenario, ReplayRunner
 from eval.scorer import Scorer
 
@@ -395,3 +397,46 @@ class TestContinuity:
         assert metrics["false_merge_rate"] <= 0.5, (
             f"High false merge rate: {metrics['false_merge_rate']}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Fixture reference date (time seam)
+# ---------------------------------------------------------------------------
+
+
+class TestReferenceDateShift:
+    """Fixtures with ``reference_date`` are replayed relative to *now*."""
+
+    REFERENCE = datetime(2026, 3, 13, 12, tzinfo=timezone.utc)
+
+    def _procs(self, now: datetime) -> dict[str, dict]:
+        scenario = ReplayScenario.load(
+            FIXTURES_DIR / "stale_and_draft_procedures.json", now=now,
+        )
+        return {p["id"]: p for p in scenario.procedures}
+
+    def test_timestamps_move_with_now(self) -> None:
+        now = datetime(2031, 7, 1, 8, 30, tzinfo=timezone.utc)
+        procs = self._procs(now)
+        # The fixture's "today" lands on *now* ...
+        assert procs["proc-fresh-autonomous"]["staleness"]["last_observed"] == (
+            "2031-07-01T08:30:00Z"
+        )
+        # ... and the stale procedure keeps its distance from "today".
+        stale = datetime.fromisoformat(
+            procs["proc-stale-autonomous"]["staleness"]["last_observed"].replace("Z", "+00:00")
+        )
+        original = datetime(2024, 1, 1, tzinfo=timezone.utc)
+        assert now - stale == self.REFERENCE - original
+
+    @pytest.mark.parametrize("days_later", [0, 190, 5 * 365])
+    def test_freshness_is_independent_of_run_date(self, days_later: int) -> None:
+        now = self.REFERENCE + timedelta(days=days_later)
+        procs = self._procs(now)
+        fresh = procedure_freshness(procs["proc-fresh-autonomous"], now=now)
+        stale = procedure_freshness(procs["proc-stale-autonomous"], now=now)
+        assert fresh == procedure_freshness(
+            self._procs(self.REFERENCE)["proc-fresh-autonomous"], now=self.REFERENCE,
+        )
+        assert fresh >= 0.9
+        assert stale < 0.1
