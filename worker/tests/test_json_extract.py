@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import pytest
 
-from agenthandover_worker.backends._json_parser import extract_json
+from agenthandover_worker.json_extract import extract_json
 
 
 class TestDirectJSON:

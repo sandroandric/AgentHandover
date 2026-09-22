@@ -1,4 +1,4 @@
-"""Robust JSON extraction from VLM model output.
+"""Robust JSON extraction from model output (the single JSON extractor).
 
 VLM models often wrap JSON in markdown code blocks, add preamble text,
 or produce slightly malformed output. This module provides a three-tier

@@ -4590,24 +4590,8 @@ def main(argv: list[str] | None = None) -> None:
         if any(vlm_status.values()):
             logger.info("VLM backend(s) detected — attempting initialization")
             try:
-                # Check if the configured model name uses Ollama naming
-                # convention (e.g. "qwen3.5:2b") vs HuggingFace repo IDs
-                # (e.g. "mlx-community/llava-1.5-7b-4bit").  Ollama names
-                # contain ":" which is invalid for HuggingFace repo IDs,
-                # so we prefer the Ollama backend when that format is used.
-                config_model_hint = _read_vlm_config_field("model", "")
-                _model_is_ollama_style = ":" in config_model_hint
-
-                if _model_is_ollama_style and vlm_status["ollama"]:
+                if vlm_status["ollama"]:
                     backend_type = VLMBackend.OLLAMA
-                elif vlm_status["mlx_vlm"] and not _model_is_ollama_style:
-                    backend_type = VLMBackend.MLX_VLM
-                elif vlm_status["ollama"]:
-                    backend_type = VLMBackend.OLLAMA
-                elif vlm_status["mlx_vlm"]:
-                    backend_type = VLMBackend.MLX_VLM
-                elif vlm_status["llama_cpp"]:
-                    backend_type = VLMBackend.LLAMA_CPP
                 elif vlm_status.get("openai_compat"):
                     base_url = os.environ.get("AGENTHANDOVER_VLM_BASE_URL", "")
                     _local_prefixes = (

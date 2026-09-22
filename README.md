@@ -323,13 +323,12 @@ sudo installer -pkg target/AgentHandover-*.pkg -target /
 
 ### Choose your AI model
 
-AgentHandover defaults to local models via Ollama (Gemma 4 QAT for 16 GB+ Macs, Qwen 3.5 for 8 GB): free, fast, private. Six backends supported:
+AgentHandover defaults to local models via Ollama (Gemma 4 QAT for 16 GB+ Macs, Qwen 3.5 for 8 GB): free, fast, private. Supported backends:
 
 | Backend | Best for |
 |---------|----------|
 | **Ollama** (default) | Local, free, private |
-| **MLX** | Fastest on Apple Silicon |
-| **llama.cpp** | Cross-platform local |
+| **OpenAI-compatible** | Local servers (LM Studio, vLLM) |
 | **OpenAI / Anthropic / Google** | Highest quality (remote, opt-in) |
 
 Switch via `config.toml` or `agenthandover setup --vlm`.
@@ -475,7 +474,7 @@ AgentHandover is early and unusually high-leverage for contributors. The prompt 
 ### Code contributions we'd love
 
 - **New agent connectors.** Follow the pattern in [`worker/src/agenthandover_worker/agent_connect.py`](worker/src/agenthandover_worker/agent_connect.py). Cursor, Windsurf, Cline, Aider, RooCode, and any agent that reads Claude Code-format skills or MCP are straightforward — the Hermes and Codex connectors are each under 150 lines.
-- **New VLM backends.** Six supported today (Ollama, MLX, llama.cpp, Anthropic, Google, OpenAI-compat) in [`worker/src/agenthandover_worker/backends/`](worker/src/agenthandover_worker/backends/). LocalAI, LM Studio, vLLM, and any OpenAI-compatible endpoint are easy drop-ins.
+- **New VLM backends.** Supported today: Ollama, Anthropic, Google, OpenAI-compat in [`worker/src/agenthandover_worker/backends/`](worker/src/agenthandover_worker/backends/). LocalAI, LM Studio, vLLM, and any OpenAI-compatible endpoint are easy drop-ins.
 - **Prompt engineering.** The prompts in [`sop_generator.py`](worker/src/agenthandover_worker/sop_generator.py) and [`behavioral_synthesizer.py`](worker/src/agenthandover_worker/behavioral_synthesizer.py) drive the entire output quality. If you see a way to make them more precise, more robust, or better at handling your language, send a PR.
 - **Browser extension ports.** Chrome / Chromium / Brave / Edge / Arc / Comet are supported. Firefox and Safari are wide open.
 - **Privacy review.** This is a local-first tool that handles sensitive data. Extra eyes on [`crates/common/src/redaction.rs`](crates/common/src/redaction.rs) and the artifact encryption path are genuinely wanted.

@@ -561,18 +561,6 @@ class TestBackendFactory:
         worker = VLMWorker()
         assert isinstance(worker._backend, MockVLMBackend)
 
-    def test_creates_mlx_backend(self) -> None:
-        from agenthandover_worker.backends.mlx_vlm import MLXVLMBackend
-        config = VLMConfig(backend=VLMBackend.MLX_VLM)
-        worker = VLMWorker(config=config)
-        assert isinstance(worker._backend, MLXVLMBackend)
-
-    def test_creates_llama_cpp_backend(self) -> None:
-        from agenthandover_worker.backends.llama_cpp import LlamaCppBackend
-        config = VLMConfig(backend=VLMBackend.LLAMA_CPP)
-        worker = VLMWorker(config=config)
-        assert isinstance(worker._backend, LlamaCppBackend)
-
     def test_creates_ollama_backend(self) -> None:
         from agenthandover_worker.backends.ollama import OllamaBackend
         config = VLMConfig(backend=VLMBackend.OLLAMA)
@@ -585,10 +573,8 @@ class TestBackendFactory:
         worker = VLMWorker(config=config)
         assert isinstance(worker._backend, OpenAICompatBackend)
 
-    def test_enum_has_7_members(self) -> None:
-        assert len(VLMBackend) == 7
-        assert VLMBackend.MLX_VLM.value == "mlx-vlm"
-        assert VLMBackend.LLAMA_CPP.value == "llama-cpp-python"
+    def test_enum_has_5_members(self) -> None:
+        assert len(VLMBackend) == 5
         assert VLMBackend.OLLAMA.value == "ollama"
         assert VLMBackend.OPENAI_COMPAT.value == "openai-compat"
         assert VLMBackend.ANTHROPIC.value == "anthropic"
