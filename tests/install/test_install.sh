@@ -401,6 +401,17 @@ run_build "${T}" "${WORK}/build-goodsparkle.log"
 check "Sparkle 2.9.6 with an app binary passes the staging checks" \
     contains "${WORK}/build-goodsparkle.log" "Staged app and Sparkle 2.9.6 verified."
 
+# ---------------------------------------------------------------------------
+# minimum macOS
+# ---------------------------------------------------------------------------
+echo ""
+echo "== minimum macOS agrees everywhere (14, Sonoma) =="
+check "app Info.plist LSMinimumSystemVersion is 14.0" test "$(plist_value \
+    "${REPO_ROOT}/app/AgentHandoverApp/Sources/AgentHandoverApp/Info.plist" LSMinimumSystemVersion)" = "14.0"
+check "Package.swift targets .macOS(.v14)" contains "${REPO_ROOT}/app/AgentHandoverApp/Package.swift" ".macOS(.v14)"
+check "cask depends_on Sonoma" contains "${REPO_ROOT}/homebrew/Casks/agenthandover.rb" 'depends_on macos: ">= :sonoma"'
+check "installer distribution requires 14.0" contains "${REPO_ROOT}/resources/pkg/distribution.xml" '<os-version min="14.0"/>'
+
 echo ""
 echo "Install journey: ${PASSED} passed, ${FAILED} failed, ${SKIPPED} skipped"
 [ "${FAILED}" -eq 0 ]
