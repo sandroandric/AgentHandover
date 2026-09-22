@@ -111,10 +111,13 @@ enum Commands {
         #[arg(short = 'n', long, default_value = "20")]
         limit: usize,
     },
-    /// Connect an AI agent (claude-code, codex, openclaw, mcp)
+    /// Connect an AI agent (claude-code, codex, openclaw, hermes, mcp)
     Connect {
-        /// Which agent to connect: claude-code, codex, openclaw, mcp
+        /// Which agent to connect: claude-code, codex, openclaw, hermes, mcp
         agent: String,
+        /// Options passed to the connector (codex: --path, --append, --force)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        options: Vec<String>,
     },
     /// Recall what you were doing at a given time
     Recall {
@@ -232,35 +235,24 @@ fn main() -> Result<()> {
             FocusAction::Finalize => commands::focus::finalize(),
             FocusAction::SkipQuestions => commands::focus::skip_questions(),
         },
-        Commands::Connect { agent } => {
-            // Delegate to the Python agent_connect script
+        Commands::Connect { agent, options } => {
+            // Delegate to the Python connector: the entry point on PATH, else
+            // the pkg venv. Fall back only when the first cannot be started;
+            // a connector that ran and refused (exit 1) is not run twice.
             let status = std::process::Command::new("agenthandover-connect")
                 .arg(&agent)
-                .status();
+                .args(&options)
+                .status()
+                .or_else(|_| {
+                    std::process::Command::new("/usr/local/lib/agenthandover/venv/bin/python")
+                        .args(["-m", "agenthandover_worker.agent_connect", &agent])
+                        .args(&options)
+                        .status()
+                });
             match status {
                 Ok(s) if s.success() => Ok(()),
-                Ok(s) => {
-                    // Try fallback: call Python directly
-                    let venv = "/usr/local/lib/agenthandover/venv/bin/python";
-                    let fallback = std::process::Command::new(venv)
-                        .args(["-m", "agenthandover_worker.agent_connect", &agent])
-                        .status();
-                    match fallback {
-                        Ok(fs) if fs.success() => Ok(()),
-                        _ => anyhow::bail!("agenthandover connect failed (exit {})", s.code().unwrap_or(-1)),
-                    }
-                }
-                Err(_) => {
-                    // agenthandover-connect not in PATH, try venv directly
-                    let venv = "/usr/local/lib/agenthandover/venv/bin/python";
-                    let fallback = std::process::Command::new(venv)
-                        .args(["-m", "agenthandover_worker.agent_connect", &agent])
-                        .status();
-                    match fallback {
-                        Ok(s) if s.success() => Ok(()),
-                        _ => anyhow::bail!("Could not run agent connect. Is the worker installed?"),
-                    }
-                }
+                Ok(s) => std::process::exit(s.code().unwrap_or(1)),
+                Err(_) => anyhow::bail!("Could not run agent connect. Is the worker installed?"),
             }
         }
         Commands::Export { format, sop, output } => {
