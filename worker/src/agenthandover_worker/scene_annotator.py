@@ -650,11 +650,7 @@ def _call_ollama_vlm(
             merged into the options dict. Use model_profiles.get_profile() to
             get optimal settings per model.
     """
-    import urllib.request
-    import urllib.error
     import base64
-
-    url = f"{host}/api/generate"
 
     options = {
         "num_predict": num_predict,
@@ -689,22 +685,41 @@ def _call_ollama_vlm(
     if image_base64:
         payload["images"] = [image_base64]
 
-    body = json.dumps(payload).encode("utf-8")
+    start = time.monotonic()
+    result = ollama_generate(host, payload, timeout)
+    elapsed = time.monotonic() - start
+    return result.get("response", ""), elapsed
+
+
+def ollama_generate(host: str, payload: dict, timeout: float) -> dict:
+    """POST *payload* to ``{host}/api/generate`` and return the reply.
+
+    Classifies failures so callers can tell "try again later" from "this
+    call failed":
+
+    Raises:
+        OllamaUnavailable: Ollama unreachable (refused, reset, DNS) or the
+            model is not pulled (HTTP 404).
+        TimeoutError: no reply within *timeout*.
+        RuntimeError: any other HTTP error.
+    """
+    import urllib.request
+    import urllib.error
+
+    host_model = payload.get("model", "?")
     req = urllib.request.Request(
-        url,
-        data=body,
+        f"{host}/api/generate",
+        data=json.dumps(payload).encode("utf-8"),
         headers={"Content-Type": "application/json"},
         method="POST",
     )
-
-    start = time.monotonic()
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             result = json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         if exc.code == 404:
             raise OllamaUnavailable(
-                f"model {model!r} not available at {host}"
+                f"model {host_model!r} not available at {host}"
             ) from exc
         raise RuntimeError(f"Ollama HTTP {exc.code} at {host}: {exc.reason}") from exc
     except urllib.error.URLError as exc:
@@ -714,19 +729,18 @@ def _call_ollama_vlm(
     except ConnectionError as exc:  # reset/refused while reading the reply
         raise OllamaUnavailable(f"Ollama connection lost at {host}: {exc}") from exc
 
-    elapsed = time.monotonic() - start
     logger.debug(
         "ollama generate model=%s prompt_eval_count=%s eval_count=%s "
-        "done_reason=%s (%.1fs)",
-        model, result.get("prompt_eval_count"), result.get("eval_count"),
-        result.get("done_reason"), elapsed,
+        "done_reason=%s",
+        host_model, result.get("prompt_eval_count"), result.get("eval_count"),
+        result.get("done_reason"),
     )
     if result.get("done_reason") == "length":
         logger.warning(
-            "Ollama output for %s hit num_predict=%d and was truncated",
-            model, options.get("num_predict"),
+            "Ollama output for %s hit num_predict=%s and was truncated",
+            host_model, (payload.get("options") or {}).get("num_predict"),
         )
-    return result.get("response", ""), elapsed
+    return result
 
 
 def _ollama_has_model(host: str, model: str, timeout: float = 3.0) -> bool:

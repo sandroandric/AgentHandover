@@ -72,7 +72,7 @@ ANN_CHROME_GITHUB_FILLED = {
 
 ANN_FINDER = {
     "app": "Finder",
-    "location": "/Users/sandro/Documents",
+    "location": "/Users/jane/Documents",
     "visible_content": {
         "headings": ["Documents"],
         "labels": [],

@@ -103,7 +103,7 @@ FOR WHOM, and with WHAT TRIGGER/CADENCE? Must include: the artifact produced \
 (e.g. 'email to self', 'Slack update to team'), the recipient (specific \
 person, team, or channel if visible), and the trigger (daily, weekly, on \
 event X, etc.). Example of concrete: 'Sends a daily digest email of top 10 \
-Hacker News stories to themselves at sandro@sandric.co to stay updated on \
+Hacker News stories to themselves at jane@example.com to stay updated on \
 tech news.' Example of BAD abstract: 'research-to-communication cycle'. \
 If you cannot determine the concrete goal, say so explicitly: \
 'Unclear — recipient/cadence not visible in observations'>",
@@ -170,7 +170,7 @@ not intent.
 goal, not restating the goal itself
 - Use VERBATIM TEXT from OCR/annotations where it appears (recipient emails, \
 subject lines, URLs, item counts, selected text). Don't generalize "an email \
-address" when the observations show "sandro@sandric.co".
+address" when the observations show "jane@example.com".
 - "selection_criteria" should explain WHAT the user engages with vs skips
 - "content_templates" should capture the STRUCTURE of text the user produces
 - "decision_branches" should explain branch conditions from observed behavior
@@ -193,22 +193,30 @@ Respond with ONLY the JSON object."""
 # VLM client (reused pattern from sop_generator)
 # ---------------------------------------------------------------------------
 
+# Slowest decode rate we plan for (tokens/s on an 8GB machine): the
+# synthesis timeout must let ``num_predict`` tokens finish at this rate.
+_MIN_DECODE_TOKENS_PER_SECOND = 13.0
+
+
+def synthesis_timeout(config: "SynthesizerConfig") -> float:
+    """HTTP timeout for a synthesis call: at least ``config.timeout`` and
+    long enough to decode ``config.num_predict`` tokens at the slowest rate."""
+    return max(config.timeout, config.num_predict / _MIN_DECODE_TOKENS_PER_SECOND)
+
+
 def _call_ollama_text(
     *,
     model: str,
     prompt: str,
     host: str = "http://localhost:11434",
-    num_predict: int = 12000,
+    num_predict: int = 3000,
     system: str = "",
     timeout: float = 600.0,
     think: bool | str = True,
     extra_options: dict | None = None,
 ) -> tuple[str, float]:
     """Call Ollama's /api/generate for text-only synthesis."""
-    import urllib.request
-    import urllib.error
-
-    url = f"{host}/api/generate"
+    from agenthandover_worker.scene_annotator import ollama_generate
 
     options: dict = {"num_predict": num_predict}
     if extra_options:
@@ -224,20 +232,8 @@ def _call_ollama_text(
     if system:
         payload["system"] = system
 
-    body = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(
-        url, data=body,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-
     start = time.monotonic()
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            result = json.loads(resp.read().decode("utf-8"))
-    except urllib.error.URLError as exc:
-        raise ConnectionError(f"Ollama not reachable at {host}: {exc}") from exc
-
+    result = ollama_generate(host, payload, timeout)
     elapsed = time.monotonic() - start
     return result.get("response", ""), elapsed
 
@@ -304,7 +300,10 @@ class SynthesizerConfig:
 
     model: str = "qwen3.5:4b"
     ollama_host: str = "http://localhost:11434"
-    num_predict: int = 8000
+    # Output budget including any thinking tokens (plan: synthesis <= 3k).
+    num_predict: int = 3000
+    # Floor for the HTTP timeout; the effective timeout also covers
+    # num_predict at the slowest supported decode rate.
     timeout: float = 600.0
     min_observations: int = 3
     re_synthesis_interval: int = 3
@@ -390,10 +389,12 @@ class BehavioralSynthesizer:
                 model=self.config.model,
                 prompt=prompt,
                 host=self.config.ollama_host,
-                num_predict=12000,  # high budget — thinking consumes ~3-4K tokens
-                system=profile.sop_system or BEHAVIORAL_SYSTEM_PROMPT,
-                timeout=self.config.timeout,
-                think=profile.sop_think if profile.sop_think else True,
+                num_predict=self.config.num_predict,
+                # Never the SOP system prompt: synthesis asks for a
+                # different JSON object.
+                system=profile.synth_system or BEHAVIORAL_SYSTEM_PROMPT,
+                timeout=synthesis_timeout(self.config),
+                think=profile.sop_think,
                 extra_options={
                     k: v for k, v in profile.sop_options().items()
                     if k not in ("num_predict",)

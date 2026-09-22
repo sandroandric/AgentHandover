@@ -806,7 +806,7 @@ class TestOCRInjection:
     Historical bug (caught 2026-04-10): the scene_annotator never fed
     daemon OCR output into the VLM prompt.  Gemma re-read text visually
     from half-res screenshots and misread things like email addresses
-    (e.g. 'sandro@sandric.co' → 'sandro@sandroid.co').  The daemon-
+    (e.g. 'jane@example.com' → 'jane@exarnple.com').  The daemon-
     captured OCR had confidence 1.0 for those exact chars but sat unused.
     """
 
@@ -817,7 +817,7 @@ class TestOCRInjection:
                 "ocr": {
                     "elements": [
                         {"text": "To:", "confidence": 1.0, "bbox_normalized": [0, 0, 0.1, 0.05]},
-                        {"text": "sandro@sandric.co", "confidence": 1.0, "bbox_normalized": [0.1, 0, 0.5, 0.05]},
+                        {"text": "jane@example.com", "confidence": 1.0, "bbox_normalized": [0.1, 0, 0.5, 0.05]},
                         {"text": "Subject:", "confidence": 1.0, "bbox_normalized": [0, 0.05, 0.1, 0.1]},
                         {"text": "daily news for April 10", "confidence": 1.0, "bbox_normalized": [0.1, 0.05, 0.7, 0.1]},
                     ]
@@ -825,7 +825,7 @@ class TestOCRInjection:
             }),
         }
         text = _extract_ocr_text_from_event(event)
-        assert "sandro@sandric.co" in text
+        assert "jane@example.com" in text
         assert "daily news for April 10" in text
         assert "Subject:" in text
 
@@ -892,10 +892,10 @@ class TestOCRInjection:
         containing the actual OCR text and the ground-truth marker."""
         prompt = build_annotation_prompt(
             recent_annotations=None,
-            ocr_text="sandro@sandric.co\ndaily news for April 10",
+            ocr_text="jane@example.com\ndaily news for April 10",
         )
         # Must contain the actual OCR text we passed in
-        assert "sandro@sandric.co" in prompt
+        assert "jane@example.com" in prompt
         assert "daily news for April 10" in prompt
         # Must contain the OCR block header (only present when ocr_text is non-empty)
         assert "treat as ground truth" in prompt
@@ -922,9 +922,9 @@ class TestOCRInjection:
         ]
         prompt = build_annotation_prompt(
             recent_annotations=recent,
-            ocr_text="sandro@sandric.co",
+            ocr_text="jane@example.com",
         )
-        assert "sandro@sandric.co" in prompt
+        assert "jane@example.com" in prompt
         assert "treat as ground truth" in prompt
         assert "PREVIOUS FRAMES" in prompt
         assert "Gmail" in prompt
