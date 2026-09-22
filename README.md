@@ -86,7 +86,7 @@ If it's a workflow you've done three times and will do again, it belongs in a Sk
 3. **Answer 1-3 questions.** AgentHandover asks from the agent's perspective — *"What determines which posts you engage with?"*
 4. **Review and approve.** Open the Skill in the menu bar app, check the steps/strategy/guardrails, click **Approve for Agents**.
 5. **Connect your agent.** `agenthandover connect claude-code` (or `codex` / `openclaw`). One command.
-6. **Run it.** In Claude Code, type `/ah-reddit-community-marketing`. The agent executes your workflow.
+6. **Run it.** In Claude Code, type `/reddit-community-marketing` (or just describe the task). The agent executes your workflow.
 
 That's the whole loop. Record once, hand off forever.
 
@@ -177,7 +177,7 @@ Skills don't just describe your workflows -- they learn from every execution and
 
 ### One-click agent pairing
 
-The menu bar app detects installed agents (Claude Code, Cursor, Windsurf) and connects them with one click -- writes the MCP config automatically. No terminal, no config files.
+The menu bar app detects installed agents (Claude Code, Cursor, Windsurf, OpenClaw) and connects them with one click: Claude Code through `claude mcp add --scope user`, the others by adding the server to their MCP config file. The menu shows **Connected** only when the agent reports the server running (for Claude Code, `claude mcp list`).
 
 ## Connect Your Agent
 
@@ -214,7 +214,7 @@ Exposes 8 tools:
 agenthandover connect claude-code
 ```
 
-Skills appear as `/ah-<slug>` slash commands (the `ah-` prefix groups them together in Claude Code's command palette so your other project commands don't collide with AgentHandover's). Type `/ah-reddit-community-marketing` and Claude Code gets the full Skill.
+Installs every agent-ready Skill as a Claude Code Skill (`~/.claude/skills/<slug>/SKILL.md`) and registers the MCP server with `claude mcp add --scope user --transport stdio agenthandover -- /usr/local/bin/agenthandover-mcp`. Type `/reddit-community-marketing`, or describe the task and Claude Code picks the Skill. `/agenthandover-list` lists them.
 
 ### Codex
 
@@ -222,7 +222,7 @@ Skills appear as `/ah-<slug>` slash commands (the `ah-` prefix groups them toget
 agenthandover connect codex
 ```
 
-Generates `AGENTS.md` with all agent-ready Skills, strategy, guardrails, and voice guidance.
+Writes all agent-ready Skills, strategy, guardrails, and voice guidance into `./AGENTS.md` (or `--path`), between `<!-- BEGIN agenthandover -->` and `<!-- END agenthandover -->` markers; a rerun replaces only that block. An existing `AGENTS.md` without the markers is left alone unless you pass `--append` (add the block at the end) or `--force` (replace the file).
 
 ### OpenClaw
 

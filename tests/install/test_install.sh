@@ -163,6 +163,9 @@ check_installed_prefix() {
         "${py}" -c "import importlib.util, sys; sys.exit(importlib.util.find_spec('mlx_embeddings') is not None)"
     check "pip output logged to logs/pip-install.log" test -s "${dd}/logs/pip-install.log"
     check "default config disables image embeddings" contains "${dd}/config.toml" "image_embeddings = false"
+    check "default config: the worker exports through every adapter" \
+        env HOME="${p}/home" "${py}" -c \
+        "from agenthandover_worker.config import load_config; assert load_config().export.adapter == 'all'"
     check "install marker written" test -f "${dd}/config.toml.bak"
 
     local plist="${p}/LaunchAgents/com.agenthandover.worker.plist"

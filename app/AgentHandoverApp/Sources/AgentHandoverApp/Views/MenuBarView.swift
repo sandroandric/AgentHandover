@@ -645,11 +645,20 @@ struct MenuBarView: View {
                     Text(agent.name)
                         .font(.system(size: 12))
                     Spacer()
-                    if agent.isConnected {
+                    if agent.isBusy {
+                        ProgressView()
+                            .controlSize(.mini)
+                    } else if agent.isConnected {
                         Text("Connected")
                             .font(.system(size: 10))
                             .foregroundColor(.green)
                     } else {
+                        if let failure = agent.failure {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .font(.system(size: 10))
+                                .foregroundColor(.orange)
+                                .help(failure)
+                        }
                         Button("Connect") {
                             agentDetector.connect(agent)
                         }

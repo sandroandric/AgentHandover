@@ -97,6 +97,10 @@ def install() -> Path:
     # Tools that honour XDG before HOME must not escape the sandbox either.
     for var in ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME"):
         os.environ.pop(var, None)
+    # ``agenthandover connect claude-code`` runs the Claude Code CLI, which
+    # writes the developer's real Claude Code config.  Tests pair against a
+    # stub (they set AH_CLAUDE_BIN); anything else finds no CLI here.
+    os.environ["AH_CLAUDE_BIN"] = str(_sandbox / "claude-cli-disabled-in-tests")
     sys.addaudithook(_audit)
     return _sandbox
 

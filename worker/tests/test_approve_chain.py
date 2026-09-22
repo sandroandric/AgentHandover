@@ -80,8 +80,9 @@ class Env:
         trigger_spool.write_trigger(self.state, kind, payload)
         assert trigger_spool.drain(self.state, self.handlers()) == 1
 
-    def commands(self) -> list[str]:
-        return sorted(p.name for p in self.commands_dir.glob("ah-*.md"))
+    def skills(self) -> list[str]:
+        """Slugs of the Claude Code Skills installed."""
+        return sorted(p.parent.name for p in self.skills_dir.glob("*/SKILL.md"))
 
     def save_focus_draft(self, **overrides) -> dict:
         """What the focus v2 path stores for review: a v3 procedure."""
@@ -111,7 +112,7 @@ def env(tmp_path: Path, tmp_db_path: Path, monkeypatch) -> Env:
 class TestApproveForAgents:
     def test_one_trigger_approves_promotes_and_hands_off(self, env: Env) -> None:
         env.save_focus_draft()
-        assert env.commands() == []
+        assert env.skills() == []
 
         env.send("lifecycle-promote", {
             "kind": "lifecycle-promote", "slug": SLUG, "to_state": "agent_ready",
@@ -124,18 +125,33 @@ class TestApproveForAgents:
         assert [h["to_state"] for h in proc["lifecycle_history"]] == [
             "reviewed", "verified", "agent_ready",
         ]
-        assert env.commands() == [f"ah-{SLUG}.md"]
+        assert env.skills() == [SLUG]
         assert (env.skills_dir / SLUG / "SKILL.md").is_file()
+        # The commands dir holds only the pointer to the Skills.
+        assert [p.name for p in env.commands_dir.iterdir()] == ["agenthandover-list.md"]
+        assert f"`/{SLUG}`" in (env.commands_dir / "agenthandover-list.md").read_text()
+
+    def test_the_advertised_skill_path_is_the_path_written(self, env: Env) -> None:
+        """#17: query_api (and SOPDetailView) show ~/.claude/skills/<slug>/SKILL.md."""
+        from agenthandover_worker.query_api import procedure_export_paths
+
+        env.save_focus_draft()
+        env.send("lifecycle-promote", {"slug": SLUG, "to_state": "agent_ready"})
+
+        advertised = Path(procedure_export_paths(env.kb, SLUG)["claude_skill"])
+        assert advertised == env.home / ".claude" / "skills" / SLUG / "SKILL.md"
+        assert advertised.resolve() == (env.skills_dir / SLUG / "SKILL.md").resolve()
+        assert "report_execution_start" in advertised.read_text(encoding="utf-8")
 
     def test_demotion_removes_the_command_and_the_skill(self, env: Env) -> None:
         env.save_focus_draft()
         env.send("lifecycle-promote", {"slug": SLUG, "to_state": "agent_ready"})
-        assert env.commands() == [f"ah-{SLUG}.md"]
+        assert env.skills() == [SLUG]
 
         env.send("lifecycle-promote", {"procedure_slug": SLUG, "to_state": "stale"})
 
         assert env.kb.get_procedure(SLUG)["lifecycle_state"] == "stale"
-        assert env.commands() == []
+        assert env.skills() == []
         assert not (env.skills_dir / SLUG).exists()
 
     def test_a_draft_that_fails_lint_is_not_promoted(self, env: Env) -> None:
@@ -145,7 +161,7 @@ class TestApproveForAgents:
 
         assert env.db.get_generated_sop_by_slug(SLUG)["status"] == "draft"
         assert env.kb.get_procedure(SLUG)["lifecycle_state"] == "draft"
-        assert env.commands() == []
+        assert env.skills() == []
         assert not env.export_dir.exists()
 
     def test_a_failing_refresh_does_not_undo_the_promotion(
@@ -179,7 +195,7 @@ class TestApproveForAgents:
         assert proc["strategy"] == "Check the registrar first."
         assert proc["lifecycle_state"] == "draft"  # approval alone does not promote
         assert env.db.get_generated_sop_by_slug(SLUG)["status"] == "approved"
-        assert env.commands() == []
+        assert env.skills() == []
 
 
 class TestQAMergeUpdatesTheReviewRecord:

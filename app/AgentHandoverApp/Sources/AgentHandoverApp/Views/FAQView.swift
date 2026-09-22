@@ -156,12 +156,12 @@ struct FAQView: View {
                     FAQItem(
                         id: "how-connect",
                         question: "How do I connect an AI agent?",
-                        answer: "Click the agent name in the menu bar and hit \"Connect\". This adds AgentHandover's MCP server to the agent's configuration.\n\nSupported agents: Claude Code, Cursor, Windsurf, Codex, and any MCP-compatible tool.\n\nYou can also connect manually:\n  agenthandover connect claude-code\n  agenthandover connect mcp"
+                        answer: "Click the agent name in the menu bar and hit \"Connect\". For Claude Code this runs `claude mcp add --scope user`; for the others it adds AgentHandover's MCP server to the agent's MCP config file.\n\nSupported agents: Claude Code, Cursor, Windsurf, Codex, and any MCP-compatible tool.\n\nYou can also connect manually:\n  agenthandover connect claude-code\n  agenthandover connect mcp"
                     ),
                     FAQItem(
                         id: "how-use-skill",
                         question: "How do I tell the agent to use a Skill?",
-                        answer: "Two ways:\n\n1. Slash command: Type /ah-skill-name in Claude Code (e.g. /ah-send-weekly-report). The agent gets the full procedure with steps, strategy, and your preferences.\n\n2. Just ask: If the MCP server is connected, the agent can search your Skills. Say \"check my AgentHandover skills\" or \"do you know how to send the weekly report?\" and it will find the matching Skill."
+                        answer: "Two ways:\n\n1. Skill: Type /skill-name in Claude Code (e.g. /send-weekly-report). The agent gets the full procedure with steps, strategy, and your preferences.\n\n2. Just ask: If the MCP server is connected, the agent can search your Skills. Say \"check my AgentHandover skills\" or \"do you know how to send the weekly report?\" and it will find the matching Skill."
                     ),
                     FAQItem(
                         id: "mcp-what",

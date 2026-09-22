@@ -35,6 +35,29 @@ from agenthandover_worker.knowledge_base import KnowledgeBase
 
 logger = logging.getLogger(__name__)
 
+
+def procedure_export_paths(kb: KnowledgeBase, slug: str) -> dict[str, str]:
+    """Where *slug* has been exported, by target; only files that exist.
+
+    The Claude Code path is the one ``ClaudeSkillWriter`` and
+    ``agent_connect.connect_claude_code`` write:
+    ``<[export] claude_skills_dir>/<slugify(slug)>/SKILL.md``.
+    """
+    from pathlib import Path
+
+    from agenthandover_worker.config import load_config
+    from agenthandover_worker.skill_render import slugify
+
+    apprentice = Path.home() / ".openclaw" / "workspace" / "memory" / "apprentice"
+    candidates = {
+        "knowledge_base": kb.root / "procedures" / f"{slug}.json",
+        "openclaw": apprentice / "sops" / f"sop.{slug}.md",
+        "skill_md": apprentice / "skills" / f"SKILL.{slug}.md",
+        "claude_skill": load_config().export.skills_dir / slugify(slug) / "SKILL.md",
+    }
+    return {name: str(path) for name, path in candidates.items() if path.is_file()}
+
+
 # URL patterns
 _PROCEDURE_SLUG_RE = re.compile(r"^/procedures/([a-zA-Z0-9_-]+)$")
 _CONTEXT_NAME_RE = re.compile(r"^/context/([a-zA-Z0-9_-]+)$")
@@ -444,25 +467,7 @@ class QueryAPIHandler(http.server.BaseHTTPRequestHandler):
             except Exception:
                 pass
 
-        # Build export paths
-        export_paths = {}
-        # Check known export locations
-        from pathlib import Path
-        kb_path = kb.root / "procedures" / f"{slug}.json"
-        if kb_path.is_file():
-            export_paths["knowledge_base"] = str(kb_path)
-
-        openclaw_path = Path.home() / ".openclaw" / "workspace" / "memory" / "apprentice" / "sops" / f"sop.{slug}.md"
-        if openclaw_path.is_file():
-            export_paths["openclaw"] = str(openclaw_path)
-
-        skill_md_path = Path.home() / ".openclaw" / "workspace" / "memory" / "apprentice" / "skills" / f"SKILL.{slug}.md"
-        if skill_md_path.is_file():
-            export_paths["skill_md"] = str(skill_md_path)
-
-        claude_skill_path = Path.home() / ".claude" / "skills" / slug / "SKILL.md"
-        if claude_skill_path.is_file():
-            export_paths["claude_skill"] = str(claude_skill_path)
+        export_paths = procedure_export_paths(kb, slug)
 
         # Execution history
         exec_monitor = getattr(self.server, "execution_monitor", None)

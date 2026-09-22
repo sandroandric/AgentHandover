@@ -187,13 +187,13 @@ class TestStatusDir:
         assert isinstance(result, Path)
 
     def test_darwin_path(self) -> None:
-        with patch("agenthandover_worker.main._platform") as mock_platform:
+        with patch("agenthandover_worker.paths.platform") as mock_platform:
             mock_platform.system.return_value = "Darwin"
             result = _status_dir()
         assert "Library/Application Support/agenthandover" in str(result)
 
     def test_linux_path(self) -> None:
-        with patch("agenthandover_worker.main._platform") as mock_platform:
+        with patch("agenthandover_worker.paths.platform") as mock_platform:
             mock_platform.system.return_value = "Linux"
             result = _status_dir()
         assert ".local/share/agenthandover" in str(result)

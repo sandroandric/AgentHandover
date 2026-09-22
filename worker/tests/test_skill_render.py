@@ -165,12 +165,12 @@ def test_focus_approve_and_mcp_read_the_same_packet(tmp_path: Path):
     skill = ClaudeSkillWriter(skills_dir=tmp_path / "skills").write_procedure(proc)
     focus_body = _body_of(skill.read_text(encoding="utf-8"))
 
-    # Approve: connect claude-code writes the slash command.
-    commands = tmp_path / "commands"
+    # Approve: connect claude-code writes the Claude Code Skill.
+    approve_skills = tmp_path / "approve-skills"
     with patch("agenthandover_worker.agent_connect._get_kb_root", return_value=kb_root):
-        connect_claude_code(commands_dir=commands)
+        connect_claude_code(commands_dir=tmp_path / "commands", skills_dir=approve_skills)
     approve_body = _body_of(
-        (commands / f"ah-{proc['id']}.md").read_text(encoding="utf-8")
+        (approve_skills / proc["id"] / "SKILL.md").read_text(encoding="utf-8")
     )
 
     # MCP: get_skill returns the packet.
@@ -461,7 +461,7 @@ def test_two_ticks_keep_both_skills_in_every_catalogue(tmp_path: Path):
         kb.save_procedure(proc)
         openclaw.write_procedure(proc)
         with patch("agenthandover_worker.agent_connect._get_kb_root", return_value=kb_root):
-            connect_claude_code(commands_dir=commands)
+            connect_claude_code(commands_dir=commands, skills_dir=tmp_path / "skills")
 
     catalogue = (openclaw.apprentice_dir / "index.md").read_text(encoding="utf-8")
     assert "**Total SOPs:** 2" in catalogue
@@ -469,8 +469,11 @@ def test_two_ticks_keep_both_skills_in_every_catalogue(tmp_path: Path):
     assert "`check-domain-price`" in catalogue
 
     listing = (commands / "agenthandover-list.md").read_text(encoding="utf-8")
-    assert "`/ah-check-domain-availability`" in listing
-    assert "`/ah-check-domain-price`" in listing
+    assert "`/check-domain-availability`" in listing
+    assert "`/check-domain-price`" in listing
+    assert sorted(p.parent.name for p in (tmp_path / "skills").glob("*/SKILL.md")) == [
+        "check-domain-availability", "check-domain-price",
+    ]
 
 
 def test_openclaw_keeps_a_hand_edited_file(tmp_path: Path):

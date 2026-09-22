@@ -6,18 +6,12 @@ consume procedures without custom integration.
 
 Usage::
 
-    agenthandover serve-mcp          # stdio transport (default)
-    agenthandover serve-mcp --sse    # SSE transport for HTTP clients
+    agenthandover-mcp                # stdio transport (default)
+    agenthandover-mcp --sse          # SSE transport for HTTP clients
 
-Configure in Claude Code settings.json::
-
-    {
-      "mcpServers": {
-        "agenthandover": {
-          "command": "agenthandover-mcp"
-        }
-      }
-    }
+Pair Claude Code with ``agenthandover connect claude-code`` (it runs
+``claude mcp add --scope user --transport stdio agenthandover -- <path>``);
+``agenthandover connect mcp`` prints the config for other agents.
 """
 
 from __future__ import annotations
@@ -27,24 +21,19 @@ import logging
 from datetime import datetime, timezone
 from pathlib import Path
 
+from agenthandover_worker import paths
+
 logger = logging.getLogger(__name__)
 
 
 def _get_kb_root() -> Path:
-    """Resolve the knowledge base root directory.
-
-    Must match ``knowledge_base.DEFAULT_KNOWLEDGE_DIR`` so we read the same
-    directory that the worker writes to.
-    """
-    return Path.home() / ".agenthandover" / "knowledge"
+    """The knowledge base the worker writes (``paths.knowledge_base_dir()``)."""
+    return paths.knowledge_base_dir()
 
 
 def _get_db_path() -> Path:
-    """Resolve the daemon database path."""
-    import platform
-    if platform.system() == "Darwin":
-        return Path.home() / "Library" / "Application Support" / "agenthandover" / "agenthandover.db"
-    return Path.home() / ".agenthandover" / "agenthandover.db"
+    """The worker's database, which holds the vector store (``paths.db_path()``)."""
+    return paths.db_path()
 
 
 def build_mcp_server():
@@ -76,18 +65,43 @@ def build_mcp_server():
         return _state["kb"]
 
     def _vector_kb():
+        """``(VectorKB | None, reason)``; the reason says why it is unavailable."""
         if "vkb" not in _state:
-            try:
-                from agenthandover_worker.vector_kb import VectorKB
-                db_path = _get_db_path()
-                if db_path.exists():
-                    _state["vkb"] = VectorKB(db_path)
-                else:
-                    _state["vkb"] = None
-            except Exception:
-                logger.warning("VectorKB init failed; semantic search disabled", exc_info=True)
-                _state["vkb"] = None
+            db_path = _get_db_path()
+            if not db_path.exists():
+                _state["vkb"] = (None, f"no worker database at {db_path}")
+            else:
+                try:
+                    from agenthandover_worker.config import load_config
+                    from agenthandover_worker.vector_kb import VectorKB, VectorKBConfig
+
+                    _state["vkb"] = (VectorKB(db_path, VectorKBConfig(
+                        ollama_host=load_config().vlm.ollama_host,
+                    )), "")
+                except Exception as exc:
+                    logger.warning("VectorKB init failed", exc_info=True)
+                    _state["vkb"] = (None, f"vector store failed to open: {exc}")
+            if _state["vkb"][0] is None:
+                logger.warning(
+                    "Semantic search unavailable (%s); search_skills uses keyword matching",
+                    _state["vkb"][1],
+                )
         return _state["vkb"]
+
+    def _keyword_search(query: str, limit: int) -> list[dict]:
+        query_lower = query.lower()
+        matches = []
+        for proc in _kb().list_procedures():
+            title = proc.get("title", "").lower()
+            desc = proc.get("description", "").lower()
+            if query_lower in title or query_lower in desc:
+                matches.append({
+                    "slug": proc.get("id", ""),
+                    "title": proc.get("title", ""),
+                    "score": 1.0 if query_lower in title else 0.7,
+                })
+        matches.sort(key=lambda m: m["score"], reverse=True)
+        return matches[:limit]
 
     # ------------------------------------------------------------------
     # Tools — agents call these to get data
@@ -160,33 +174,52 @@ def build_mcp_server():
         Use this when you know what KIND of task you need but not the exact
         procedure name. For example: "deploy to production" will find
         procedures about deployment even if they're titled differently.
-        """
-        vkb = _vector_kb()
-        if vkb is None:
-            # Fallback to title/description search
-            kb = _kb()
-            procedures = kb.list_procedures()
-            query_lower = query.lower()
-            matches = []
-            for proc in procedures:
-                title = proc.get("title", "").lower()
-                desc = proc.get("description", "").lower()
-                if query_lower in title or query_lower in desc:
-                    matches.append({
-                        "slug": proc.get("id", ""),
-                        "title": proc.get("title", ""),
-                        "score": 1.0 if query_lower in title else 0.7,
-                    })
-            matches.sort(key=lambda m: m["score"], reverse=True)
-            return json.dumps(matches[:limit], indent=2)
 
-        results = vkb.search(
-            query, top_k=limit, source_types=["procedure"], min_score=0.3,
-        )
-        return json.dumps(
-            [{"slug": r.source_id, "score": r.score} for r in results],
-            indent=2,
-        )
+        Returns ``{"mode", "reason", "results"}``: ``mode`` is
+        ``"semantic"`` or ``"keyword_fallback"`` (a substring match on
+        titles and descriptions), and ``reason`` says why semantic search
+        was not used.
+        """
+        from agenthandover_worker.ollama import OllamaError
+
+        vkb, reason = _vector_kb()
+        if vkb is not None:
+            if vkb.count("procedure") == 0:
+                reason = "no Skill has been embedded yet"
+            else:
+                try:
+                    vectors = vkb.compute_embeddings([query])
+                except (ConnectionError, OllamaError) as exc:
+                    reason = f"embedding model unavailable: {exc}"
+                    logger.warning("search_skills: %s", reason)
+                else:
+                    if vectors and vectors[0]:
+                        hits = vkb.search_by_vector(
+                            vectors[0], top_k=limit,
+                            source_types=["procedure"], min_score=0.3,
+                        )
+                        titles = {
+                            p.get("id", ""): p.get("title", "")
+                            for p in _kb().list_procedures()
+                        }
+                        return json.dumps({
+                            "mode": "semantic",
+                            "reason": "",
+                            "results": [
+                                {
+                                    "slug": r.source_id,
+                                    "title": titles.get(r.source_id, ""),
+                                    "score": round(r.score, 4),
+                                }
+                                for r in hits
+                            ],
+                        }, indent=2)
+                    reason = "embedding model returned no vector"
+        return json.dumps({
+            "mode": "keyword_fallback",
+            "reason": reason,
+            "results": _keyword_search(query, limit),
+        }, indent=2)
 
     @mcp.tool()
     def get_user_profile() -> str:

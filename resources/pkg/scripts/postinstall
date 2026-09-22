@@ -75,7 +75,7 @@ retention_days_raw = 14
 retention_days_episodes = 90
 
 [export]
-adapter = "openclaw"
+adapter = "all"
 json_export = false
 
 [embedding]
