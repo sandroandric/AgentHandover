@@ -10,6 +10,8 @@
  *   Daemon -> Extension:  DaemonMessage   (discriminated by DaemonMessageType)
  */
 
+import type { FormAnchor } from './form-submit';
+
 // ---------------------------------------------------------------------------
 // Extension -> Daemon message types
 // ---------------------------------------------------------------------------
@@ -21,7 +23,9 @@ export type ExtensionMessageType =
   | 'click_intent'
   | 'dwell_snapshot'
   | 'scroll_snapshot'
-  | 'secure_field_status';
+  | 'secure_field_status'
+  | 'navigation_change'
+  | 'form_submit';
 
 // ---------------------------------------------------------------------------
 // Daemon -> Extension message types
@@ -89,6 +93,24 @@ export interface SecureFieldPayload {
   isSecure: boolean;
   tabId: number;
   url: string;
+}
+
+/**
+ * Sent by the background when the active tab commits a navigation
+ * (`tabs.onUpdated`, no DOM access).
+ */
+export interface NavigationChangePayload {
+  url: string;
+  title: string;
+  tabId: number;
+}
+
+/** Sent when a form is submitted (content-script `submit` listener). */
+export interface FormSubmitPayload {
+  url: string;
+  title: string;
+  tabId: number;
+  formAnchor: FormAnchor;
 }
 
 // ---------------------------------------------------------------------------
