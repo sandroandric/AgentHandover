@@ -1,0 +1,361 @@
+"""The one Ollama client: exact request bytes, error classes, the reply's
+counters, and the counters reaching ``worker-status.json``.
+
+``urllib.request.urlopen`` is replaced; nothing talks to a real Ollama.
+The replay through a real HTTP server is in ``journeys/test_cassette.py``.
+"""
+
+from __future__ import annotations
+
+import io
+import json
+import urllib.error
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from agenthandover_worker import (
+    behavioral_synthesizer,
+    model_profiles,
+    scene_annotator,
+    sop_generator,
+    task_segmenter,
+)
+from agenthandover_worker.llm_reasoning import LLMReasoner, ReasoningConfig
+from agenthandover_worker.ollama import (
+    OllamaBadResponse,
+    OllamaClient,
+    OllamaUnavailable,
+    Response,
+)
+from agenthandover_worker.ops_telemetry import MODEL_USAGE
+from agenthandover_worker.vector_kb import VectorKB, VectorKBConfig
+
+HOST = "http://localhost:11434"
+PNG_1X1_B64 = (
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4//8/AAX+Av4N70a4"
+    "AAAAAElFTkSuQmCC"
+)
+
+REPLY = {
+    "model": "m",
+    "response": '{"title": "t", "steps": []}',
+    "done": True,
+    "done_reason": "stop",
+    "total_duration": 3_000_000_000,
+    "load_duration": 500_000_000,
+    "prompt_eval_count": 1234,
+    "prompt_eval_duration": 1_000_000_000,
+    "eval_count": 56,
+    "eval_duration": 1_500_000_000,
+}
+
+
+class _Urlopen:
+    """Stands in for ``urllib.request.urlopen``: records the raw request
+    (method, URL, body bytes, timeout) and answers from a queue."""
+
+    def __init__(self, *replies):
+        self.replies = list(replies)
+        self.sent: list[tuple[str, str, bytes | None, float | None]] = []
+
+    def __call__(self, req, timeout=None):
+        self.sent.append((req.get_method(), req.full_url, req.data, timeout))
+        reply = self.replies.pop(0) if self.replies else REPLY
+        if isinstance(reply, BaseException):
+            raise reply
+        resp = MagicMock()
+        resp.read.return_value = (
+            reply if isinstance(reply, bytes) else json.dumps(reply).encode("utf-8")
+        )
+        resp.__enter__ = lambda s: s
+        resp.__exit__ = lambda s, *a: False
+        return resp
+
+
+@pytest.fixture(autouse=True)
+def _fresh_usage():
+    MODEL_USAGE.reset()
+    yield
+    MODEL_USAGE.reset()
+
+
+# ---------------------------------------------------------------------------
+# Request bytes: identical to the pre-client call sites (cassette keys and
+# Ollama's prompt cache depend on them).  The expected strings were captured
+# from the hand-rolled clients before they were replaced.
+# ---------------------------------------------------------------------------
+
+
+def _call_sites(tmp_path: Path) -> list[tuple[str, callable, str]]:
+    img = tmp_path / "frame.jpg"
+    img.write_bytes(b"\xff\xd8\xff" + b"\x00" * 10)
+    import base64
+
+    img_b64 = base64.b64encode(img.read_bytes()).decode("ascii")
+    return [
+        (
+            "annotation (image, schema, keep_alive, profile options)",
+            lambda: scene_annotator._call_ollama_vlm(
+                model="m", prompt="p", image_path=img, system="sys", think=False,
+                format={"type": "object"}, keep_alive="30m", num_ctx=4096,
+                extra_options={"temperature": 0.0, "top_k": 1}, timeout=42.0,
+            ),
+            '{"model": "m", "prompt": "p", "stream": false, "think": false, '
+            '"options": {"num_predict": 1500, "num_ctx": 4096, "temperature": 0.0, '
+            '"top_k": 1}, "system": "sys", "format": {"type": "object"}, '
+            '"keep_alive": "30m", "images": ["' + img_b64 + '"]}',
+        ),
+        (
+            "annotation (base64 image, defaults)",
+            lambda: scene_annotator._call_ollama_vlm(
+                model="m", prompt="p", image_base64=PNG_1X1_B64, num_predict=300,
+            ),
+            '{"model": "m", "prompt": "p", "stream": false, "think": false, '
+            '"options": {"num_predict": 300, "num_ctx": 8192}, '
+            '"images": ["' + PNG_1X1_B64 + '"]}',
+        ),
+        (
+            "preload",
+            lambda: scene_annotator.SceneAnnotator(scene_annotator.AnnotationConfig(
+                model="qwen3.5:2b", timeout_seconds=77.0,
+            )).preload(),
+            '{"model": "qwen3.5:2b", "prompt": "", "stream": false, "think": false, '
+            '"options": {"num_predict": 1, "num_ctx": 4096}, "keep_alive": "30m"}',
+        ),
+        (
+            "sop (json format, thinking off)",
+            lambda: sop_generator._call_ollama(
+                model="m", prompt="p", num_predict=2000, think=False, format_json=True,
+            ),
+            '{"model": "m", "prompt": "p", "stream": false, "think": false, '
+            '"options": {"num_predict": 2000, "num_ctx": 24576, "temperature": 0.3}, '
+            '"format": "json"}',
+        ),
+        (
+            "sop (thinking on drops the grammar)",
+            lambda: sop_generator._call_ollama(
+                model="m", prompt="p", system="s", think="high", format_json=True,
+                extra_options={"top_p": 0.9},
+            ),
+            '{"model": "m", "prompt": "p", "stream": false, "think": "high", '
+            '"options": {"num_predict": 6000, "num_ctx": 24576, "temperature": 0.3, '
+            '"top_p": 0.9}, "system": "s"}',
+        ),
+        (
+            "synthesis",
+            lambda: behavioral_synthesizer._call_ollama_text(
+                model="m", prompt="p", system="s", extra_options={"top_k": 3},
+            ),
+            '{"model": "m", "prompt": "p", "stream": false, "think": true, '
+            '"options": {"num_predict": 3000, "top_k": 3}, "system": "s"}',
+        ),
+        (
+            "reasoning",
+            lambda: LLMReasoner(ReasoningConfig(model="q"))._call_ollama(
+                "p", "sys", num_predict=50, think=False,
+            ),
+            '{"model": "q", "prompt": "p", "stream": false, "think": false, '
+            '"options": {"num_predict": 50, "num_ctx": 16384, "temperature": 0.3}, '
+            '"system": "sys"}',
+        ),
+        (
+            "segmenter embeddings",
+            lambda: task_segmenter._compute_embeddings(["a", "b"]),
+            '{"model": "all-minilm:l6-v2", "input": ["a", "b"]}',
+        ),
+    ]
+
+
+def test_request_bytes_are_unchanged(tmp_path):
+    for name, call, expected in _call_sites(tmp_path):
+        opener = _Urlopen(
+            {"embeddings": [[1.0], [2.0]]} if "embeddings" in name else REPLY
+        )
+        with patch("urllib.request.urlopen", opener):
+            call()
+        assert len(opener.sent) == 1, name
+        method, url, data, _ = opener.sent[0]
+        assert method == "POST", name
+        assert data.decode("utf-8") == expected, name
+
+
+def test_vector_kb_batches_and_keeps_the_body(tmp_path):
+    opener = _Urlopen({"embeddings": [[1.0], [2.0]]}, {"embeddings": [[3.0]]})
+    kb = VectorKB(tmp_path / "v.db", VectorKBConfig(batch_size=2))
+    with patch("urllib.request.urlopen", opener):
+        vectors = kb.compute_embeddings(["a", "b", "c"])
+    assert vectors == [[1.0], [2.0], [3.0]]
+    assert [data for _, _, data, _ in opener.sent] == [
+        b'{"model": "nomic-embed-text", "input": ["a", "b"]}',
+        b'{"model": "nomic-embed-text", "input": ["c"]}',
+    ]
+    assert opener.sent[0][3] == kb.config.timeout_seconds
+
+
+def test_get_endpoints():
+    opener = _Urlopen(
+        {"version": "0.30.6"},
+        {"models": [{"name": "gemma4:e2b"}, {"model": "qwen3.5:2b"}, "junk"]},
+    )
+    with patch("urllib.request.urlopen", opener):
+        assert model_profiles.check_ollama_version(HOST) == "0.30.6"
+        assert OllamaClient(HOST).tags() == ["gemma4:e2b", "qwen3.5:2b"]
+    assert [(m, u, d, t) for m, u, d, t in opener.sent] == [
+        ("GET", f"{HOST}/api/version", None, 5),
+        ("GET", f"{HOST}/api/tags", None, 3.0),
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Response
+# ---------------------------------------------------------------------------
+
+
+def test_generate_returns_the_counters():
+    with patch("urllib.request.urlopen", _Urlopen(REPLY)):
+        response = OllamaClient(HOST).generate("m", "p", think=False)
+    assert isinstance(response, Response)
+    assert response.text == REPLY["response"]
+    assert response.prompt_eval_count == 1234
+    assert response.eval_count == 56
+    assert response.prompt_eval_duration == 1_000_000_000
+    assert response.eval_duration == 1_500_000_000
+    assert response.load_duration == 500_000_000
+    assert response.total_duration == 3_000_000_000
+    assert response.done_reason == "stop"
+    assert response.elapsed >= 0
+
+
+def test_generate_omits_unset_fields():
+    opener = _Urlopen(REPLY)
+    with patch("urllib.request.urlopen", opener):
+        OllamaClient(HOST).generate("m", "p", system="", images=[])
+    assert opener.sent[0][2] == b'{"model": "m", "prompt": "p", "stream": false}'
+
+
+def test_truncated_output_is_logged(caplog):
+    with patch("urllib.request.urlopen", _Urlopen(dict(REPLY, done_reason="length"))):
+        OllamaClient(HOST).generate("m", "p", options={"num_predict": 9})
+    assert "hit num_predict=9" in caplog.text
+    assert MODEL_USAGE.snapshot()["m"]["truncated_calls"] == 1
+
+
+def test_embed_prefix_and_padding(caplog):
+    opener = _Urlopen({"embeddings": [[1.0]]})
+    with patch("urllib.request.urlopen", opener):
+        vectors = OllamaClient(HOST).embed(
+            "e", ["a", "b"], prefix="search_document: ",
+        )
+    assert opener.sent[0][2] == (
+        b'{"model": "e", "input": ["search_document: a", "search_document: b"]}'
+    )
+    assert vectors == [[1.0], []]
+    assert "expected 2, got 1" in caplog.text
+    assert OllamaClient(HOST).embed("e", []) == []
+
+
+def test_has_model():
+    client = OllamaClient(HOST)
+    with patch("urllib.request.urlopen", _Urlopen({"models": [{"name": "gemma4:latest"}]})):
+        assert client.has_model("gemma4") is True
+    with patch("urllib.request.urlopen", _Urlopen({"models": [{"name": "other:1b"}]})):
+        assert client.has_model("gemma4:e2b") is False
+    refused = urllib.error.URLError(ConnectionRefusedError(61, "Connection refused"))
+    with patch("urllib.request.urlopen", _Urlopen(refused)):
+        assert client.has_model("gemma4:e2b") is False
+
+
+# ---------------------------------------------------------------------------
+# Error classes
+# ---------------------------------------------------------------------------
+
+
+def _http_error(code: int) -> urllib.error.HTTPError:
+    return urllib.error.HTTPError(f"{HOST}/api/generate", code, "err", {}, io.BytesIO(b"{}"))
+
+
+@pytest.mark.parametrize("error, expected", [
+    (urllib.error.URLError(ConnectionRefusedError(61, "Connection refused")),
+     OllamaUnavailable),
+    (_http_error(404), OllamaUnavailable),
+    (_http_error(500), OllamaUnavailable),
+    (_http_error(503), OllamaUnavailable),
+    (ConnectionResetError(), OllamaUnavailable),
+    (urllib.error.URLError(TimeoutError("timed out")), TimeoutError),
+    (TimeoutError("timed out"), TimeoutError),
+    (_http_error(400), OllamaBadResponse),
+])
+def test_errors_are_classified(error, expected):
+    with patch("urllib.request.urlopen", _Urlopen(error)):
+        with pytest.raises(expected):
+            OllamaClient(HOST).generate("m", "p")
+    if expected is OllamaUnavailable:
+        assert issubclass(expected, ConnectionError)  # callers defer on it
+    assert MODEL_USAGE.snapshot() == {}
+
+
+@pytest.mark.parametrize("body", [b"not json", b"[1, 2]", b"\xff\xfe"])
+def test_a_reply_that_is_not_an_object_is_a_bad_response(body):
+    with patch("urllib.request.urlopen", _Urlopen(body)):
+        with pytest.raises(OllamaBadResponse):
+            OllamaClient(HOST).generate("m", "p")
+
+
+def test_embed_errors_share_the_classes():
+    with patch("urllib.request.urlopen", _Urlopen(_http_error(404))):
+        with pytest.raises(OllamaUnavailable):
+            task_segmenter._compute_embeddings(["a"])
+
+
+# ---------------------------------------------------------------------------
+# Usage counters -> worker-status.json
+# ---------------------------------------------------------------------------
+
+
+def test_every_reply_is_counted_per_model():
+    with patch("urllib.request.urlopen", _Urlopen(REPLY, REPLY, {
+        "embeddings": [[1.0]], "prompt_eval_count": 3, "total_duration": 10_000_000,
+    })):
+        client = OllamaClient(HOST)
+        client.generate("m", "p")
+        client.generate("m", "p")
+        client.embed("e", ["x"])
+    usage = MODEL_USAGE.snapshot()
+    assert usage["m"]["generate_calls"] == 2
+    assert usage["m"]["prompt_eval_count"] == 2468
+    assert usage["m"]["eval_count"] == 112
+    assert usage["m"]["prompt_eval_seconds"] == 2.0
+    assert usage["m"]["eval_seconds"] == 3.0
+    assert usage["m"]["load_seconds"] == 1.0
+    assert usage["m"]["total_seconds"] == 6.0
+    assert usage["e"]["embed_calls"] == 1
+    assert usage["e"]["prompt_eval_count"] == 3
+    assert usage["e"]["eval_count"] == 0
+
+
+def test_eval_count_reaches_worker_status(tmp_path):
+    """A reply's ``eval_count`` travels Response -> MODEL_USAGE ->
+    ``worker-status.json`` (what the app and the lead's scorecards read)."""
+    from agenthandover_worker.main import _write_worker_status
+
+    with patch("urllib.request.urlopen", _Urlopen(REPLY)):
+        scene_annotator._call_ollama_vlm(
+            model="gemma4:e2b", prompt="p", image_base64=PNG_1X1_B64,
+        )
+    with patch("agenthandover_worker.main._status_dir", return_value=tmp_path):
+        _write_worker_status(
+            started_at="2026-09-22T10:00:00Z",
+            events_processed_today=1,
+            sops_generated=0,
+            last_pipeline_duration_ms=None,
+            consecutive_errors=0,
+            vlm_available=True,
+            sop_inducer_available=False,
+        )
+    status = json.loads((tmp_path / "worker-status.json").read_text())
+    calls = status["model_calls"]["gemma4:e2b"]
+    assert calls["eval_count"] == REPLY["eval_count"] == 56
+    assert calls["prompt_eval_count"] == 1234
+    assert calls["generate_calls"] == 1
