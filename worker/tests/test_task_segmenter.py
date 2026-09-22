@@ -22,7 +22,6 @@ from agenthandover_worker.task_segmenter import (
     _cosine_similarity,
     _make_segment,
     _split_into_contiguous_segments,
-    _stitch_interrupted_workflows,
     _timestamp_to_epoch,
     _update_centroid,
 )
@@ -385,85 +384,6 @@ class TestMakeSegment:
 
 
 # ---------------------------------------------------------------------------
-# Interrupted workflow stitching
-# ---------------------------------------------------------------------------
-
-class TestStitchInterruptedWorkflows:
-    def test_no_stitching_needed(self):
-        """Single segment per cluster = no stitching."""
-        seg = TaskSegment(
-            segment_id="s1", cluster_id=0,
-            frames=[_make_frame("e1")],
-            start_time="2026-03-04T10:00:00Z",
-            end_time="2026-03-04T10:05:00Z",
-        )
-        result = _stitch_interrupted_workflows([seg], [])
-        assert len(result) == 1
-
-    def test_merges_close_segments(self):
-        """Two segments of same cluster within gap = merge."""
-        seg1 = TaskSegment(
-            segment_id="s1", cluster_id=0,
-            frames=[_make_frame("e1")],
-            task_label="expense report",
-            apps_involved=["Chrome"],
-            start_time="2026-03-04T10:00:00Z",
-            end_time="2026-03-04T10:05:00Z",
-        )
-        seg2 = TaskSegment(
-            segment_id="s2", cluster_id=0,
-            frames=[_make_frame("e2")],
-            task_label="expense report",
-            apps_involved=["Chrome"],
-            start_time="2026-03-04T10:10:00Z",
-            end_time="2026-03-04T10:15:00Z",
-        )
-        result = _stitch_interrupted_workflows(
-            [seg1, seg2], [], max_gap_seconds=1800,
-        )
-        assert len(result) == 1
-        assert result[0].frame_count == 2
-
-    def test_no_merge_across_large_gap(self):
-        """Two segments of same cluster > gap = stay separate."""
-        seg1 = TaskSegment(
-            segment_id="s1", cluster_id=0,
-            frames=[_make_frame("e1")],
-            start_time="2026-03-04T10:00:00Z",
-            end_time="2026-03-04T10:05:00Z",
-        )
-        seg2 = TaskSegment(
-            segment_id="s2", cluster_id=0,
-            frames=[_make_frame("e2")],
-            start_time="2026-03-04T12:00:00Z",
-            end_time="2026-03-04T12:05:00Z",
-        )
-        result = _stitch_interrupted_workflows(
-            [seg1, seg2], [], max_gap_seconds=1800,
-        )
-        assert len(result) == 2
-
-    def test_different_clusters_not_merged(self):
-        """Segments from different clusters are never merged."""
-        seg1 = TaskSegment(
-            segment_id="s1", cluster_id=0,
-            frames=[_make_frame("e1")],
-            start_time="2026-03-04T10:00:00Z",
-            end_time="2026-03-04T10:05:00Z",
-        )
-        seg2 = TaskSegment(
-            segment_id="s2", cluster_id=1,
-            frames=[_make_frame("e2")],
-            start_time="2026-03-04T10:10:00Z",
-            end_time="2026-03-04T10:15:00Z",
-        )
-        result = _stitch_interrupted_workflows(
-            [seg1, seg2], [], max_gap_seconds=1800,
-        )
-        assert len(result) == 2
-
-
-# ---------------------------------------------------------------------------
 # TaskSegmenter.segment
 # ---------------------------------------------------------------------------
 
@@ -560,54 +480,22 @@ class TestTaskSegmenterSegment:
         assert len(result.segments) >= 1
 
 
-# ---------------------------------------------------------------------------
-# TaskSegmenter.get_sop_ready_clusters
-# ---------------------------------------------------------------------------
-
-class TestGetSopReadyClusters:
-    def test_not_enough_demonstrations(self):
-        """Single segment = not enough for passive SOP."""
-        seg = TaskSegmenter()
-        result = SegmentationResult(
-            clusters={0: [
-                TaskSegment(segment_id="s1", cluster_id=0,
-                            frames=[_make_frame("e1")], task_label="expense"),
-            ]},
-        )
-        ready = seg.get_sop_ready_clusters(result)
-        assert len(ready) == 0
-
-    def test_two_demonstrations_ready(self):
-        """Two segments in same cluster = ready for SOP."""
-        seg = TaskSegmenter()
-        result = SegmentationResult(
-            clusters={0: [
-                TaskSegment(segment_id="s1", cluster_id=0,
-                            frames=[_make_frame("e1")], task_label="expense"),
-                TaskSegment(segment_id="s2", cluster_id=0,
-                            frames=[_make_frame("e2")], task_label="expense"),
-            ]},
-        )
-        ready = seg.get_sop_ready_clusters(result)
-        assert len(ready) == 1
-        task_label, demos = ready[0]
-        assert task_label == "expense"
-        assert len(demos) == 2
-
-    def test_custom_min_demonstrations(self):
-        """Custom min_demonstrations respected."""
-        config = SegmenterConfig(min_demonstrations=3)
-        seg = TaskSegmenter(config=config)
-        result = SegmentationResult(
-            clusters={0: [
-                TaskSegment(segment_id="s1", cluster_id=0,
-                            frames=[_make_frame("e1")], task_label="expense"),
-                TaskSegment(segment_id="s2", cluster_id=0,
-                            frames=[_make_frame("e2")], task_label="expense"),
-            ]},
-        )
-        ready = seg.get_sop_ready_clusters(result)
-        assert len(ready) == 0
+    @patch("agenthandover_worker.task_segmenter._compute_embeddings", side_effect=_mock_embeddings)
+    def test_same_cluster_split_only_beyond_gap(self, mock_embed):
+        """Same-cluster frames within the gap form one segment; a gap
+        larger than ``stitch_max_gap_seconds`` yields two segments in the
+        same cluster (the split is the only grouping step, nothing
+        re-merges them afterwards)."""
+        events = [
+            _make_event("e1", "2026-03-04T10:00:00Z", what_doing="Filing expense report"),
+            _make_event("e2", "2026-03-04T10:20:00Z", what_doing="Submitting expense form"),
+            _make_event("e3", "2026-03-04T12:00:00Z", what_doing="Filing expense report"),
+        ]
+        result = TaskSegmenter().segment(events)
+        assert len(result.clusters) == 1
+        (cluster_segs,) = result.clusters.values()
+        assert [s.frame_count for s in cluster_segs] == [2, 1]
+        assert [s.frame_count for s in result.segments] == [2, 1]
 
 
 # ---------------------------------------------------------------------------
