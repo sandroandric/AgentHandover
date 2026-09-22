@@ -860,7 +860,7 @@ class SceneAnnotator:
                 timeout=self.config.timeout_seconds,
                 keep_alive=self.config.keep_alive,
             )
-        except OllamaUnavailable as exc:
+        except ConnectionError as exc:  # OllamaUnavailable and kin
             logger.warning("Annotation model preload deferred: %s", exc)
             self._defer()
             return False
@@ -978,7 +978,7 @@ class SceneAnnotator:
                 keep_alive=self.config.keep_alive,
                 extra_options=profile.ann_options(),
             )
-        except OllamaUnavailable as exc:
+        except ConnectionError as exc:  # OllamaUnavailable and kin
             # Transport error: keep the JPEG, leave the row pending.
             self._stats["deferred"] += 1
             self._defer()

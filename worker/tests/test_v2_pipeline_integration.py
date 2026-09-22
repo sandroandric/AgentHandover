@@ -187,12 +187,25 @@ class TestCheckV2Schema:
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture(autouse=True)
+def _ollama_up():
+    """The /api/tags probe answers "model present" unless a test says
+    otherwise, so no test depends on a real Ollama on this machine."""
+    with patch(
+        "agenthandover_worker.scene_annotator._ollama_has_model",
+        return_value=True,
+    ) as probe:
+        yield probe
+
+
 class TestProcessAnnotations:
     def test_no_unannotated_events(self, v2_db: WorkerDB, tmp_path: Path):
         """When there are no pending events, returns zero stats."""
         annotator = SceneAnnotator(AnnotationConfig())
         stats = _process_annotations(v2_db, annotator, tmp_path / "screenshots")
-        assert stats == {"annotated": 0, "skipped": 0, "failed": 0, "blocked": 0}
+        assert stats == {
+            "annotated": 0, "skipped": 0, "failed": 0, "blocked": 0, "deferred": 0,
+        }
 
     def test_annotates_pending_event(
         self, v2_db: WorkerDB, v2_write_conn: sqlite3.Connection, tmp_path: Path,
