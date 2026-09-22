@@ -584,10 +584,7 @@ class SceneAnnotator:
                 num_predict=profile.ann_num_predict,
                 system=profile.ann_system or SYSTEM_PROMPT,
                 think=profile.ann_think,
-                extra_options={
-                    k: v for k, v in profile.ann_options().items()
-                    if k not in ("num_predict", "num_ctx")
-                },
+                extra_options=profile.ann_options(),
             )
         except ConnectionError as exc:
             self._stats["failed"] += 1
@@ -625,10 +622,7 @@ class SceneAnnotator:
                     num_predict=profile.ann_num_predict,
                     system=profile.ann_system or SYSTEM_PROMPT,
                     think=profile.ann_think,
-                    extra_options={
-                        k: v for k, v in profile.ann_options().items()
-                        if k not in ("num_predict", "num_ctx")
-                    },
+                    extra_options=profile.ann_options(),
                 )
                 inference_time += retry_time
                 annotation = _validate_annotation(raw_response)

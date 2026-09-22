@@ -4624,12 +4624,11 @@ def main(argv: list[str] | None = None) -> None:
 
     logger.info("Knowledge base initialized: %s", args.knowledge_dir)
 
-    # Log model tier recommendation based on system RAM
+    # Check Ollama compatibility and log the active model profiles
     try:
         from agenthandover_worker.model_profiles import (
-            log_recommendation, get_profile, ollama_supports_gemma4,
+            get_profile, ollama_supports_gemma4,
         )
-        recommended_tier = log_recommendation()
 
         # Warn if using Gemma 4 but Ollama is too old
         ann_model = v2_cfg["annotation_model"] if v2_cfg else "qwen3.5:2b"
