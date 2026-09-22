@@ -565,6 +565,56 @@ class TestSearchEndpoint:
 # Error handling & routing
 # ---------------------------------------------------------------------------
 
+class TestRecallEndpoint:
+    """POST /recall: the CLI's ``recall`` without waiting for a worker tick."""
+
+    def test_recall_without_searcher_returns_501(self, port: int) -> None:
+        status, body = _post(port, "/recall", {})
+        assert status == 501
+
+    def test_recall_expands_hhmm_and_returns_the_timeline(
+        self, populated_kb: KnowledgeBase,
+    ) -> None:
+        from agenthandover_worker.activity_search import (
+            ActivityTimeline,
+            SearchResult,
+        )
+
+        calls: list[dict] = []
+
+        class FakeSearcher:
+            def session_recall(self, **kwargs: Any) -> ActivityTimeline:
+                calls.append(kwargs)
+                return ActivityTimeline(
+                    entries=[SearchResult(
+                        timestamp="2026-03-10T09:31:00Z", app="Chrome",
+                        location="https://example.com",
+                        what_doing="Checking domains", relevance_score=1.0,
+                        event_id="evt-1",
+                    )],
+                    date="2026-03-10", total_active_minutes=4,
+                    apps_used=["Chrome"],
+                )
+
+        p = _free_port()
+        srv = QueryAPIServer(populated_kb, port=p, activity_searcher=FakeSearcher())
+        srv.start()
+        time.sleep(0.1)
+        try:
+            status, body = _post(p, "/recall", {
+                "date": "2026-03-10", "start_time": "09:30", "app": "Chrome",
+            })
+        finally:
+            srv.stop()
+        assert status == 200
+        assert calls == [{
+            "date": "2026-03-10", "app": "Chrome",
+            "start_time": "2026-03-10T09:30:00", "end_time": None,
+        }]
+        assert body["total_active_minutes"] == 4
+        assert body["entries"][0]["what_doing"] == "Checking domains"
+
+
 class TestErrorHandling:
     """Test error responses and unknown routes."""
 

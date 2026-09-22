@@ -1321,6 +1321,36 @@ class WorkerDB:
         finally:
             write_conn.close()
 
+    def update_sop_json(self, slug: str, sop_template: dict) -> bool:
+        """Replace the stored template of the newest SOP record for *slug*.
+
+        An UPDATE, not a second INSERT: the review queue keeps one row per
+        generation, and the app and the approval export read the updated
+        template.  Returns False when no record exists for *slug*.
+        """
+        db_path = self._get_writable_path()
+        if not db_path:
+            return False
+
+        write_conn = sqlite3.connect(db_path)
+        try:
+            write_conn.execute("PRAGMA busy_timeout = 5000;")
+            self._ensure_generated_sops_table(write_conn)
+            cursor = write_conn.execute(
+                "UPDATE generated_sops SET sop_json = ? WHERE sop_id = ("
+                "  SELECT sop_id FROM generated_sops WHERE slug = ? "
+                "  ORDER BY created_at DESC, rowid DESC LIMIT 1"
+                ")",
+                (json.dumps(sop_template), slug),
+            )
+            write_conn.commit()
+            return cursor.rowcount > 0
+        except sqlite3.Error as exc:
+            logger.exception("Failed to update SOP template: %s", exc)
+            return False
+        finally:
+            write_conn.close()
+
     def get_approved_sops(self) -> list[dict]:
         """Return all approved SOPs, including parsed ``sop_json``."""
         db_path = self._get_writable_path()

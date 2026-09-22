@@ -246,120 +246,65 @@ final class SOPIndexManager: ObservableObject {
 
     // MARK: - Approve / Reject
 
-    private var triggerDir: URL {
-        FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Application Support/agenthandover")
-    }
+    /// Where requests for the worker are queued (tests point it elsewhere).
+    var stateDir: URL = TriggerSpool.defaultStateDir
 
-    /// Write an approval trigger file for the worker to pick up.
+    /// Queue an approval for the worker to pick up.
     func approveSOP(_ sop: SOPEntry) {
-        let fmt = ISO8601DateFormatter()
-        fmt.formatOptions = [.withInternetDateTime]
-        let payload: [String: Any] = [
+        writeTrigger(kind: "approve", [
             "sop_id": sop.slug,
             "action": "approve",
-            "requested_at": fmt.string(from: Date())
-        ]
-        writeTrigger(payload, filename: "approve-trigger.json")
+            "requested_at": Self.timestamp(),
+        ])
     }
 
-    /// Write a rejection trigger file for the worker to pick up.
+    /// Queue a rejection for the worker to pick up.
     func rejectSOP(_ sop: SOPEntry) {
-        let fmt = ISO8601DateFormatter()
-        fmt.formatOptions = [.withInternetDateTime]
-        let payload: [String: Any] = [
+        writeTrigger(kind: "approve", [
             "sop_id": sop.slug,
             "action": "reject",
-            "requested_at": fmt.string(from: Date())
-        ]
-        writeTrigger(payload, filename: "approve-trigger.json")
+            "requested_at": Self.timestamp(),
+        ])
     }
 
-    /// Promote a procedure to the next lifecycle state via trigger file.
+    /// Promote a procedure to a lifecycle state.
     func promoteProcedure(_ sop: SOPEntry, toState: String) {
-        let trigger: [String: Any] = [
+        writeTrigger(kind: "lifecycle-promote", [
             "procedure_slug": sop.slug,
             "to_state": toState,
             "actor": "human",
             "reason": "Promoted via AgentHandover app",
-            "requested_at": ISO8601DateFormatter().string(from: Date())
-        ]
-        writeTrigger(trigger, filename: "lifecycle-promote-trigger.json")
-
-        // Refresh after a short delay
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
-            self?.loadIndex()
-        }
+            "requested_at": Self.timestamp(),
+        ])
     }
 
-    /// Approve an SOP and promote it all the way to agent_ready in one action.
-    /// Writes the approval trigger, then writes sequential lifecycle promotion
-    /// triggers with staggered delays so the worker processes each transition.
+    /// Approve an SOP for agents in one action.
+    ///
+    /// Writes a single `lifecycle-promote` request to `agent_ready`.  The
+    /// worker approves the pending draft (lint gated), walks the lifecycle
+    /// one valid transition at a time, and then refreshes what Claude Code
+    /// sees, so there is no chain of timed writes here to race it.
     func approveForAgents(_ sop: SOPEntry) {
-        // Step 1: Approve the SOP
-        approveSOP(sop)
-
-        // Step 2: Promote through all lifecycle states to agent_ready
-        let promotionChain = ["draft", "reviewed", "verified", "agent_ready"]
-
-        // Find where we need to start promoting from
-        let currentIndex: Int
-        switch sop.lifecycleState {
-        case "observed": currentIndex = 0
-        case "draft": currentIndex = 1
-        case "reviewed": currentIndex = 2
-        case "verified": currentIndex = 3
-        default: currentIndex = 0
-        }
-
-        // Write each promotion trigger with staggered delays
-        for i in currentIndex..<promotionChain.count {
-            let targetState = promotionChain[i]
-            let delay = Double(i - currentIndex + 1) * 2.5  // 2.5s between each promotion
-            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
-                guard let self = self else { return }
-                let trigger: [String: Any] = [
-                    "procedure_slug": sop.slug,
-                    "to_state": targetState,
-                    "actor": "human",
-                    "reason": "Approved for agents via AgentHandover app",
-                    "requested_at": ISO8601DateFormatter().string(from: Date())
-                ]
-                self.writeTrigger(trigger, filename: "lifecycle-promote-trigger.json")
-            }
-        }
-
-        // Final refresh after all promotions should be done
-        let totalDelay = Double(promotionChain.count - currentIndex + 1) * 2.5 + 1.0
-        DispatchQueue.main.asyncAfter(deadline: .now() + totalDelay) { [weak self] in
-            self?.loadIndex()
-        }
+        writeTrigger(kind: "lifecycle-promote", [
+            "kind": "lifecycle-promote",
+            "slug": sop.slug,
+            "to_state": "agent_ready",
+            "actor": "human",
+            "reason": "Approved for agents via AgentHandover app",
+            "requested_at": Self.timestamp(),
+        ])
     }
 
-    /// Atomic trigger file writer. Writes payload as JSON to a named file
-    /// inside the agenthandover state directory using tmp+rename.
-    func writeTrigger(_ payload: [String: Any], filename: String) {
-        guard let data = try? JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys]) else {
-            return
-        }
+    private static func timestamp() -> String {
+        let fmt = ISO8601DateFormatter()
+        fmt.formatOptions = [.withInternetDateTime]
+        return fmt.string(from: Date())
+    }
 
-        let dir = triggerDir
-        // Ensure parent directory exists
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-
-        let target = dir.appendingPathComponent(filename)
-        let tmp = dir.appendingPathComponent(".\(filename).tmp")
-
-        do {
-            try data.write(to: tmp, options: .atomic)
-            // Rename .tmp -> final path (atomic on same filesystem)
-            if FileManager.default.fileExists(atPath: target.path) {
-                try FileManager.default.removeItem(at: target)
-            }
-            try FileManager.default.moveItem(at: tmp, to: target)
-        } catch {
-            // Clean up tmp file if rename failed
-            try? FileManager.default.removeItem(at: tmp)
+    /// Queue one request in the worker's trigger spool, then reload the
+    /// index shortly after to pick up the worker's response.
+    func writeTrigger(kind: String, _ payload: [String: Any]) {
+        guard TriggerSpool.write(kind: kind, payload: payload, stateDir: stateDir) != nil else {
             return
         }
 

@@ -486,3 +486,43 @@ class ActivitySearcher:
         """
         self._ensure_fts_index()
         return self._populate_fts_index()
+
+
+_HHMM_RE = re.compile(r"^\d{2}:\d{2}$")
+
+
+def recall_payload(searcher: ActivitySearcher, request: dict) -> dict:
+    """Run a session recall for a CLI request and return the JSON reply.
+
+    Shared by ``POST /recall`` and the ``recall-query`` trigger.  Bare
+    ``HH:MM`` start/end times are expanded to ISO timestamps on the
+    requested date (UTC today when none is given).
+    """
+    date = request.get("date")
+    start_time = request.get("start_time")
+    end_time = request.get("end_time")
+    day = date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    if start_time and _HHMM_RE.match(start_time):
+        start_time = f"{day}T{start_time}:00"
+    if end_time and _HHMM_RE.match(end_time):
+        end_time = f"{day}T{end_time}:00"
+
+    timeline = searcher.session_recall(
+        date=date, app=request.get("app"),
+        start_time=start_time, end_time=end_time,
+    )
+    return {
+        "date": timeline.date,
+        "total_active_minutes": timeline.total_active_minutes,
+        "apps_used": timeline.apps_used,
+        "entries": [
+            {
+                "timestamp": e.timestamp,
+                "app": e.app,
+                "location": e.location,
+                "what_doing": e.what_doing,
+                "event_id": e.event_id,
+            }
+            for e in timeline.entries
+        ],
+    }

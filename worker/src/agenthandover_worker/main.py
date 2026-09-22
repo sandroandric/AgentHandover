@@ -17,10 +17,12 @@ import sys
 import tempfile
 import time
 import uuid
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from agenthandover_worker import trigger_spool
 from agenthandover_worker.clipboard_linker import ClipboardLinker
 from agenthandover_worker.config import load_config
 from agenthandover_worker.confidence import ConfidenceScorer, is_native_app_context
@@ -81,16 +83,17 @@ def _lint_and_log(sop_template: dict, label: str) -> bool:
     description an error.
     """
     result = lint_sop(sop_template, source=label)
+    ident = sop_template.get("slug") or sop_template.get("id") or "?"
     for issue in result.issues:
         if issue.severity == "error":
             logger.error(
                 "SOP lint error [%s] %s [%s]: %s",
-                label, issue.field, sop_template.get("slug", "?"), issue.message,
+                label, issue.field, ident, issue.message,
             )
         else:
             logger.warning(
                 "SOP lint warning [%s] %s [%s]: %s",
-                label, issue.field, sop_template.get("slug", "?"), issue.message,
+                label, issue.field, ident, issue.message,
             )
     if not result.valid:
         logger.error(
@@ -513,6 +516,21 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def _next_poll_interval(
+    current: float, base: float, *, busy: bool, triggers_consumed: int,
+) -> float:
+    """Seconds to sleep before the next worker tick.
+
+    Work found or a consumed trigger (someone is using the app or CLI)
+    resets to *base*; an idle tick doubles, up to ``max(5, 4 * base)`` so
+    a request written after a long idle stretch is picked up within
+    seconds.
+    """
+    if busy or triggers_consumed:
+        return base
+    return min(current * 2, max(5.0, base * 4))
+
+
 def _status_dir() -> Path:
     """Return the standard data directory for status/PID files."""
     if _platform.system() == "Darwin":
@@ -748,19 +766,28 @@ def _embed_procedure(vector_kb, procedure: dict) -> None:
     _embed_in_vector_kb(vector_kb, "procedure", slug, text)
 
 
-def _refresh_claude_commands(commands_dir: Path | None = None) -> None:
-    """Refresh Claude Code slash commands after a Skill is approved.
+def _refresh_claude_commands(
+    commands_dir: Path | None = None,
+    skills_dir: Path | None = None,
+) -> None:
+    """Make Claude Code see exactly the agent_ready procedures.
 
-    Runs connect_claude_code() to regenerate /ah-{slug} commands from
-    all agent_ready procedures in the knowledge base.  *commands_dir*
-    overrides the default ``~/.claude/commands``.
+    Regenerates the /ah-{slug} commands from the agent_ready procedures
+    in the knowledge base (removing the rest), then removes exported
+    Skills whose procedure is no longer agent_ready.  *commands_dir* and
+    *skills_dir* override ``~/.claude/commands`` and the configured
+    Skills root.  Never raises: a failed refresh must not undo the
+    lifecycle change or approval that asked for it.
     """
     try:
         from agenthandover_worker.agent_connect import connect_claude_code
-        connect_claude_code(commands_dir=commands_dir)
-        logger.info("Refreshed Claude Code slash commands")
+        connect_claude_code(
+            commands_dir=commands_dir,
+            skills_dir=skills_dir if skills_dir is not None else _skills_dir(),
+        )
+        logger.info("Refreshed Claude Code slash commands and Skills")
     except Exception:
-        logger.debug("Failed to refresh Claude Code commands", exc_info=True)
+        logger.warning("Failed to refresh Claude Code commands", exc_info=True)
 
 
 def _write_sops_index(
@@ -782,9 +809,12 @@ def _write_sops_index(
         all_sops_raw = db.get_generated_sops()
         failed = db.get_failed_generations()
 
-        # Only surface v2 pipeline SOPs and focus recordings — v1 PrefixSpan
-        # patterns (switch_app, navigate) are mechanical noise not worth reviewing.
-        _REVIEWABLE_SOURCES = {"v2_focus_recording", "v2_passive_discovery", "focus"}
+        # Surface v2 pipeline SOPs and focus recordings, plus mined (v1
+        # PrefixSpan) templates, which reach the DB only when review is on
+        # and must then be approved here before anything exports them.
+        _REVIEWABLE_SOURCES = {
+            "v2_focus_recording", "v2_passive_discovery", "focus", "v1_mined",
+        }
         all_sops = [
             s for s in all_sops_raw
             if s.get("source", "") in _REVIEWABLE_SOURCES
@@ -999,8 +1029,14 @@ def run_pipeline(
     db: "WorkerDB | None" = None,
     procedure_writer: "ProcedureWriter | None" = None,
     kb_export_adapter: "KnowledgeBaseExportAdapter | None" = None,
+    sop_auto_approve: bool = True,
 ) -> dict:
     """Run the full D->E->F pipeline on a batch of events.
+
+    Mined (v1 PrefixSpan) templates are linted like every other path.
+    With ``sop_auto_approve`` off they are only queued for review in the
+    DB; nothing reaches the knowledge base or any export directory until
+    a human approves them.
 
     Returns a summary dict with counts and results for monitoring.
     """
@@ -1218,12 +1254,39 @@ def run_pipeline(
             logger.info("Enhanced %d/%d SOPs with LLM descriptions",
                         enhanced_count, len(sop_templates))
 
-    # Step F2: Format, version, and export SOPs
+    # Step F2: Lint, then dedup against the mined-template registry (its
+    # own file, so mined templates never merge into recorded Skills).
+    sop_templates = [t for t in sop_templates if _lint_and_log(t, "v1_mined")]
     if sop_templates:
-        # Deduplicate against known SOPs before writing
-        from agenthandover_worker.sop_dedup import deduplicate_templates
-        sop_templates = deduplicate_templates(sop_templates, _status_dir())
+        from agenthandover_worker.sop_dedup import (
+            V1_MINED_REGISTRY_FILE,
+            deduplicate_templates,
+        )
+        sop_templates = deduplicate_templates(
+            sop_templates, _status_dir(), registry_file=V1_MINED_REGISTRY_FILE,
+        )
 
+    if sop_templates and not sop_auto_approve:
+        # Review is on: queue each new template once (mining re-runs over
+        # the stored episodes every tick) and export nothing.
+        if db is not None:
+            for tpl in sop_templates:
+                slug = tpl.get("slug", "")
+                if db.get_generated_sop_by_slug(slug) is not None:
+                    continue
+                db.save_generated_sop(
+                    slug=slug,
+                    title=tpl.get("title") or slug,
+                    source="v1_mined",
+                    sop_template=tpl,
+                    confidence=tpl.get("confidence_avg", tpl.get("confidence", 0.0)),
+                    auto_approve=False,
+                )
+                summary["sops_queued"] = summary.get("sops_queued", 0) + 1
+        return summary
+
+    # Step F2b: Format, version, and export SOPs (auto-approve on)
+    if sop_templates:
         # Cache SOP templates for CLI export trigger re-export
         _save_sop_cache(sop_templates)
 
@@ -1628,6 +1691,7 @@ def _process_focus_sessions_v2(
     # --- Check for pending focus Q&A answers from a previous cycle ---
     pending_export = _check_focus_answers(
         state_dir,
+        db=db,
         focus_questioner=focus_questioner,
         openclaw_writer=openclaw_writer,
         skill_md_writer=skill_md_writer,
@@ -1721,6 +1785,7 @@ def _process_focus_sessions_v2(
         from agenthandover_worker.procedure_schema import sop_to_procedure
         procedure_dict = sop_to_procedure(result.sop)
         procedure_dict["id"] = slug
+        procedure_dict["slug"] = slug
         procedure_dict["title"] = title  # User's focus session title, not VLM's guess
         procedure_dict["source"] = "focus"
         procedure_dict["lifecycle_state"] = "draft"  # Focus recordings start as draft, not observed
@@ -2071,6 +2136,7 @@ def _focus_v2_export(
 def _check_focus_answers(
     state_dir: Path,
     *,
+    db: "WorkerDB | None" = None,
     focus_questioner: "FocusQuestioner | None",
     openclaw_writer: "SOPExportAdapter",
     skill_md_writer: "SOPExportAdapter | None" = None,
@@ -2136,6 +2202,11 @@ def _check_focus_answers(
 
     sop_templates = [procedure_dict]
 
+    # The review-queue row was saved before the answers; update it in
+    # place so the app and a later approval read the merged procedure.
+    if db is not None and not db.update_sop_json(slug, procedure_dict):
+        logger.warning("No review record for '%s' to merge Q&A answers into", slug)
+
     # Save enriched procedure to KB (answers merged)
     if knowledge_base is not None:
         try:
@@ -2159,6 +2230,9 @@ def _check_focus_answers(
             procedure_writer=procedure_writer,
             kb_export_adapter=kb_export_adapter,
         )
+        record = db.get_generated_sop_by_slug(slug) if db is not None else None
+        if record is not None:
+            db.update_sop_status(record["sop_id"], "approved")
 
     # Clean up Q&A files
     clear_focus_qa_files(state_dir)
@@ -2661,6 +2735,7 @@ def _record_retry_lint_failure(
 
 
 def _process_retry_triggers(
+    trigger: dict,
     db: "WorkerDB",
     *,
     focus_processor: "FocusProcessor | None" = None,
@@ -2674,28 +2749,14 @@ def _process_retry_triggers(
     procedure_writer: "ProcedureWriter | None" = None,
     kb_export_adapter: "KnowledgeBaseExportAdapter | None" = None,
 ) -> None:
-    """Check for and process a retry-trigger.json file.
+    """Handle a ``retry`` trigger.
 
     Re-runs SOP generation for a previously failed attempt, then marks
     the failure as retried in the DB.
     """
-    state_dir = _status_dir()
-    trigger_path = state_dir / "retry-trigger.json"
-
-    if not trigger_path.is_file():
-        return
-
-    try:
-        with open(trigger_path) as f:
-            trigger = json.load(f)
-    except (json.JSONDecodeError, OSError):
-        logger.debug("Could not read retry-trigger.json", exc_info=True)
-        return
-
     failure_id = trigger.get("failure_id", "")
     if not failure_id:
-        logger.warning("retry-trigger.json missing failure_id")
-        _remove_trigger(trigger_path)
+        logger.warning("retry trigger missing failure_id")
         return
 
     logger.info("Processing retry trigger for failure_id=%s", failure_id)
@@ -2707,12 +2768,10 @@ def _process_retry_triggers(
             "Failed to read failure record %s from DB",
             failure_id, exc_info=True,
         )
-        _remove_trigger(trigger_path)
         return
 
     if failure is None:
         logger.warning("Retry trigger: failure_id=%s not found in DB", failure_id)
-        _remove_trigger(trigger_path)
         return
 
     source = failure.get("source", "")
@@ -2883,11 +2942,10 @@ def _process_retry_triggers(
     except Exception:
         logger.debug("Failed to mark failure as retried", exc_info=True)
 
-    _remove_trigger(trigger_path)
 
-
-def _process_approval_triggers(
+def _approve_sop(
     db: "WorkerDB",
+    sop_id_or_slug: str,
     *,
     openclaw_writer: "SOPExportAdapter",
     skill_md_writer: "SOPExportAdapter | None" = None,
@@ -2896,102 +2954,90 @@ def _process_approval_triggers(
     procedure_writer: "ProcedureWriter | None" = None,
     kb_export_adapter: "KnowledgeBaseExportAdapter | None" = None,
     vector_kb=None,
-) -> None:
-    """Check for and process an approve-trigger.json file.
+) -> bool:
+    """Lint, approve and export one generated SOP; return True on success.
 
-    Approves or rejects a draft SOP.  On approval, exports the SOP via
-    all active adapters.
+    The stored record is linted before its status changes, so a record
+    that fails lint stays a draft instead of becoming an approved SOP
+    that was never exported.
     """
-    state_dir = _status_dir()
-    trigger_path = state_dir / "approve-trigger.json"
+    # Resolve: try as UUID first, then as slug
+    record = db.get_generated_sop(sop_id_or_slug)
+    if record is None:
+        record = db.get_generated_sop_by_slug(sop_id_or_slug)
+    if record is None:
+        logger.warning("Cannot approve SOP %s: not found", sop_id_or_slug)
+        return False
+    sop_id = record["sop_id"]
+    sop_template = record.get("sop_json")
+    if not isinstance(sop_template, dict) or not sop_template:
+        logger.warning("Cannot approve SOP %s: no template stored", sop_id)
+        return False
+    if not _lint_and_log(sop_template, "approval"):
+        logger.error("SOP %s failed lint validation, left as draft", sop_id)
+        return False
+    if not db.update_sop_status(sop_id, "approved"):
+        logger.warning("Failed to approve SOP %s", sop_id)
+        return False
+    _export_sop_templates(
+        [sop_template],
+        openclaw_writer=openclaw_writer,
+        skill_md_writer=skill_md_writer,
+        claude_skill_writer=claude_skill_writer,
+        index_generator=index_generator,
+        procedure_writer=procedure_writer,
+        kb_export_adapter=kb_export_adapter,
+    )
+    logger.info("Approved and exported SOP %s", sop_id)
+    _embed_procedure(vector_kb, sop_template)
+    _refresh_claude_commands()
+    return True
 
-    if not trigger_path.is_file():
-        return
 
-    try:
-        with open(trigger_path) as f:
-            trigger = json.load(f)
-    except (json.JSONDecodeError, OSError):
-        logger.debug("Could not read approve-trigger.json", exc_info=True)
-        return
+def _process_approval_triggers(
+    trigger: dict,
+    db: "WorkerDB",
+    **export_kwargs,
+) -> None:
+    """Handle an ``approve`` trigger: approve or reject a draft SOP.
 
+    ``export_kwargs`` are the writers ``_approve_sop`` exports through.
+    """
     sop_id_or_slug = trigger.get("sop_id", "")
     action = trigger.get("action", "")
 
     if not sop_id_or_slug or action not in ("approve", "reject"):
         logger.warning(
-            "approve-trigger.json invalid: sop_id=%s action=%s",
+            "approve trigger invalid: sop_id=%s action=%s",
             sop_id_or_slug, action,
         )
-        _remove_trigger(trigger_path)
         return
 
-    # Resolve: try as UUID first, then as slug
-    sop_record = db.get_generated_sop(sop_id_or_slug)
-    if sop_record is None:
-        sop_record = db.get_generated_sop_by_slug(sop_id_or_slug)
-    sop_id = sop_record["sop_id"] if sop_record else sop_id_or_slug
+    logger.info(
+        "Processing approval trigger: sop_id=%s action=%s",
+        sop_id_or_slug, action,
+    )
+    if action == "approve":
+        _approve_sop(db, sop_id_or_slug, **export_kwargs)
+        return
 
-    logger.info("Processing approval trigger: sop_id=%s action=%s", sop_id, action)
-
-    try:
-        if action == "approve":
-            if db.update_sop_status(sop_id, "approved"):
-                sop_record = db.get_generated_sop(sop_id)
-                if sop_record and sop_record.get("sop_json"):
-                    sop_template = sop_record["sop_json"]
-                    if not _lint_and_log(sop_template, "approval"):
-                        logger.error(
-                            "Approved SOP %s failed lint validation, export skipped",
-                            sop_id,
-                        )
-                    else:
-                        _export_sop_templates(
-                            [sop_template],
-                            openclaw_writer=openclaw_writer,
-                            skill_md_writer=skill_md_writer,
-                            claude_skill_writer=claude_skill_writer,
-                            index_generator=index_generator,
-                            procedure_writer=procedure_writer,
-                            kb_export_adapter=kb_export_adapter,
-                        )
-                        logger.info("Approved and exported SOP %s", sop_id)
-                        _embed_procedure(vector_kb, sop_template)
-                        _refresh_claude_commands()
-                else:
-                    logger.warning(
-                        "Approved SOP %s but could not load template for export",
-                        sop_id,
-                    )
-            else:
-                logger.warning("Failed to approve SOP %s (not found?)", sop_id)
-
-        elif action == "reject":
-            if db.update_sop_status(sop_id, "rejected"):
-                logger.info("Rejected SOP %s", sop_id)
-            else:
-                logger.warning("Failed to reject SOP %s (not found?)", sop_id)
-    except Exception:
-        logger.warning(
-            "Approval trigger processing failed for %s",
-            sop_id, exc_info=True,
-        )
-
-    _remove_trigger(trigger_path)
+    record = db.get_generated_sop(sop_id_or_slug)
+    if record is None:
+        record = db.get_generated_sop_by_slug(sop_id_or_slug)
+    sop_id = record["sop_id"] if record else sop_id_or_slug
+    if db.update_sop_status(sop_id, "rejected"):
+        logger.info("Rejected SOP %s", sop_id)
+    else:
+        logger.warning("Failed to reject SOP %s (not found?)", sop_id)
 
 
-def _process_failed_query_trigger(db: "WorkerDB") -> None:
-    """Check for and process a failed-query-trigger.json file.
+def _process_failed_query_trigger(trigger: dict, db: "WorkerDB") -> None:
+    """Handle a ``failed-query`` trigger.
 
     Reads failed generations from the DB and writes the result to
     failed-query-result.json for the CLI to pick up.
     """
     state_dir = _status_dir()
-    trigger_path = state_dir / "failed-query-trigger.json"
-
-    if not trigger_path.is_file():
-        return
-
     logger.info("Processing failed generations query trigger")
 
     try:
@@ -3014,23 +3060,17 @@ def _process_failed_query_trigger(db: "WorkerDB") -> None:
     except Exception:
         logger.warning("Failed to process failed query trigger", exc_info=True)
 
-    _remove_trigger(trigger_path)
-
 
 def _process_search_trigger(
+    trigger: dict,
     activity_searcher: "ActivitySearcher | None",
 ) -> None:
-    """Check for and process a search-query-trigger.json file.
+    """Handle a ``search-query`` trigger (the CLI's fallback path).
 
     Runs the query through the ActivitySearcher and writes results
     to search-query-result.json for the CLI to pick up.
     """
     state_dir = _status_dir()
-    trigger_path = state_dir / "search-query-trigger.json"
-
-    if not trigger_path.is_file():
-        return
-
     logger.info("Processing search query trigger")
 
     # Remove any stale result file so the CLI cannot read old data
@@ -3038,9 +3078,6 @@ def _process_search_trigger(
     result_path.unlink(missing_ok=True)
 
     try:
-        with open(trigger_path) as f:
-            trigger = json.load(f)
-
         query = trigger.get("query", "")
         limit = trigger.get("limit", 20)
         date = trigger.get("date")
@@ -3080,22 +3117,16 @@ def _process_search_trigger(
         except Exception:
             pass
 
-    _remove_trigger(trigger_path)
-
 
 def _process_recall_trigger(
+    trigger: dict,
     activity_searcher: "ActivitySearcher | None",
 ) -> None:
-    """Check for and process a recall-query-trigger.json file.
+    """Handle a ``recall-query`` trigger (the CLI's fallback path).
 
     Runs session recall and writes results to recall-query-result.json.
     """
     state_dir = _status_dir()
-    trigger_path = state_dir / "recall-query-trigger.json"
-
-    if not trigger_path.is_file():
-        return
-
     logger.info("Processing recall query trigger")
 
     # Remove any stale result file so the CLI cannot read old data
@@ -3103,47 +3134,11 @@ def _process_recall_trigger(
     result_path.unlink(missing_ok=True)
 
     try:
-        with open(trigger_path) as f:
-            trigger = json.load(f)
-
-        date = trigger.get("date")
-        app = trigger.get("app")
-        start_time = trigger.get("start_time")
-        end_time = trigger.get("end_time")
-
-        # Convert HH:MM shorthand to full ISO timestamps.
-        # The searcher expects ISO format (e.g. "2026-03-12T09:30:00")
-        # but the CLI / trigger file may use bare "HH:MM".
-        import re as _re
-        _hhmm_re = _re.compile(r"^\d{2}:\d{2}$")
-        _date_prefix = date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        if start_time and _hhmm_re.match(start_time):
-            start_time = f"{_date_prefix}T{start_time}:00"
-        if end_time and _hhmm_re.match(end_time):
-            end_time = f"{_date_prefix}T{end_time}:00"
-
         if activity_searcher is None:
             result = {"error": "Activity search not available (v2 schema required)"}
         else:
-            timeline = activity_searcher.session_recall(
-                date=date, app=app,
-                start_time=start_time, end_time=end_time,
-            )
-            result = {
-                "date": timeline.date,
-                "total_active_minutes": timeline.total_active_minutes,
-                "apps_used": timeline.apps_used,
-                "entries": [
-                    {
-                        "timestamp": e.timestamp,
-                        "app": e.app,
-                        "location": e.location,
-                        "what_doing": e.what_doing,
-                        "event_id": e.event_id,
-                    }
-                    for e in timeline.entries
-                ],
-            }
+            from agenthandover_worker.activity_search import recall_payload
+            result = recall_payload(activity_searcher, trigger)
 
         result_path = state_dir / "recall-query-result.json"
         _atomic_write_result(result_path, result)
@@ -3156,8 +3151,6 @@ def _process_recall_trigger(
         except Exception:
             pass
 
-    _remove_trigger(trigger_path)
-
 
 # ------------------------------------------------------------------
 # Trigger handlers: trust & staleness (MicroReviewView triggers)
@@ -3165,33 +3158,19 @@ def _process_recall_trigger(
 
 
 def _process_trust_accept_trigger(
+    trigger: dict,
     trust_advisor: "TrustAdvisor",
     constraint_manager: "ConstraintManager",
 ) -> None:
-    """Check for and process a trust-accept-trigger.json file.
+    """Handle a ``trust-accept`` trigger.
 
     The MicroReviewView writes this file when the user accepts a trust
     promotion suggestion.  We delegate to ``trust_advisor.accept_suggestion``
     which promotes the procedure's trust level in the knowledge base.
     """
-    state_dir = _status_dir()
-    trigger_path = state_dir / "trust-accept-trigger.json"
-
-    if not trigger_path.is_file():
-        return
-
-    try:
-        with open(trigger_path) as f:
-            trigger = json.load(f)
-    except (json.JSONDecodeError, OSError):
-        logger.debug("Could not read trust-accept-trigger.json", exc_info=True)
-        _remove_trigger(trigger_path)
-        return
-
     procedure_slug = trigger.get("procedure_slug", "")
     if not procedure_slug:
-        logger.warning("trust-accept-trigger.json missing procedure_slug")
-        _remove_trigger(trigger_path)
+        logger.warning("trust-accept trigger missing procedure_slug")
         return
 
     logger.info("Processing trust accept trigger: slug=%s", procedure_slug)
@@ -3213,36 +3192,20 @@ def _process_trust_accept_trigger(
             exc_info=True,
         )
 
-    _remove_trigger(trigger_path)
-
 
 def _process_trust_dismiss_trigger(
+    trigger: dict,
     trust_advisor: "TrustAdvisor",
 ) -> None:
-    """Check for and process a trust-dismiss-trigger.json file.
+    """Handle a ``trust-dismiss`` trigger.
 
     The MicroReviewView writes this file when the user dismisses a trust
     promotion suggestion.  No state change is needed beyond marking the
     suggestion as dismissed — this simply acknowledges the user's choice.
     """
-    state_dir = _status_dir()
-    trigger_path = state_dir / "trust-dismiss-trigger.json"
-
-    if not trigger_path.is_file():
-        return
-
-    try:
-        with open(trigger_path) as f:
-            trigger = json.load(f)
-    except (json.JSONDecodeError, OSError):
-        logger.debug("Could not read trust-dismiss-trigger.json", exc_info=True)
-        _remove_trigger(trigger_path)
-        return
-
     procedure_slug = trigger.get("procedure_slug", "")
     if not procedure_slug:
-        logger.warning("trust-dismiss-trigger.json missing procedure_slug")
-        _remove_trigger(trigger_path)
+        logger.warning("trust-dismiss trigger missing procedure_slug")
         return
 
     logger.info("Processing trust dismiss trigger: slug=%s", procedure_slug)
@@ -3265,14 +3228,13 @@ def _process_trust_dismiss_trigger(
             exc_info=True,
         )
 
-    _remove_trigger(trigger_path)
-
 
 def _process_staleness_reviewed_trigger(
+    trigger: dict,
     staleness_detector: "StalenessDetector",
     knowledge_base: "KnowledgeBase",
 ) -> None:
-    """Check for and process a staleness-reviewed-trigger.json file.
+    """Handle a ``staleness-reviewed`` trigger.
 
     The MicroReviewView writes this file when the user acts on a staleness
     alert.  Two actions are supported:
@@ -3281,32 +3243,15 @@ def _process_staleness_reviewed_trigger(
       ``staleness.last_confirmed`` to now.
     * ``"archive"`` — delete the procedure from the knowledge base.
     """
-    state_dir = _status_dir()
-    trigger_path = state_dir / "staleness-reviewed-trigger.json"
-
-    if not trigger_path.is_file():
-        return
-
-    try:
-        with open(trigger_path) as f:
-            trigger = json.load(f)
-    except (json.JSONDecodeError, OSError):
-        logger.debug(
-            "Could not read staleness-reviewed-trigger.json", exc_info=True
-        )
-        _remove_trigger(trigger_path)
-        return
-
     procedure_slug = trigger.get("procedure_slug", "")
     action = trigger.get("action", "")
 
     if not procedure_slug or action not in ("reviewed", "archive"):
         logger.warning(
-            "staleness-reviewed-trigger.json invalid: slug=%s action=%s",
+            "staleness-reviewed trigger invalid: slug=%s action=%s",
             procedure_slug,
             action,
         )
-        _remove_trigger(trigger_path)
         return
 
     logger.info(
@@ -3351,87 +3296,81 @@ def _process_staleness_reviewed_trigger(
             exc_info=True,
         )
 
-    _remove_trigger(trigger_path)
-
 
 def _process_lifecycle_promote_trigger(
+    trigger: dict,
     *,
     lifecycle_manager: "LifecycleManager",
+    db: "WorkerDB | None" = None,
+    approve: Callable[[str], bool] | None = None,
+    knowledge_base: "KnowledgeBase | None" = None,
+    claude_skill_writer: "SOPExportAdapter | None" = None,
 ) -> None:
-    """Process a lifecycle-promote-trigger.json written by the CLI.
+    """Handle a ``lifecycle-promote`` trigger from the app or the CLI.
 
-    The CLI ``agenthandover sops promote <slug> <state>`` writes a trigger file
-    requesting a lifecycle transition.  The worker validates and applies it.
+    ``slug`` (app) or ``procedure_slug`` (CLI) names the procedure.  The
+    target is reached by walking the promotion chain one valid transition
+    at a time.  Promoting to ``agent_ready`` first approves a pending draft
+    through *approve*; a draft that fails approval (lint) is not promoted.
+    Claude Code commands are refreshed whenever the procedure enters or
+    leaves ``agent_ready``; on entering it, the procedure is also written
+    as a Claude Code Skill when *claude_skill_writer* is configured (the
+    refresh removes Skills of procedures that are not agent_ready).
     """
-    state_dir = _status_dir()
-    trigger_path = state_dir / "lifecycle-promote-trigger.json"
+    from agenthandover_worker.lifecycle_manager import ProcedureLifecycle
 
-    if not trigger_path.is_file():
-        return
-
-    try:
-        with open(trigger_path) as f:
-            trigger = json.load(f)
-    except (json.JSONDecodeError, OSError):
-        logger.debug("Could not read lifecycle-promote-trigger.json", exc_info=True)
-        _remove_trigger(trigger_path)
-        return
-
-    slug = trigger.get("procedure_slug", "")
+    slug = trigger.get("slug") or trigger.get("procedure_slug", "")
     to_state = trigger.get("to_state", "")
     actor = trigger.get("actor", "human")
     reason = trigger.get("reason", "")
 
     if not slug or not to_state:
         logger.warning("Lifecycle promote trigger missing slug or to_state")
-        _remove_trigger(trigger_path)
         return
-
-    logger.info(
-        "Processing lifecycle promote trigger: %s → %s",
-        slug, to_state,
-    )
-
     try:
-        from agenthandover_worker.lifecycle_manager import ProcedureLifecycle
         target = ProcedureLifecycle(to_state)
-        lifecycle_manager.transition(
-            slug, target,
-            trigger="cli_promote",
-            actor=actor,
-            reason=reason,
-        )
-        logger.info("Lifecycle promoted: %s → %s", slug, to_state)
     except ValueError:
         logger.warning("Invalid lifecycle state: %s", to_state)
+        return
+
+    logger.info("Processing lifecycle promote trigger: %s → %s", slug, to_state)
+
+    if target is ProcedureLifecycle.AGENT_READY and db is not None and approve is not None:
+        record = db.get_generated_sop_by_slug(slug)
+        if record is not None and record.get("status") == "draft" and not approve(slug):
+            logger.warning("Not promoting %s: its draft could not be approved", slug)
+            return
+
+    before = lifecycle_manager.get_state(slug)
+    try:
+        lifecycle_manager.promote(
+            slug, target, trigger="human_promote", actor=actor, reason=reason,
+        )
+        logger.info("Lifecycle promoted: %s → %s", slug, to_state)
     except Exception:
         logger.warning(
             "Lifecycle promote failed for %s → %s",
             slug, to_state, exc_info=True,
         )
-
-    _remove_trigger(trigger_path)
+    after = lifecycle_manager.get_state(slug)
+    if before == after or ProcedureLifecycle.AGENT_READY not in (before, after):
+        return
+    if after is ProcedureLifecycle.AGENT_READY and claude_skill_writer is not None:
+        proc = knowledge_base.get_procedure(slug) if knowledge_base is not None else None
+        if proc is not None:
+            try:
+                claude_skill_writer.write_procedure(proc)
+            except Exception:
+                logger.warning("Claude Skill export failed for %s", slug, exc_info=True)
+    _refresh_claude_commands()
 
 
 def _process_merge_trigger(
+    trigger: dict,
     *,
     procedure_curator: "ProcedureCurator | None" = None,
 ) -> None:
-    """Process a merge-trigger.json written by the SwiftUI app."""
-    state_dir = _status_dir()
-    trigger_path = state_dir / "merge-trigger.json"
-
-    if not trigger_path.is_file():
-        return
-
-    try:
-        with open(trigger_path) as f:
-            trigger = json.load(f)
-    except (json.JSONDecodeError, OSError):
-        logger.debug("Could not read merge-trigger.json", exc_info=True)
-        _remove_trigger(trigger_path)
-        return
-
+    """Handle a ``merge`` trigger written by the SwiftUI app."""
     # The SwiftUI app writes procedure_slug + merge_target; also accept
     # the slug_a/slug_b form for CLI callers.
     slug_a = trigger.get("slug_a") or trigger.get("procedure_slug", "")
@@ -3440,7 +3379,6 @@ def _process_merge_trigger(
 
     if not slug_a or not slug_b:
         logger.warning("Merge trigger missing slug_a/slug_b or procedure_slug/merge_target")
-        _remove_trigger(trigger_path)
         return
 
     # Handle dismiss action
@@ -3454,7 +3392,6 @@ def _process_merge_trigger(
                 logger.warning("Merge dismiss failed for %s + %s", slug_a, slug_b, exc_info=True)
         else:
             logger.warning("Merge dismiss received but procedure_curator is not available")
-        _remove_trigger(trigger_path)
         return
 
     logger.info("Processing merge trigger: %s + %s", slug_a, slug_b)
@@ -3468,35 +3405,19 @@ def _process_merge_trigger(
     else:
         logger.warning("Merge trigger received but procedure_curator is not available")
 
-    _remove_trigger(trigger_path)
-
 
 def _process_drift_reviewed_trigger(
+    trigger: dict,
     *,
     procedure_curator: "ProcedureCurator | None" = None,
 ) -> None:
-    """Process a drift-reviewed-trigger.json written by the SwiftUI app."""
-    state_dir = _status_dir()
-    trigger_path = state_dir / "drift-reviewed-trigger.json"
-
-    if not trigger_path.is_file():
-        return
-
-    try:
-        with open(trigger_path) as f:
-            trigger = json.load(f)
-    except (json.JSONDecodeError, OSError):
-        logger.debug("Could not read drift-reviewed-trigger.json", exc_info=True)
-        _remove_trigger(trigger_path)
-        return
-
+    """Handle a ``drift-reviewed`` trigger written by the SwiftUI app."""
     slug = trigger.get("procedure_slug", "")
     drift_type = trigger.get("drift_type", "")
     action = trigger.get("action", "dismiss")
 
     if not slug:
         logger.warning("Drift reviewed trigger missing procedure_slug")
-        _remove_trigger(trigger_path)
         return
 
     logger.info("Processing drift reviewed trigger: %s type=%s action=%s", slug, drift_type, action)
@@ -3527,25 +3448,13 @@ def _process_drift_reviewed_trigger(
     else:
         logger.warning("Drift reviewed trigger received but procedure_curator is not available")
 
-    _remove_trigger(trigger_path)
-
 
 def _process_lifecycle_dismiss_trigger(
+    trigger: dict,
     *,
     procedure_curator: "ProcedureCurator | None" = None,
 ) -> None:
-    """Process lifecycle-dismiss-trigger.json — records that user dismissed an upgrade suggestion."""
-    state_dir = _status_dir()
-    trigger_path = state_dir / "lifecycle-dismiss-trigger.json"
-    if not trigger_path.is_file():
-        return
-    try:
-        with open(trigger_path) as f:
-            trigger = json.load(f)
-    except (json.JSONDecodeError, OSError):
-        _remove_trigger(trigger_path)
-        return
-
+    """Handle a ``lifecycle-dismiss`` trigger: record that user dismissed an upgrade suggestion."""
     slug = trigger.get("procedure_slug", "")
     if slug and procedure_curator is not None:
         try:
@@ -3562,8 +3471,6 @@ def _process_lifecycle_dismiss_trigger(
             logger.info("Lifecycle upgrade dismissed for %s", slug)
         except Exception:
             logger.debug("Lifecycle dismiss failed", exc_info=True)
-
-    _remove_trigger(trigger_path)
 
 
 def _export_sop_templates(
@@ -3720,12 +3627,13 @@ def _load_sop_cache() -> list[dict]:
 
 
 def _check_export_trigger(
+    trigger: dict,
     *,
     openclaw_writer: "SOPExportAdapter",
     sops_dir: Path,
     procedure_writer: "ProcedureWriter | None" = None,
 ) -> None:
-    """Check for and process an export-trigger.json file written by the CLI.
+    """Handle an ``export`` trigger written by the CLI.
 
     The CLI ``agenthandover export`` writes a trigger file requesting re-export of
     existing SOPs in a specific format (skill-md, generic, openclaw).  The
@@ -3733,19 +3641,6 @@ def _check_export_trigger(
     via ``_export_via_adapter()`` for v3-aware rendering, and removes the
     trigger.
     """
-    state_dir = _status_dir()
-    trigger_path = state_dir / "export-trigger.json"
-
-    if not trigger_path.is_file():
-        return
-
-    try:
-        with open(trigger_path) as f:
-            trigger = json.load(f)
-    except (json.JSONDecodeError, OSError):
-        logger.debug("Could not read export-trigger.json", exc_info=True)
-        return
-
     fmt = trigger.get("format", "")
     sop_slug = trigger.get("sop_slug")
     output_dir = trigger.get("output_dir")
@@ -3763,7 +3658,6 @@ def _check_export_trigger(
             "Run the pipeline first so SOPs are induced and cached."
         )
         # Still remove the trigger so it doesn't loop
-        _remove_trigger(trigger_path)
         return
 
     if sop_slug:
@@ -3772,7 +3666,6 @@ def _check_export_trigger(
         ]
         if not sop_templates:
             logger.warning("Export trigger: no SOP with slug '%s' found", sop_slug)
-            _remove_trigger(trigger_path)
             return
 
     # Resolve output directory: trigger output_dir overrides default
@@ -3831,16 +3724,6 @@ def _check_export_trigger(
 
     if exported == 0 and fmt not in ("skill-md", "openclaw", "generic", "claude-skill", "all"):
         logger.warning("Export trigger: unsupported format '%s'", fmt)
-
-    _remove_trigger(trigger_path)
-
-
-def _remove_trigger(trigger_path: Path) -> None:
-    """Remove the export trigger file."""
-    try:
-        trigger_path.unlink(missing_ok=True)
-    except Exception:
-        logger.debug("Failed to remove export-trigger.json", exc_info=True)
 
 
 def _persist_vlm_jobs(db: "WorkerDB", vlm_queue: VLMFallbackQueue) -> None:
@@ -4801,8 +4684,73 @@ def main(argv: list[str] | None = None) -> None:
                 )
 
         current_interval = args.poll_interval
-        max_interval = max(60.0, args.poll_interval * 16)
         consecutive_errors = 0
+
+        # App and CLI requests arrive through the trigger spool; each kind
+        # maps to one handler.
+        export_kwargs = dict(
+            openclaw_writer=sop_writer,
+            skill_md_writer=skill_md_writer,
+            claude_skill_writer=claude_skill_writer,
+            index_generator=index_generator,
+            procedure_writer=procedure_writer,
+            kb_export_adapter=kb_export_adapter,
+        )
+        trigger_handlers: dict[str, Callable[[dict], None]] = {
+            "retry": lambda t: _process_retry_triggers(
+                t, db,
+                focus_processor=focus_processor,
+                sop_generator=sop_generator,
+                screenshots_dir=screenshots_dir,
+                sop_auto_approve=sop_auto_approve,
+                **export_kwargs,
+            ),
+            "approve": lambda t: _process_approval_triggers(
+                t, db, vector_kb=vector_kb, **export_kwargs,
+            ),
+            "failed-query": lambda t: _process_failed_query_trigger(t, db),
+            "search-query": lambda t: _process_search_trigger(t, activity_searcher),
+            "recall-query": lambda t: _process_recall_trigger(t, activity_searcher),
+            "trust-accept": lambda t: _process_trust_accept_trigger(
+                t, trust_advisor, constraint_manager,
+            ),
+            "trust-dismiss": lambda t: _process_trust_dismiss_trigger(t, trust_advisor),
+            "staleness-reviewed": lambda t: _process_staleness_reviewed_trigger(
+                t, staleness_detector, knowledge_base,
+            ),
+            "lifecycle-promote": lambda t: _process_lifecycle_promote_trigger(
+                t,
+                lifecycle_manager=lifecycle_manager,
+                db=db,
+                approve=lambda slug: _approve_sop(
+                    db, slug, vector_kb=vector_kb, **export_kwargs,
+                ),
+                knowledge_base=knowledge_base,
+                # With --adapter claude-skill the primary writer is the
+                # Claude Skill writer.
+                claude_skill_writer=(
+                    claude_skill_writer
+                    or (sop_writer if args.adapter == "claude-skill" else None)
+                ),
+            ),
+            "merge": lambda t: _process_merge_trigger(
+                t, procedure_curator=procedure_curator,
+            ),
+            "drift-reviewed": lambda t: _process_drift_reviewed_trigger(
+                t, procedure_curator=procedure_curator,
+            ),
+            "lifecycle-dismiss": lambda t: _process_lifecycle_dismiss_trigger(
+                t, procedure_curator=procedure_curator,
+            ),
+            "export": lambda t: _check_export_trigger(
+                t,
+                openclaw_writer=sop_writer,
+                sops_dir=args.sops_dir,
+                procedure_writer=procedure_writer,
+            ),
+        }
+        assert set(trigger_handlers) == set(trigger_spool.KINDS)
+        trigger_spool.migrate_legacy(_status_dir())
 
         # Force-write sops-index.json at startup so the SwiftUI app
         # immediately sees the latest data (including any new fields).
@@ -4829,49 +4777,9 @@ def main(argv: list[str] | None = None) -> None:
                 vector_kb.reset_cycle_budget()
 
             try:
-                # Process retry and approval triggers first
-                _process_retry_triggers(
-                    db,
-                    focus_processor=focus_processor,
-                    sop_generator=sop_generator,
-                    openclaw_writer=sop_writer,
-                    skill_md_writer=skill_md_writer,
-                    claude_skill_writer=claude_skill_writer,
-                    index_generator=index_generator,
-                    screenshots_dir=screenshots_dir,
-                    sop_auto_approve=sop_auto_approve,
-                    procedure_writer=procedure_writer,
-                    kb_export_adapter=kb_export_adapter,
-                )
-                _process_approval_triggers(
-                    db,
-                    openclaw_writer=sop_writer,
-                    skill_md_writer=skill_md_writer,
-                    claude_skill_writer=claude_skill_writer,
-                    index_generator=index_generator,
-                    procedure_writer=procedure_writer,
-                    kb_export_adapter=kb_export_adapter,
-                    vector_kb=vector_kb,
-                )
-                _process_failed_query_trigger(db)
-                _process_search_trigger(activity_searcher)
-                _process_recall_trigger(activity_searcher)
-                _process_trust_accept_trigger(trust_advisor, constraint_manager)
-                _process_trust_dismiss_trigger(trust_advisor)
-                _process_staleness_reviewed_trigger(
-                    staleness_detector, knowledge_base
-                )
-                _process_lifecycle_promote_trigger(
-                    lifecycle_manager=lifecycle_manager,
-                )
-                _process_merge_trigger(
-                    procedure_curator=procedure_curator,
-                )
-                _process_drift_reviewed_trigger(
-                    procedure_curator=procedure_curator,
-                )
-                _process_lifecycle_dismiss_trigger(
-                    procedure_curator=procedure_curator,
+                # App and CLI requests first, oldest first
+                triggers_consumed = trigger_spool.drain(
+                    _status_dir(), trigger_handlers,
                 )
 
                 # Refresh curation queue after any curation action so UI reflects changes
@@ -4935,13 +4843,6 @@ def main(argv: list[str] | None = None) -> None:
                     )
                     _write_sops_index(db, knowledge_base)
 
-                # Check for CLI-requested export triggers
-                _check_export_trigger(
-                    openclaw_writer=sop_writer,
-                    sops_dir=args.sops_dir,
-                    procedure_writer=procedure_writer,
-                )
-
                 unprocessed = db.get_unprocessed_events(limit=100)
                 pending_vlm = db.get_pending_vlm_jobs(limit=10)
 
@@ -4951,14 +4852,18 @@ def main(argv: list[str] | None = None) -> None:
                         len(unprocessed),
                         len(pending_vlm),
                     )
-                    # Reset backoff when work is found
-                    current_interval = args.poll_interval
+                    current_interval = _next_poll_interval(
+                        current_interval, args.poll_interval,
+                        busy=True, triggers_consumed=triggers_consumed,
+                    )
                     # Reset idle log timer
                     last_idle_log_time = time.monotonic()
                 else:
                     logger.debug("Poll: nothing to do")
-                    # Exponential backoff when idle
-                    current_interval = min(current_interval * 2, max_interval)
+                    current_interval = _next_poll_interval(
+                        current_interval, args.poll_interval,
+                        busy=False, triggers_consumed=triggers_consumed,
+                    )
 
                     # Task 5: Periodic idle progress message
                     now_mono = time.monotonic()
@@ -4992,6 +4897,7 @@ def main(argv: list[str] | None = None) -> None:
                         db=db,
                         procedure_writer=procedure_writer,
                         kb_export_adapter=kb_export_adapter,
+                        sop_auto_approve=sop_auto_approve,
                     )
                     pipeline_elapsed_ms = int((time.monotonic() - pipeline_start) * 1000)
                     last_pipeline_duration_ms = pipeline_elapsed_ms

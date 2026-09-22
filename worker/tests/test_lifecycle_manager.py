@@ -346,3 +346,56 @@ class TestEdgeCases:
     def test_get_transition_history_nonexistent_returns_empty(self, kb, lm):
         history = lm.get_transition_history("no-exist")
         assert history == []
+
+
+# ---------------------------------------------------------------------------
+# promote(): the chain walk behind "Approve for agents"
+# ---------------------------------------------------------------------------
+
+class TestPromote:
+    def test_walks_the_chain_from_observed(self, kb, lm):
+        _save_procedure(kb, "p", lifecycle_state="observed")
+        entered = lm.promote("p", ProcedureLifecycle.AGENT_READY, trigger="human_promote")
+        assert entered == [
+            ProcedureLifecycle.DRAFT,
+            ProcedureLifecycle.REVIEWED,
+            ProcedureLifecycle.VERIFIED,
+            ProcedureLifecycle.AGENT_READY,
+        ]
+        proc = kb.get_procedure("p")
+        assert proc["lifecycle_state"] == "agent_ready"
+        assert [(h["from_state"], h["to_state"]) for h in proc["lifecycle_history"]] == [
+            ("observed", "draft"), ("draft", "reviewed"),
+            ("reviewed", "verified"), ("verified", "agent_ready"),
+        ]
+
+    def test_starts_from_the_current_state(self, kb, lm):
+        _save_procedure(kb, "p", lifecycle_state="reviewed")
+        entered = lm.promote("p", ProcedureLifecycle.AGENT_READY, trigger="t")
+        assert entered == [ProcedureLifecycle.VERIFIED, ProcedureLifecycle.AGENT_READY]
+
+    def test_stale_reenters_the_chain_at_the_furthest_valid_state(self, kb, lm):
+        _save_procedure(kb, "p", lifecycle_state="stale")
+        entered = lm.promote("p", ProcedureLifecycle.AGENT_READY, trigger="t")
+        assert entered[0] == ProcedureLifecycle.REVIEWED
+        assert lm.get_state("p") == ProcedureLifecycle.AGENT_READY
+
+    def test_already_there_is_a_noop(self, kb, lm):
+        _save_procedure(kb, "p", lifecycle_state="agent_ready")
+        assert lm.promote("p", ProcedureLifecycle.AGENT_READY, trigger="t") == []
+
+    def test_demotion_is_a_single_valid_transition(self, kb, lm):
+        _save_procedure(kb, "p", lifecycle_state="agent_ready")
+        assert lm.promote("p", ProcedureLifecycle.STALE, trigger="t") == [ProcedureLifecycle.STALE]
+        _save_procedure(kb, "q", lifecycle_state="agent_ready")
+        assert lm.promote("q", ProcedureLifecycle.VERIFIED, trigger="t") == [ProcedureLifecycle.VERIFIED]
+
+    def test_backwards_through_the_chain_is_refused(self, kb, lm):
+        _save_procedure(kb, "p", lifecycle_state="agent_ready")
+        with pytest.raises(InvalidTransitionError):
+            lm.promote("p", ProcedureLifecycle.DRAFT, trigger="t")
+        assert lm.get_state("p") == ProcedureLifecycle.AGENT_READY
+
+    def test_missing_procedure_raises(self, lm):
+        with pytest.raises(InvalidTransitionError):
+            lm.promote("ghost", ProcedureLifecycle.AGENT_READY, trigger="t")
