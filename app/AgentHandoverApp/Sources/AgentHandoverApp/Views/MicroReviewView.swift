@@ -453,23 +453,15 @@ final class MicroReviewViewModel: ObservableObject {
     }
 
     func handleAction(card: ReviewCardData, action: ReviewAction) {
-        // Write trigger file for the worker to pick up
-        let stateDir: URL = {
-            let home = FileManager.default.homeDirectoryForCurrentUser
-            return home.appendingPathComponent(
-                "Library/Application Support/agenthandover"
-            )
-        }()
-
+        // Queue the decision in the worker's trigger spool
         let now = ISO8601DateFormatter().string(from: Date())
         var success = false
 
         switch (card.type, action) {
-        // Draft SOP cards -> approve-trigger.json
+        // Draft SOP cards -> approve trigger
         case (.draftProcedure, .approve):
             success = writeTrigger(
-                dir: stateDir,
-                filename: "approve-trigger.json",
+                kind: "approve",
                 payload: [
                     "sop_id": card.slug,
                     "action": "approve",
@@ -478,8 +470,7 @@ final class MicroReviewViewModel: ObservableObject {
             )
         case (.draftProcedure, .reject):
             success = writeTrigger(
-                dir: stateDir,
-                filename: "approve-trigger.json",
+                kind: "approve",
                 payload: [
                     "sop_id": card.slug,
                     "action": "reject",
@@ -490,8 +481,7 @@ final class MicroReviewViewModel: ObservableObject {
         // Trust suggestion cards -> trust-accept / trust-dismiss triggers
         case (.trustSuggestion, .approve):
             success = writeTrigger(
-                dir: stateDir,
-                filename: "trust-accept-trigger.json",
+                kind: "trust-accept",
                 payload: [
                     "procedure_slug": card.slug,
                     "requested_at": now,
@@ -500,19 +490,17 @@ final class MicroReviewViewModel: ObservableObject {
         case (.trustSuggestion, .reject),
              (.trustSuggestion, .dismiss):
             success = writeTrigger(
-                dir: stateDir,
-                filename: "trust-dismiss-trigger.json",
+                kind: "trust-dismiss",
                 payload: [
                     "procedure_slug": card.slug,
                     "requested_at": now,
                 ]
             )
 
-        // Stale procedure cards -> staleness-reviewed-trigger.json
+        // Stale procedure cards -> staleness-reviewed trigger
         case (.staleAlert, .approve):
             success = writeTrigger(
-                dir: stateDir,
-                filename: "staleness-reviewed-trigger.json",
+                kind: "staleness-reviewed",
                 payload: [
                     "procedure_slug": card.slug,
                     "action": "reviewed",
@@ -521,8 +509,7 @@ final class MicroReviewViewModel: ObservableObject {
             )
         case (.staleAlert, .reject):
             success = writeTrigger(
-                dir: stateDir,
-                filename: "staleness-reviewed-trigger.json",
+                kind: "staleness-reviewed",
                 payload: [
                     "procedure_slug": card.slug,
                     "action": "archive",
@@ -530,12 +517,11 @@ final class MicroReviewViewModel: ObservableObject {
                 ]
             )
 
-        // Lifecycle upgrade cards -> lifecycle-promote-trigger.json
+        // Lifecycle upgrade cards -> lifecycle-promote trigger
         case (.lifecycleUpgrade, .approve):
             let nextState = card.metadata["nextState"] ?? "draft"
             success = writeTrigger(
-                dir: stateDir,
-                filename: "lifecycle-promote-trigger.json",
+                kind: "lifecycle-promote",
                 payload: [
                     "procedure_slug": card.slug,
                     "to_state": nextState,
@@ -548,8 +534,7 @@ final class MicroReviewViewModel: ObservableObject {
              (.lifecycleUpgrade, .dismiss):
             // Dismiss: write trigger so worker records the decision durably
             success = writeTrigger(
-                dir: stateDir,
-                filename: "lifecycle-dismiss-trigger.json",
+                kind: "lifecycle-dismiss",
                 payload: [
                     "procedure_slug": card.slug,
                     "action": "dismiss",
@@ -557,11 +542,10 @@ final class MicroReviewViewModel: ObservableObject {
                 ]
             )
 
-        // Merge candidate cards -> merge-trigger.json
+        // Merge candidate cards -> merge trigger
         case (.mergeCandidate, .approve):
             success = writeTrigger(
-                dir: stateDir,
-                filename: "merge-trigger.json",
+                kind: "merge",
                 payload: [
                     "procedure_slug": card.slug,
                     "action": "merge",
@@ -573,8 +557,7 @@ final class MicroReviewViewModel: ObservableObject {
              (.mergeCandidate, .dismiss):
             let mergeTarget = card.metadata["mergeTarget"] ?? ""
             success = writeTrigger(
-                dir: stateDir,
-                filename: "merge-trigger.json",
+                kind: "merge",
                 payload: [
                     "procedure_slug": card.slug,
                     "merge_target": mergeTarget,
@@ -583,11 +566,10 @@ final class MicroReviewViewModel: ObservableObject {
                 ]
             )
 
-        // Drift alert cards -> drift-reviewed-trigger.json
+        // Drift alert cards -> drift-reviewed trigger
         case (.driftAlert, .approve):
             success = writeTrigger(
-                dir: stateDir,
-                filename: "drift-reviewed-trigger.json",
+                kind: "drift-reviewed",
                 payload: [
                     "procedure_slug": card.slug,
                     "drift_type": card.metadata["driftType"] ?? "",
@@ -597,8 +579,7 @@ final class MicroReviewViewModel: ObservableObject {
             )
         case (.driftAlert, .reject):
             success = writeTrigger(
-                dir: stateDir,
-                filename: "drift-reviewed-trigger.json",
+                kind: "drift-reviewed",
                 payload: [
                     "procedure_slug": card.slug,
                     "drift_type": card.metadata["driftType"] ?? "",
@@ -608,8 +589,7 @@ final class MicroReviewViewModel: ObservableObject {
             )
         case (.driftAlert, .dismiss):
             success = writeTrigger(
-                dir: stateDir,
-                filename: "drift-reviewed-trigger.json",
+                kind: "drift-reviewed",
                 payload: [
                     "procedure_slug": card.slug,
                     "drift_type": card.metadata["driftType"] ?? "",
@@ -630,39 +610,8 @@ final class MicroReviewViewModel: ObservableObject {
     }
 
     @discardableResult
-    private func writeTrigger(dir: URL, filename: String, payload: [String: String]) -> Bool {
-        do {
-            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        } catch {
-            return false
-        }
-
-        let target = dir.appendingPathComponent(filename)
-        let tmp = dir.appendingPathComponent(".\(filename).tmp")
-
-        guard let data = try? JSONSerialization.data(
-            withJSONObject: payload, options: [.prettyPrinted, .sortedKeys]
-        ) else { return false }
-
-        do {
-            try data.write(to: tmp)
-        } catch {
-            return false
-        }
-
-        // Remove stale target if it exists so moveItem does not fail
-        if FileManager.default.fileExists(atPath: target.path) {
-            try? FileManager.default.removeItem(at: target)
-        }
-
-        do {
-            try FileManager.default.moveItem(at: tmp, to: target)
-            return true
-        } catch {
-            // Clean up the tmp file on failure
-            try? FileManager.default.removeItem(at: tmp)
-            return false
-        }
+    private func writeTrigger(kind: String, payload: [String: String]) -> Bool {
+        TriggerSpool.write(kind: kind, payload: payload) != nil
     }
 
     private nonisolated static func loadReviewItems() -> [ReviewCardData] {
