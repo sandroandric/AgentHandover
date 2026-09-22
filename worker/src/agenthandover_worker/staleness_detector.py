@@ -272,7 +272,7 @@ class StalenessDetector:
         return "current", "none"
 
 
-def procedure_freshness(proc: dict) -> float:
+def procedure_freshness(proc: dict, now: datetime | None = None) -> float:
     """Compute freshness score for a procedure without instantiating StalenessDetector.
 
     Standalone function usable by other modules (e.g. query_api) that don't
@@ -281,11 +281,13 @@ def procedure_freshness(proc: dict) -> float:
 
     Args:
         proc: Procedure dict with optional ``staleness`` and ``evidence`` keys.
+        now: Reference time (timezone-aware); defaults to the current UTC time.
 
     Returns:
         Float 0.0-1.0 representing procedure freshness.
     """
-    now = datetime.now(timezone.utc)
+    if now is None:
+        now = datetime.now(timezone.utc)
     staleness = proc.get("staleness", {})
     evidence = proc.get("evidence", {})
 

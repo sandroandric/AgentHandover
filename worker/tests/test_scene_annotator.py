@@ -26,7 +26,7 @@ from agenthandover_worker.scene_annotator import (
     _build_context_section,
 )
 
-from conftest import insert_event, DAEMON_SCHEMA
+from daemon_db import insert_event, DAEMON_SCHEMA
 
 
 # ---------------------------------------------------------------------------

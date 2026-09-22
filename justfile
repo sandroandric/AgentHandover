@@ -90,7 +90,7 @@ build-app:
     echo "App built: app/AgentHandoverApp/.build/release/AgentHandoverApp"
 
 # Run all tests
-test-all: test-rust test-python test-extension
+test-all: test-rust test-python test-extension test-swift
     @echo "All tests passed!"
 
 # Run Rust tests
@@ -99,12 +99,13 @@ test-rust:
     source ~/.cargo/env 2>/dev/null || true
     cargo test --workspace
 
-# Run Python tests (separate roots to avoid namespace collision)
+# Run all Python test roots (listed in the root pyproject.toml) with a sandboxed HOME
 test-python:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    python -m pytest worker/tests/ -v
-    cd tests && python -m pytest e2e/ load/ -v
+    python -m pytest
+
+# Run SwiftUI app tests
+test-swift:
+    cd app/AgentHandoverApp && swift test
 
 # Run extension tests
 test-extension:

@@ -24,7 +24,7 @@ from agenthandover_worker.activity_search import (
     _iso_to_epoch,
     _parse_annotation,
 )
-from conftest import insert_event
+from daemon_db import insert_event
 
 
 # ---------------------------------------------------------------------------

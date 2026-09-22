@@ -69,24 +69,30 @@ class TestLoadProcedures:
 
 class TestConnectClaudeCode:
 
-    def test_creates_index_skill(self, fake_kb: Path, tmp_path: Path):
-        commands_dir = tmp_path / ".claude" / "commands"
-        with patch("agenthandover_worker.agent_connect._get_kb_root", return_value=fake_kb / "knowledge"), \
-             patch("agenthandover_worker.agent_connect.Path.home", return_value=tmp_path):
-            # Monkey-patch the skills dir
-            import agenthandover_worker.agent_connect as mod
-            orig = mod.connect_claude_code
-            def patched():
-                nonlocal commands_dir
-                commands_dir.mkdir(parents=True, exist_ok=True)
-                # Run the real function but with patched home
-                _procs = mod._load_procedures()
-                ready = [p for p in _procs if p.get("lifecycle_state") == "agent_ready"]
-                index_path = commands_dir / "agenthandover-list.md"
-                index_path.write_text(f"# {len(ready)} procedures", encoding="utf-8")
-            patched()
+    def test_writes_commands_into_given_dir(self, fake_kb: Path, tmp_path: Path):
+        commands_dir = tmp_path / "commands"
+        with patch("agenthandover_worker.agent_connect._get_kb_root", return_value=fake_kb / "knowledge"):
+            connect_claude_code(commands_dir=commands_dir)
 
         assert (commands_dir / "agenthandover-list.md").exists()
+        assert (commands_dir / "ah-reddit-marketing.md").exists()
+        # Draft procedures never become commands.
+        assert not (commands_dir / "ah-deploy-staging.md").exists()
+
+    def test_removes_stale_commands(self, fake_kb: Path, tmp_path: Path):
+        commands_dir = tmp_path / "commands"
+        commands_dir.mkdir()
+        (commands_dir / "ah-gone.md").write_text("old", encoding="utf-8")
+        with patch("agenthandover_worker.agent_connect._get_kb_root", return_value=fake_kb / "knowledge"):
+            connect_claude_code(commands_dir=commands_dir)
+        assert not (commands_dir / "ah-gone.md").exists()
+
+    def test_default_dir_is_under_home(self, fake_kb: Path, tmp_path: Path):
+        home = tmp_path / "home"
+        with patch("agenthandover_worker.agent_connect._get_kb_root", return_value=fake_kb / "knowledge"), \
+             patch("agenthandover_worker.agent_connect.Path.home", return_value=home):
+            connect_claude_code()
+        assert (home / ".claude" / "commands" / "agenthandover-list.md").exists()
 
 
 class TestConnectCodex:

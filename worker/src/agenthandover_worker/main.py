@@ -355,6 +355,29 @@ def _config_path() -> str | None:
     return str(p) if p.is_file() else None
 
 
+def _skills_dir() -> Path:
+    """Return the Claude Code skills root for ``ClaudeSkillWriter``.
+
+    Reads ``[export] claude_skills_dir`` from config.toml (``~`` is
+    expanded); defaults to ``~/.claude/skills``.
+    """
+    default = Path.home() / ".claude" / "skills"
+    config_file = _config_path()
+    if config_file is None:
+        return default
+    try:
+        import tomllib
+        with open(config_file, "rb") as f:
+            cfg = tomllib.load(f)
+        configured = cfg.get("export", {}).get("claude_skills_dir")
+    except Exception:
+        logger.warning("Could not read [export] claude_skills_dir", exc_info=True)
+        return default
+    if not configured:
+        return default
+    return Path(str(configured)).expanduser()
+
+
 def _read_feature_flags() -> dict:
     """Read [features] section from config.toml.
 
@@ -915,15 +938,16 @@ def _embed_procedure(vector_kb, procedure: dict) -> None:
     _embed_in_vector_kb(vector_kb, "procedure", slug, text)
 
 
-def _refresh_claude_commands() -> None:
+def _refresh_claude_commands(commands_dir: Path | None = None) -> None:
     """Refresh Claude Code slash commands after a Skill is approved.
 
     Runs connect_claude_code() to regenerate /ah-{slug} commands from
-    all agent_ready procedures in the knowledge base.
+    all agent_ready procedures in the knowledge base.  *commands_dir*
+    overrides the default ``~/.claude/commands``.
     """
     try:
         from agenthandover_worker.agent_connect import connect_claude_code
-        connect_claude_code()
+        connect_claude_code(commands_dir=commands_dir)
         logger.info("Refreshed Claude Code slash commands")
     except Exception:
         logger.debug("Failed to refresh Claude Code commands", exc_info=True)
@@ -4130,7 +4154,7 @@ def _check_export_trigger(
     if fmt in ("claude-skill", "all"):
         try:
             from agenthandover_worker.claude_skill_writer import ClaudeSkillWriter
-            skills_dir = Path(output_dir) / "skills" if output_dir else None
+            skills_dir = Path(output_dir) / "skills" if output_dir else _skills_dir()
             writer = ClaudeSkillWriter(skills_dir=skills_dir)
             paths = _export_via_adapter(writer, sop_templates, procedure_writer)
             exported += len(paths)
@@ -4677,13 +4701,13 @@ def main(argv: list[str] | None = None) -> None:
         sop_writer = SkillMdWriter(workspace_dir=args.sops_dir.parent.parent)
     elif args.adapter == "claude-skill":
         from agenthandover_worker.claude_skill_writer import ClaudeSkillWriter
-        sop_writer = ClaudeSkillWriter()
+        sop_writer = ClaudeSkillWriter(skills_dir=_skills_dir())
     elif args.adapter == "all":
         sop_writer = OpenClawWriter(workspace_dir=args.sops_dir.parent.parent)
         from agenthandover_worker.skill_md_writer import SkillMdWriter
         skill_md_writer = SkillMdWriter(workspace_dir=args.sops_dir.parent.parent)
         from agenthandover_worker.claude_skill_writer import ClaudeSkillWriter
-        claude_skill_writer = ClaudeSkillWriter()
+        claude_skill_writer = ClaudeSkillWriter(skills_dir=_skills_dir())
     else:
         sop_writer = OpenClawWriter(workspace_dir=args.sops_dir.parent.parent)
 

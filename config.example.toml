@@ -101,6 +101,7 @@ auto_approve = false
 adapter = "openclaw"           # "openclaw" or "generic"
 json_export = false            # also write .json alongside .md
 # generic_output_dir = "~/Library/Application Support/agenthandover/sops"
+# claude_skills_dir = "~/.claude/skills"   # where Claude Code skills are written
 
 # ─── Phase 2+: Knowledge base, trust & privacy zones ───────────────
 
