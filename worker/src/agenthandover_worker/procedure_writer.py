@@ -66,6 +66,18 @@ class ProcedureWriter:
         # Convert to v3 procedure
         procedure = sop_to_procedure(sop_template)
 
+        # A procedure already in the KB is updated, never replaced: its
+        # accumulated evidence, lifecycle and history survive the rewrite.
+        if self._kb.get_procedure(procedure["id"]) is not None:
+            return self.update_procedure(
+                procedure["id"],
+                sop_template,
+                source=source,
+                source_id=source_id,
+                event_count=event_count,
+                duration_minutes=duration_minutes,
+            )
+
         # Enrich environment from observation data
         self._enrich_environment(procedure, sop_template)
 
@@ -148,6 +160,7 @@ class ProcedureWriter:
 
         # Enrich environment
         self._enrich_environment(new_proc, new_template)
+        self._pre_populate_from_evidence(new_proc, new_template)
 
         if existing is not None:
             # Preserve accumulated data from the existing procedure
@@ -184,6 +197,8 @@ class ProcedureWriter:
 
         # Save
         path = self._kb.save_procedure(new_proc)
+        self._embed_procedure(new_proc)
+        self._analyze_style(new_proc)
 
         # Add evidence
         if source_id:
