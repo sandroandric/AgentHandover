@@ -152,3 +152,105 @@ class TestMCPResourceLogic:
         assert "# Reddit Community Marketing" in md
         assert "Target high-signal" in md
         assert "casual" in md
+
+
+# ---------------------------------------------------------------------------
+# One path for the worker and the MCP server; search_skills says its mode
+# ---------------------------------------------------------------------------
+
+
+def test_mcp_db_path_matches_worker():
+    """The MCP server reads the database and knowledge base the worker writes."""
+    from agenthandover_worker import knowledge_base, mcp_server
+    from agenthandover_worker import main as worker_main
+
+    assert mcp_server._get_db_path() == worker_main.DEFAULT_DB_PATH
+    assert mcp_server._get_db_path().name == "events.db"
+    assert mcp_server._get_kb_root() == worker_main.KNOWLEDGE_BASE_DIR
+    assert knowledge_base.DEFAULT_KNOWLEDGE_DIR == worker_main.KNOWLEDGE_BASE_DIR
+
+
+def _fake_embed(self, texts, **_):
+    """Texts about Reddit point one way, everything else another."""
+    return [[1.0, 0.0] if "reddit" in t.lower() else [0.0, 1.0] for t in texts]
+
+
+class TestSearchSkillsMode:
+
+    @pytest.fixture
+    def server(self, tmp_path: Path):
+        from agenthandover_worker.knowledge_base import KnowledgeBase
+        from agenthandover_worker.mcp_server import build_mcp_server
+
+        kb = KnowledgeBase(root=tmp_path / "knowledge")
+        kb.ensure_structure()
+        kb.save_procedure({
+            "id": "reddit-marketing", "title": "Reddit Community Marketing",
+            "description": "Daily engagement", "lifecycle_state": "agent_ready",
+            "steps": [{"action": "Open Reddit"}],
+        })
+        db = tmp_path / "events.db"
+        with patch("agenthandover_worker.mcp_server._get_kb_root", return_value=tmp_path / "knowledge"), \
+             patch("agenthandover_worker.mcp_server._get_db_path", return_value=db):
+            srv = build_mcp_server()
+
+            def search(query: str) -> dict:
+                return json.loads(srv._tool_manager.get_tool("search_skills").fn(query))
+
+            yield search, db
+
+    @staticmethod
+    def _embed_skill(db: Path) -> None:
+        from agenthandover_worker.vector_kb import VectorKB
+
+        with patch.object(VectorKB, "compute_embeddings", _fake_embed), VectorKB(db) as vkb:
+            vkb.upsert("procedure", "reddit-marketing", "Reddit Community Marketing")
+
+    def test_no_database_falls_back_and_warns(self, server, caplog):
+        search, _ = server
+        with caplog.at_level("WARNING", logger="agenthandover_worker.mcp_server"):
+            result = search("reddit")
+        assert result["mode"] == "keyword_fallback"
+        assert "no worker database" in result["reason"]
+        assert [r["slug"] for r in result["results"]] == ["reddit-marketing"]
+        assert "Semantic search unavailable" in caplog.text
+
+    def test_no_embedded_skill_falls_back(self, server):
+        from agenthandover_worker.vector_kb import VectorKB
+
+        search, db = server
+        VectorKB(db).close()
+        result = search("reddit")
+        assert result["mode"] == "keyword_fallback"
+        assert result["reason"] == "no Skill has been embedded yet"
+
+    def test_semantic_when_the_skill_is_embedded(self, server):
+        from agenthandover_worker.vector_kb import VectorKB
+
+        search, db = server
+        self._embed_skill(db)
+        with patch.object(VectorKB, "compute_embeddings", _fake_embed):
+            result = search("post on the subreddit")
+        assert result["mode"] == "semantic"
+        assert result["reason"] == ""
+        assert result["results"] == [
+            {"slug": "reddit-marketing", "title": "Reddit Community Marketing", "score": 1.0},
+        ]
+
+    def test_embedding_model_down_falls_back_and_warns(self, server, caplog):
+        from agenthandover_worker.ollama import OllamaUnavailable
+        from agenthandover_worker.vector_kb import VectorKB
+
+        search, db = server
+        self._embed_skill(db)
+
+        def down(self, texts, **_):
+            raise OllamaUnavailable("connection refused")
+
+        with patch.object(VectorKB, "compute_embeddings", down), \
+             caplog.at_level("WARNING", logger="agenthandover_worker.mcp_server"):
+            result = search("reddit")
+        assert result["mode"] == "keyword_fallback"
+        assert "embedding model unavailable" in result["reason"]
+        assert "embedding model unavailable" in caplog.text
+        assert [r["slug"] for r in result["results"]] == ["reddit-marketing"]
