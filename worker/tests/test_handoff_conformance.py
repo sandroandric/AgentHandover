@@ -40,69 +40,9 @@ def kb(tmp_path):
 
 @pytest.fixture
 def sample_sop_template():
-    """A representative SOP template as produced by sop_generator."""
-    return {
-        "slug": "check-domain-availability",
-        "title": "Check Domain Availability",
-        "short_title": "Domain Check",
-        "description": "Check if a domain name is available for purchase",
-        "tags": ["domain", "web"],
-        "steps": [
-            {
-                "step": "Navigate to registrar",
-                "target": "https://namecheap.com",
-                "app": "Chrome",
-                "location": "https://namecheap.com",
-                "input": "",
-                "verify": "Namecheap homepage loads",
-                "confidence": 0.92,
-                "parameters": {
-                    "app": "Chrome",
-                    "location": "https://namecheap.com",
-                    "verify": "Namecheap homepage loads",
-                },
-            },
-            {
-                "step": "Search for domain",
-                "target": "search box",
-                "app": "Chrome",
-                "location": "",
-                "input": "{{domain_name}}",
-                "verify": "Search results appear",
-                "confidence": 0.88,
-                "parameters": {
-                    "app": "Chrome",
-                    "input": "{{domain_name}}",
-                    "verify": "Search results appear",
-                },
-            },
-            {
-                "step": "Check price and availability",
-                "target": "results panel",
-                "app": "Chrome",
-                "location": "",
-                "input": "",
-                "verify": "Price and status displayed",
-                "confidence": 0.85,
-                "parameters": {
-                    "app": "Chrome",
-                    "verify": "Price and status displayed",
-                },
-            },
-        ],
-        "variables": [
-            {"name": "domain_name", "type": "string", "description": "Domain to check", "example": "example.com"},
-        ],
-        "confidence_avg": 0.88,
-        "episode_count": 3,
-        "apps_involved": ["Chrome"],
-        "preconditions": ["Browser must be open"],
-        "postconditions": ["Domain availability is known"],
-        "exceptions_seen": [],
-        "source": "v2_passive_discovery",
-        "task_description": "Check if a domain name is available for registration",
-        "execution_overview": {"when_to_use": "When exploring new domain names"},
-    }
+    """An SOP template produced by the generator from a stored model answer."""
+    from fixtures.vlm_answers import generated_sop_template
+    return generated_sop_template("check_domain_availability")
 
 
 @pytest.fixture
@@ -170,6 +110,109 @@ class TestSchemaCompleteness:
         from agenthandover_worker.procedure_schema import validate_procedure
         errors = validate_procedure(sample_procedure)
         assert errors == [], f"Validation errors: {errors}"
+
+
+# ---- 1b. Generator fields survive the schema boundary (WP-P1) ----
+
+class TestGeneratorFieldsSurvive:
+    """app/location/input/verify live under ``parameters`` in generator
+    output; the procedure and every writer must still see them."""
+
+    def test_every_step_carries_app_target_verify(self, sample_procedure):
+        assert sample_procedure["steps"]
+        for i, step in enumerate(sample_procedure["steps"]):
+            assert step["app"] == "Google Chrome", f"steps[{i}] lost app"
+            assert step["target"], f"steps[{i}] lost target"
+            assert step["location"], f"steps[{i}] lost location"
+            assert step["verify"], f"steps[{i}] lost verify"
+            assert step["description"].endswith("."), f"steps[{i}] description"
+        assert sample_procedure["steps"][1]["input"] == "{{domain_name}}"
+
+    def test_description_falls_back_to_task_description(
+        self, sample_sop_template, sample_procedure,
+    ):
+        # The generator emits ``task_description``, never ``description``.
+        assert "description" not in sample_sop_template
+        assert sample_procedure["description"] == (
+            sample_sop_template["task_description"]
+        )
+        assert sample_procedure["description"].endswith(".")
+
+    def test_top_level_step_fields_still_read(self):
+        from agenthandover_worker.procedure_schema import sop_to_procedure
+        proc = sop_to_procedure({
+            "slug": "x",
+            "title": "X",
+            "steps": [{
+                "step": "Open", "app": "Safari", "location": "https://a.b",
+                "input": "hi", "verify": "Page loads",
+            }],
+        })
+        step = proc["steps"][0]
+        assert (step["app"], step["location"], step["input"], step["verify"]) == (
+            "Safari", "https://a.b", "hi", "Page loads",
+        )
+
+    def test_procedure_to_sop_template_merges_into_parameters(
+        self, sample_procedure,
+    ):
+        from agenthandover_worker.export_adapter import procedure_to_sop_template
+        sample_procedure["steps"][0]["parameters"] = {}  # top-level only
+        template = procedure_to_sop_template(sample_procedure)
+        for tpl_step, proc_step in zip(template["steps"], sample_procedure["steps"]):
+            params = tpl_step["parameters"]
+            assert params["app"] == proc_step["app"]
+            assert params["verify"] == proc_step["verify"]
+            assert params["location"] == proc_step["location"]
+            assert tpl_step["description"] == proc_step["description"]
+
+    def test_writers_render_verify_for_every_step(self, tmp_path, sample_procedure):
+        from agenthandover_worker.skill_md_writer import SkillMdWriter
+        path = SkillMdWriter(workspace_dir=tmp_path).write_procedure(sample_procedure)
+        content = path.read_text()
+        for step in sample_procedure["steps"]:
+            assert step["verify"] in content
+        assert "Google Chrome" in content
+
+    def test_conversion_is_a_fixpoint(self, sample_sop_template):
+        from agenthandover_worker.procedure_schema import sop_to_procedure
+        once = sop_to_procedure(sample_sop_template)
+        once["constraints"]["guardrails"] = ["Never buy a domain"]
+        once["lifecycle_state"] = "agent_ready"
+        snapshot = json.loads(json.dumps(once))
+        twice = sop_to_procedure(once)
+        assert twice == snapshot
+        assert twice["id"] == "check-domain-availability"
+
+    def test_write_procedure_of_v3_never_writes_unknown(
+        self, kb, sample_sop_template,
+    ):
+        from agenthandover_worker.evidence_tracker import EvidenceTracker
+        from agenthandover_worker.procedure_schema import sop_to_procedure
+        from agenthandover_worker.procedure_writer import ProcedureWriter
+        pw = ProcedureWriter(kb=kb, evidence=EvidenceTracker(knowledge_base=kb))
+        proc = sop_to_procedure(sample_sop_template)
+        proc["constraints"]["guardrails"] = ["Never buy a domain"]
+        pw.write_procedure(proc, "focus", "s1")
+        pw.update_procedure(proc["id"], proc, source="focus", source_id="s2")
+        assert kb.get_procedure("unknown") is None
+        assert not list(kb.root.rglob("unknown.json"))
+        saved = kb.get_procedure("check-domain-availability")
+        assert saved["inputs"][0]["name"] == "domain_name"
+        assert saved["constraints"]["guardrails"] == ["Never buy a domain"]
+
+    def test_fallbacks_for_id_inputs_constraints(self):
+        from agenthandover_worker.procedure_schema import sop_to_procedure
+        proc = sop_to_procedure({
+            "id": "legacy",
+            "title": "Legacy",
+            "steps": [],
+            "inputs": [{"name": "q", "type": "string"}],
+            "constraints": {"trust_level": "observe", "guardrails": ["g"]},
+        })
+        assert proc["id"] == "legacy"
+        assert proc["inputs"][0]["name"] == "q"
+        assert proc["constraints"]["guardrails"] == ["g"]
 
 
 # ---- 2. Export Adapter write_procedure() ----
@@ -454,8 +497,8 @@ class TestExecutionFeedback:
         exec_id = monitor.start_execution(sample_procedure["id"], "test-agent")
         assert exec_id
 
-        monitor.record_step(exec_id, "0", "Navigate to registrar")
-        monitor.record_step(exec_id, "1", "Search for domain")
+        for step in sample_procedure["steps"][:2]:
+            monitor.record_step(exec_id, str(step["index"]), step["action"])
 
         record = monitor.complete_execution(exec_id)
         assert record.status == ExecutionStatus.COMPLETED
@@ -526,7 +569,7 @@ class TestEnvironmentEnrichment:
         proc = kb.get_procedure(sample_sop_template["slug"])
         assert proc is not None
         env = proc["environment"]
-        assert "Chrome" in env["required_apps"]
+        assert "Google Chrome" in env["required_apps"]
 
     def test_accounts_detected_from_urls(self, kb):
         """Account hints extracted from step URLs."""
