@@ -1,8 +1,8 @@
 //! Unix domain socket control API for the AgentHandover daemon.
 //!
-//! Provides a JSON-over-Unix-socket control plane so that the CLI, SwiftUI
-//! menu bar app, and future agents can query daemon state and trigger actions
-//! without relying on file-based IPC hacks.
+//! The menu bar app uses this socket to pause and resume passive capture
+//! around focus recordings. It accepts exactly two commands:
+//! `pause_capture` and `resume_capture`.
 //!
 //! ## Protocol
 //!
@@ -12,10 +12,9 @@
 //! - Server closes the connection after the response
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
@@ -25,45 +24,11 @@ use tracing::{debug, error, info, warn};
 /// Socket filename within the status directory.
 const CONTROL_SOCKET_FILE: &str = "control.sock";
 
-// ---------------------------------------------------------------------------
-// Shared daemon state
-// ---------------------------------------------------------------------------
-
-/// Mutable daemon state shared between the control server and the main loop.
-#[derive(Debug, Clone)]
-pub struct FocusSession {
-    pub session_id: String,
-    pub title: String,
-    pub started_at: String,
-}
-
-/// State that the control server can read and mutate.
-#[derive(Debug)]
-pub struct DaemonState {
-    pub focus_session: Option<FocusSession>,
-    pub capture_paused: bool,
-}
-
-impl DaemonState {
-    pub fn new() -> Self {
-        Self {
-            focus_session: None,
-            capture_paused: false,
-        }
-    }
-}
-
-/// All the handles the control server needs to answer queries and trigger
-/// actions. Constructed in `main.rs` and passed to [`serve`].
+/// All the handles the control server needs. Constructed in `main.rs` and
+/// passed to [`serve`].
 pub struct ControlContext {
     /// Directory where `control.sock` will be created.
     pub status_dir: PathBuf,
-    /// Daemon process start time (for uptime calculation).
-    pub start_time: DateTime<Utc>,
-    /// Shared event counter (incremented by the storage writer).
-    pub event_counter: Arc<AtomicU64>,
-    /// Mutable daemon state (focus session, capture paused).
-    pub state: Arc<tokio::sync::Mutex<DaemonState>>,
     /// Atomic capture-paused flag shared with the observer event loop.
     /// The control API sets this; the observer reads it each tick.
     pub capture_paused: Arc<AtomicBool>,
@@ -78,49 +43,13 @@ pub struct ControlContext {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case")]
 enum Command {
-    GetStatus,
-    RequestAccessibility,
-    RequestScreenRecording,
-    StartFocus {
-        title: String,
-        session_id: String,
-    },
-    StopFocus,
     PauseCapture,
     ResumeCapture,
 }
 
 #[derive(Debug, Serialize)]
-struct StatusResponse {
-    ok: bool,
-    pid: u32,
-    version: &'static str,
-    uptime_seconds: u64,
-    accessibility_permitted: bool,
-    screen_recording_permitted: bool,
-    capture_active: bool,
-    focus_session: Option<FocusSessionResponse>,
-    events_today: u64,
-}
-
-#[derive(Debug, Serialize)]
-struct FocusSessionResponse {
-    session_id: String,
-    title: String,
-}
-
-#[derive(Debug, Serialize)]
 struct SimpleOkResponse {
     ok: bool,
-}
-
-#[derive(Debug, Serialize)]
-struct PermissionResponse {
-    ok: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    accessibility_permitted: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    screen_recording_permitted: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -130,212 +59,23 @@ struct ErrorResponse {
 }
 
 // ---------------------------------------------------------------------------
-// Permission helpers (platform-specific)
-// ---------------------------------------------------------------------------
-
-/// Check if accessibility permission is currently granted.
-fn check_accessibility() -> bool {
-    crate::observation::snapshot()
-        .map(|snapshot| snapshot.accessibility_granted)
-        .unwrap_or(false)
-}
-
-/// Accessibility is owned by the main app process.
-/// The daemon keeps this command as a compatibility no-op so older clients
-/// receive a sensible current-state response instead of failing outright.
-fn request_accessibility_with_prompt() -> bool {
-    check_accessibility()
-}
-
-/// Check if screen recording permission is currently granted.
-fn check_screen_recording() -> bool {
-    crate::observation::snapshot()
-        .map(|snapshot| snapshot.screen_recording_granted)
-        .unwrap_or(false)
-}
-
-/// Request screen recording permission.
-fn request_screen_recording() -> bool {
-    check_screen_recording()
-}
-
-// ---------------------------------------------------------------------------
 // Command dispatch
 // ---------------------------------------------------------------------------
 
 /// Handle a single parsed command and return a JSON response string.
-async fn handle_command(cmd: Command, ctx: &ControlContext) -> String {
-    match cmd {
-        Command::GetStatus => {
-            let now = Utc::now();
-            let uptime = now
-                .signed_duration_since(ctx.start_time)
-                .num_seconds()
-                .unsigned_abs();
-            let events_today = ctx.event_counter.load(Ordering::Relaxed);
-
-            let state = ctx.state.lock().await;
-            let focus = state.focus_session.as_ref().map(|fs| FocusSessionResponse {
-                session_id: fs.session_id.clone(),
-                title: fs.title.clone(),
-            });
-            drop(state);
-            let capture_active = !ctx.capture_paused.load(Ordering::Acquire);
-
-            let resp = StatusResponse {
-                ok: true,
-                pid: std::process::id(),
-                version: env!("CARGO_PKG_VERSION"),
-                uptime_seconds: uptime,
-                accessibility_permitted: check_accessibility(),
-                screen_recording_permitted: check_screen_recording(),
-                capture_active,
-                focus_session: focus,
-                events_today,
-            };
-            serde_json::to_string(&resp).unwrap_or_else(|e| {
-                format!(r#"{{"ok":false,"error":"serialization error: {}"}}"#, e)
-            })
-        }
-
-        Command::RequestAccessibility => {
-            // AXIsProcessTrustedWithOptions is a synchronous FFI call.
-            // Run on a blocking thread so we don't stall the async runtime.
-            let permitted =
-                tokio::task::spawn_blocking(request_accessibility_with_prompt)
-                    .await
-                    .unwrap_or(false);
-            let resp = PermissionResponse {
-                ok: true,
-                accessibility_permitted: Some(permitted),
-                screen_recording_permitted: None,
-            };
-            serde_json::to_string(&resp).unwrap_or_else(|e| {
-                format!(r#"{{"ok":false,"error":"serialization error: {}"}}"#, e)
-            })
-        }
-
-        Command::RequestScreenRecording => {
-            let permitted =
-                tokio::task::spawn_blocking(request_screen_recording)
-                    .await
-                    .unwrap_or(false);
-            let resp = PermissionResponse {
-                ok: true,
-                accessibility_permitted: None,
-                screen_recording_permitted: Some(permitted),
-            };
-            serde_json::to_string(&resp).unwrap_or_else(|e| {
-                format!(r#"{{"ok":false,"error":"serialization error: {}"}}"#, e)
-            })
-        }
-
-        Command::StartFocus { title, session_id } => {
-            let mut state = ctx.state.lock().await;
-            if state.focus_session.is_some() {
-                let resp = ErrorResponse {
-                    ok: false,
-                    error: "a focus session is already active".to_string(),
-                };
-                return serde_json::to_string(&resp).unwrap_or_else(|e| {
-                    format!(r#"{{"ok":false,"error":"serialization error: {}"}}"#, e)
-                });
-            }
-
-            let started_at = Utc::now().to_rfc3339();
-
-            // Write the focus signal file so the observer loop and worker can
-            // see it (backwards-compatible with existing file-based consumers).
-            let signal = agenthandover_common::focus_session::FocusSessionSignal {
-                session_id: session_id.clone(),
-                title: title.clone(),
-                started_at: started_at.clone(),
-                status: agenthandover_common::focus_session::FocusSessionStatus::Recording,
-            };
-            let state_dir = agenthandover_common::status::data_dir();
-            if let Err(e) =
-                agenthandover_common::focus_session::write_focus_signal(&state_dir, &signal)
-            {
-                warn!(error = %e, "Failed to write focus-session.json from control API");
-            }
-
-            state.focus_session = Some(FocusSession {
-                session_id,
-                title,
-                started_at,
-            });
-            drop(state);
-
-            info!("Focus session started via control API");
-            let resp = SimpleOkResponse { ok: true };
-            serde_json::to_string(&resp).unwrap_or_else(|e| {
-                format!(r#"{{"ok":false,"error":"serialization error: {}"}}"#, e)
-            })
-        }
-
-        Command::StopFocus => {
-            let mut state = ctx.state.lock().await;
-            if state.focus_session.is_none() {
-                let resp = ErrorResponse {
-                    ok: false,
-                    error: "no focus session is active".to_string(),
-                };
-                return serde_json::to_string(&resp).unwrap_or_else(|e| {
-                    format!(r#"{{"ok":false,"error":"serialization error: {}"}}"#, e)
-                });
-            }
-
-            // Update signal file to "stopped" so the worker picks it up.
-            let state_dir = agenthandover_common::status::data_dir();
-            if let Some(mut signal) =
-                agenthandover_common::focus_session::read_focus_signal(&state_dir)
-            {
-                signal.status =
-                    agenthandover_common::focus_session::FocusSessionStatus::Stopped;
-                if let Err(e) =
-                    agenthandover_common::focus_session::write_focus_signal(&state_dir, &signal)
-                {
-                    warn!(error = %e, "Failed to write stopped focus-session.json from control API");
-                }
-            }
-
-            state.focus_session = None;
-            drop(state);
-
-            info!("Focus session stopped via control API");
-            let resp = SimpleOkResponse { ok: true };
-            serde_json::to_string(&resp).unwrap_or_else(|e| {
-                format!(r#"{{"ok":false,"error":"serialization error: {}"}}"#, e)
-            })
-        }
-
-        Command::PauseCapture => {
-            let mut state = ctx.state.lock().await;
-            state.capture_paused = true;
-            drop(state);
-            // Atomic flag — observer loop reads this each tick without locking
-            ctx.capture_paused.store(true, Ordering::Release);
-
-            info!("Capture paused via control API");
-            let resp = SimpleOkResponse { ok: true };
-            serde_json::to_string(&resp).unwrap_or_else(|e| {
-                format!(r#"{{"ok":false,"error":"serialization error: {}"}}"#, e)
-            })
-        }
-
-        Command::ResumeCapture => {
-            let mut state = ctx.state.lock().await;
-            state.capture_paused = false;
-            drop(state);
-            ctx.capture_paused.store(false, Ordering::Release);
-
-            info!("Capture resumed via control API");
-            let resp = SimpleOkResponse { ok: true };
-            serde_json::to_string(&resp).unwrap_or_else(|e| {
-                format!(r#"{{"ok":false,"error":"serialization error: {}"}}"#, e)
-            })
-        }
+fn handle_command(cmd: Command, ctx: &ControlContext) -> String {
+    let paused = matches!(cmd, Command::PauseCapture);
+    // Atomic flag — observer loop reads this each tick without locking
+    ctx.capture_paused.store(paused, Ordering::Release);
+    if paused {
+        info!("Capture paused via control API");
+    } else {
+        info!("Capture resumed via control API");
     }
+    let resp = SimpleOkResponse { ok: true };
+    serde_json::to_string(&resp).unwrap_or_else(|e| {
+        format!(r#"{{"ok":false,"error":"serialization error: {}"}}"#, e)
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -388,7 +128,7 @@ async fn handle_connection(
     let response = match serde_json::from_str::<Command>(line.trim()) {
         Ok(cmd) => {
             debug!(command = ?cmd, "Control API command received");
-            handle_command(cmd, ctx).await
+            handle_command(cmd, ctx)
         }
         Err(e) => {
             let resp = ErrorResponse {
@@ -496,22 +236,18 @@ pub async fn serve(ctx: ControlContext) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::AtomicU64;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixStream;
 
     /// Helper: create a ControlContext with a socket in a temp directory.
     fn make_context(
         tmp_dir: &Path,
-        state: Arc<tokio::sync::Mutex<DaemonState>>,
+        capture_paused: Arc<AtomicBool>,
     ) -> (ControlContext, watch::Sender<bool>) {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let ctx = ControlContext {
             status_dir: tmp_dir.to_path_buf(),
-            start_time: Utc::now(),
-            event_counter: Arc::new(AtomicU64::new(42)),
-            state,
-            capture_paused: Arc::new(AtomicBool::new(false)),
+            capture_paused,
             shutdown_rx,
         };
         (ctx, shutdown_tx)
@@ -533,98 +269,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_get_status() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let state = Arc::new(tokio::sync::Mutex::new(DaemonState::new()));
-        let (ctx, shutdown_tx) = make_context(tmp.path(), state);
-        let sock_path = tmp.path().join(CONTROL_SOCKET_FILE);
-
-        let server = tokio::spawn(serve(ctx));
-
-        // Give the server a moment to bind.
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-        let resp = send_command(&sock_path, r#"{"command":"get_status"}"#).await;
-        let parsed: serde_json::Value = serde_json::from_str(resp.trim()).unwrap();
-
-        assert_eq!(parsed["ok"], true);
-        assert_eq!(parsed["events_today"], 42);
-        assert!(parsed["pid"].as_u64().unwrap() > 0);
-        assert!(parsed["uptime_seconds"].as_u64().is_some());
-        assert_eq!(parsed["capture_active"], true);
-        assert!(parsed["focus_session"].is_null());
-
-        let _ = shutdown_tx.send(true);
-        let _ = server.await;
-    }
-
-    #[tokio::test]
-    async fn test_start_stop_focus() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let state = Arc::new(tokio::sync::Mutex::new(DaemonState::new()));
-        let (ctx, shutdown_tx) = make_context(tmp.path(), Arc::clone(&state));
-        let sock_path = tmp.path().join(CONTROL_SOCKET_FILE);
-
-        let server = tokio::spawn(serve(ctx));
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-        // Start focus
-        let resp = send_command(
-            &sock_path,
-            r#"{"command":"start_focus","title":"Test Session","session_id":"uuid-123"}"#,
-        )
-        .await;
-        let parsed: serde_json::Value = serde_json::from_str(resp.trim()).unwrap();
-        assert_eq!(parsed["ok"], true);
-
-        // Verify state
-        {
-            let s = state.lock().await;
-            assert!(s.focus_session.is_some());
-            assert_eq!(s.focus_session.as_ref().unwrap().session_id, "uuid-123");
-        }
-
-        // Get status — should show focus session
-        let resp = send_command(&sock_path, r#"{"command":"get_status"}"#).await;
-        let parsed: serde_json::Value = serde_json::from_str(resp.trim()).unwrap();
-        assert_eq!(parsed["focus_session"]["session_id"], "uuid-123");
-        assert_eq!(parsed["focus_session"]["title"], "Test Session");
-
-        // Starting another focus should fail
-        let resp = send_command(
-            &sock_path,
-            r#"{"command":"start_focus","title":"Dup","session_id":"uuid-456"}"#,
-        )
-        .await;
-        let parsed: serde_json::Value = serde_json::from_str(resp.trim()).unwrap();
-        assert_eq!(parsed["ok"], false);
-        assert!(parsed["error"].as_str().unwrap().contains("already active"));
-
-        // Stop focus
-        let resp = send_command(&sock_path, r#"{"command":"stop_focus"}"#).await;
-        let parsed: serde_json::Value = serde_json::from_str(resp.trim()).unwrap();
-        assert_eq!(parsed["ok"], true);
-
-        // Verify state cleared
-        {
-            let s = state.lock().await;
-            assert!(s.focus_session.is_none());
-        }
-
-        // Stopping again should fail
-        let resp = send_command(&sock_path, r#"{"command":"stop_focus"}"#).await;
-        let parsed: serde_json::Value = serde_json::from_str(resp.trim()).unwrap();
-        assert_eq!(parsed["ok"], false);
-
-        let _ = shutdown_tx.send(true);
-        let _ = server.await;
-    }
-
-    #[tokio::test]
     async fn test_pause_resume_capture() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let state = Arc::new(tokio::sync::Mutex::new(DaemonState::new()));
-        let (ctx, shutdown_tx) = make_context(tmp.path(), Arc::clone(&state));
+        let flag = Arc::new(AtomicBool::new(false));
+        let (ctx, shutdown_tx) = make_context(tmp.path(), Arc::clone(&flag));
         let sock_path = tmp.path().join(CONTROL_SOCKET_FILE);
 
         let server = tokio::spawn(serve(ctx));
@@ -634,21 +282,42 @@ mod tests {
         let resp = send_command(&sock_path, r#"{"command":"pause_capture"}"#).await;
         let parsed: serde_json::Value = serde_json::from_str(resp.trim()).unwrap();
         assert_eq!(parsed["ok"], true);
-
-        // Status should show capture_active = false
-        let resp = send_command(&sock_path, r#"{"command":"get_status"}"#).await;
-        let parsed: serde_json::Value = serde_json::from_str(resp.trim()).unwrap();
-        assert_eq!(parsed["capture_active"], false);
+        assert!(flag.load(Ordering::Acquire));
 
         // Resume
         let resp = send_command(&sock_path, r#"{"command":"resume_capture"}"#).await;
         let parsed: serde_json::Value = serde_json::from_str(resp.trim()).unwrap();
         assert_eq!(parsed["ok"], true);
+        assert!(!flag.load(Ordering::Acquire));
 
-        // Status should show capture_active = true
-        let resp = send_command(&sock_path, r#"{"command":"get_status"}"#).await;
-        let parsed: serde_json::Value = serde_json::from_str(resp.trim()).unwrap();
-        assert_eq!(parsed["capture_active"], true);
+        let _ = shutdown_tx.send(true);
+        let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn test_removed_commands_are_rejected() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let flag = Arc::new(AtomicBool::new(false));
+        let (ctx, shutdown_tx) = make_context(tmp.path(), Arc::clone(&flag));
+        let sock_path = tmp.path().join(CONTROL_SOCKET_FILE);
+
+        let server = tokio::spawn(serve(ctx));
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        for cmd in [
+            "get_status",
+            "request_accessibility",
+            "request_screen_recording",
+            "start_focus",
+            "stop_focus",
+        ] {
+            let json = format!(r#"{{"command":"{}"}}"#, cmd);
+            let resp = send_command(&sock_path, &json).await;
+            let parsed: serde_json::Value = serde_json::from_str(resp.trim()).unwrap();
+            assert_eq!(parsed["ok"], false, "{} should be rejected", cmd);
+            assert!(parsed["error"].as_str().unwrap().contains("invalid command"));
+        }
+        assert!(!flag.load(Ordering::Acquire), "rejected commands must not touch capture state");
 
         let _ = shutdown_tx.send(true);
         let _ = server.await;
@@ -657,8 +326,7 @@ mod tests {
     #[tokio::test]
     async fn test_invalid_command() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let state = Arc::new(tokio::sync::Mutex::new(DaemonState::new()));
-        let (ctx, shutdown_tx) = make_context(tmp.path(), state);
+        let (ctx, shutdown_tx) = make_context(tmp.path(), Arc::new(AtomicBool::new(false)));
         let sock_path = tmp.path().join(CONTROL_SOCKET_FILE);
 
         let server = tokio::spawn(serve(ctx));
@@ -680,8 +348,7 @@ mod tests {
     #[tokio::test]
     async fn test_socket_cleanup_on_shutdown() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let state = Arc::new(tokio::sync::Mutex::new(DaemonState::new()));
-        let (ctx, shutdown_tx) = make_context(tmp.path(), state);
+        let (ctx, shutdown_tx) = make_context(tmp.path(), Arc::new(AtomicBool::new(false)));
         let sock_path = tmp.path().join(CONTROL_SOCKET_FILE);
 
         let server = tokio::spawn(serve(ctx));
@@ -707,15 +374,14 @@ mod tests {
         std::fs::write(&sock_path, b"stale").unwrap();
         assert!(sock_path.exists());
 
-        let state = Arc::new(tokio::sync::Mutex::new(DaemonState::new()));
-        let (ctx, shutdown_tx) = make_context(tmp.path(), state);
+        let (ctx, shutdown_tx) = make_context(tmp.path(), Arc::new(AtomicBool::new(false)));
 
         let server = tokio::spawn(serve(ctx));
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
         // Server should have replaced the stale file with a real socket.
         // Verify by connecting.
-        let resp = send_command(&sock_path, r#"{"command":"get_status"}"#).await;
+        let resp = send_command(&sock_path, r#"{"command":"resume_capture"}"#).await;
         let parsed: serde_json::Value = serde_json::from_str(resp.trim()).unwrap();
         assert_eq!(parsed["ok"], true);
 

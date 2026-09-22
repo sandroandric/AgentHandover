@@ -106,21 +106,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "agenthandover-test-harness"
-version = "0.4.0"
-dependencies = [
- "agenthandover-common",
- "agenthandover-storage",
- "anyhow",
- "chrono",
- "serde",
- "serde_json",
- "tempfile",
- "tracing",
- "uuid",
-]
-
-[[package]]
 name = "ahash"
 version = "0.8.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"

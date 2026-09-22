@@ -4,7 +4,6 @@ members = [
     "crates/daemon",
     "crates/common",
     "crates/storage",
-    "crates/test-harness",
     "crates/cli",
 ]
 
