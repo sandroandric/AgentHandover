@@ -70,8 +70,11 @@ class TestFocusSessionInduction:
         ]
         result = inducer.induce_from_focus_session([steps], "Conf Test")
         assert len(result) == 1
-        # Average of 0.80 and 0.90 = 0.85
-        assert abs(result[0]["confidence_avg"] - 0.85) < 0.01
+        # The v1 per-step mean (0.80 and 0.90) keeps its own key ...
+        assert abs(result[0]["step_confidence_mean"] - 0.85) < 0.01
+        # ... confidence_avg is on the v2 scale: 1 demo (0.15) + consistency
+        # (0.30) + no annotations (0.10) + no variables (0.06) + focus (0.10).
+        assert result[0]["confidence_avg"] == pytest.approx(0.71)
 
     def test_apps_collected(self):
         inducer = self._make_inducer()
