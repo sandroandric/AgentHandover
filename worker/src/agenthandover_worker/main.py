@@ -30,6 +30,7 @@ from agenthandover_worker.exporter import IndexGenerator
 from agenthandover_worker.focus_processor import FocusProcessor
 from agenthandover_worker.frame_differ import DiffConfig, FrameDiffer
 from agenthandover_worker.negative_demo import NegativeDemoPruner
+from agenthandover_worker.ollama import OllamaError
 from agenthandover_worker.ops_telemetry import MODEL_USAGE
 from agenthandover_worker.export_adapter import SOPExportAdapter
 from agenthandover_worker.openclaw_writer import OpenClawWriter
@@ -4748,7 +4749,7 @@ def main(argv: list[str] | None = None) -> None:
                     vkb_config.embedding_model, vkb_config.embedding_model,
                 )
                 vector_kb = None
-        except ConnectionError:
+        except (ConnectionError, OllamaError):
             logger.warning(
                 "Vector KB model '%s' not available — "
                 "run 'ollama pull %s' to enable semantic search",

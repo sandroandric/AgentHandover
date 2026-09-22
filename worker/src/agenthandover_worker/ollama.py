@@ -7,13 +7,14 @@ the request fields; this module owns the transport, the error
 classification and the usage counters.
 
 Failures are classified so callers can tell "try again later" from
-"this call failed":
+"this call failed"; all of them derive from :class:`OllamaError`:
 
 * :class:`OllamaUnavailable` (a ``ConnectionError``): Ollama is
   unreachable (refused, reset, DNS), the model is not pulled (HTTP 404),
   or Ollama answered 5xx (a model that fails to load or runs out of
   memory).  Retrying later can succeed.
-* ``TimeoutError``: no reply within the timeout (a cold model load).
+* :class:`OllamaTimeout` (a ``TimeoutError``): no reply within the
+  timeout (a cold model load).
 * :class:`OllamaBadResponse` (a ``RuntimeError``): any other HTTP error,
   or a reply that is not a JSON object.
 
@@ -39,13 +40,21 @@ logger = logging.getLogger(__name__)
 DEFAULT_HOST = "http://localhost:11434"
 
 
-class OllamaUnavailable(ConnectionError):
+class OllamaError(Exception):
+    """Base of every failure :class:`OllamaClient` raises."""
+
+
+class OllamaUnavailable(OllamaError, ConnectionError):
     """Ollama could not serve the call: unreachable (refused, reset, DNS),
     the model is not pulled (HTTP 404), or it answered 5xx.  Retrying later
     can succeed, so callers defer the work instead of discarding it."""
 
 
-class OllamaBadResponse(RuntimeError):
+class OllamaTimeout(OllamaError, TimeoutError):
+    """No reply within the timeout (often a cold model load)."""
+
+
+class OllamaBadResponse(OllamaError, RuntimeError):
     """Ollama answered, but with an HTTP error other than 404/5xx or with
     a body that is not a JSON object.  Retrying the same call will not help."""
 
@@ -282,13 +291,18 @@ class OllamaClient:
             ) from exc
         except urllib.error.URLError as exc:
             if isinstance(exc.reason, TimeoutError):
-                raise TimeoutError(
+                raise OllamaTimeout(
                     f"Ollama timed out after {timeout:.0f}s ({path})"
                     if timeout is not None else f"Ollama timed out ({path})"
                 ) from exc
             raise OllamaUnavailable(f"Ollama not reachable at {self.host}: {exc}") from exc
         except ConnectionError as exc:  # reset/refused while reading the reply
             raise OllamaUnavailable(f"Ollama connection lost at {self.host}: {exc}") from exc
+        except TimeoutError as exc:  # the socket timed out while reading
+            raise OllamaTimeout(
+                f"Ollama timed out after {timeout:.0f}s ({path})"
+                if timeout is not None else f"Ollama timed out ({path})"
+            ) from exc
 
         try:
             reply = json.loads(body.decode("utf-8"))

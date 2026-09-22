@@ -26,6 +26,7 @@ from agenthandover_worker.llm_reasoning import LLMReasoner, ReasoningConfig
 from agenthandover_worker.ollama import (
     OllamaBadResponse,
     OllamaClient,
+    OllamaError,
     OllamaUnavailable,
     Response,
 )
@@ -289,11 +290,27 @@ def _http_error(code: int) -> urllib.error.HTTPError:
 ])
 def test_errors_are_classified(error, expected):
     with patch("urllib.request.urlopen", _Urlopen(error)):
-        with pytest.raises(expected):
+        with pytest.raises(expected) as raised:
             OllamaClient(HOST).generate("m", "p")
+    assert isinstance(raised.value, OllamaError)
     if expected is OllamaUnavailable:
         assert issubclass(expected, ConnectionError)  # callers defer on it
     assert MODEL_USAGE.snapshot() == {}
+
+
+@pytest.mark.parametrize("error", [
+    _http_error(400),
+    urllib.error.URLError(TimeoutError("timed out")),
+    urllib.error.URLError(ConnectionRefusedError(61, "Connection refused")),
+])
+def test_embedding_callers_degrade_on_every_ollama_error(tmp_path, error):
+    """vector_kb degrades (no vector, no results) on any client error, as it
+    did when its own client re-raised every failure as ConnectionError."""
+    kb = VectorKB(tmp_path / "v.db", VectorKBConfig())
+    with patch("urllib.request.urlopen", _Urlopen(error)):
+        assert kb.upsert("sop", "s1", "open the report") is False
+    with patch("urllib.request.urlopen", _Urlopen(error)):
+        assert kb.search("report") == []
 
 
 @pytest.mark.parametrize("body", [b"not json", b"[1, 2]", b"\xff\xfe"])

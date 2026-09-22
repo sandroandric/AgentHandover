@@ -20,7 +20,7 @@ import struct
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from agenthandover_worker.ollama import OllamaClient
+from agenthandover_worker.ollama import OllamaClient, OllamaError
 
 logger = logging.getLogger(__name__)
 
@@ -213,7 +213,7 @@ class VectorKB:
                     return False
                 embedding = embeddings[0]
                 self._cycle_embed_count += 1
-            except ConnectionError:
+            except (ConnectionError, OllamaError):
                 logger.debug("Ollama unavailable for embedding", exc_info=True)
                 return False
 
@@ -285,7 +285,7 @@ class VectorKB:
         texts = [t[3] for t in to_embed]
         try:
             computed = self.compute_embeddings(texts)
-        except ConnectionError:
+        except (ConnectionError, OllamaError):
             logger.debug("Ollama unavailable for batch embedding", exc_info=True)
             return 0
 
@@ -330,7 +330,7 @@ class VectorKB:
         """Embed *query_text* and find closest vectors by cosine similarity."""
         try:
             embeddings = self.compute_embeddings([query_text])
-        except ConnectionError:
+        except (ConnectionError, OllamaError):
             logger.debug("Ollama unavailable for search embedding")
             return []
 

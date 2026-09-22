@@ -31,7 +31,7 @@ from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from agenthandover_worker.ollama import OllamaClient
+from agenthandover_worker.ollama import OllamaClient, OllamaError
 
 if TYPE_CHECKING:
     from agenthandover_worker.llm_reasoning import LLMReasoner
@@ -719,7 +719,7 @@ class TaskSegmenter:
                 except Exception:
                     logger.warning("Vector KB storage failed", exc_info=True)
 
-        except ConnectionError as exc:
+        except (ConnectionError, OllamaError) as exc:
             logger.warning("Embedding failed (Ollama not reachable): %s", exc)
             # Fall back to app-based clustering (no embeddings)
             return self._fallback_app_clustering(frames, result)
