@@ -152,14 +152,29 @@ def _split_list(value) -> list[str]:
     return [str(i).strip() for i in items if str(i).strip()]
 
 
+def slugify(text: str) -> str:
+    """Filesystem- and command-safe slug: lowercase, hyphens, no specials."""
+    slug = unicodedata.normalize("NFKD", str(text))
+    slug = re.sub(r"[^\w\s-]", "", slug).strip().lower()
+    slug = re.sub(r"[\s_]+", "-", slug)
+    return slug[:80] if slug else "unknown"
+
+
 def slug_of(proc: dict) -> str:
     return str(proc.get("id") or proc.get("slug") or "unknown")
 
 
 def description(proc: dict) -> str:
-    """One-sentence description: goal, task description, when to use, title."""
-    for key in ("goal", "task_description", "description"):
-        value = proc.get(key)
+    """One sentence: goal, description, task description, when to use, title.
+
+    ``description`` is the procedure's own summary (``sop_to_procedure``
+    fills it from the task description; the app edits it), so it wins
+    over the raw ``task_description``.
+    """
+    for value in (
+        proc.get("goal"), proc.get("description"), proc.get("task_description"),
+        _overview(proc).get("goal"),
+    ):
         if isinstance(value, str) and value.strip():
             return _first_sentence(value)
     when = _when_to_use(proc)
@@ -222,7 +237,7 @@ def frontmatter(proc: dict, target: Target) -> dict:
 
     fm: dict = {}
     if target != "claude-command":
-        fm["name"] = slug_of(proc)
+        fm["name"] = slugify(slug_of(proc))
     fm["description"] = description(proc)
 
     if target in ("claude-skill", "claude-command"):
@@ -249,6 +264,14 @@ def serialize_frontmatter(fm: dict) -> str:
         width=10_000,
     )
     return f"---\n{text}---\n"
+
+
+def _precondition(text: str) -> str:
+    """Readable form of the miner's ``app_open:`` / ``url_open:`` preconditions."""
+    for prefix, template in (("app_open:", "{} is open"), ("url_open:", "{} is open in the browser")):
+        if text.startswith(prefix):
+            return template.format(text[len(prefix):])
+    return text
 
 
 def _section(heading: str, lines: list[str]) -> str | None:
@@ -335,9 +358,12 @@ def body_sections(proc: dict) -> list[str]:
     intro = [f"# {title}"]
     summary = next(
         (
-            str(proc[k]).strip()
-            for k in ("goal", "description", "task_description")
-            if isinstance(proc.get(k), str) and proc[k].strip()
+            v.strip()
+            for v in (
+                proc.get("goal"), proc.get("description"),
+                proc.get("task_description"), _overview(proc).get("goal"),
+            )
+            if isinstance(v, str) and v.strip()
         ),
         "",
     )
@@ -352,7 +378,7 @@ def body_sections(proc: dict) -> list[str]:
     prereqs: list[str] = []
     for item in (
         _split_list(proc.get("prerequisites"))
-        + _split_list(proc.get("preconditions"))
+        + [_precondition(p) for p in _split_list(proc.get("preconditions"))]
         + _split_list(_overview(proc).get("prerequisites"))
     ):
         if item not in prereqs:
@@ -488,6 +514,9 @@ def body_sections(proc: dict) -> list[str]:
         f"- Observed {proc.get('episode_count') or evidence.get('total_observations') or 0} "
         f"demonstration(s); confidence {float(proc.get('confidence_avg') or 0.0):.2f}"
     ]
+    source = str(proc.get("source") or "")
+    if source and source != "unknown":
+        ev_lines.append(f"- Learned from: {source}")
     for obs in (evidence.get("observations") or [])[-10:]:
         if isinstance(obs, dict):
             parts = [str(obs.get(k)) for k in ("date", "type") if obs.get(k)]

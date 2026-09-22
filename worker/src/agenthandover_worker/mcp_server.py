@@ -139,29 +139,18 @@ def build_mcp_server():
     def get_skill(slug: str) -> str:
         """Get a full Skill by slug.
 
-        Returns the complete procedure including steps, strategy,
-        selection criteria, guardrails, voice profile, and content templates.
-        This is everything an agent needs to execute the workflow.
+        Returns the procedure (steps, strategy, selection criteria,
+        guardrails, voice profile, content templates) plus ``packet``:
+        the same Skill text every other agent integration receives,
+        including the execution protocol for reporting progress back.
         """
+        from agenthandover_worker.skill_render import render_packet
+
         kb = _kb()
         proc = kb.get_procedure(slug)
         if proc is None:
             return json.dumps({"error": f"Procedure '{slug}' not found"})
-        # Append execution protocol so agents know how to report back
-        proc["execution_protocol"] = {
-            "instructions": (
-                "When executing this Skill, report your progress using the "
-                "AgentHandover MCP tools: call report_execution_start before "
-                "beginning, report_step_result after each step, and "
-                "report_execution_complete when finished. This improves "
-                "the Skill for future runs."
-            ),
-            "tools": [
-                "report_execution_start",
-                "report_step_result",
-                "report_execution_complete",
-            ],
-        }
+        proc["packet"] = render_packet(proc, target="mcp")
         return json.dumps(proc, indent=2, default=str)
 
     @mcp.tool()

@@ -1,10 +1,7 @@
 """Tests for Claude Code Skill Export Adapter.
 
-Tests cover:
-- Frontmatter generation (name, description, argument-hint, allowed-tools)
-- Step rendering (natural language, variable substitution, verify notes)
-- Variable mapping (ordered by appearance, empty case)
-- Full rendering (v2 focus SOPs, passive SOPs, prerequisites, errors, DOM hints)
+Rendering is ``skill_render``'s job (see ``test_skill_render.py``); these
+tests cover the writer's file layout:
 - File operations (write_sop, write_all_sops, list_sops, write_metadata, index)
 - Edge cases (v1 legacy, empty steps, special chars in slug)
 """
@@ -205,120 +202,9 @@ def _make_v1_sop(**overrides) -> dict:
 # ------------------------------------------------------------------
 
 
-class TestFrontmatter:
-    def setup_method(self):
-        self.tmpdir = tempfile.mkdtemp()
-        self.writer = ClaudeSkillWriter(skills_dir=self.tmpdir)
-
-    def test_frontmatter_basic(self):
-        """Frontmatter contains name and description."""
-        sop = _make_v2_focus_sop()
-        fm = self.writer._build_frontmatter(sop)
-        assert "name: search-product-amazon" in fm
-        assert "description:" in fm
-        assert fm.startswith("---\n")
-        assert fm.strip().endswith("---")
-
-    def test_frontmatter_with_variables(self):
-        """argument-hint is present when variables exist."""
-        sop = _make_v2_focus_sop()
-        fm = self.writer._build_frontmatter(sop)
-        assert "argument-hint: [search_query] [category]" in fm
-
-    def test_frontmatter_no_variables(self):
-        """argument-hint is absent when no variables."""
-        sop = _make_v2_focus_sop(variables=[])
-        fm = self.writer._build_frontmatter(sop)
-        assert "argument-hint" not in fm
-
-    def test_frontmatter_allowed_tools_browser(self):
-        """Chrome maps to Bash in allowed-tools."""
-        sop = _make_v2_focus_sop(apps_involved=["Chrome"])
-        fm = self.writer._build_frontmatter(sop)
-        assert "allowed-tools:" in fm
-        assert "Bash" in fm
-
-    def test_frontmatter_allowed_tools_terminal(self):
-        """Terminal/VS Code maps to Bash."""
-        sop = _make_v2_focus_sop(apps_involved=["VS Code"])
-        fm = self.writer._build_frontmatter(sop)
-        assert "Bash" in fm
-
-    def test_frontmatter_allowed_tools_default(self):
-        """No apps -> Bash, Read as defaults."""
-        sop = _make_v2_focus_sop(apps_involved=[])
-        fm = self.writer._build_frontmatter(sop)
-        assert "Bash" in fm
-        assert "Read" in fm
-
-
 # ------------------------------------------------------------------
 # Tests: Step rendering
 # ------------------------------------------------------------------
-
-
-class TestStepRendering:
-    def setup_method(self):
-        self.tmpdir = tempfile.mkdtemp()
-        self.writer = ClaudeSkillWriter(skills_dir=self.tmpdir)
-
-    def test_step_with_all_fields(self):
-        """Step with app, location, input, verify all present."""
-        step = {
-            "step": "Enter search query",
-            "parameters": {
-                "app": "Chrome",
-                "location": "https://www.amazon.com",
-                "input": "wireless earbuds",
-                "verify": "Results page loads",
-            },
-        }
-        rendered = self.writer._render_step(step, {}, step_num=1)
-        assert "1." in rendered
-        assert "**Chrome**" in rendered
-        assert "`https://www.amazon.com`" in rendered
-        assert "`wireless earbuds`" in rendered
-        assert "_Verify: Results page loads_" in rendered
-
-    def test_step_minimal(self):
-        """Step with just action, no params."""
-        step = {"step": "Click submit button", "parameters": {}}
-        rendered = self.writer._render_step(step, {}, step_num=3)
-        assert "3." in rendered
-        assert "Click submit button" in rendered
-
-    def test_step_variable_substitution(self):
-        """{{email}} is replaced with $0."""
-        step = {
-            "step": "Enter email address",
-            "parameters": {"input": "{{email}}"},
-        }
-        var_map = {"email": 0}
-        rendered = self.writer._render_step(step, var_map, step_num=1)
-        assert "$0" in rendered
-        assert "{{email}}" not in rendered
-
-    def test_step_multiple_variables(self):
-        """Multiple variables get correct index mapping."""
-        step = {
-            "step": "Fill form",
-            "parameters": {"input": "{{first_name}} {{last_name}}"},
-        }
-        var_map = {"first_name": 0, "last_name": 1}
-        rendered = self.writer._render_step(step, var_map, step_num=1)
-        assert "$0" in rendered
-        assert "$1" in rendered
-        assert "{{first_name}}" not in rendered
-        assert "{{last_name}}" not in rendered
-
-    def test_step_with_verify(self):
-        """Verify is rendered as italicized note."""
-        step = {
-            "step": "Click Submit",
-            "parameters": {"verify": "Form is submitted"},
-        }
-        rendered = self.writer._render_step(step, {}, step_num=1)
-        assert "_Verify: Form is submitted_" in rendered
 
 
 # ------------------------------------------------------------------
@@ -326,133 +212,9 @@ class TestStepRendering:
 # ------------------------------------------------------------------
 
 
-class TestVariableMapping:
-    def setup_method(self):
-        self.writer = ClaudeSkillWriter(skills_dir=tempfile.mkdtemp())
-
-    def test_variable_map_basic(self):
-        """Variables are indexed in order of appearance."""
-        variables = [
-            {"name": "email", "type": "string"},
-            {"name": "password", "type": "string"},
-        ]
-        var_map = self.writer._build_variable_map(variables)
-        assert var_map == {"email": 0, "password": 1}
-
-    def test_variable_map_empty(self):
-        """No variables -> empty map."""
-        var_map = self.writer._build_variable_map([])
-        assert var_map == {}
-
-
 # ------------------------------------------------------------------
 # Tests: Full rendering
 # ------------------------------------------------------------------
-
-
-class TestFullRendering:
-    def setup_method(self):
-        self.tmpdir = tempfile.mkdtemp()
-        self.writer = ClaudeSkillWriter(skills_dir=self.tmpdir)
-
-    def test_render_v2_focus_sop(self):
-        """Complete v2 focus recording SOP renders correctly."""
-        sop = _make_v2_focus_sop()
-        path = self.writer.write_sop(sop)
-        content = path.read_text()
-
-        # Frontmatter
-        assert content.startswith("---\n")
-        assert "name: search-product-amazon" in content
-        assert "argument-hint: [search_query] [category]" in content
-
-        # Body
-        assert "## Steps" in content
-        assert "1." in content
-        assert "2." in content
-        assert "3." in content
-        assert "$0" in content  # search_query
-        assert "$1" in content  # category
-        assert "_Verify:" in content
-
-        # Footer
-        assert "Generated by AgentHandover" in content
-        assert "confidence: 0.85" in content
-
-    def test_render_v2_passive_sop(self):
-        """Multi-demo passive SOP renders correctly."""
-        sop = _make_v2_passive_sop()
-        path = self.writer.write_sop(sop)
-        content = path.read_text()
-
-        assert "name: deploy-feature-staging" in content
-        assert "argument-hint: [commit_message]" in content
-        assert "$0" in content  # commit_message
-        assert "3 demonstration(s)" in content
-
-    def test_render_with_prerequisites(self):
-        """Prerequisites section is rendered."""
-        sop = _make_v2_focus_sop()
-        path = self.writer.write_sop(sop)
-        content = path.read_text()
-        assert "## Prerequisites" in content
-        assert "Amazon.com is accessible" in content
-        assert "Browser is open" in content
-
-    def test_render_with_common_errors(self):
-        """Common errors are rendered as warning notes."""
-        sop = _make_v2_focus_sop()
-        path = self.writer.write_sop(sop)
-        content = path.read_text()
-        assert "## Common Errors" in content
-        assert "No results found" in content
-
-    def test_render_with_dom_hints(self):
-        """DOM selectors from steps appear in browser automation notes."""
-        sop = _make_v2_focus_sop()
-        # Step 2 has selector="#twotabsearchtextbox"
-        path = self.writer.write_sop(sop)
-        content = path.read_text()
-        assert "## Browser Automation Notes" in content
-        assert "#twotabsearchtextbox" in content
-
-    def test_render_with_success_criteria(self):
-        """Success criteria section renders from execution_overview."""
-        sop = _make_v2_focus_sop()
-        path = self.writer.write_sop(sop)
-        content = path.read_text()
-        assert "## Success Criteria" in content
-        assert "Search results page" in content
-
-    def test_render_arguments_reference(self):
-        """Arguments reference line is present when variables exist."""
-        sop = _make_v2_focus_sop()
-        path = self.writer.write_sop(sop)
-        content = path.read_text()
-        assert "**Arguments:**" in content
-        assert "`$0` = search_query" in content
-        assert "`$1` = category" in content
-
-    def test_render_no_arguments_when_no_variables(self):
-        """No arguments line when no variables."""
-        sop = _make_v2_focus_sop(variables=[])
-        path = self.writer.write_sop(sop)
-        content = path.read_text()
-        assert "**Arguments:**" not in content
-
-    def test_render_with_timeline_dom_hints(self):
-        """Timeline DOM nodes are rendered in browser automation notes."""
-        sop = _make_v2_focus_sop()
-        sop["_timeline"] = [{
-            "dom_nodes": [
-                {"tag": "button", "text": "Add to Cart", "id": "add-to-cart-btn"},
-                {"tag": "input", "type": "text", "ariaLabel": "Search", "role": "textbox"},
-            ],
-        }]
-        path = self.writer.write_sop(sop)
-        content = path.read_text()
-        assert "## Browser Automation Notes" in content
-        assert "add-to-cart-btn" in content
 
 
 # ------------------------------------------------------------------
@@ -595,57 +357,8 @@ class TestEdgeCases:
         content = path.read_text()
         assert content.startswith("---\n")
         # Should not crash, sections just absent
-        assert "## Common Errors" not in content
-        assert "## Success Criteria" not in content
-
-    def test_missing_task_description(self):
-        """SOP without task_description falls back to title."""
-        sop = _make_v2_focus_sop()
-        del sop["task_description"]
-        path = self.writer.write_sop(sop)
-        content = path.read_text()
-        # Body (after closing frontmatter ---) should start with title
-        # Split on "---\n" gives [empty, frontmatter, body...]
-        parts = content.split("---\n", 2)
-        body = parts[2].strip() if len(parts) >= 3 else ""
-        assert body.startswith("Search for a Product on Amazon.")
-
-    def test_description_derivation_from_task_desc(self):
-        """Description comes from first sentence of task_description."""
-        sop = _make_v2_focus_sop(
-            task_description="Search for a product on Amazon. This is detailed."
-        )
-        desc = ClaudeSkillWriter._derive_description(sop)
-        assert desc == "Search for a product on Amazon."
-
-    def test_description_derivation_from_when_to_use(self):
-        """Description falls back to when_to_use if no task_description."""
-        sop = _make_v2_focus_sop(task_description="")
-        desc = ClaudeSkillWriter._derive_description(sop)
-        assert "find a product" in desc.lower() or "when" in desc.lower()
-
-    def test_description_derivation_from_title(self):
-        """Description falls back to title if nothing else."""
-        sop = {
-            "slug": "test",
-            "title": "My Test Skill",
-        }
-        desc = ClaudeSkillWriter._derive_description(sop)
-        assert desc == "My Test Skill."
-
-    def test_allowed_tools_filesystem_apps(self):
-        """Finder maps to Read, Write."""
-        tools = self.writer._derive_allowed_tools(["Finder"])
-        assert "Read" in tools
-        assert "Write" in tools
-
-    def test_allowed_tools_unknown_apps(self):
-        """Unknown apps get broad tool access."""
-        tools = self.writer._derive_allowed_tools(["SomeObscureApp"])
-        assert "Bash" in tools
-        assert "Read" in tools
-        assert "Write" in tools
-        assert "Grep" in tools
+        assert "## Common errors" not in content
+        assert "## Success criteria" not in content
 
     def test_write_sop_overwrite(self):
         """Writing same slug twice overwrites cleanly."""

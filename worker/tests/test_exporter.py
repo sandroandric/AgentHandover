@@ -7,9 +7,10 @@ from pathlib import Path
 
 import pytest
 
-from agenthandover_worker.exporter import AtomicWriter, IndexGenerator, SOPExporter
-from agenthandover_worker.sop_format import SOPFormatter
-from agenthandover_worker.sop_versioner import SOPVersioner
+import json
+
+from agenthandover_worker.exporter import AtomicWriter, IndexGenerator
+from agenthandover_worker.procedure_schema import sop_to_procedure
 
 
 # ---------------------------------------------------------------------------
@@ -168,54 +169,44 @@ class TestIndexUpdateAtomic:
         assert "# SOP Index" in content
 
 
-class TestExportSOP:
-    """Full export pipeline for a single SOP."""
+class TestIndexReadsDisk:
+    """The catalogue lists every procedure on disk, not only the last batch."""
 
-    def test_exports_sop(self, tmp_path: Path):
-        base_dir = tmp_path / "workspace"
-        exporter = SOPExporter(base_dir)
-        exporter.formatter = SOPFormatter()
-        exporter.versioner = SOPVersioner(base_dir / "sops")
+    @staticmethod
+    def _write_proc(sops_dir: Path, slug: str, title: str) -> None:
+        proc = sop_to_procedure(_sample_template(slug, title))
+        AtomicWriter.write(
+            sops_dir / f"sop.{slug}.v3.json", json.dumps(proc),
+        )
 
-        template = _sample_template()
-        result = exporter.export_sop(template)
+    def test_earlier_procedures_survive_a_later_batch(self, tmp_path: Path):
+        sops_dir = tmp_path / "base" / "sops"
+        self._write_proc(sops_dir, "workflow_a", "Workflow A")
+        self._write_proc(sops_dir, "workflow_b", "Workflow B")
 
-        assert result.exists()
-        assert result.name == "sop.test_workflow.md"
-        content = result.read_text(encoding="utf-8")
-        assert "---" in content
-        assert "Submit button" in content
+        IndexGenerator().update_index(
+            sops_dir, [_sample_template("workflow_b", "Workflow B renamed")],
+        )
 
-        # Index should also be created
-        index_path = base_dir / "index.md"
-        assert index_path.exists()
+        content = (tmp_path / "base" / "index.md").read_text(encoding="utf-8")
+        assert "**Total SOPs:** 2" in content
+        assert "`workflow_a`" in content
+        # The fresh batch wins over the disk copy of the same slug.
+        assert "Workflow B renamed" in content
+        assert "| Workflow B |" not in content
 
+    def test_archive_and_unreadable_files_are_skipped(self, tmp_path: Path):
+        sops_dir = tmp_path / "base" / "sops"
+        self._write_proc(sops_dir, "workflow_a", "Workflow A")
+        self._write_proc(sops_dir / "archive", "old_one", "Old One")
+        AtomicWriter.write(sops_dir / "sop.broken.v3.json", "{not json")
 
-class TestExportAll:
-    """Multiple SOPs + index."""
+        IndexGenerator().update_index(sops_dir, [])
 
-    def test_exports_multiple(self, tmp_path: Path):
-        base_dir = tmp_path / "workspace"
-        exporter = SOPExporter(base_dir)
-        exporter.formatter = SOPFormatter()
-        exporter.versioner = SOPVersioner(base_dir / "sops")
-
-        templates = [
-            _sample_template("workflow_a", "Workflow A"),
-            _sample_template("workflow_b", "Workflow B"),
-        ]
-        paths = exporter.export_all(templates)
-
-        assert len(paths) == 2
-        for p in paths:
-            assert p.exists()
-
-        # Index should have both entries
-        index_path = base_dir / "index.md"
-        assert index_path.exists()
-        index_content = index_path.read_text(encoding="utf-8")
-        assert "`workflow_a`" in index_content
-        assert "`workflow_b`" in index_content
+        content = (tmp_path / "base" / "index.md").read_text(encoding="utf-8")
+        assert "**Total SOPs:** 1" in content
+        assert "old_one" not in content
+        assert "broken" not in content
 
 
 class TestDirectoryCreation:
@@ -227,14 +218,3 @@ class TestDirectoryCreation:
 
         assert filepath.exists()
         assert (tmp_path / "a" / "b" / "c").is_dir()
-
-    def test_exporter_creates_sops_dir(self, tmp_path: Path):
-        base_dir = tmp_path / "new_workspace"
-        exporter = SOPExporter(base_dir)
-        exporter.formatter = SOPFormatter()
-        exporter.versioner = SOPVersioner(base_dir / "sops")
-
-        template = _sample_template()
-        exporter.export_sop(template)
-
-        assert (base_dir / "sops").is_dir()

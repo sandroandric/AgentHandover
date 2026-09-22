@@ -156,6 +156,8 @@ def sop_to_procedure(sop_template: dict) -> dict:
     # Convert variables to typed inputs
     inputs = []
     for var in variables:
+        if isinstance(var, str):  # legacy templates list bare names
+            var = {"name": var}
         inp: dict = {
             "name": var.get("name", ""),
             "type": var.get("type", "string"),

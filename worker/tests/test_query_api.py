@@ -236,8 +236,10 @@ class TestHealthEndpoint:
         assert body["status"] == "ok"
 
     def test_health_returns_version(self, port: int) -> None:
+        from agenthandover_worker import __version__
+
         status, body = _get(port, "/health")
-        assert body["version"] == "0.1.0"
+        assert body["version"] == __version__
 
 
 # ---------------------------------------------------------------------------

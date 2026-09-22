@@ -10,7 +10,6 @@ import pytest
 
 from agenthandover_worker.agent_connect import (
     _load_procedures,
-    _render_skill_markdown,
     connect_claude_code,
     connect_codex,
     connect_hermes,
@@ -131,60 +130,6 @@ class TestConnectMCP:
         assert "list_ready_procedures" in output
 
 
-class TestRenderSkillMarkdown:
-    """Tests for the shared Claude Code / agentskills.io markdown renderer."""
-
-    def test_includes_frontmatter_and_title(self):
-        proc = {
-            "id": "reddit-marketing",
-            "title": "Reddit Community Marketing",
-            "description": "Daily engagement workflow",
-            "steps": [{"action": "Open Reddit"}],
-            "constraints": {"guardrails": ["Max 5/day"]},
-        }
-        md = _render_skill_markdown(proc)
-        assert md.startswith("---\ndescription: Reddit Community Marketing\n---\n")
-        assert "# Reddit Community Marketing" in md
-        assert "Daily engagement workflow" in md
-        assert "## Steps" in md
-        assert "1. Open Reddit" in md
-        assert "## Guardrails" in md
-        assert "Max 5/day" in md
-
-    def test_include_name_adds_name_field(self):
-        """Hermes convention requires a `name:` field in frontmatter."""
-        proc = {
-            "id": "reddit-marketing",
-            "title": "Reddit Community Marketing",
-            "steps": [],
-        }
-        md = _render_skill_markdown(proc, include_name=True)
-        assert "name: reddit-marketing" in md
-        assert "description: Reddit Community Marketing" in md
-        # name should come before description
-        assert md.index("name:") < md.index("description:")
-
-    def test_include_name_false_omits_name(self):
-        proc = {"id": "x", "title": "X", "steps": []}
-        md = _render_skill_markdown(proc, include_name=False)
-        assert "name:" not in md
-
-    def test_includes_execution_protocol(self):
-        proc = {"id": "x", "title": "X", "steps": []}
-        md = _render_skill_markdown(proc)
-        assert "## Execution Protocol" in md
-        assert "report_execution_start" in md
-        assert "slug `x`" in md
-
-    def test_omits_empty_sections(self):
-        proc = {"id": "x", "title": "X", "steps": []}
-        md = _render_skill_markdown(proc)
-        assert "## Strategy" not in md
-        assert "## Guardrails" not in md
-        assert "## Steps" not in md
-        assert "## Voice" not in md
-
-
 class TestConnectHermes:
     """Tests for Hermes integration.
 
@@ -213,13 +158,13 @@ class TestConnectHermes:
 
         content = skill_file.read_text(encoding="utf-8")
         # Frontmatter must include the name field for Hermes
-        assert "name: reddit-marketing" in content
-        assert "description: Reddit Community Marketing" in content
+        assert content.startswith("---\nname: reddit-marketing\ndescription: Daily engagement workflow.\n")
         assert "Max 5/day" in content
-        assert "## Execution Protocol" in content
+        assert "## Execution protocol" in content
         # Generator-shaped steps keep their target and verify line
-        assert "1. Open the Namecheap homepage (target: https://www.namecheap.com)" in content
-        assert "   - Verify: The Namecheap homepage loads" in content
+        assert "1. [step_1] Open the Namecheap homepage\n" in content
+        assert "   Target: https://www.namecheap.com\n" in content
+        assert "   Verify: The Namecheap homepage loads" in content
 
         out = capsys.readouterr().out
         assert "Hermes integration ready" in out

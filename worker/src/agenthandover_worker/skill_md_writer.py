@@ -11,8 +11,6 @@ Implements the ``SOPExportAdapter`` ABC.
 
 from __future__ import annotations
 
-import re
-import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -22,6 +20,7 @@ from agenthandover_worker import __version__
 from agenthandover_worker.export_adapter import SOPExportAdapter
 from agenthandover_worker.exporter import AtomicWriter
 from agenthandover_worker.procedure_schema import sop_to_procedure
+from agenthandover_worker.skill_render import slugify
 from agenthandover_worker.skill_render import render_packet
 
 
@@ -46,7 +45,7 @@ class SkillMdWriter(SOPExportAdapter):
     def write_procedure(self, procedure: dict) -> Path:
         """Write a v3 procedure as ``skills/SKILL.<slug>.md``."""
         self._ensure_dirs()
-        slug = self._slugify(procedure.get("id") or procedure.get("slug") or "unknown")
+        slug = slugify(procedure.get("id") or procedure.get("slug") or "unknown")
         path = self.skills_dir / f"SKILL.{slug}.md"
         AtomicWriter.write(path, render_packet(procedure, target="generic"))
         return path
@@ -131,7 +130,7 @@ class SkillMdWriter(SOPExportAdapter):
         lines.append("|------|-------|------------|----------|--------------|")
 
         for sop in sop_templates:
-            slug = self._slugify(sop.get("slug", "unknown"))
+            slug = slugify(sop.get("slug", "unknown"))
             title = sop.get("title", "Untitled")
             confidence = sop.get("confidence_avg", 0.0)
             episodes = sop.get("episode_count", 0)
@@ -146,11 +145,3 @@ class SkillMdWriter(SOPExportAdapter):
         index_path = self.skills_dir / "SKILLS-INDEX.md"
         AtomicWriter.write(index_path, "\n".join(lines))
         return index_path
-
-    @staticmethod
-    def _slugify(text: str) -> str:
-        """Ensure slug is filesystem-safe: lowercase, hyphens, no specials."""
-        slug = unicodedata.normalize("NFKD", text)
-        slug = re.sub(r"[^\w\s-]", "", slug).strip().lower()
-        slug = re.sub(r"[\s_]+", "-", slug)
-        return slug[:80] if slug else "unknown"

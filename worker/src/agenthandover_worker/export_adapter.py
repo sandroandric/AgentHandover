@@ -82,65 +82,6 @@ def procedure_to_sop_template(procedure: dict) -> dict:
     }
 
 
-def render_voice_style_section(procedure: dict) -> list[str]:
-    """Render voice/style guidance for agent-facing exports.
-
-    Returns markdown lines that tell the agent HOW to write (tone,
-    formality, sentence length) — not just WHAT to do.  Returns empty
-    list if no style data is available.
-    """
-    lines: list[str] = []
-    vp = procedure.get("voice_profile", {})
-    samples = procedure.get("content_samples", [])
-
-    if not vp and not samples:
-        return lines
-
-    # Only render if we have moderate+ confidence (not one-shot guesses)
-    confidence = vp.get("style_confidence", "low")
-    if confidence == "low" and vp.get("sample_count", 0) < 3:
-        return lines
-
-    lines.append("## Voice & Style")
-    lines.append("")
-    lines.append("When producing text output for this workflow, match the user's writing style:")
-    lines.append("")
-
-    if vp.get("tone"):
-        lines.append(f"- **Tone**: {vp['tone']}")
-    elif vp.get("formality"):
-        lines.append(f"- **Tone**: {vp['formality']}")
-    if vp.get("sentence_style"):
-        lines.append(f"- **Sentences**: {vp['sentence_style']}")
-    if vp.get("vocabulary"):
-        lines.append(f"- **Vocabulary**: {vp['vocabulary']}")
-
-    markers = vp.get("personality_markers", [])
-    if markers:
-        lines.append(f"- **Personality**: {', '.join(markers)}")
-
-    would_say = vp.get("would_say", "")
-    if would_say:
-        lines.append(f"- **Would say**: \"{would_say}\"")
-    would_never = vp.get("would_never_say", "")
-    if would_never:
-        lines.append(f"- **Would never say**: \"{would_never}\"")
-
-    # Content samples — concrete examples of how the user writes
-    if samples:
-        lines.append("")
-        lines.append("**Example text from the user** (match this style):")
-        for s in samples[:3]:
-            text = s.get("text", "")
-            if text:
-                # Indent as blockquote
-                lines.append(f"> {text[:200]}")
-                lines.append("")
-
-    lines.append("")
-    return lines
-
-
 class SOPExportAdapter(ABC):
     """Abstract base for SOP export adapters.
 

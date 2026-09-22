@@ -12,8 +12,6 @@ Implements the ``SOPExportAdapter`` ABC.
 from __future__ import annotations
 
 import json
-import re
-import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -23,6 +21,7 @@ from agenthandover_worker import __version__
 from agenthandover_worker.export_adapter import SOPExportAdapter
 from agenthandover_worker.exporter import AtomicWriter
 from agenthandover_worker.procedure_schema import sop_to_procedure
+from agenthandover_worker.skill_render import slugify
 from agenthandover_worker.skill_render import description as skill_description, render_packet
 
 
@@ -54,7 +53,7 @@ class ClaudeSkillWriter(SOPExportAdapter):
 
     def write_procedure(self, procedure: dict) -> Path:
         """Write a v3 procedure as ``<skills_root>/<slug>/SKILL.md``."""
-        slug = self._slugify(procedure.get("id") or procedure.get("slug") or "unknown")
+        slug = slugify(procedure.get("id") or procedure.get("slug") or "unknown")
         skill_dir = self._skills_root / slug
         skill_dir.mkdir(parents=True, exist_ok=True)
         path = skill_dir / "SKILL.md"
@@ -150,7 +149,7 @@ class ClaudeSkillWriter(SOPExportAdapter):
         lines.append("|-------|-------------|------------|-------|")
 
         for sop in sop_templates:
-            slug = self._slugify(sop.get("slug", "unknown"))
+            slug = slugify(sop.get("slug", "unknown"))
             desc = skill_description(sop)
             # Truncate description for table
             if len(desc) > 60:
@@ -170,14 +169,6 @@ class ClaudeSkillWriter(SOPExportAdapter):
     # ------------------------------------------------------------------
     # Utilities
     # ------------------------------------------------------------------
-
-    @staticmethod
-    def _slugify(text: str) -> str:
-        """Ensure slug is filesystem-safe: lowercase, hyphens, no specials."""
-        slug = unicodedata.normalize("NFKD", text)
-        slug = re.sub(r"[^\w\s-]", "", slug).strip().lower()
-        slug = re.sub(r"[\s_]+", "-", slug)
-        return slug[:80] if slug else "unknown"
 
     @staticmethod
     def _parse_frontmatter_from_text(text: str) -> dict:
