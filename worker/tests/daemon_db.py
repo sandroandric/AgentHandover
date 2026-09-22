@@ -1,91 +1,69 @@
 """Daemon database schema and row helpers shared by worker tests.
 
-``DAEMON_SCHEMA`` mirrors the tables the Rust daemon writes
-(``crates/storage/src/migrations``).  Test modules import from here;
-``conftest.py`` builds its database fixtures on it.
+Databases are built by applying the daemon's own migrations
+(``crates/storage/src/migrations``, in the order ``crates/storage/src/lib.rs``
+applies them), so the tests cannot drift from the schema the daemon writes.
 """
 
 from __future__ import annotations
 
+import re
 import sqlite3
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 
 # ---------------------------------------------------------------------------
-# Schema — mirrors crates/storage/src/migrations/v001 + v002 exactly
+# Schema: the daemon's own migrations, applied in the order the daemon applies them
 # ---------------------------------------------------------------------------
 
-DAEMON_SCHEMA = """\
-CREATE TABLE IF NOT EXISTS events (
-    id TEXT PRIMARY KEY NOT NULL,
-    timestamp TEXT NOT NULL,
-    kind_json TEXT NOT NULL,
-    window_json TEXT,
-    display_topology_json TEXT NOT NULL,
-    primary_display_id TEXT NOT NULL,
-    cursor_x INTEGER,
-    cursor_y INTEGER,
-    ui_scale REAL,
-    artifact_ids_json TEXT NOT NULL DEFAULT '[]',
-    metadata_json TEXT NOT NULL DEFAULT '{}',
-    processed INTEGER NOT NULL DEFAULT 0,
-    episode_id TEXT,
-    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-    display_ids_spanned_json TEXT,
-    scene_annotation_json TEXT DEFAULT NULL,
-    annotation_status TEXT NOT NULL DEFAULT 'pending',
-    frame_diff_json TEXT DEFAULT NULL
-);
+REPO_ROOT = Path(__file__).resolve().parents[2]
+STORAGE_SRC = REPO_ROOT / "crates" / "storage" / "src"
 
-CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp);
-CREATE INDEX IF NOT EXISTS idx_events_processed ON events(processed);
-CREATE INDEX IF NOT EXISTS idx_events_episode_id ON events(episode_id);
 
-CREATE TABLE IF NOT EXISTS artifacts (
-    id TEXT PRIMARY KEY NOT NULL,
-    event_id TEXT NOT NULL REFERENCES events(id),
-    artifact_type TEXT NOT NULL,
-    file_path TEXT NOT NULL,
-    compression_algo TEXT NOT NULL DEFAULT 'zstd',
-    encryption_algo TEXT NOT NULL DEFAULT 'xchacha20poly1305',
-    original_size_bytes INTEGER NOT NULL,
-    stored_size_bytes INTEGER NOT NULL,
-    artifact_version INTEGER NOT NULL DEFAULT 1,
-    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-);
+def migration_files() -> list[Path]:
+    """The ``.sql`` files ``EventStore::run_migrations`` applies, in its order.
 
-CREATE INDEX IF NOT EXISTS idx_artifacts_event_id ON artifacts(event_id);
+    Read from the ``include_str!`` calls in ``crates/storage/src/lib.rs``,
+    so a migration the daemon runs is a migration the tests run.
+    """
+    lib_rs = (STORAGE_SRC / "lib.rs").read_text(encoding="utf-8")
+    names = re.findall(r'include_str!\("(migrations/[^"]+\.sql)"\)', lib_rs)
+    if not names:
+        raise RuntimeError(f"no migrations found in {STORAGE_SRC / 'lib.rs'}")
+    return [STORAGE_SRC / name for name in names]
 
-CREATE TABLE IF NOT EXISTS episodes (
-    id TEXT PRIMARY KEY NOT NULL,
-    segment_id INTEGER NOT NULL DEFAULT 0,
-    prev_segment_id INTEGER,
-    thread_id TEXT,
-    start_time TEXT NOT NULL,
-    end_time TEXT,
-    event_count INTEGER NOT NULL DEFAULT 0,
-    status TEXT NOT NULL DEFAULT 'open',
-    summary TEXT,
-    metadata_json TEXT NOT NULL DEFAULT '{}',
-    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-);
 
-CREATE TABLE IF NOT EXISTS vlm_queue (
-    id TEXT PRIMARY KEY NOT NULL,
-    event_id TEXT NOT NULL REFERENCES events(id),
-    priority REAL NOT NULL DEFAULT 0.5,
-    status TEXT NOT NULL DEFAULT 'pending',
-    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-    processed_at TEXT,
-    result_json TEXT,
-    ttl_expires_at TEXT NOT NULL
-);
+def schema_version() -> int:
+    """``CURRENT_SCHEMA_VERSION`` from ``crates/storage/src/schema.rs``."""
+    schema_rs = (STORAGE_SRC / "schema.rs").read_text(encoding="utf-8")
+    match = re.search(r"CURRENT_SCHEMA_VERSION\s*:\s*u32\s*=\s*(\d+)", schema_rs)
+    if match is None:
+        raise RuntimeError(f"CURRENT_SCHEMA_VERSION not found in {STORAGE_SRC / 'schema.rs'}")
+    return int(match.group(1))
 
-CREATE INDEX IF NOT EXISTS idx_vlm_queue_status ON vlm_queue(status, priority DESC);
 
-CREATE INDEX IF NOT EXISTS idx_events_annotation_status
-    ON events(annotation_status);
-"""
+def apply_daemon_migrations(conn: sqlite3.Connection) -> None:
+    """Bring an empty database to the daemon's current schema.
+
+    Same statements and ``user_version`` as ``EventStore::open`` on a new
+    file (WAL journal, every migration in order).
+    """
+    conn.execute("PRAGMA journal_mode=WAL")
+    for sql_file in migration_files():
+        conn.executescript(sql_file.read_text(encoding="utf-8"))
+    conn.execute(f"PRAGMA user_version = {schema_version()}")
+    conn.commit()
+
+
+def create_daemon_db(path: Path) -> Path:
+    """Create ``path`` as a new daemon database and return it."""
+    conn = sqlite3.connect(str(path))
+    try:
+        apply_daemon_migrations(conn)
+    finally:
+        conn.close()
+    return path
 
 
 def _now_iso() -> str:
