@@ -252,7 +252,7 @@ async fn handle_command(cmd: Command, ctx: &ControlContext) -> String {
                 started_at: started_at.clone(),
                 status: agenthandover_common::focus_session::FocusSessionStatus::Recording,
             };
-            let state_dir = agenthandover_common::status::data_dir();
+            let state_dir = ctx.status_dir.clone();
             if let Err(e) =
                 agenthandover_common::focus_session::write_focus_signal(&state_dir, &signal)
             {
@@ -286,7 +286,7 @@ async fn handle_command(cmd: Command, ctx: &ControlContext) -> String {
             }
 
             // Update signal file to "stopped" so the worker picks it up.
-            let state_dir = agenthandover_common::status::data_dir();
+            let state_dir = ctx.status_dir.clone();
             if let Some(mut signal) =
                 agenthandover_common::focus_session::read_focus_signal(&state_dir)
             {
@@ -568,10 +568,17 @@ mod tests {
         let server = tokio::spawn(serve(ctx));
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
+        // A per-run id, so a signal file in the real data dir can only
+        // match if this run wrote it there.
+        let session_id = uuid::Uuid::new_v4().to_string();
+
         // Start focus
         let resp = send_command(
             &sock_path,
-            r#"{"command":"start_focus","title":"Test Session","session_id":"uuid-123"}"#,
+            &format!(
+                r#"{{"command":"start_focus","title":"Test Session","session_id":"{}"}}"#,
+                session_id
+            ),
         )
         .await;
         let parsed: serde_json::Value = serde_json::from_str(resp.trim()).unwrap();
@@ -581,13 +588,26 @@ mod tests {
         {
             let s = state.lock().await;
             assert!(s.focus_session.is_some());
-            assert_eq!(s.focus_session.as_ref().unwrap().session_id, "uuid-123");
+            assert_eq!(s.focus_session.as_ref().unwrap().session_id, session_id);
+        }
+
+        // The signal file lands in ctx.status_dir, never in the real data dir.
+        let signal = agenthandover_common::focus_session::read_focus_signal(tmp.path())
+            .expect("focus-session.json written under ctx.status_dir");
+        assert_eq!(signal.session_id, session_id);
+        assert_eq!(
+            signal.status,
+            agenthandover_common::focus_session::FocusSessionStatus::Recording
+        );
+        let real = agenthandover_common::status::data_dir();
+        if let Some(real_signal) = agenthandover_common::focus_session::read_focus_signal(&real) {
+            assert_ne!(real_signal.session_id, session_id);
         }
 
         // Get status — should show focus session
         let resp = send_command(&sock_path, r#"{"command":"get_status"}"#).await;
         let parsed: serde_json::Value = serde_json::from_str(resp.trim()).unwrap();
-        assert_eq!(parsed["focus_session"]["session_id"], "uuid-123");
+        assert_eq!(parsed["focus_session"]["session_id"], session_id.as_str());
         assert_eq!(parsed["focus_session"]["title"], "Test Session");
 
         // Starting another focus should fail
@@ -609,6 +629,16 @@ mod tests {
         {
             let s = state.lock().await;
             assert!(s.focus_session.is_none());
+        }
+
+        let signal = agenthandover_common::focus_session::read_focus_signal(tmp.path())
+            .expect("stopped signal still under ctx.status_dir");
+        assert_eq!(
+            signal.status,
+            agenthandover_common::focus_session::FocusSessionStatus::Stopped
+        );
+        if let Some(real_signal) = agenthandover_common::focus_session::read_focus_signal(&real) {
+            assert_ne!(real_signal.session_id, session_id);
         }
 
         // Stopping again should fail
