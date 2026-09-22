@@ -14,21 +14,29 @@ LIB_DIR="${AH_LIB_DIR:-/usr/local/lib/agenthandover}"
 LAUNCH_AGENTS="${AH_LAUNCH_AGENTS:-${USER_HOME}/Library/LaunchAgents}"
 APP_PATH="${AH_APP_PATH:-/Applications/AgentHandover.app}"
 NO_SERVICES="${AH_NO_SERVICES:-0}"
+# The app to quit. Overridable so the install test harness can point this
+# at a stub process instead of a real AgentHandover.app on the machine; an
+# empty AH_APP_BUNDLE_ID skips the AppleScript quit (a stub has no bundle).
+APP_BUNDLE_ID="${AH_APP_BUNDLE_ID-com.agenthandover.app}"
+APP_PROCESS="${AH_APP_PROCESS:-AgentHandover}"
 
 # Quit the menu bar app so the payload does not land under a live process
 # and postinstall's `open` starts the new binary instead of re-attaching to
 # the old one. Ask politely first (the app stops the daemon it spawned on
-# quit), then wait up to 5 s, then kill whatever is left. The `is running`
-# guard matters: a bare `tell application` would launch the app to quit it.
-as_user /usr/bin/osascript \
-    -e 'if application id "com.agenthandover.app" is running then' \
-    -e 'tell application id "com.agenthandover.app" to quit' \
-    -e 'end if' >/dev/null 2>&1 || true
+# quit), then wait up to 5 s, then kill whatever is left. AppleScript runs
+# only while the process is up, and the `is running` guard stays: a bare
+# `tell application` would launch the app just to quit it.
+if [ -n "${APP_BUNDLE_ID}" ] && pgrep -x -u "${CONSOLE_UID}" "${APP_PROCESS}" >/dev/null; then
+    as_user /usr/bin/osascript \
+        -e "if application id \"${APP_BUNDLE_ID}\" is running then" \
+        -e "tell application id \"${APP_BUNDLE_ID}\" to quit" \
+        -e 'end if' >/dev/null 2>&1 || true
+fi
 for _ in 1 2 3 4 5; do
-    pgrep -x -u "${CONSOLE_UID}" AgentHandover >/dev/null || break
+    pgrep -x -u "${CONSOLE_UID}" "${APP_PROCESS}" >/dev/null || break
     sleep 1
 done
-pkill -x -u "${CONSOLE_UID}" AgentHandover 2>/dev/null || true
+pkill -x -u "${CONSOLE_UID}" "${APP_PROCESS}" 2>/dev/null || true
 
 if [ "${NO_SERVICES}" != "1" ]; then
     # Stop the daemon launchd job left by pre-v0.2.1 installs (the daemon
