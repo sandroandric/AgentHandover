@@ -487,9 +487,9 @@ class TestNegativeDemoDetection:
             write_conn,
             event_id="ev-open-dialog",
             timestamp=_ts(base),
-            kind_json=_kind("ClickIntent"),
+            kind_json=json.dumps({"ClickIntent": {"target_description": "Open File"}}),
             window_json=json.dumps({"app_id": app_id, "title": "Open File"}),
-            metadata_json=json.dumps({"element_text": "Open File"}),
+            metadata_json="{}",
         )
 
         # Navigate in dialog
@@ -507,9 +507,10 @@ class TestNegativeDemoDetection:
             write_conn,
             event_id="ev-cancel",
             timestamp=_ts(base + timedelta(seconds=6)),
-            kind_json=_kind("ClickIntent"),
+            # A native click names its target in the ClickIntent kind.
+            kind_json=json.dumps({"ClickIntent": {"target_description": "Cancel"}}),
             window_json=json.dumps({"app_id": app_id, "title": "Open File"}),
-            metadata_json=json.dumps({"element_text": "Cancel"}),
+            metadata_json="{}",
         )
 
         with WorkerDB(tmp_db_path) as db:

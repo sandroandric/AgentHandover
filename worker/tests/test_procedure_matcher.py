@@ -446,3 +446,46 @@ class TestThresholdConfigurable:
 
         # The high-threshold matcher should return equal or fewer matches
         assert len(matches_high) <= len(matches_low)
+
+
+class TestMatchBoundary:
+    """Daily task boundaries match procedures on apps, domains and intent."""
+
+    def test_boundary_fingerprint_and_match(self, kb):
+        from agenthandover_worker.daily_processor import TaskBoundary
+
+        kb.save_procedure(_github_pr_procedure())
+        matcher = ProcedureMatcher(kb=kb)
+        boundary = TaskBoundary(
+            start_time="2026-03-14T10:00:00Z",
+            end_time="2026-03-14T10:20:00Z",
+            duration_minutes=20,
+            intent="Reviewing GitHub pull request",
+            apps=["Chrome"],
+            urls=["https://www.github.com/org/repo/pull/42", ""],
+            event_ids=["e1"],
+            is_complete=True,
+        )
+
+        fp = matcher._boundary_to_fingerprint(boundary)
+        assert fp["domains"] == ["github.com"]
+        assert "github" in fp["title_tokens"]
+
+        matches = matcher.match_boundary(boundary)
+        assert matches and matches[0][0] == "review-github-pr"
+
+    def test_unrelated_boundary_does_not_match(self, kb):
+        from agenthandover_worker.daily_processor import TaskBoundary
+
+        kb.save_procedure(_github_pr_procedure())
+        boundary = TaskBoundary(
+            start_time="2026-03-14T10:00:00Z",
+            end_time="2026-03-14T10:20:00Z",
+            duration_minutes=20,
+            intent="Editing holiday photos",
+            apps=["Photoshop"],
+            urls=[],
+            event_ids=["e1"],
+            is_complete=True,
+        )
+        assert ProcedureMatcher(kb=kb).match_boundary(boundary) == []

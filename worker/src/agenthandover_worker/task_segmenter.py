@@ -7,8 +7,8 @@ continuous annotation stream.
 Pipeline:
   1. Load completed annotations from a time window
   2. Extract ``task_context.what_doing`` from each annotation
-  3. Compute text embeddings via Ollama ``/api/embed`` (all-minilm:l6-v2)
-  4. Cluster by cosine similarity ≥ threshold (default 0.75)
+  3. Compute text embeddings via Ollama ``/api/embed`` (nomic-embed-text, ``clustering:`` prefix)
+  4. Cluster by cosine similarity ≥ threshold (default 0.83)
   5. Filter noise: drop clusters where ALL frames have is_workflow=False
   6. Split each cluster into contiguous segments wherever two consecutive
      frames are more than ``stitch_max_gap_seconds`` apart (default 30 min),
@@ -52,8 +52,12 @@ class SegmenterConfig:
     embedding_model: str = "nomic-embed-text"
     ollama_host: str = "http://localhost:11434"
 
-    # Clustering
-    similarity_threshold: float = 0.75  # cosine similarity for same-task
+    # Clustering: cosine similarity to a cluster centroid for "same task".
+    # Calibrated for ``clustering:``-prefixed nomic-embed-text vectors, which
+    # sit ~0.09 higher than unprefixed ones: 0.83 is the operating point the
+    # old unprefixed 0.75 had (no two tasks merged) on the labelled set in
+    # tests/journeys/test_segmenter_threshold.py.
+    similarity_threshold: float = 0.83
 
     # Noise filtering
     min_workflow_ratio: float = 0.0  # ratio of is_workflow=True frames
@@ -223,6 +227,12 @@ class SegmentationResult:
 # Embedding via Ollama
 # ---------------------------------------------------------------------------
 
+# nomic-embed-text is trained with task prefixes; grouping frames by task is
+# its ``clustering`` task.  The similarity threshold is calibrated for
+# vectors computed with this prefix.
+CLUSTERING_PREFIX = "clustering: "
+
+
 def _compute_embeddings(
     texts: list[str],
     *,
@@ -232,6 +242,7 @@ def _compute_embeddings(
 ) -> list[list[float]]:
     """Compute text embeddings via Ollama's /api/embed endpoint.
 
+    *texts* are sent as given: the caller includes any task prefix.
     Returns a list of embedding vectors (one per input text).
     Raises ConnectionError if Ollama is not reachable.
     """
@@ -266,11 +277,10 @@ def _is_noise_frame(frame: AnnotatedFrame) -> bool:
     Uses activity_type/learnability when available (Phase 1+),
     falls back to is_workflow for legacy events.
     """
-    if frame.activity_type:
-        return (
-            frame.activity_type in ("entertainment", "dead_time")
-            or frame.learnability == "ignore"
-        )
+    if frame.learnability == "ignore":
+        return True
+    if frame.activity_type and frame.activity_type != "unknown":
+        return frame.activity_type in ("entertainment", "dead_time")
     return not frame.is_workflow
 
 
@@ -280,7 +290,7 @@ def _is_noise_frame(frame: AnnotatedFrame) -> bool:
 
 def _cluster_frames(
     frames: list[AnnotatedFrame],
-    threshold: float = 0.75,
+    threshold: float = 0.83,
 ) -> dict[int, list[int]]:
     """Cluster frames by embedding cosine similarity.
 
@@ -676,7 +686,7 @@ class TaskSegmenter:
             proxy = f.annotation.get("_visual_text_proxy", "") if f.annotation else ""
             if proxy and len(proxy) > 20:
                 parts.append(proxy[:500])
-            texts.append(" | ".join(parts))
+            texts.append(CLUSTERING_PREFIX + " | ".join(parts))
         try:
             embed_start = time.monotonic()
             embeddings = _compute_embeddings(

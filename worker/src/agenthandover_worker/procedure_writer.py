@@ -75,9 +75,7 @@ def merge_existing_procedure(
     if keep_lifecycle:
         new_proc["lifecycle_state"] = existing.get("lifecycle_state", "observed")
     carry_run_history(new_proc, existing)
-    new_proc.setdefault("staleness", {})["last_observed"] = (
-        datetime.now(timezone.utc).isoformat()
-    )
+    new_proc.setdefault("staleness", {})["last_observed"] = datetime.now(timezone.utc).isoformat()
     return new_proc
 
 

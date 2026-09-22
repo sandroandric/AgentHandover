@@ -91,6 +91,45 @@ class TestWriteProcedure:
         assert obs["type"] == "focus"
         assert obs["event_count"] == 15
 
+    def test_rewrite_upserts_and_keeps_evidence(
+        self, writer: ProcedureWriter, kb: KnowledgeBase, sample_sop: dict
+    ) -> None:
+        """Three passive observations of one procedure count as three."""
+        import copy
+
+        for i in range(3):
+            writer.write_procedure(
+                copy.deepcopy(sample_sop), source="passive",
+                source_id=f"cluster-{i}", event_count=10 + i,
+            )
+        proc = kb.get_procedure("check-domains")
+        assert proc is not None
+        assert proc["evidence"]["total_observations"] == 3
+        assert [o["session_id"] for o in proc["evidence"]["observations"]] == [
+            "cluster-0", "cluster-1", "cluster-2",
+        ]
+
+    def test_rewrite_keeps_lifecycle_and_extracted_evidence(
+        self, writer: ProcedureWriter, kb: KnowledgeBase, sample_sop: dict
+    ) -> None:
+        import copy
+
+        writer.write_procedure(copy.deepcopy(sample_sop), source="passive", source_id="c0")
+        proc = kb.get_procedure("check-domains")
+        proc["lifecycle_state"] = "reviewed"
+        proc["evidence"]["extracted_evidence"] = {"domains": ["expireddomains.net"]}
+        kb.save_procedure(proc)
+
+        updated = copy.deepcopy(sample_sop)
+        updated["steps"].append({"action": "Export the list", "confidence": 0.8})
+        writer.write_procedure(updated, source="passive", source_id="c1")
+
+        proc = kb.get_procedure("check-domains")
+        assert proc["lifecycle_state"] == "reviewed"
+        assert proc["evidence"]["extracted_evidence"] == {"domains": ["expireddomains.net"]}
+        assert proc["evidence"]["total_observations"] == 2
+        assert len(proc["steps"]) == 3
+
     def test_write_sets_source(
         self, writer: ProcedureWriter, kb: KnowledgeBase, sample_sop: dict
     ) -> None:

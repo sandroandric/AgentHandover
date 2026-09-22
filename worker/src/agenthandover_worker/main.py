@@ -2265,6 +2265,7 @@ def _check_focus_answers(
 def _process_passive_discovery(
     db: "WorkerDB",
     *,
+    knowledge_base: "KnowledgeBase",
     segmenter: "TaskSegmenter",
     sop_generator: "SOPGenerator",
     openclaw_writer: "SOPExportAdapter",
@@ -2503,16 +2504,19 @@ def _process_passive_discovery(
             task_label[:60], len(demonstrations),
         )
 
-        # Load evidence from prior procedure if it exists
+        # Load evidence from prior procedure if it exists.  The generated
+        # SOP is titled with task_label and slugged by _generate_slug, so
+        # the same call names the procedure an earlier run wrote.
         _prior_evidence: dict | None = None
         try:
-            from agenthandover_worker.sop_format import slugify
-            _candidate_slug = slugify(task_label) if task_label else ""
+            _candidate_slug = _generate_slug(task_label) if task_label else ""
             if _candidate_slug:
                 _prior_proc = knowledge_base.get_procedure(_candidate_slug)
                 if _prior_proc is not None:
-                    _prior_evidence = _prior_proc.get("extracted_evidence")
-        except Exception:
+                    _prior_evidence = (
+                        _prior_proc.get("evidence") or {}
+                    ).get("extracted_evidence")
+        except (OSError, KeyError, ValueError):
             logger.debug("Failed to load prior evidence for '%s'", task_label[:60], exc_info=True)
 
         # Use enriched generation if variant data available
@@ -4089,11 +4093,55 @@ def main(argv: list[str] | None = None) -> None:
         [k for k, v in vars(features).items() if not v] or "all enabled",
     )
 
-    # Forward declarations — these are initialized later but referenced
-    # by module constructors. Python 3.14 requires locals to be assigned
-    # before any use in the same function scope.
+    # Shared LLM reasoning utility — must be created before modules that use it.
+    # VLMFallbackQueue is imported at module level (line 40) — do NOT re-import
+    # it here, that shadows the module-level binding and makes Python treat
+    # VLMFallbackQueue as local to this whole main() function (same class of
+    # bug as the FocusProcessor regression caught by hikoae in issue #1).
+    # LLMReasoner stays as a local import because it's not at module level —
+    # the worker/llm_reasoning module is deliberately loaded lazily here.
+    vlm_queue = VLMFallbackQueue()
+    from agenthandover_worker.llm_reasoning import LLMReasoner, ReasoningConfig
+    llm_reasoner = LLMReasoner(
+        config=ReasoningConfig(ollama_host=vlm_cfg.ollama_host),
+        vlm_queue=vlm_queue,
+    )
+
+    # Initialize vector KB for semantic search and embedding storage
     vector_kb = None
-    llm_reasoner = None
+    try:
+        from agenthandover_worker.vector_kb import VectorKB, VectorKBConfig
+        vkb_config = VectorKBConfig(
+            ollama_host=vlm_cfg.ollama_host,
+        )
+        vector_kb = VectorKB(args.db_path, vkb_config)
+        # Health check: verify embedding model is available
+        try:
+            test_emb = vector_kb.compute_embeddings(["health check"])
+            if test_emb and test_emb[0]:
+                logger.info(
+                    "Vector KB ready (model=%s, dim=%d, vectors=%d)",
+                    vkb_config.embedding_model, len(test_emb[0]),
+                    vector_kb.count(),
+                )
+            else:
+                logger.warning(
+                    "Vector KB model '%s' returned empty embeddings — "
+                    "run 'ollama pull %s' to enable semantic search",
+                    vkb_config.embedding_model, vkb_config.embedding_model,
+                )
+                vector_kb.close()
+                vector_kb = None
+        except (ConnectionError, OllamaError):
+            logger.warning(
+                "Vector KB model '%s' not available — "
+                "run 'ollama pull %s' to enable semantic search",
+                vkb_config.embedding_model, vkb_config.embedding_model,
+            )
+            vector_kb.close()
+            vector_kb = None
+    except Exception:
+        logger.debug("Vector KB initialization failed — semantic search disabled", exc_info=True)
 
     evidence_tracker = EvidenceTracker(knowledge_base=knowledge_base)
     lifecycle_manager = LifecycleManager(knowledge_base)
@@ -4118,7 +4166,6 @@ def main(argv: list[str] | None = None) -> None:
     except Exception:
         logger.debug("Privacy zone config parsing failed, using defaults", exc_info=True)
     privacy_checker = PrivacyZoneChecker(config=_pz_cfg)
-    daily_processor = DailyBatchProcessor(knowledge_base=knowledge_base)
     staleness_detector = StalenessDetector(knowledge_base)
     profile_builder = ProfileBuilder(knowledge_base)
     activity_classifier = None
@@ -4127,27 +4174,10 @@ def main(argv: list[str] | None = None) -> None:
         activity_classifier = ActivityClassifier(
             profile=knowledge_base.get_profile(),
             policy=user_policy,
+            llm_reasoner=llm_reasoner,
         )
     pattern_detector = PatternDetector(knowledge_base)
     constraint_manager = ConstraintManager(knowledge_base)
-
-    # Shared LLM reasoning utility — must be created before modules that use it.
-    # VLMFallbackQueue is imported at module level (line 40) — do NOT re-import
-    # it here, that shadows the module-level binding and makes Python treat
-    # VLMFallbackQueue as local to this whole main() function (same class of
-    # bug as the FocusProcessor regression caught by hikoae in issue #1).
-    # LLMReasoner stays as a local import because it's not at module level —
-    # the worker/llm_reasoning module is deliberately loaded lazily here.
-    vlm_queue = VLMFallbackQueue()
-    from agenthandover_worker.llm_reasoning import LLMReasoner, ReasoningConfig
-    llm_reasoner = LLMReasoner(
-        config=ReasoningConfig(ollama_host=vlm_cfg.ollama_host),
-        vlm_queue=vlm_queue,
-    )
-
-    # Wire LLM reasoner into activity classifier (created before reasoner)
-    if activity_classifier is not None:
-        activity_classifier._llm_reasoner = llm_reasoner
 
     # Phase 4: Execution monitoring, correction detection, trust advisor
     runtime_validator = None
@@ -4158,12 +4188,15 @@ def main(argv: list[str] | None = None) -> None:
     trust_advisor = TrustAdvisor(knowledge_base, execution_monitor=execution_monitor)
     session_linker = SessionLinker(knowledge_base, llm_reasoner=llm_reasoner, vector_kb=vector_kb)
     digest_generator = DigestGenerator(knowledge_base)
+    procedure_matcher = ProcedureMatcher(kb=knowledge_base, vector_kb=vector_kb)
+    daily_processor = DailyBatchProcessor(
+        knowledge_base=knowledge_base, matcher=procedure_matcher,
+    )
     continuity_tracker = None
     if features.continuity_tracking:
-        procedure_matcher_obj = ProcedureMatcher(kb=knowledge_base, vector_kb=vector_kb)
         continuity_tracker = ContinuityTracker(
             kb=knowledge_base,
-            matcher=procedure_matcher_obj,
+            matcher=procedure_matcher,
         )
 
     # Phase 4: Variant detection and evidence normalization
@@ -4645,41 +4678,6 @@ def main(argv: list[str] | None = None) -> None:
         v2_diffs_today=total_v2_diffs,
     )
 
-    # Initialize vector KB for semantic search and embedding storage
-    vector_kb = None
-    try:
-        from agenthandover_worker.vector_kb import VectorKB, VectorKBConfig
-        vkb_config = VectorKBConfig(
-            ollama_host=vlm_cfg.ollama_host,
-        )
-        vector_kb = VectorKB(args.db_path, vkb_config)
-        # Health check: verify embedding model is available
-        try:
-            test_emb = vector_kb.compute_embeddings(["health check"])
-            if test_emb and test_emb[0]:
-                logger.info(
-                    "Vector KB ready (model=%s, dim=%d, vectors=%d)",
-                    vkb_config.embedding_model, len(test_emb[0]),
-                    vector_kb.count(),
-                )
-            else:
-                logger.warning(
-                    "Vector KB model '%s' returned empty embeddings — "
-                    "run 'ollama pull %s' to enable semantic search",
-                    vkb_config.embedding_model, vkb_config.embedding_model,
-                )
-                vector_kb = None
-        except (ConnectionError, OllamaError):
-            logger.warning(
-                "Vector KB model '%s' not available — "
-                "run 'ollama pull %s' to enable semantic search",
-                vkb_config.embedding_model, vkb_config.embedding_model,
-            )
-            vector_kb.close()
-            vector_kb = None
-    except Exception:
-        logger.debug("Vector KB initialization failed — semantic search disabled", exc_info=True)
-
     with WorkerDB(args.db_path) as db:
         logger.info("Connected to database, entering main loop")
 
@@ -5076,6 +5074,7 @@ def main(argv: list[str] | None = None) -> None:
                         try:
                             pd_sops = _process_passive_discovery(
                                 db,
+                                knowledge_base=knowledge_base,
                                 segmenter=task_segmenter,
                                 sop_generator=sop_generator,
                                 openclaw_writer=sop_writer,

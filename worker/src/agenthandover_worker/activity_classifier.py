@@ -6,7 +6,9 @@ and optional policy overrides.  No VLM call — everything is derived from
 existing annotation data produced by the scene annotator.
 
 Activity types:  WORK, RESEARCH, COMMUNICATION, SETUP, PERSONAL_ADMIN,
-                 ENTERTAINMENT, DEAD_TIME, CONTEXT_SWITCH.
+                 ENTERTAINMENT, DEAD_TIME, CONTEXT_SWITCH, plus UNKNOWN
+                 when no heuristic matches (consumers then fall back to
+                 the annotator's is_workflow).
 
 Each classification also carries a *learnability* tag that tells the SOP
 pipeline whether to record, ignore, or prioritise the activity.
@@ -16,10 +18,12 @@ from __future__ import annotations
 
 import fnmatch
 import logging
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 from typing import TYPE_CHECKING
+from urllib.parse import urlsplit
 
 if TYPE_CHECKING:
     from agenthandover_worker.llm_reasoning import LLMReasoner
@@ -43,6 +47,9 @@ class ActivityType(str, Enum):
     ENTERTAINMENT = "entertainment"
     DEAD_TIME = "dead_time"
     CONTEXT_SWITCH = "context_switch"
+    # No heuristic matched: the classifier has no opinion, and consumers
+    # fall back to the annotator's own is_workflow verdict.
+    UNKNOWN = "unknown"
 
 
 class Learnability(str, Enum):
@@ -111,40 +118,83 @@ _KEYWORD_TABLE: dict[ActivityType, list[str]] = {
     ],
 }
 
-_URL_HINTS: list[tuple[str, ActivityType]] = [
+# Hosts, matched against the location's parsed host name.  Each host also
+# covers its subdomains (``foo.com`` and ``*.foo.com``), never a longer name
+# that merely contains it: ``x.com`` must not match ``dropbox.com``.  The
+# first match wins, so a specific subdomain precedes its parent's entry.
+_HOST_HINTS: list[tuple[str, ActivityType]] = [
     # Entertainment
-    ("*youtube.com*", ActivityType.ENTERTAINMENT),
-    ("*netflix.com*", ActivityType.ENTERTAINMENT),
-    ("*twitch.tv*", ActivityType.ENTERTAINMENT),
-    ("*reddit.com*", ActivityType.ENTERTAINMENT),
-    ("*instagram.com*", ActivityType.ENTERTAINMENT),
-    ("*tiktok.com*", ActivityType.ENTERTAINMENT),
-    ("*twitter.com*", ActivityType.ENTERTAINMENT),
-    ("*x.com*", ActivityType.ENTERTAINMENT),
+    ("youtube.com", ActivityType.ENTERTAINMENT),
+    ("netflix.com", ActivityType.ENTERTAINMENT),
+    ("twitch.tv", ActivityType.ENTERTAINMENT),
+    ("reddit.com", ActivityType.ENTERTAINMENT),
+    ("instagram.com", ActivityType.ENTERTAINMENT),
+    ("tiktok.com", ActivityType.ENTERTAINMENT),
+    ("twitter.com", ActivityType.ENTERTAINMENT),
+    ("x.com", ActivityType.ENTERTAINMENT),
     # Communication
-    ("*facebook.com*", ActivityType.COMMUNICATION),
-    ("*mail.google.com*", ActivityType.COMMUNICATION),
-    ("*outlook.*", ActivityType.COMMUNICATION),
-    ("*slack.com*", ActivityType.COMMUNICATION),
-    ("*teams.microsoft*", ActivityType.COMMUNICATION),
-    ("*discord.com*", ActivityType.COMMUNICATION),
+    ("facebook.com", ActivityType.COMMUNICATION),
+    ("mail.google.com", ActivityType.COMMUNICATION),
+    ("outlook.com", ActivityType.COMMUNICATION),
+    ("outlook.live.com", ActivityType.COMMUNICATION),
+    ("outlook.office.com", ActivityType.COMMUNICATION),
+    ("outlook.office365.com", ActivityType.COMMUNICATION),
+    ("slack.com", ActivityType.COMMUNICATION),
+    ("teams.microsoft.com", ActivityType.COMMUNICATION),
+    ("discord.com", ActivityType.COMMUNICATION),
+    # Research (developer documentation hosts precede their parent sites)
+    ("docs.github.com", ActivityType.RESEARCH),
+    ("stackoverflow.com", ActivityType.RESEARCH),
+    ("docs.python.org", ActivityType.RESEARCH),
+    ("developer.mozilla.org", ActivityType.RESEARCH),
+    ("developer.apple.com", ActivityType.RESEARCH),
+    ("developer.android.com", ActivityType.RESEARCH),
+    ("learn.microsoft.com", ActivityType.RESEARCH),
+    ("readthedocs.io", ActivityType.RESEARCH),
+    ("docs.rs", ActivityType.RESEARCH),
+    ("arxiv.org", ActivityType.RESEARCH),
+    ("scholar.google.com", ActivityType.RESEARCH),
     # Work
-    ("*github.com*", ActivityType.WORK),
-    ("*gitlab.com*", ActivityType.WORK),
-    ("*bitbucket.org*", ActivityType.WORK),
-    ("*jira.*", ActivityType.WORK),
-    ("*linear.app*", ActivityType.WORK),
-    ("*notion.so*", ActivityType.WORK),
-    # Research
-    ("*stackoverflow.com*", ActivityType.RESEARCH),
-    ("*docs.*", ActivityType.RESEARCH),
-    ("*developer.*", ActivityType.RESEARCH),
-    ("*arxiv.org*", ActivityType.RESEARCH),
-    ("*scholar.google*", ActivityType.RESEARCH),
+    ("github.com", ActivityType.WORK),
+    ("gitlab.com", ActivityType.WORK),
+    ("bitbucket.org", ActivityType.WORK),
+    ("atlassian.net", ActivityType.WORK),
+    ("linear.app", ActivityType.WORK),
+    ("notion.so", ActivityType.WORK),
     # Personal admin
-    ("*amazon.com*", ActivityType.PERSONAL_ADMIN),
-    ("*ebay.com*", ActivityType.PERSONAL_ADMIN),
+    ("amazon.com", ActivityType.PERSONAL_ADMIN),
+    ("ebay.com", ActivityType.PERSONAL_ADMIN),
 ]
+
+# The host glob pairs, in hint order.
+_URL_HINTS: list[tuple[str, ActivityType]] = [
+    (pattern, activity_type)
+    for host, activity_type in _HOST_HINTS
+    for pattern in (host, f"*.{host}")
+]
+
+
+def _location_host(location: str) -> str:
+    """The lowercased host name of a URL-like location, or "".
+
+    Accepts full URLs and scheme-less ones (``dropbox.com/home``).  File
+    paths, app-internal locations and free text have no host.
+    """
+    loc = location.strip()
+    if not loc:
+        return ""
+    try:
+        host = urlsplit(loc).hostname
+        if host is None and not loc.startswith(("/", "~", ".")):
+            first = loc.split("/", 1)[0]
+            if first and not any(ch.isspace() for ch in first):
+                host = urlsplit("//" + loc).hostname
+    except ValueError:
+        return ""
+    if not host or "." not in host:
+        return ""
+    return host.rstrip(".").lower()
+
 
 _APP_HINTS: dict[str, ActivityType] = {
     # Communication
@@ -174,6 +224,7 @@ _LEARNABILITY_MAP: dict[ActivityType, Learnability] = {
     ActivityType.CONTEXT_SWITCH: Learnability.CONTEXT_ONLY,
     ActivityType.ENTERTAINMENT: Learnability.IGNORE,
     ActivityType.DEAD_TIME: Learnability.IGNORE,
+    ActivityType.UNKNOWN: Learnability.CONTEXT_ONLY,
 }
 
 
@@ -249,9 +300,12 @@ class ActivityClassifier:
             or ""
         )
         app = annotation.get("app", "") or ""
-        is_workflow = annotation.get("task_context", {}).get(
-            "is_workflow", False,
-        )
+        task_context = annotation.get("task_context", {})
+        is_workflow = task_context.get("is_workflow", False)
+        # The annotator saw the frame and said whether it is a workflow:
+        # an app-level prior (this app is usually work) must not overrule
+        # that verdict, or YouTube in a work browser becomes work.
+        vlm_judged = "is_workflow" in task_context
 
         # App tracking happens after Stage 1 (below) so we only count
         # apps seen in work-like contexts, not noise apps.
@@ -284,10 +338,14 @@ class ActivityClassifier:
         if result.confidence < 0.9:
             if self._profile is not None:
                 # Full profile available (after 3+ daily summaries)
-                result = self._stage_prior(result, app, event_context)
+                result = self._stage_prior(
+                    result, app, event_context, app_override=not vlm_judged,
+                )
             elif self._session_total >= 10:
                 # No profile yet — use session-learned priors from day 1
-                result = self._stage_session_prior(result, app, event_context)
+                result = self._stage_session_prior(
+                    result, app, event_context, app_override=not vlm_judged,
+                )
 
         # Stage 2.5 — LLM refinement for ambiguous classifications
         if (
@@ -344,9 +402,9 @@ class ActivityClassifier:
                 reasoning="Derived from legacy is_workflow=True",
             )
         return ClassificationResult(
-            activity_type=ActivityType.ENTERTAINMENT,
-            learnability=Learnability.IGNORE,
-            confidence=0.5,
+            activity_type=ActivityType.UNKNOWN,
+            learnability=Learnability.CONTEXT_ONLY,
+            confidence=0.3,
             source="heuristic",
             reasoning="Derived from legacy is_workflow=False",
         )
@@ -430,9 +488,20 @@ class ActivityClassifier:
                         reasoning=f"Keyword match: '{kw}' in what_doing",
                     )
 
-        # 2. Try URL match on location
+        # 2. Try a host match on location.  Only a location without a
+        # parseable host (a file path, an app-internal location) falls back
+        # to searching the raw string for a hint host.
+        host = _location_host(location)
         for pattern, activity_type in _URL_HINTS:
-            if fnmatch.fnmatch(location_lower, pattern.lower()):
+            if host:
+                matched = fnmatch.fnmatchcase(host, pattern)
+            else:
+                # The hint host as a whole name, not a tail of a longer one.
+                matched = not pattern.startswith("*.") and re.search(
+                    rf"(?<![a-z0-9-]){re.escape(pattern)}(?![a-z0-9-])",
+                    location_lower,
+                ) is not None
+            if matched:
                 return ClassificationResult(
                     activity_type=activity_type,
                     learnability=Learnability.CONTEXT_ONLY,
@@ -462,9 +531,9 @@ class ActivityClassifier:
                 reasoning="Fallback: is_workflow=True",
             )
         return ClassificationResult(
-            activity_type=ActivityType.ENTERTAINMENT,
+            activity_type=ActivityType.UNKNOWN,
             learnability=Learnability.CONTEXT_ONLY,
-            confidence=0.5,
+            confidence=0.3,
             source="heuristic",
             reasoning="Fallback: is_workflow=False, no heuristic match",
         )
@@ -478,6 +547,8 @@ class ActivityClassifier:
         current: ClassificationResult,
         app: str,
         event_context: dict | None,
+        *,
+        app_override: bool = True,
     ) -> ClassificationResult:
         """Adjust classification using session-learned app frequency.
 
@@ -498,9 +569,10 @@ class ActivityClassifier:
         # it's a known work app — override ambiguous classifications
         is_frequent = app_ratio >= 0.10
 
-        if is_frequent and current.activity_type in (
+        if app_override and is_frequent and current.activity_type in (
             ActivityType.ENTERTAINMENT,
             ActivityType.PERSONAL_ADMIN,
+            ActivityType.UNKNOWN,
         ) and current.confidence <= 0.8:
             return ClassificationResult(
                 activity_type=ActivityType.WORK,
@@ -549,6 +621,8 @@ class ActivityClassifier:
         current: ClassificationResult,
         app: str,
         event_context: dict | None,
+        *,
+        app_override: bool = True,
     ) -> ClassificationResult:
         """Adjust classification using the user profile."""
         assert self._profile is not None
@@ -566,9 +640,10 @@ class ActivityClassifier:
             for name in primary_app_names
         )
 
-        if is_primary and current.activity_type in (
+        if app_override and is_primary and current.activity_type in (
             ActivityType.ENTERTAINMENT,
             ActivityType.PERSONAL_ADMIN,
+            ActivityType.UNKNOWN,
         ) and current.confidence <= 0.8:
             current = ClassificationResult(
                 activity_type=ActivityType.WORK,

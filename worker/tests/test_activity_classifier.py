@@ -33,16 +33,20 @@ from agenthandover_worker.user_policy import PolicyAction, PolicyRule, UserPolic
 
 def _ann(
     what_doing: str = "",
-    is_workflow: bool = False,
+    is_workflow: bool | None = False,
     active_app: str = "",
     location: str = "",
 ) -> dict:
-    """Build an annotation dict matching the format produced by SceneAnnotator."""
+    """Build an annotation dict matching the format produced by SceneAnnotator.
+
+    ``is_workflow=None`` leaves the annotator's verdict out (an annotation
+    without one), which is the only case an app-level prior may override.
+    """
+    task_context: dict = {"what_doing": what_doing}
+    if is_workflow is not None:
+        task_context["is_workflow"] = is_workflow
     return {
-        "task_context": {
-            "what_doing": what_doing,
-            "is_workflow": is_workflow,
-        },
+        "task_context": task_context,
         "visual_context": {
             "active_app": active_app,
             "location": location,
@@ -115,11 +119,11 @@ class TestKeywordMapping:
     def test_playing_guitar_no_keyword_match(self, classifier: ActivityClassifier):
         """'playing guitar' should not match ENTERTAINMENT keyword 'playing music'
         (substring match fails because 'playing music' != 'playing guitar').
-        Falls back to is_workflow=False default (ENTERTAINMENT) — but via
-        fallback, not keyword match."""
+        Falls back to the is_workflow=False default (UNKNOWN), not a keyword."""
         result = classifier.classify(_ann(what_doing="playing guitar"))
-        # No keyword matched, so source is heuristic fallback at 0.5 confidence
-        assert result.confidence == 0.5
+        # No keyword matched, so source is heuristic fallback at 0.3 confidence
+        assert result.activity_type == ActivityType.UNKNOWN
+        assert result.confidence == 0.3
         assert result.source == "heuristic"
 
     def test_running_errands_not_work(self, classifier: ActivityClassifier):
@@ -197,6 +201,90 @@ class TestURLHeuristics:
         assert result.activity_type == ActivityType.ENTERTAINMENT
 
 
+class TestHostMatching:
+    """Hints match the parsed host, never a substring of a longer name."""
+
+    @pytest.mark.parametrize("location", [
+        "https://www.dropbox.com/home/Invoices",
+        "https://app.box.com/folder/123",
+        "https://manage.wix.com/dashboard/abc/home",
+        "dropbox.com/home",
+    ])
+    def test_x_com_suffix_hosts_are_not_entertainment(
+        self, classifier: ActivityClassifier, location: str,
+    ) -> None:
+        """Work on Dropbox, Box and Wix is work, not 'x.com' entertainment."""
+        work = classifier.classify(_ann(location=location, is_workflow=True))
+        assert work.activity_type == ActivityType.WORK
+        assert work.learnability == Learnability.EXECUTION_RELEVANT
+
+        # Without a workflow verdict they are unknown, never entertainment.
+        other = classifier.classify(_ann(location=location, is_workflow=False))
+        assert other.activity_type == ActivityType.UNKNOWN
+        assert other.learnability != Learnability.IGNORE
+
+    @pytest.mark.parametrize("location, expected", [
+        ("https://x.com/home", ActivityType.ENTERTAINMENT),
+        ("https://m.youtube.com/watch?v=abc", ActivityType.ENTERTAINMENT),
+        ("youtube.com/watch?v=abc", ActivityType.ENTERTAINMENT),
+        ("https://acme.atlassian.net/browse/OPS-12", ActivityType.WORK),
+        ("https://outlook.office.com/mail/", ActivityType.COMMUNICATION),
+        ("https://docs.github.com/en/actions", ActivityType.RESEARCH),
+        ("https://developer.apple.com/documentation/swiftui", ActivityType.RESEARCH),
+        ("https://requests.readthedocs.io/en/latest/", ActivityType.RESEARCH),
+        ("HTTPS://GitHub.com/org/repo", ActivityType.WORK),
+    ])
+    def test_host_and_subdomain_hints(
+        self, classifier: ActivityClassifier, location: str, expected: ActivityType,
+    ) -> None:
+        assert classifier.classify(_ann(location=location)).activity_type == expected
+
+    @pytest.mark.parametrize("location", [
+        "https://docs.google.com/document/d/1/edit",
+        "https://developer.example.org/guide",
+        "https://jira.example.com/browse/X-1",
+        "https://outlook.example.net/",
+        "https://netflix.company.io/careers",
+    ])
+    def test_bare_wildcards_are_gone(
+        self, classifier: ActivityClassifier, location: str,
+    ) -> None:
+        """'*docs.*', '*developer.*', '*jira.*', '*outlook.*' no longer match."""
+        result = classifier.classify(_ann(location=location))
+        assert result.activity_type == ActivityType.UNKNOWN
+
+    def test_raw_fallback_only_without_a_host(
+        self, classifier: ActivityClassifier,
+    ) -> None:
+        """A location with no host still matches a hint host as a whole name."""
+        slack = classifier.classify(_ann(location="Slack desktop (slack.com workspace)"))
+        assert slack.activity_type == ActivityType.COMMUNICATION
+        backup = classifier.classify(_ann(location="/Users/me/box.com-export/notes.txt"))
+        assert backup.activity_type == ActivityType.UNKNOWN
+
+
+class TestSessionPriorRespectsVerdict:
+    """Day 1 (no profile): the session prior promotes only unjudged frames."""
+
+    def test_youtube_in_frequent_work_browser_stays_entertainment(self) -> None:
+        c = ActivityClassifier()
+        for _ in range(12):
+            c.classify(_ann(
+                what_doing="coding a feature", active_app="Google Chrome",
+                location="https://github.com/org/repo", is_workflow=True,
+            ))
+        youtube = c.classify(_ann(
+            active_app="Google Chrome",
+            location="https://www.youtube.com/watch?v=abc",
+            is_workflow=False,
+        ))
+        assert youtube.activity_type == ActivityType.ENTERTAINMENT
+
+        unjudged = c.classify(_ann(active_app="Google Chrome", is_workflow=None))
+        assert unjudged.activity_type == ActivityType.WORK
+        assert unjudged.source == "prior"
+
+
 # ===================================================================
 # TestAppHints — 4 tests
 # ===================================================================
@@ -219,8 +307,8 @@ class TestAppHints:
     def test_unknown_app_fallback(self, classifier: ActivityClassifier):
         """An unknown app with no keyword signals falls back to is_workflow=False."""
         result = classifier.classify(_ann(active_app="SomeRandomApp"))
-        assert result.activity_type == ActivityType.ENTERTAINMENT
-        assert result.confidence == 0.5
+        assert result.activity_type == ActivityType.UNKNOWN
+        assert result.confidence == 0.3
 
 
 # ===================================================================
@@ -246,12 +334,29 @@ class TestPriorBlending:
         classification back to WORK."""
         profile = self._profile_with_apps(["Safari"])
         c = ActivityClassifier(profile=profile)
-        # Safari is not in _APP_HINTS, so with no keyword it falls to
-        # is_workflow=False → ENTERTAINMENT at 0.5 confidence, which
-        # the prior can override because app is primary and confidence <= 0.8.
-        result = c.classify(_ann(active_app="Safari"))
+        # Safari is not in _APP_HINTS, and the annotation has no is_workflow
+        # verdict, so it falls to UNKNOWN at 0.3 confidence, which the prior
+        # can override because app is primary and confidence <= 0.8.
+        result = c.classify(_ann(active_app="Safari", is_workflow=None))
         assert result.activity_type == ActivityType.WORK
         assert result.source == "prior"
+
+    def test_primary_app_never_overrides_the_annotators_verdict(self):
+        """Day 4: Chrome is the primary work app, but a YouTube frame the
+        annotator judged not-a-workflow stays entertainment."""
+        c = ActivityClassifier(profile=self._profile_with_apps(["Google Chrome"]))
+        result = c.classify(_ann(
+            what_doing="Watching a music video",
+            active_app="Google Chrome",
+            location="https://www.youtube.com/watch?v=abc",
+            is_workflow=False,
+        ))
+        assert result.activity_type == ActivityType.ENTERTAINMENT
+        assert result.learnability == Learnability.IGNORE
+
+        # A frame with no match and a not-a-workflow verdict is not promoted.
+        result = c.classify(_ann(active_app="Google Chrome", is_workflow=False))
+        assert result.activity_type == ActivityType.UNKNOWN
 
     def test_outside_working_hours_reduces_confidence(self):
         """An event outside working hours should get lower confidence for WORK."""
@@ -284,8 +389,8 @@ class TestPriorBlending:
             "working_hours": {},
         }
         c = ActivityClassifier(profile=profile)
-        result = c.classify(_ann(active_app="Finder"))
-        # Finder is not in _APP_HINTS → fallback ENTERTAINMENT @ 0.5.
+        result = c.classify(_ann(active_app="Finder", is_workflow=None))
+        # Finder is not in _APP_HINTS → fallback UNKNOWN @ 0.3.
         # Finder is in primary_apps → prior overrides to WORK.
         assert result.activity_type == ActivityType.WORK
 
@@ -457,8 +562,8 @@ class TestConfidenceValues:
             "working_hours": {"typical_start": "09:00", "typical_end": "17:00"},
         }
         c = ActivityClassifier(profile=profile)
-        # Safari not in _APP_HINTS → ENTERTAINMENT @ 0.5, prior overrides to WORK @ 0.7
-        result = c.classify(_ann(active_app="Safari"))
+        # Safari not in _APP_HINTS → UNKNOWN @ 0.3, prior overrides to WORK @ 0.7
+        result = c.classify(_ann(active_app="Safari", is_workflow=None))
         assert result.confidence == pytest.approx(0.7)
 
     def test_policy_override_confidence(self, kb):
@@ -473,6 +578,8 @@ class TestConfidenceValues:
 
     def test_fallback_confidence(self, classifier: ActivityClassifier):
         result = classifier.classify(_ann())
+        assert result.confidence == pytest.approx(0.3)
+        result = classifier.classify(_ann(is_workflow=True))
         assert result.confidence == pytest.approx(0.5)
 
 
@@ -488,10 +595,10 @@ class TestBackwardCompat:
         assert result.activity_type == ActivityType.WORK
         assert result.learnability == Learnability.EXECUTION_RELEVANT
 
-    def test_is_workflow_false_returns_entertainment(self, classifier: ActivityClassifier):
+    def test_is_workflow_false_returns_unknown(self, classifier: ActivityClassifier):
         result = classifier.classify_from_is_workflow(False)
-        assert result.activity_type == ActivityType.ENTERTAINMENT
-        assert result.learnability == Learnability.IGNORE
+        assert result.activity_type == ActivityType.UNKNOWN
+        assert result.learnability == Learnability.CONTEXT_ONLY
 
     def test_annotation_is_workflow_true_no_what_doing(self, classifier: ActivityClassifier):
         """is_workflow=True with empty what_doing falls back to WORK."""
@@ -499,9 +606,9 @@ class TestBackwardCompat:
         assert result.activity_type == ActivityType.WORK
 
     def test_annotation_is_workflow_false_no_what_doing(self, classifier: ActivityClassifier):
-        """is_workflow=False with empty what_doing falls back to ENTERTAINMENT."""
+        """is_workflow=False with empty what_doing falls back to UNKNOWN."""
         result = classifier.classify(_ann(is_workflow=False))
-        assert result.activity_type == ActivityType.ENTERTAINMENT
+        assert result.activity_type == ActivityType.UNKNOWN
 
 
 # ===================================================================
@@ -521,6 +628,7 @@ class TestAllClassesReachable:
             _ann(what_doing="watching a movie"),           # ENTERTAINMENT
             _ann(what_doing="idle at the screen"),         # DEAD_TIME
             _ann(what_doing="switching between tabs"),     # CONTEXT_SWITCH
+            _ann(what_doing="looking at a chart"),         # UNKNOWN
         ]
         types_seen = {
             classifier.classify(ann).activity_type for ann in annotations
@@ -539,7 +647,7 @@ class TestEdgeCases:
         """Empty what_doing should not crash and should use fallback."""
         result = classifier.classify(_ann(what_doing=""))
         assert isinstance(result, ClassificationResult)
-        assert result.confidence == 0.5
+        assert result.confidence == 0.3
 
     def test_none_annotation_fields(self, classifier: ActivityClassifier):
         """Annotation with None values instead of strings should not crash."""
