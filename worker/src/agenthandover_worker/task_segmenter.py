@@ -1,8 +1,8 @@
 """Task segmenter for passive workflow discovery (v2 pipeline).
 
 Replaces the heuristic episode_builder.py.  Uses VLM scene annotations
-and text embeddings to identify, cluster, and stitch task segments from
-the continuous annotation stream.
+and text embeddings to identify and cluster task segments from the
+continuous annotation stream.
 
 Pipeline:
   1. Load completed annotations from a time window
@@ -10,12 +10,12 @@ Pipeline:
   3. Compute text embeddings via Ollama ``/api/embed`` (all-minilm:l6-v2)
   4. Cluster by cosine similarity ≥ threshold (default 0.75)
   5. Filter noise: drop clusters where ALL frames have is_workflow=False
-  6. Stitch interrupted workflows: merge same-cluster segments separated
-     by noise within a configurable gap (default 30 min)
+  6. Split each cluster into contiguous segments wherever two consecutive
+     frames are more than ``stitch_max_gap_seconds`` apart (default 30 min),
+     so a same-cluster return within that gap stays one segment
   7. Output: ``TaskSegment`` objects with ordered event lists
 
-Cross-session linking deferred to Phase 3 enhancement — this module
-provides the core segmentation and stitching logic.
+Cross-segment linking lives in ``continuity_tracker``.
 """
 
 from __future__ import annotations
@@ -57,7 +57,7 @@ class SegmenterConfig:
     min_workflow_ratio: float = 0.0  # ratio of is_workflow=True frames
     # 0.0 means keep clusters with at least 1 workflow frame
 
-    # Interrupted workflow stitching
+    # A larger gap between consecutive same-cluster frames starts a new segment
     stitch_max_gap_seconds: int = 1800  # 30 minutes
 
     # Minimum demonstrations for SOP generation
