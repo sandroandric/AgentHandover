@@ -362,31 +362,28 @@ class WorkerDB:
         url: str,
         tolerance_sec: float = 5.0,
     ) -> list[dict]:
-        """Find DOM snapshot events near a given timestamp + URL.
+        """Chrome extension DOM snapshots within *tolerance_sec* of *timestamp*
+        on the host of *url* (a URL or a bare host, with or without scheme;
+        empty matches any host).
 
-        DOM snapshots from the Chrome extension are stored as events with
-        ``metadata_json`` containing a ``nodes`` array.  This method finds
-        events whose ``metadata_json.nodes`` is present and whose timestamp
-        is within *tolerance_sec* of the given *timestamp*, optionally
-        filtered by URL match.
+        A snapshot row stores its payload in ``metadata_json``: an
+        ``anchors`` set and a text ``digest`` (current extension) or a
+        ``nodes`` tree (earlier versions); ``nodes`` in the result is
+        whichever the row holds, for :func:`dom.flatten_dom`.
 
-        Returns list of dicts with keys: event_id, timestamp, url, nodes.
-        Ordered by time proximity (closest first).
+        Returns dicts with event_id, timestamp, url, nodes, digest, closest
+        first.
         """
         import json as _json
 
         cur = self._conn.execute(
             "SELECT id, timestamp, metadata_json FROM events "
-            "WHERE json_extract(metadata_json, '$.nodes') IS NOT NULL "
-            "  AND timestamp >= strftime('%Y-%m-%dT%H:%M:%fZ', ?, '-' || ? || ' seconds') "
-            "  AND timestamp <= strftime('%Y-%m-%dT%H:%M:%fZ', ?, '+' || ? || ' seconds') "
+            "WHERE (json_extract(metadata_json, '$.anchors') IS NOT NULL "
+            "       OR json_extract(metadata_json, '$.nodes') IS NOT NULL) "
+            "  AND ABS(julianday(timestamp) - julianday(?)) * 86400.0 <= ? "
             "ORDER BY ABS(julianday(timestamp) - julianday(?)) ASC "
             "LIMIT 5",
-            (
-                timestamp, str(tolerance_sec),
-                timestamp, str(tolerance_sec),
-                timestamp,
-            ),
+            (timestamp, float(tolerance_sec), timestamp),
         )
         results = []
         for row in cur.fetchall():
@@ -395,71 +392,56 @@ class WorkerDB:
             except (ValueError, TypeError):
                 continue
 
-            nodes = meta.get("nodes")
+            nodes = meta.get("anchors")
+            if not isinstance(nodes, list):
+                nodes = meta.get("nodes")
             if not isinstance(nodes, list):
                 continue
 
             snap_url = meta.get("url", "")
-            # Filter by URL if provided — match domain or prefix
-            if url and snap_url:
-                # Extract domain for loose matching
-                if not _url_match(url, snap_url):
-                    continue
+            if url and not _url_match(url, snap_url):
+                continue
 
             results.append({
                 "event_id": row["id"],
                 "timestamp": row["timestamp"],
                 "url": snap_url,
                 "nodes": nodes,
+                "digest": meta.get("digest", ""),
             })
 
         return results
 
-    def get_dom_snapshots_for_focus_session(
-        self,
-        session_id: str,
-        tolerance_sec: float = 5.0,
-    ) -> list[dict]:
-        """Find DOM snapshots captured during a focus session.
-
-        Matches DOM snapshot events (events with ``metadata_json.nodes``)
-        to focus session events by time proximity and URL.
-
-        Returns list of {event_id, timestamp, url, nodes, matched_focus_event_id}.
-        """
+    def get_click_intents(self, start: str, end: str) -> list[dict]:
+        """Chrome extension clicks between *start* and *end* (inclusive), in
+        time order: dicts with event_id, timestamp, url and the click's
+        ``target`` (tagName, role, ariaLabel, testId, innerText,
+        composedPath)."""
         import json as _json
 
-        # Get all focus session events
-        focus_events = self.get_focus_session_annotated_events(session_id)
-        if not focus_events:
-            return []
-
-        results = []
-        seen_snap_ids: set[str] = set()
-
-        for fevent in focus_events:
-            ts = fevent.get("timestamp", "")
-            # Get location from annotation
-            ann_json = fevent.get("scene_annotation_json", "")
-            location = ""
-            if ann_json:
-                try:
-                    ann = _json.loads(ann_json)
-                    location = ann.get("location", "")
-                except (ValueError, TypeError):
-                    pass
-
-            if not location or not location.startswith("http"):
+        cur = self._conn.execute(
+            "SELECT id, timestamp, metadata_json FROM events "
+            "WHERE json_extract(kind_json, '$.type') = 'ClickIntent' "
+            "  AND julianday(timestamp) BETWEEN julianday(?) AND julianday(?) "
+            "ORDER BY julianday(timestamp) ASC",
+            (start, end),
+        )
+        clicks = []
+        for row in cur.fetchall():
+            try:
+                meta = _json.loads(row["metadata_json"] or "{}")
+            except (ValueError, TypeError):
                 continue
-
-            snaps = self.get_dom_snapshots_near_timestamp(ts, location, tolerance_sec)
-            for snap in snaps:
-                if snap["event_id"] not in seen_snap_ids:
-                    seen_snap_ids.add(snap["event_id"])
-                    snap["matched_focus_event_id"] = fevent.get("id", "")
-                    results.append(snap)
-
-        return results
+            target = meta.get("target") if isinstance(meta, dict) else None
+            if not isinstance(target, dict):
+                continue
+            clicks.append({
+                "event_id": row["id"],
+                "timestamp": row["timestamp"],
+                "url": meta.get("url", ""),
+                "target": target,
+            })
+        return clicks
 
     # ------------------------------------------------------------------
     # Episodes
@@ -1673,14 +1655,9 @@ class WorkerDB:
 
 
 def _url_match(url_a: str, url_b: str) -> bool:
-    """Loose URL matching — checks if both URLs share the same domain."""
-    try:
-        from urllib.parse import urlparse
-        domain_a = urlparse(url_a).netloc.lower()
-        domain_b = urlparse(url_b).netloc.lower()
-        if domain_a and domain_b:
-            return domain_a == domain_b
-    except Exception:
-        pass
-    # Fallback: prefix match
-    return url_a[:30] == url_b[:30] if url_a and url_b else False
+    """True when both locations are on the same host (scheme optional,
+    ``www.`` ignored)."""
+    from agenthandover_worker.dom import url_host
+
+    host_a = url_host(url_a)
+    return bool(host_a) and host_a == url_host(url_b)

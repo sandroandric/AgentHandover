@@ -13,9 +13,11 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import timedelta
 from pathlib import Path
 
-from agenthandover_worker.event_helpers import display_name, parse_json_field
+from agenthandover_worker.dom import url_host
+from agenthandover_worker.event_helpers import display_name, parse_json_field, parse_timestamp
 from agenthandover_worker.scene_annotator import SceneAnnotator
 from agenthandover_worker.frame_differ import FrameDiffer
 from agenthandover_worker.sop_generator import SOPGenerator, GeneratedSOP
@@ -24,6 +26,9 @@ logger = logging.getLogger(__name__)
 
 # Annotation statuses the focus path does not re-annotate.
 _ANNOTATION_DONE = ("completed", "skipped", "missing_screenshot")
+
+# How far (seconds) a DOM snapshot or click may lie from a frame to join it.
+_DOM_TOLERANCE_SEC = 5.0
 
 
 class FocusProcessor:
@@ -601,6 +606,10 @@ class FocusProcessor:
         - diff: parsed frame diff dict (or None)
         - timestamp: ISO timestamp string
         - app: application name
+        - event_id: the frame's event id (the step evidence points at it)
+        - host, dom_nodes, dom_snapshot_id: the DOM snapshot joined by host
+        - click_targets: the Chrome clicks made on this frame's page
+        - clipboard_context: the copy made from this frame, if any
         """
         timeline = []
 
@@ -628,17 +637,21 @@ class FocusProcessor:
                 except (json.JSONDecodeError, TypeError):
                     pass
 
-            # Try to find a DOM snapshot near this event
+            # The Chrome extension's DOM snapshot closest to this frame on
+            # the same host.  The annotation's location may carry a scheme
+            # or not ("news.ycombinator.com/item?id=1").
             dom_nodes = None
-            location = annotation.get("location", "")
-            if location and location.startswith("http"):
+            dom_snapshot_id = None
+            host = url_host(annotation.get("location", ""))
+            if host:
                 dom_snaps = db.get_dom_snapshots_near_timestamp(  # type: ignore[union-attr]
                     fresh.get("timestamp", ""),
-                    location,
-                    tolerance_sec=5.0,
+                    host,
+                    tolerance_sec=_DOM_TOLERANCE_SEC,
                 )
                 if dom_snaps:
                     dom_nodes = dom_snaps[0].get("nodes")
+                    dom_snapshot_id = dom_snaps[0].get("event_id")
 
             # Look up clipboard context attached in Step 0b
             clipboard_ctx = (
@@ -651,11 +664,16 @@ class FocusProcessor:
                 "annotation": annotation,
                 "diff": diff,
                 "dom_nodes": dom_nodes,
+                "dom_snapshot_id": dom_snapshot_id,
+                "host": host,
+                "click_targets": [],
                 "timestamp": fresh.get("timestamp", ""),
                 "app": annotation.get("app", ""),
                 "event_id": event_id,
                 "clipboard_context": clipboard_ctx,
             })
+
+        self._attach_clicks(db, timeline)
 
         # Safety net: the first frame in a focus session must never carry a
         # diff — it is the clean starting point of the SOP.  Any diff stored
@@ -665,3 +683,31 @@ class FocusProcessor:
             timeline[0]["diff"] = None
 
         return timeline
+
+    @staticmethod
+    def _attach_clicks(db: object, timeline: list[dict]) -> None:
+        """Give each frame the Chrome clicks made while it was on screen.
+
+        Extension events carry no ``focus_session_id``, so they are found by
+        time: a click belongs to the last frame at or before it, when that
+        frame shows the same host (the page the user clicked on).
+        """
+        if not timeline:
+            return
+        times = [parse_timestamp(f.get("timestamp")) for f in timeline]
+        if times[0] is None or times[-1] is None:
+            return
+        end = times[-1] + timedelta(seconds=_DOM_TOLERANCE_SEC)
+        clicks = db.get_click_intents(  # type: ignore[union-attr]
+            timeline[0]["timestamp"], end.isoformat(),
+        )
+        for click in clicks:
+            when = parse_timestamp(click.get("timestamp"))
+            if when is None:
+                continue
+            owner = None
+            for frame, frame_time in zip(timeline, times):
+                if frame_time is not None and frame_time <= when:
+                    owner = frame
+            if owner is not None and owner.get("host") and owner["host"] == url_host(click.get("url")):
+                owner["click_targets"].append(click)

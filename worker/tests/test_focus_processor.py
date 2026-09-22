@@ -918,6 +918,9 @@ class TestFocusProcessorDomNodes:
                     }
                 return None
 
+            def get_click_intents(self, start, end):
+                return []
+
             def get_dom_snapshots_near_timestamp(self, ts, url, tolerance_sec=5.0):
                 if "example.com" in url:
                     return [{
@@ -959,6 +962,9 @@ class TestFocusProcessorDomNodes:
                     }),
                     "frame_diff_json": json.dumps({"diff_type": "action"}),
                 }
+
+            def get_click_intents(self, start, end):
+                return []
 
             def get_dom_snapshots_near_timestamp(self, ts, url, tolerance_sec=5.0):
                 return []  # Should never be called for non-http locations
