@@ -1050,9 +1050,12 @@ def _write_sops_index(
         all_sops_raw = db.get_generated_sops()
         failed = db.get_failed_generations()
 
-        # Only surface v2 pipeline SOPs and focus recordings — v1 PrefixSpan
-        # patterns (switch_app, navigate) are mechanical noise not worth reviewing.
-        _REVIEWABLE_SOURCES = {"v2_focus_recording", "v2_passive_discovery", "focus"}
+        # Surface v2 pipeline SOPs and focus recordings, plus mined (v1
+        # PrefixSpan) templates, which reach the DB only when review is on
+        # and must then be approved here before anything exports them.
+        _REVIEWABLE_SOURCES = {
+            "v2_focus_recording", "v2_passive_discovery", "focus", "v1_mined",
+        }
         all_sops = [
             s for s in all_sops_raw
             if s.get("source", "") in _REVIEWABLE_SOURCES
@@ -1267,8 +1270,14 @@ def run_pipeline(
     db: "WorkerDB | None" = None,
     procedure_writer: "ProcedureWriter | None" = None,
     kb_export_adapter: "KnowledgeBaseExportAdapter | None" = None,
+    sop_auto_approve: bool = True,
 ) -> dict:
     """Run the full D->E->F pipeline on a batch of events.
+
+    Mined (v1 PrefixSpan) templates are linted like every other path.
+    With ``sop_auto_approve`` off they are only queued for review in the
+    DB; nothing reaches the knowledge base or any export directory until
+    a human approves them.
 
     Returns a summary dict with counts and results for monitoring.
     """
@@ -1486,12 +1495,39 @@ def run_pipeline(
             logger.info("Enhanced %d/%d SOPs with LLM descriptions",
                         enhanced_count, len(sop_templates))
 
-    # Step F2: Format, version, and export SOPs
+    # Step F2: Lint, then dedup against the mined-template registry (its
+    # own file, so mined templates never merge into recorded Skills).
+    sop_templates = [t for t in sop_templates if _lint_and_log(t, "v1_mined")]
     if sop_templates:
-        # Deduplicate against known SOPs before writing
-        from agenthandover_worker.sop_dedup import deduplicate_templates
-        sop_templates = deduplicate_templates(sop_templates, _status_dir())
+        from agenthandover_worker.sop_dedup import (
+            V1_MINED_REGISTRY_FILE,
+            deduplicate_templates,
+        )
+        sop_templates = deduplicate_templates(
+            sop_templates, _status_dir(), registry_file=V1_MINED_REGISTRY_FILE,
+        )
 
+    if sop_templates and not sop_auto_approve:
+        # Review is on: queue each new template once (mining re-runs over
+        # the stored episodes every tick) and export nothing.
+        if db is not None:
+            for tpl in sop_templates:
+                slug = tpl.get("slug", "")
+                if db.get_generated_sop_by_slug(slug) is not None:
+                    continue
+                db.save_generated_sop(
+                    slug=slug,
+                    title=tpl.get("title") or slug,
+                    source="v1_mined",
+                    sop_template=tpl,
+                    confidence=tpl.get("confidence_avg", tpl.get("confidence", 0.0)),
+                    auto_approve=False,
+                )
+                summary["sops_queued"] = summary.get("sops_queued", 0) + 1
+        return summary
+
+    # Step F2b: Format, version, and export SOPs (auto-approve on)
+    if sop_templates:
         # Cache SOP templates for CLI export trigger re-export
         _save_sop_cache(sop_templates)
 
@@ -5176,6 +5212,7 @@ def main(argv: list[str] | None = None) -> None:
                         db=db,
                         procedure_writer=procedure_writer,
                         kb_export_adapter=kb_export_adapter,
+                        sop_auto_approve=sop_auto_approve,
                     )
                     pipeline_elapsed_ms = int((time.monotonic() - pipeline_start) * 1000)
                     last_pipeline_duration_ms = pipeline_elapsed_ms
