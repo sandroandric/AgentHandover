@@ -29,11 +29,15 @@ class ModelProfile:
     model: str
     family: str  # "qwen3.5", "gemma4"
 
-    # Annotation settings (vision, JSON extraction)
+    # Annotation settings (vision, JSON extraction).  The output is
+    # constrained by the annotation JSON schema, so temperature 0 keeps it
+    # deterministic.  ``ann_num_predict`` bounds the 21-leaf schema with its
+    # capped lists (typical output 300-500 tokens); ``ann_num_ctx`` holds
+    # the <=1,700-token prompt plus image and the output with headroom.
     ann_system: str = ""
-    ann_temperature: float = 0.3
-    ann_num_predict: int = 1500
-    ann_num_ctx: int = 8192
+    ann_temperature: float = 0.0
+    ann_num_predict: int = 600
+    ann_num_ctx: int = 4096
     ann_top_k: int = 40
     ann_top_p: float = 0.95
     ann_presence_penalty: float = 0.0
@@ -49,6 +53,11 @@ class ModelProfile:
     sop_top_p: float = 0.95
     sop_presence_penalty: float = 0.0
     sop_think: bool | str = False
+
+    # Behavioral synthesis system prompt override (empty = the
+    # synthesizer's own BEHAVIORAL_SYSTEM_PROMPT).  Never the SOP prompt:
+    # synthesis asks for a different JSON object than SOP generation.
+    synth_system: str = ""
 
     # Diff settings (text-only comparison)
     diff_system: str = ""
@@ -123,8 +132,6 @@ _PROFILES: dict[str, ModelProfile] = {
         family="qwen3.5",
         # Qwen has baked-in presence_penalty=1.5, top_k=20
         # Don't override — let its defaults work
-        ann_num_predict=1000,  # lower to avoid JSON overflow
-        ann_num_ctx=8192,
         ann_think=False,
         sop_system="",
         sop_num_predict=12000,
@@ -137,8 +144,6 @@ _PROFILES: dict[str, ModelProfile] = {
     "qwen3.5:4b": ModelProfile(
         model="qwen3.5:4b",
         family="qwen3.5",
-        ann_num_predict=1000,
-        ann_num_ctx=8192,
         ann_think=False,
         sop_num_predict=12000,
         sop_num_ctx=24576,
@@ -157,9 +162,6 @@ _PROFILES: dict[str, ModelProfile] = {
         model="gemma4",
         family="gemma4",
         ann_system=_GEMMA_ANN_SYSTEM,
-        ann_temperature=0.3,
-        ann_num_predict=1500,
-        ann_num_ctx=8192,
         ann_top_k=64,
         ann_top_p=0.95,
         ann_presence_penalty=1.0,
@@ -189,9 +191,6 @@ _PROFILES: dict[str, ModelProfile] = {
         model="gemma4:12b-it-qat",
         family="gemma4",
         ann_system=_GEMMA_ANN_SYSTEM,
-        ann_temperature=0.3,
-        ann_num_predict=1500,
-        ann_num_ctx=8192,
         ann_top_k=64,
         ann_top_p=0.95,
         ann_presence_penalty=1.0,
@@ -217,9 +216,6 @@ _PROFILES: dict[str, ModelProfile] = {
         model="gemma4:e4b",
         family="gemma4",
         ann_system=_GEMMA_ANN_SYSTEM,
-        ann_temperature=0.3,
-        ann_num_predict=1500,
-        ann_num_ctx=8192,
         ann_top_k=64,
         ann_top_p=0.95,
         ann_presence_penalty=1.0,
@@ -245,9 +241,6 @@ _PROFILES: dict[str, ModelProfile] = {
         model="gemma4:e4b-it-q8_0",
         family="gemma4",
         ann_system=_GEMMA_ANN_SYSTEM,
-        ann_temperature=0.3,
-        ann_num_predict=1500,
-        ann_num_ctx=8192,
         ann_top_k=64,
         ann_top_p=0.95,
         ann_presence_penalty=1.0,
@@ -273,9 +266,6 @@ _PROFILES: dict[str, ModelProfile] = {
         model="gemma4:e2b",
         family="gemma4",
         ann_system=_GEMMA_ANN_SYSTEM,
-        ann_temperature=0.3,
-        ann_num_predict=1500,
-        ann_num_ctx=8192,
         ann_top_k=64,
         ann_top_p=0.95,
         ann_presence_penalty=0.0,  # E2B overflows with penalty
@@ -300,9 +290,6 @@ _PROFILES: dict[str, ModelProfile] = {
         model="gemma4:26b",
         family="gemma4",
         ann_system=_GEMMA_ANN_SYSTEM,
-        ann_temperature=0.3,
-        ann_num_predict=1500,
-        ann_num_ctx=8192,
         ann_top_k=64,
         ann_top_p=0.95,
         ann_presence_penalty=1.0,
@@ -328,9 +315,6 @@ _PROFILES: dict[str, ModelProfile] = {
         model="gemma4:31b",
         family="gemma4",
         ann_system=_GEMMA_ANN_SYSTEM,
-        ann_temperature=0.3,
-        ann_num_predict=1500,
-        ann_num_ctx=8192,
         ann_top_k=64,
         ann_top_p=0.95,
         ann_presence_penalty=1.0,
@@ -359,9 +343,6 @@ _PROFILES: dict[str, ModelProfile] = {
         model="gemma4:31b-it-qat",
         family="gemma4",
         ann_system=_GEMMA_ANN_SYSTEM,
-        ann_temperature=0.3,
-        ann_num_predict=1500,
-        ann_num_ctx=8192,
         ann_top_k=64,
         ann_top_p=0.95,
         ann_presence_penalty=1.0,
@@ -387,9 +368,6 @@ _PROFILES: dict[str, ModelProfile] = {
         model="gemma4:31b-it-q8_0",
         family="gemma4",
         ann_system=_GEMMA_ANN_SYSTEM,
-        ann_temperature=0.3,
-        ann_num_predict=1500,
-        ann_num_ctx=8192,
         ann_top_k=64,
         ann_top_p=0.95,
         ann_presence_penalty=1.0,

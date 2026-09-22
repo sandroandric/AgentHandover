@@ -8,8 +8,10 @@ and whether the activity is part of a meaningful workflow.
 Key features:
 - 3-frame sliding window context (time-bounded to 10 minutes)
 - Stale-frame skipping: 3+ consecutive same-app non-workflow → skip
-- JSON validation with markdown-fence stripping and one retry
-- Screenshot lifecycle: delete JPEG after VLM processes it (success or failure)
+- Output constrained by a JSON schema (Ollama ``format``), one call per frame
+- Screenshot lifecycle: delete JPEG after VLM processes it (success or
+  failure); when Ollama is unreachable the frame is deferred instead
+  (JPEG kept, row left pending, 60 s backoff)
 """
 
 from __future__ import annotations
@@ -39,6 +41,90 @@ ANNOTATION_FIELDS = {
 
 TASK_CONTEXT_FIELDS = {"what_doing", "likely_next", "is_workflow"}
 
+# Cap on list lengths in the schema.  Bounds the output size so the whole
+# object fits in the profile's ``ann_num_predict`` budget.
+_MAX_LIST_ITEMS = 8
+
+
+def _string_list() -> dict:
+    return {"type": "array", "items": {"type": "string"}, "maxItems": _MAX_LIST_ITEMS}
+
+
+# JSON schema sent as Ollama's ``format`` so the output is grammar-constrained
+# to exactly the object the prompt describes.  Property order matches the
+# prompt (the grammar emits keys in this order).
+ANNOTATION_JSON_SCHEMA: dict = {
+    "type": "object",
+    "properties": {
+        "app": {"type": "string"},
+        "location": {"type": "string"},
+        "visible_content": {
+            "type": "object",
+            "properties": {
+                "headings": _string_list(),
+                "labels": _string_list(),
+                "values": _string_list(),
+            },
+            "required": ["headings", "labels", "values"],
+        },
+        "ui_state": {
+            "type": "object",
+            "properties": {
+                "active_element": {"type": "string"},
+                "modals_or_popups": {"type": "string"},
+                "scroll_position": {"type": "string", "enum": ["top", "middle", "bottom"]},
+            },
+            "required": ["active_element", "modals_or_popups", "scroll_position"],
+        },
+        "key_text": {
+            "type": "object",
+            "properties": {
+                "email_addresses": _string_list(),
+                "urls": _string_list(),
+                "names": _string_list(),
+                "typed_text": {"type": "string"},
+                "selected_text": {"type": "string"},
+            },
+            "required": ["email_addresses", "urls", "names", "typed_text", "selected_text"],
+        },
+        "compose": {
+            "type": "object",
+            "properties": {
+                "is_compose_window_open": {"type": "boolean"},
+                "recipient": {"type": "string"},
+                "subject": {"type": "string"},
+                "body_first_line": {"type": "string"},
+                "send_button_state": {
+                    "type": "string",
+                    "enum": ["visible", "focused", "just_clicked", "not_visible"],
+                },
+            },
+            "required": [
+                "is_compose_window_open", "recipient", "subject",
+                "body_first_line", "send_button_state",
+            ],
+        },
+        "task_context": {
+            "type": "object",
+            "properties": {
+                "what_doing": {"type": "string"},
+                "likely_next": {"type": "string"},
+                "is_workflow": {"type": "boolean"},
+            },
+            "required": ["what_doing", "likely_next", "is_workflow"],
+        },
+    },
+    "required": [
+        "app", "location", "visible_content", "ui_state",
+        "key_text", "compose", "task_context",
+    ],
+}
+
+
+# Keep the annotation model resident between frames (Ollama's default
+# unloads it after 5 minutes, and a reload costs seconds per frame).
+ANNOTATION_KEEP_ALIVE = "30m"
+
 
 @dataclass
 class AnnotationConfig:
@@ -46,11 +132,15 @@ class AnnotationConfig:
 
     model: str = "qwen3.5:2b"
     ollama_host: str = "http://localhost:11434"
-    num_predict: int = 1500
     stale_skip_count: int = 3
     sliding_window_size: int = 3
     sliding_window_max_age_sec: int = 600
     delete_screenshot_after_processing: bool = True
+    # Per-call HTTP timeout, from ``[vlm] annotation_timeout_seconds``.
+    # Also used for the preload at worker start, which pays the model load.
+    timeout_seconds: float = 180.0
+    # How long Ollama keeps the annotation model resident after a call.
+    keep_alive: str = ANNOTATION_KEEP_ALIVE
 
 
 @dataclass
@@ -58,7 +148,9 @@ class AnnotationResult:
     """Result of a single frame annotation."""
 
     event_id: str
-    status: str  # completed, failed, skipped, missing_screenshot
+    # completed, failed, skipped, missing_screenshot, or deferred (Ollama
+    # unreachable: the screenshot is kept and the row stays pending).
+    status: str
     annotation: dict | None = None
     error: str | None = None
     inference_time_seconds: float = 0.0
@@ -75,68 +167,73 @@ SYSTEM_PROMPT = (
     "Respond with ONLY valid JSON, no markdown fences, no commentary."
 )
 
-ANNOTATION_PROMPT_TEMPLATE = """\
-Analyze this screenshot and extract DETAILED information as JSON.
-Be specific — include exact text, names, email addresses, URLs, numbers, and values visible on screen.
+# Static instructions: identical for every frame, so they go into the
+# system prompt, which Ollama renders before the image and the per-frame
+# text.  That keeps them a reusable prefix in Ollama's prompt cache.
+ANNOTATION_INSTRUCTIONS = """\
+Analyze the screenshot and extract DETAILED information as JSON.
+Be specific: include exact text, names, email addresses, URLs, numbers and values visible on screen.
 
-{{
+{
   "app": "<exact application name visible on screen>",
   "location": "<full URL, file path, or app-specific location/page>",
-  "visible_content": {{
+  "visible_content": {
     "headings": ["<main headings or titles visible>"],
     "labels": ["<form labels, button text, menu items, tab names>"],
-    "values": ["<ALL filled form values: email addresses, names, typed text, selected options, prices, dates, counts>"]
-  }},
-  "ui_state": {{
-    "active_element": "<what element has focus — include the exact text/value in it>",
-    "modals_or_popups": "<any overlays, dropdowns, or dialogs visible — include their content>",
+    "values": ["<filled form values: email addresses, names, typed text, selected options, prices, dates, counts>"]
+  },
+  "ui_state": {
+    "active_element": "<element with focus, including the exact text/value in it>",
+    "modals_or_popups": "<overlays, dropdowns or dialogs visible, with their content>",
     "scroll_position": "<top, middle, bottom>"
-  }},
-  "key_text": {{
-    "email_addresses": ["<any email addresses visible on screen>"],
-    "urls": ["<any URLs or links visible>"],
-    "names": ["<people names, company names, product names>"],
+  },
+  "key_text": {
+    "email_addresses": ["<email addresses visible on screen>"],
+    "urls": ["<URLs or links visible>"],
+    "names": ["<people, company and product names>"],
     "typed_text": "<exact text the user is typing or has typed in any input field>",
-    "selected_text": "<any highlighted or selected text>"
-  }},
-  "compose": {{
-    "is_compose_window_open": <true|false: is an email/message compose window visible AT ALL>,
-    "recipient": "<exact text in the To/Recipient field, including chip names like 'Sandro Andric (incentive.ae)'. Empty string if no compose window.>",
-    "subject": "<exact text in the Subject field as visible on screen. Empty string if no compose window or subject is empty.>",
-    "body_first_line": "<the first line of the email body, exactly as visible on screen (e.g. 'Hi Sandro,' or 'Top news:'). Empty string if no body text visible.>",
+    "selected_text": "<highlighted or selected text>"
+  },
+  "compose": {
+    "is_compose_window_open": <true|false: is an email/message compose window visible at all>,
+    "recipient": "<exact text in the To/Recipient field, including chip names like 'Jane Doe (example.com)'. Empty string if no compose window.>",
+    "subject": "<exact text in the Subject field. Empty string if no compose window or no subject.>",
+    "body_first_line": "<first line of the message body exactly as visible (e.g. 'Hi Jane,' or 'Top news:'). Empty string if none.>",
     "send_button_state": "<'visible', 'focused', 'just_clicked', or 'not_visible'>"
-  }},
-  "task_context": {{
-    "what_doing": "<one detailed sentence: what specific task is the user performing — include names, recipients, subjects>",
-    "likely_next": "<one sentence: what will the user probably do next>",
+  },
+  "task_context": {
+    "what_doing": "<one detailed sentence: the specific task, including names, recipients, subjects>",
+    "likely_next": "<one sentence: what the user will probably do next>",
     "is_workflow": <true if this is a structured, repeatable task; false for browsing/chatting/reading>
-  }}
-}}
+  }
+}
 
-CRITICAL FOR COMPOSE WINDOWS: When the screenshot shows an open email
-compose window (Gmail, Outlook, Mail.app, Slack DM, etc.), you MUST fill
-the ``compose`` block with VERBATIM text from the actual compose fields:
-- ``recipient``: copy the EXACT text in the To field, including any
-  contact-chip suffixes like "(incentive.ae)" or "<email@domain>"
-- ``subject``: copy the EXACT subject line text as displayed
-- ``body_first_line``: copy the FIRST visible line of the message body
-Do NOT paraphrase or summarize.  Do NOT confuse it with text from the
-inbox list panel that's still visible alongside the compose window.
-If a compose window is NOT visible, set is_compose_window_open=false
-and leave the other compose fields as empty strings.
+COMPOSE WINDOWS: when an email/message compose window is open (Gmail,
+Outlook, Mail.app, Slack DM, ...), fill ``compose`` with VERBATIM text from
+the compose fields: ``recipient`` is the exact To field text, including
+contact-chip suffixes like "(example.com)" or "<email@domain>"; ``subject``
+is the exact subject line; ``body_first_line`` is the first visible body
+line.  Do not paraphrase.  Do not use text from the inbox list beside the
+compose window.  With no compose window, set is_compose_window_open=false
+and leave the other compose fields empty.
 
-{ocr_section}{context_section}IMPORTANT: Whenever an OCR TEXT section is provided above, treat it as \
-ground truth for ANY text field (email_addresses, urls, typed_text, values, \
-active_element, selected_text, names, subjects, counts).  The OCR was produced \
-by the OS's text extraction at confidence 1.0 and is exact.  Visual reading \
-of the screenshot is often blurry or downscaled — the OCR is the source of \
-truth when the two disagree.
+OCR TEXT, when provided, may be incomplete or misrecognised.  Prefer it
+for exact strings (email addresses, URLs, typed text, subjects, counts);
+prefer the WINDOW header for the app and URL.
 
-Respond with ONLY the JSON object. No markdown, no explanation."""
+Respond with ONLY the JSON object."""
+
+FRAME_PROMPT_TEMPLATE = """\
+{window_section}{ocr_section}{context_section}\
+Annotate this screenshot as the JSON object described in the instructions."""
+
+WINDOW_TEMPLATE = """\
+WINDOW: {window}
+
+"""
 
 OCR_TEMPLATE = """\
-OCR TEXT (high-confidence text extracted by the OS for this exact frame — \
-treat as ground truth, not visual guess):
+OCR TEXT (extracted by the OS for this frame; may be incomplete or misrecognised{truncated_note}):
 {ocr_text}
 
 """
@@ -149,6 +246,17 @@ Use the previous frames to understand what task the user is working on.
 If the current screenshot continues a task from the previous frames, reflect that in task_context.
 
 """
+
+# OCR budget for the prompt: keeps the whole annotation prompt within the
+# plan's 1,700 input-token bound.  The full OCR stays in metadata_json.
+OCR_PROMPT_MAX_CHARS = 1200
+_CONTEXT_LINE_MAX_CHARS = 160
+
+
+def annotation_system_prompt(profile_system: str = "") -> str:
+    """System prompt for annotation calls: the profile's (or the default)
+    role line followed by the static annotation instructions."""
+    return (profile_system or SYSTEM_PROMPT) + "\n\n" + ANNOTATION_INSTRUCTIONS
 
 
 def _build_context_section(recent_annotations: list[dict]) -> str:
@@ -173,11 +281,14 @@ def _build_context_section(recent_annotations: list[dict]) -> str:
             parsed = json.loads(ann_json)
         except (json.JSONDecodeError, TypeError):
             continue
+        if not isinstance(parsed, dict):
+            continue
 
         app = parsed.get("app", "?")
         location = parsed.get("location", "?")
-        what_doing = parsed.get("task_context", {}).get("what_doing", "?")
-        lines.append(f"- [{ts}] {app} — {location} — {what_doing}")
+        what_doing = (parsed.get("task_context") or {}).get("what_doing", "?")
+        line = f"- [{ts}] {app} — {location} — {what_doing}"
+        lines.append(line[:_CONTEXT_LINE_MAX_CHARS])
 
     if not lines:
         return ""
@@ -188,82 +299,198 @@ def _build_context_section(recent_annotations: list[dict]) -> str:
     )
 
 
-def _extract_ocr_text_from_event(event: dict, max_chars: int = 4000) -> str:
-    """Pull high-confidence OCR text out of the event's ``metadata_json``.
-
-    The daemon writes OCR results as::
-
-        metadata_json = {
-            "ocr": {
-                "elements": [
-                    {"text": "...", "confidence": 1.0, "bbox_normalized": [...]},
-                    ...
-                ]
-            }
-        }
-
-    We extract the ``text`` of each element, preserving daemon order (roughly
-    top-to-bottom, left-to-right), and join with newlines.  This gets injected
-    into the VLM prompt as ground truth so Gemma doesn't have to re-read
-    small/downscaled text visually.
-
-    Historically this was never passed to the VLM prompt — OCR was only used
-    for the vector text proxy via ``ocr.full_text`` (a field the daemon never
-    writes).  Bug caught 2026-04-10.
-    """
-    metadata_raw = event.get("metadata_json", "{}")
+def _load_json_field(event: dict, key: str) -> dict:
+    raw = event.get(key)
+    if isinstance(raw, dict):
+        return raw
+    if not raw:
+        return {}
     try:
-        metadata = (
-            json.loads(metadata_raw)
-            if isinstance(metadata_raw, str)
-            else metadata_raw
-        )
+        value = json.loads(raw)
     except (json.JSONDecodeError, TypeError):
-        return ""
-    if not isinstance(metadata, dict):
-        return ""
+        return {}
+    return value if isinstance(value, dict) else {}
 
+
+def _cursor_normalized(event: dict) -> tuple[float, float] | None:
+    """The cursor position in 0..1 screenshot coordinates (top-left origin),
+    or None when the event lacks the cursor or the primary display bounds.
+    Screenshots are of the primary display; OCR boxes use the same frame."""
+    x, y = event.get("cursor_x"), event.get("cursor_y")
+    if not isinstance(x, (int, float)) or not isinstance(y, (int, float)):
+        return None
+    raw = event.get("display_topology_json")
+    try:
+        displays = json.loads(raw) if isinstance(raw, str) else raw
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(displays, list):
+        return None
+    primary = event.get("primary_display_id")
+    for d in displays:
+        if not isinstance(d, dict):
+            continue
+        if primary and d.get("display_id") != primary:
+            continue
+        bounds = d.get("bounds_global_px")
+        if not (isinstance(bounds, list) and len(bounds) == 4):
+            continue
+        bx, by, bw, bh = bounds
+        if not bw or not bh:
+            continue
+        nx, ny = (x - bx) / bw, (y - by) / bh
+        if 0.0 <= nx <= 1.0 and 0.0 <= ny <= 1.0:
+            return nx, ny
+    return None
+
+
+_LOCATION_LINE_RE = re.compile(
+    r"(https?://|www\.|[\w.+-]+@[\w-]+\.[\w.]+|\b[\w-]+\.(com|org|net|io|ai|co|dev|app)\b)",
+    re.IGNORECASE,
+)
+_NEAR_CURSOR = 0.15  # normalized distance counted as "adjacent to the click"
+
+
+def _select_ocr_text(event: dict, max_chars: int = OCR_PROMPT_MAX_CHARS) -> tuple[str, dict]:
+    """Pick the most salient OCR lines of the event within *max_chars*.
+
+    The daemon writes OCR into ``metadata_json`` as::
+
+        {"ocr": {"elements": [{"text": ..., "confidence": ...,
+                               "bbox_normalized": [x, y, w, h]}, ...],
+                 "full_text": ...}}
+
+    (``bbox_normalized`` has a top-left origin.)  When everything fits, all
+    lines are kept in daemon order.  Otherwise lines are ranked: window-title,
+    URL and email lines first, then lines near the cursor (nearest first),
+    then headings (lines at least 1.5x the median line height), then the
+    rest in reading order; the kept lines are emitted in reading order.
+
+    Returns ``(text, record)``; *record* is empty when nothing was dropped,
+    else it gives the kept/total line and character counts so readers know
+    the full OCR is still in ``metadata_json``.
+    """
+    metadata = _load_json_field(event, "metadata_json")
     ocr_data = metadata.get("ocr")
     if not isinstance(ocr_data, dict):
-        return ""
+        return "", {}
 
-    # Prefer the structured elements list (what the daemon actually writes)
+    lines: list[tuple[str, list | None]] = []
     elements = ocr_data.get("elements")
     if isinstance(elements, list):
-        texts: list[str] = []
         for el in elements:
             if not isinstance(el, dict):
                 continue
             text = el.get("text", "")
             if isinstance(text, str) and text.strip():
-                texts.append(text.strip())
-        combined = "\n".join(texts)
-        if combined:
-            return combined[:max_chars]
+                bbox = el.get("bbox_normalized")
+                ok_bbox = isinstance(bbox, list) and len(bbox) == 4 and all(
+                    isinstance(v, (int, float)) for v in bbox
+                )
+                lines.append((text.strip(), bbox if ok_bbox else None))
 
-    # Fallback: some older formats may have stored a flat full_text string
-    full_text = ocr_data.get("full_text", "")
-    if isinstance(full_text, str) and full_text:
-        return full_text[:max_chars]
+    if not lines:
+        # Older format: a flat full_text string only.
+        full_text = ocr_data.get("full_text", "")
+        if not isinstance(full_text, str) or not full_text:
+            return "", {}
+        if len(full_text) <= max_chars:
+            return full_text, {}
+        return full_text[:max_chars], {
+            "total_chars": len(full_text), "kept_chars": max_chars,
+        }
 
-    return ""
+    total_chars = sum(len(t) for t, _ in lines) + len(lines) - 1
+    if total_chars <= max_chars:
+        return "\n".join(t for t, _ in lines), {}
+
+    title = str(_load_json_field(event, "window_json").get("title", "")).strip().lower()
+    cursor = _cursor_normalized(event)
+    heights = sorted(b[3] for _, b in lines if b is not None)
+    heading_min = heights[len(heights) // 2] * 1.5 if heights else None
+
+    def rank(i: int) -> tuple:
+        text, bbox = lines[i]
+        low = text.lower()
+        dist = 9.0
+        if cursor is not None and bbox is not None:
+            cx, cy = bbox[0] + bbox[2] / 2, bbox[1] + bbox[3] / 2
+            dist = ((cx - cursor[0]) ** 2 + (cy - cursor[1]) ** 2) ** 0.5
+        is_title = bool(title) and len(low) >= 4 and (low in title or title in low)
+        if is_title or _LOCATION_LINE_RE.search(text):
+            tier = 0
+        elif dist <= _NEAR_CURSOR:
+            tier = 1
+        elif heading_min is not None and bbox is not None and bbox[3] >= heading_min:
+            tier = 2
+        else:
+            tier = 3
+        return (tier, dist if tier == 1 else 0.0, i)
+
+    kept: list[int] = []
+    used = 0
+    for i in sorted(range(len(lines)), key=rank):
+        cost = len(lines[i][0]) + (1 if kept else 0)
+        if used + cost <= max_chars:
+            kept.append(i)
+            used += cost
+
+    if not kept:
+        # Every line is longer than the whole budget.
+        text = lines[0][0][:max_chars]
+        return text, {
+            "total_lines": len(lines), "kept_lines": 1,
+            "total_chars": total_chars, "kept_chars": len(text),
+        }
+
+    kept.sort()
+    text = "\n".join(lines[i][0] for i in kept)
+    return text, {
+        "total_lines": len(lines), "kept_lines": len(kept),
+        "total_chars": total_chars, "kept_chars": len(text),
+    }
+
+
+def _extract_ocr_text_from_event(event: dict, max_chars: int = OCR_PROMPT_MAX_CHARS) -> str:
+    """The OCR text that goes into the annotation prompt (see
+    :func:`_select_ocr_text`)."""
+    return _select_ocr_text(event, max_chars)[0]
+
+
+def _window_header(event: dict) -> str:
+    """``app — title — url`` from the event's window_json, or ""."""
+    window = _load_json_field(event, "window_json")
+    app = str(window.get("app_name") or window.get("app_bundle_id") or "").strip()
+    title = str(window.get("title") or "").strip()
+    url = str(window.get("url") or "").strip()
+    return " — ".join(p for p in (app, title, url) if p)[:300]
 
 
 def build_annotation_prompt(
     recent_annotations: list[dict] | None = None,
     ocr_text: str = "",
+    *,
+    window: str = "",
+    ocr_truncated: bool = False,
 ) -> str:
-    """Build the full annotation prompt with optional sliding-window context
-    and optional OCR ground-truth text for the current frame."""
+    """Build the per-frame annotation prompt: the window header, the OCR
+    block and the sliding-window context.  The static instructions travel
+    in the system prompt (:func:`annotation_system_prompt`)."""
     context_section = ""
     if recent_annotations:
         context_section = _build_context_section(recent_annotations)
 
     ocr_section = ""
     if ocr_text:
-        ocr_section = OCR_TEMPLATE.format(ocr_text=ocr_text)
+        ocr_section = OCR_TEMPLATE.format(
+            ocr_text=ocr_text,
+            truncated_note="; the most salient lines only" if ocr_truncated else "",
+        )
 
-    return ANNOTATION_PROMPT_TEMPLATE.format(
+    window_section = WINDOW_TEMPLATE.format(window=window) if window else ""
+
+    return FRAME_PROMPT_TEMPLATE.format(
+        window_section=window_section,
         context_section=context_section,
         ocr_section=ocr_section,
     )
@@ -381,6 +608,12 @@ class _StaleTracker:
 # Ollama VLM client
 # ---------------------------------------------------------------------------
 
+class OllamaUnavailable(ConnectionError):
+    """Ollama could not serve the call: unreachable (refused, reset, DNS)
+    or the model is not pulled (HTTP 404).  Retrying later can succeed, so
+    callers defer the work instead of discarding it."""
+
+
 def _call_ollama_vlm(
     *,
     model: str,
@@ -389,19 +622,30 @@ def _call_ollama_vlm(
     image_base64: str | None = None,
     host: str = "http://localhost:11434",
     num_predict: int = 1500,
+    num_ctx: int = 8192,
     system: str = "",
     timeout: float = 60.0,
     think: bool | str = False,
+    format: dict | str | None = None,
+    keep_alive: str | None = None,
     extra_options: dict | None = None,
 ) -> tuple[str, float]:
     """Call Ollama's /api/generate with an optional image.
 
     Returns (response_text, inference_time_seconds).
-    Raises on connection or HTTP errors.
+
+    Raises:
+        OllamaUnavailable: Ollama unreachable or the model is missing.
+        TimeoutError: no response within *timeout*.
+        RuntimeError: any other HTTP error.
 
     Args:
         think: False, True, "low", "medium", or "high". Controls reasoning
             depth for models that support it (Gemma 4, Qwen 3.5).
+        format: a JSON schema dict (grammar-constrained output), "json",
+            or None for free text.
+        keep_alive: how long Ollama keeps the model loaded after the call
+            (Ollama's default is 5m when omitted).
         extra_options: Additional Ollama options (top_k, presence_penalty, etc.)
             merged into the options dict. Use model_profiles.get_profile() to
             get optimal settings per model.
@@ -414,7 +658,7 @@ def _call_ollama_vlm(
 
     options = {
         "num_predict": num_predict,
-        "num_ctx": 8192,
+        "num_ctx": num_ctx,
     }
     if extra_options:
         options.update(extra_options)
@@ -430,6 +674,10 @@ def _call_ollama_vlm(
 
     if system:
         payload["system"] = system
+    if format is not None:
+        payload["format"] = format
+    if keep_alive is not None:
+        payload["keep_alive"] = keep_alive
 
     # Attach image
     if image_path and not image_base64:
@@ -453,11 +701,58 @@ def _call_ollama_vlm(
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             result = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            raise OllamaUnavailable(
+                f"model {model!r} not available at {host}"
+            ) from exc
+        raise RuntimeError(f"Ollama HTTP {exc.code} at {host}: {exc.reason}") from exc
     except urllib.error.URLError as exc:
-        raise ConnectionError(f"Ollama not reachable at {host}: {exc}") from exc
+        if isinstance(exc.reason, TimeoutError):
+            raise TimeoutError(f"Ollama timed out after {timeout:.0f}s") from exc
+        raise OllamaUnavailable(f"Ollama not reachable at {host}: {exc}") from exc
+    except ConnectionError as exc:  # reset/refused while reading the reply
+        raise OllamaUnavailable(f"Ollama connection lost at {host}: {exc}") from exc
 
     elapsed = time.monotonic() - start
+    logger.debug(
+        "ollama generate model=%s prompt_eval_count=%s eval_count=%s "
+        "done_reason=%s (%.1fs)",
+        model, result.get("prompt_eval_count"), result.get("eval_count"),
+        result.get("done_reason"), elapsed,
+    )
+    if result.get("done_reason") == "length":
+        logger.warning(
+            "Ollama output for %s hit num_predict=%d and was truncated",
+            model, options.get("num_predict"),
+        )
     return result.get("response", ""), elapsed
+
+
+def _ollama_has_model(host: str, model: str, timeout: float = 3.0) -> bool:
+    """GET /api/tags: True when Ollama answers and has *model* pulled."""
+    import urllib.request
+
+    wanted = model if ":" in model else f"{model}:latest"
+    try:
+        with urllib.request.urlopen(f"{host}/api/tags", timeout=timeout) as resp:
+            tags = json.loads(resp.read().decode("utf-8"))
+    except Exception:
+        return False
+    for entry in tags.get("models") or []:
+        if not isinstance(entry, dict):
+            continue
+        for key in ("name", "model"):
+            name = str(entry.get(key) or "")
+            if name == wanted or name == model:
+                return True
+    return False
+
+
+# After a transport failure, annotation waits this long before trying
+# Ollama again; a successful /api/tags probe is trusted for as long.
+DEFER_BACKOFF_SECONDS = 60.0
+PROBE_TTL_SECONDS = 60.0
 
 
 # ---------------------------------------------------------------------------
@@ -488,11 +783,81 @@ class SceneAnnotator:
             "skipped_stale": 0,
             "failed": 0,
             "missing_screenshot": 0,
+            "deferred": 0,
         }
+        # Monotonic deadlines for the transport-error backoff and the
+        # cached /api/tags probe.
+        self._backoff_until = 0.0
+        self._probe_ok_until = 0.0
 
     @property
     def stats(self) -> dict:
         return dict(self._stats)
+
+    # ------------------------------------------------------------------
+    # Availability (transport-error backoff)
+    # ------------------------------------------------------------------
+
+    def ready(self) -> bool:
+        """Whether annotation should call Ollama now.
+
+        False during the backoff after a transport error.  Otherwise a
+        cached /api/tags probe decides: Ollama must answer and have the
+        annotation model; a failed probe starts a new backoff.
+        """
+        now = time.monotonic()
+        if now < self._backoff_until:
+            return False
+        if now < self._probe_ok_until:
+            return True
+        if _ollama_has_model(self.config.ollama_host, self.config.model):
+            self._probe_ok_until = now + PROBE_TTL_SECONDS
+            return True
+        logger.warning(
+            "Ollama at %s is unreachable or lacks %s; annotation deferred "
+            "for %.0fs",
+            self.config.ollama_host, self.config.model, DEFER_BACKOFF_SECONDS,
+        )
+        self._defer()
+        return False
+
+    def _defer(self) -> None:
+        self._backoff_until = time.monotonic() + DEFER_BACKOFF_SECONDS
+        self._probe_ok_until = 0.0
+
+    def preload(self) -> bool:
+        """Load the annotation model into Ollama at worker start.
+
+        An empty prompt makes Ollama load the model and return.  The call
+        carries the same ``num_ctx`` as real annotation calls (a different
+        context size would force a reload) and ``keep_alive``, so the first
+        real frame meets a warm model.  Returns True on success.
+        """
+        from agenthandover_worker.model_profiles import get_profile
+
+        profile = get_profile(self.config.model)
+        try:
+            _, elapsed = _call_ollama_vlm(
+                model=self.config.model,
+                prompt="",
+                host=self.config.ollama_host,
+                num_predict=1,
+                num_ctx=profile.ann_num_ctx,
+                timeout=self.config.timeout_seconds,
+                keep_alive=self.config.keep_alive,
+            )
+        except OllamaUnavailable as exc:
+            logger.warning("Annotation model preload deferred: %s", exc)
+            self._defer()
+            return False
+        except Exception as exc:
+            logger.warning("Annotation model preload failed: %s", exc)
+            return False
+        logger.info(
+            "Preloaded annotation model %s in %.1fs (keep_alive=%s)",
+            self.config.model, elapsed, self.config.keep_alive,
+        )
+        return True
 
     # ------------------------------------------------------------------
     # Core annotation
@@ -514,7 +879,10 @@ class SceneAnnotator:
         *skip_stale_check* disables stale-frame skipping (used for focus
         sessions where every frame matters).
 
-        Returns an AnnotationResult with status and annotation data.
+        Returns an AnnotationResult with status and annotation data.  When
+        Ollama is unreachable the status is ``deferred``: the screenshot is
+        kept, the caller leaves the row pending, and :meth:`ready` returns
+        False until the backoff has passed.
         """
         event_id = event.get("id", "unknown")
 
@@ -566,36 +934,44 @@ class SceneAnnotator:
             )
 
         # --- Build prompt ---
-        # Extract daemon OCR text from this event and feed it to the VLM
-        # as ground truth. Prevents Gemma from visually misreading small
-        # text (email addresses, subject lines, counts) at half resolution.
-        ocr_text = _extract_ocr_text_from_event(event)
-        prompt = build_annotation_prompt(recent_annotations, ocr_text=ocr_text)
+        # The daemon's OCR goes into the prompt (salient lines within the
+        # budget) so the model need not re-read small text visually.
+        ocr_text, ocr_record = _select_ocr_text(event)
+        prompt = build_annotation_prompt(
+            recent_annotations,
+            ocr_text=ocr_text,
+            window=_window_header(event),
+            ocr_truncated=bool(ocr_record),
+        )
 
         # --- Call VLM ---
+        # One call: the output is grammar-constrained to the schema at
+        # temperature 0, so a repeat of the same call cannot do better.
+        from agenthandover_worker.model_profiles import get_profile
+        profile = get_profile(self.config.model)
         try:
-            from agenthandover_worker.model_profiles import get_profile
-            profile = get_profile(self.config.model)
             raw_response, inference_time = _call_ollama_vlm(
                 model=self.config.model,
                 prompt=prompt,
                 image_path=screenshot_path,
                 host=self.config.ollama_host,
                 num_predict=profile.ann_num_predict,
-                system=profile.ann_system or SYSTEM_PROMPT,
+                num_ctx=profile.ann_num_ctx,
+                system=annotation_system_prompt(profile.ann_system),
+                timeout=self.config.timeout_seconds,
                 think=profile.ann_think,
-                extra_options={
-                    k: v for k, v in profile.ann_options().items()
-                    if k not in ("num_predict", "num_ctx")
-                },
+                format=ANNOTATION_JSON_SCHEMA,
+                keep_alive=self.config.keep_alive,
+                extra_options=profile.ann_options(),
             )
-        except ConnectionError as exc:
-            self._stats["failed"] += 1
-            self._delete_screenshot(screenshot_path)
+        except OllamaUnavailable as exc:
+            # Transport error: keep the JPEG, leave the row pending.
+            self._stats["deferred"] += 1
+            self._defer()
             return AnnotationResult(
                 event_id=event_id,
-                status="failed",
-                error=f"ollama_connection: {exc}",
+                status="deferred",
+                error=f"ollama_unavailable: {exc}",
             )
         except Exception as exc:
             self._stats["failed"] += 1
@@ -608,32 +984,15 @@ class SceneAnnotator:
 
         # --- Validate JSON ---
         annotation = _validate_annotation(raw_response)
-
         if annotation is None:
-            # Retry once with explicit JSON-only instruction
             logger.debug(
-                "Annotation JSON invalid for %s, retrying with JSON-only suffix",
-                event_id,
+                "Annotation JSON invalid for %s (len=%d): %.200s",
+                event_id, len(raw_response), raw_response,
             )
-            retry_prompt = prompt + "\n\nIMPORTANT: Respond with ONLY a valid JSON object. No text outside the JSON."
-            try:
-                raw_response, retry_time = _call_ollama_vlm(
-                    model=self.config.model,
-                    prompt=retry_prompt,
-                    image_path=screenshot_path,
-                    host=self.config.ollama_host,
-                    num_predict=profile.ann_num_predict,
-                    system=profile.ann_system or SYSTEM_PROMPT,
-                    think=profile.ann_think,
-                    extra_options={
-                        k: v for k, v in profile.ann_options().items()
-                        if k not in ("num_predict", "num_ctx")
-                    },
-                )
-                inference_time += retry_time
-                annotation = _validate_annotation(raw_response)
-            except Exception:
-                pass
+        elif ocr_record:
+            # The prompt carried only part of the OCR; the full text stays
+            # in the event's metadata_json for later readers.
+            annotation["_ocr_truncation"] = ocr_record
 
         # --- Embed screenshot before deletion (SigLIP image embedding) ---
         if self._image_embedder and self._vector_kb and screenshot_path:
@@ -658,7 +1017,7 @@ class SceneAnnotator:
             return AnnotationResult(
                 event_id=event_id,
                 status="failed",
-                error="invalid_json_after_retry",
+                error="invalid_json",
                 inference_time_seconds=inference_time,
             )
 
