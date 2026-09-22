@@ -93,7 +93,7 @@ struct OnboardingView: View {
             case .standard: return "~6 GB"
             case .recommended: return "~7 GB"
             case .performance: return "~7 GB"
-            case .maxQuality: return "~18 GB"
+            case .maxQuality: return "~19 GB"
             }
         }
 
