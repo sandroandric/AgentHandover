@@ -928,3 +928,82 @@ class TestOCRInjection:
         assert "treat as ground truth" in prompt
         assert "PREVIOUS FRAMES" in prompt
         assert "Gmail" in prompt
+
+
+# ---------------------------------------------------------------------------
+# Screenshot lifecycle (WP-C2): the daemon no longer writes encrypted
+# artifacts, so events carry no artifact ids; the JPEG named in
+# metadata.screenshot_path is the only copy and is deleted once used.
+# ---------------------------------------------------------------------------
+
+
+def _jpeg(path: Path) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"\xff\xd8\xff\xe0" + b"\x00" * 100)
+    return path
+
+
+def _event_for(img: Path, **extra) -> dict:
+    return {
+        "id": "evt-life",
+        "timestamp": "2026-03-03T09:14:50.000Z",
+        "artifact_ids_json": "[]",
+        "metadata_json": json.dumps({"screenshot_path": str(img)}),
+        "window_json": "{}",
+        "annotation_status": "pending",
+        **extra,
+    }
+
+
+class TestScreenshotLifecycle:
+
+    def test_found_without_artifact_ids_and_deleted_after_annotation(self, tmp_path):
+        img = _jpeg(tmp_path / "screenshots" / "frame.jpg")
+        annotator = SceneAnnotator(AnnotationConfig())
+
+        with patch(
+            "agenthandover_worker.scene_annotator._call_ollama_vlm",
+            side_effect=_canned_vlm_call,
+        ):
+            result = annotator.annotate_event(
+                _event_for(img), artifact_dir=tmp_path / "screenshots",
+            )
+
+        assert result.status == "completed"
+        assert not img.exists(), "JPEG is deleted after successful annotation"
+
+    def test_path_outside_screenshots_dir_is_ignored_and_kept(self, tmp_path):
+        outside = _jpeg(tmp_path / "elsewhere" / "precious.jpg")
+        (tmp_path / "screenshots").mkdir()
+        annotator = SceneAnnotator(AnnotationConfig())
+
+        with patch(
+            "agenthandover_worker.scene_annotator._call_ollama_vlm",
+            side_effect=_canned_vlm_call,
+        ) as vlm:
+            result = annotator.annotate_event(
+                _event_for(outside), artifact_dir=tmp_path / "screenshots",
+            )
+
+        assert result.status == "missing_screenshot"
+        vlm.assert_not_called()
+        assert outside.exists(), "a file outside the screenshots dir is never deleted"
+
+    def test_stale_skip_deletes_the_frame(self, tmp_path):
+        img = _jpeg(tmp_path / "screenshots" / "stale.jpg")
+        config = AnnotationConfig(stale_skip_count=3)
+        annotator = SceneAnnotator(config)
+        annotator._stale.consecutive_non_workflow = 3
+        annotator._stale.last_app = "com.example.app"
+        annotator._stale.last_location = "Same title"
+        event = _event_for(
+            img,
+            window_json=json.dumps(
+                {"app_bundle_id": "com.example.app", "title": "Same title"}
+            ),
+        )
+
+        result = annotator.annotate_event(event, artifact_dir=tmp_path / "screenshots")
+
+        assert result.status == "skipped"
+        assert not img.exists(), "a finally-skipped frame is not left on disk"

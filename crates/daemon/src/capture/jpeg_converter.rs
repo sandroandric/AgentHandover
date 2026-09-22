@@ -1,8 +1,8 @@
 //! Convert raw BGRA screenshot pixels to a downscaled JPEG file.
 //!
-//! Used by the v2 VLM annotation pipeline: the daemon saves a plain (unencrypted)
-//! half-resolution JPEG alongside the encrypted artifact so the Python worker can
-//! read screenshots directly without needing the machine encryption key.
+//! Used by the v2 VLM annotation pipeline: the daemon saves each captured frame
+//! as a plain (unencrypted) half-resolution JPEG, the only on-disk copy, which
+//! the Python worker reads directly and deletes after annotation.
 //!
 //! Typical usage: 3024x1964 Retina screenshot → 1512x982 JPEG at quality 70 → ~270KB.
 
