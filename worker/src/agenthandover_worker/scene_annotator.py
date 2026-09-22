@@ -538,8 +538,11 @@ class SceneAnnotator:
                 current_app == self._stale.last_app
                 and current_title == self._stale.last_location
             ):
-                # Still stale — skip this frame
+                # Still stale — skip this frame. The skip is final (the
+                # event is saved as "skipped"), so its JPEG has no further
+                # use and is deleted now rather than at the TTL sweep.
                 self._stats["skipped_stale"] += 1
+                self._delete_screenshot(self._find_screenshot(event, artifact_dir))
                 logger.debug(
                     "Stale-skip event %s (app=%s, %d consecutive)",
                     event_id,
@@ -757,40 +760,31 @@ class SceneAnnotator:
     ) -> str | None:
         """Resolve the screenshot file path for an event.
 
-        Checks artifact_ids_json for screenshot references, then looks
-        for the file on disk.
+        The daemon records the JPEG it saved in ``metadata.screenshot_path``;
+        that is the only on-disk copy of the frame. When *artifact_dir* is
+        given, a path outside it is rejected, because the file is deleted
+        after annotation and event metadata must not be able to point that
+        deletion anywhere else.
         """
-        artifact_ids_raw = event.get("artifact_ids_json", "[]")
-        try:
-            artifact_ids = json.loads(artifact_ids_raw) if artifact_ids_raw else []
-        except (json.JSONDecodeError, TypeError):
-            artifact_ids = []
-
-        if not artifact_ids:
-            return None
-
-        # The first artifact is typically the screenshot
-        artifact_id = artifact_ids[0] if artifact_ids else None
-        if not artifact_id:
-            return None
-
-        # Try common locations
-        if artifact_dir:
-            base = Path(artifact_dir)
-            for ext in (".jpg", ".jpeg", ".png"):
-                candidate = base / f"{artifact_id}{ext}"
-                if candidate.is_file():
-                    return str(candidate)
-
-        # Check metadata_json for explicit path
         metadata_raw = event.get("metadata_json", "{}")
         try:
             metadata = json.loads(metadata_raw) if metadata_raw else {}
         except (json.JSONDecodeError, TypeError):
             metadata = {}
+        if not isinstance(metadata, dict):
+            return None
 
         screenshot_path = metadata.get("screenshot_path")
-        if screenshot_path and Path(screenshot_path).is_file():
-            return screenshot_path
-
-        return None
+        if not isinstance(screenshot_path, str) or not screenshot_path:
+            return None
+        path = Path(screenshot_path)
+        if not path.is_file():
+            return None
+        if artifact_dir and not path.resolve().is_relative_to(
+            Path(artifact_dir).resolve()
+        ):
+            logger.warning(
+                "Ignoring screenshot outside %s: %s", artifact_dir, screenshot_path,
+            )
+            return None
+        return screenshot_path

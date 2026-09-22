@@ -1,5 +1,4 @@
 use anyhow::Result;
-use chrono::Timelike;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
@@ -299,7 +298,7 @@ async fn main() -> Result<()> {
             while let Some(event) = nm_event_rx.recv().await {
                 // Track last NM message timestamp for extension-connected detection
                 nm_ts.store(chrono::Utc::now().timestamp_millis(), Ordering::Relaxed);
-                match forwarder_tx.try_send(ObserverMessage::Event { event, artifacts: vec![] }) {
+                match forwarder_tx.try_send(ObserverMessage::Event { event }) {
                     Ok(()) => {}
                     Err(mpsc::error::TrySendError::Full(_)) => {
                         warn!("Native messaging forwarder: main channel full (backpressure), dropping event");
@@ -380,6 +379,10 @@ async fn main() -> Result<()> {
                             })
                     };
 
+                    let last_maintenance = agenthandover_daemon::maintenance::read_record(
+                        &agenthandover_common::status::data_dir(),
+                    );
+
                     let daemon_status = agenthandover_common::status::DaemonStatus {
                         pid: std::process::id(),
                         version: env!("CARGO_PKG_VERSION").to_string(),
@@ -395,6 +398,10 @@ async fn main() -> Result<()> {
                             .unsigned_abs(),
                         last_extension_message: last_ext_msg,
                         focus_session: focus_session_info,
+                        last_maintenance: last_maintenance.as_ref().map(|r| r.finished_at),
+                        events_purged: last_maintenance.as_ref().map(|r| r.events_purged),
+                        artifacts_purged: last_maintenance.as_ref().map(|r| r.artifacts_purged),
+                        bytes_freed: last_maintenance.as_ref().map(|r| r.bytes_freed),
                     };
                     if let Err(e) = agenthandover_common::status::write_status_file(
                         "daemon-status.json",
@@ -411,10 +418,14 @@ async fn main() -> Result<()> {
         }
     });
 
-    // Spawn nightly maintenance trigger
+    // Spawn the daily maintenance scheduler. It checks at startup and then
+    // hourly; a run happens whenever the persisted date marker is older than
+    // today, so a machine asleep overnight still gets its daily run.
     let maint_shutdown_rx = shutdown_tx.subscribe();
     let maint_db_path = db_path.clone();
     let maint_storage_config = app_config.storage.clone();
+    let maint_screenshots_dir = config.screenshots_dir.clone();
+    let maint_screenshot_ttl_days = app_config.vlm.job_ttl_days;
     let maint_handle = tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
         let mut shutdown_rx = maint_shutdown_rx;
@@ -422,52 +433,33 @@ async fn main() -> Result<()> {
         loop {
             tokio::select! {
                 _ = interval.tick() => {
-                    let hour = chrono::Local::now().hour();
-                    if hour >= 1 && hour < 5 {
-                        info!("Nightly maintenance window — running full maintenance");
-                        let artifact_dir = maint_db_path.parent()
-                            .map(|p| p.join("artifacts"));
-                        match run_maintenance(
-                            &maint_db_path,
-                            &maint_storage_config,
-                            artifact_dir.as_deref(),
-                        ) {
-                            Ok(report) => {
-                                // Actually delete artifact files from disk
-                                let mut files_deleted = 0usize;
-                                let mut files_failed = 0usize;
-                                for path_str in &report.artifact_paths_to_delete {
-                                    let path = std::path::Path::new(path_str);
-                                    if path.exists() {
-                                        match std::fs::remove_file(path) {
-                                            Ok(()) => files_deleted += 1,
-                                            Err(e) => {
-                                                warn!(
-                                                    path = %path.display(),
-                                                    error = %e,
-                                                    "Failed to delete artifact file"
-                                                );
-                                                files_failed += 1;
-                                            }
-                                        }
-                                    }
-                                }
-                                info!(
-                                    events_purged = report.events_purged,
-                                    episodes_purged = report.episodes_purged,
-                                    vlm_purged = report.vlm_jobs_purged,
-                                    artifact_rows = report.artifact_paths_to_delete.len(),
-                                    artifact_size_evicted = report.artifact_size_evicted,
-                                    artifact_files_deleted = files_deleted,
-                                    artifact_files_failed = files_failed,
-                                    vacuumed = report.vacuumed,
-                                    "Nightly maintenance completed"
-                                );
-                            }
-                            Err(e) => {
-                                error!("Nightly maintenance failed: {}", e);
-                            }
-                        }
+                    let db_path = maint_db_path.clone();
+                    let storage_config = maint_storage_config.clone();
+                    let screenshots_dir = maint_screenshots_dir.clone();
+                    let outcome = tokio::task::spawn_blocking(move || {
+                        let state_dir = agenthandover_common::status::data_dir();
+                        let today = chrono::Local::now().date_naive();
+                        agenthandover_daemon::maintenance::run_if_due(&state_dir, today, || {
+                            info!("Daily maintenance due — running full maintenance");
+                            run_maintenance(
+                                &db_path,
+                                &storage_config,
+                                &screenshots_dir,
+                                maint_screenshot_ttl_days,
+                            )
+                        })
+                    })
+                    .await;
+                    match outcome {
+                        Ok(Ok(Some(record))) => info!(
+                            events_purged = record.events_purged,
+                            artifacts_purged = record.artifacts_purged,
+                            bytes_freed = record.bytes_freed,
+                            "Daily maintenance completed"
+                        ),
+                        Ok(Ok(None)) => debug!("Daily maintenance already ran today"),
+                        Ok(Err(e)) => error!("Daily maintenance failed: {}", e),
+                        Err(e) => error!("Daily maintenance task panicked: {}", e),
                     }
                 }
                 _ = shutdown_rx.changed() => {
@@ -514,7 +506,7 @@ async fn main() -> Result<()> {
                                 metadata: serde_json::json!({}),
                                 display_ids_spanned: None,
                             };
-                            match fwd_tx.try_send(ObserverMessage::Event { event, artifacts: vec![] }) {
+                            match fwd_tx.try_send(ObserverMessage::Event { event }) {
                                 Ok(()) => {}
                                 Err(mpsc::error::TrySendError::Full(_)) => {
                                     warn!("Clipboard forwarder: main channel full (backpressure), dropping event");
@@ -697,7 +689,7 @@ async fn run_native_messaging_bridge() -> Result<()> {
                 last_heartbeat_write = std::time::Instant::now();
             }
 
-            match forwarder_tx.try_send(ObserverMessage::Event { event, artifacts: vec![] }) {
+            match forwarder_tx.try_send(ObserverMessage::Event { event }) {
                 Ok(()) => {}
                 Err(mpsc::error::TrySendError::Full(_)) => {
                     warn!("NM bridge: channel full, dropping event");
@@ -855,22 +847,28 @@ fn dirs_or_home(subpath: &str) -> PathBuf {
 fn run_maintenance(
     db_path: &std::path::Path,
     storage_config: &agenthandover_common::config::StorageConfig,
-    artifact_dir: Option<&std::path::Path>,
+    screenshots_dir: &std::path::Path,
+    screenshot_ttl_days: u32,
 ) -> Result<agenthandover_storage::maintenance::MaintenanceReport> {
-    use agenthandover_storage::maintenance::MaintenanceRunner;
+    use agenthandover_storage::maintenance::{MaintenanceOptions, MaintenanceRunner};
 
     // Default artifact max: 10 GB
     const ARTIFACT_MAX_BYTES: u64 = 10 * 1024 * 1024 * 1024;
 
+    let artifact_dir = db_path.parent().map(|p| p.join("artifacts"));
     let conn = rusqlite::Connection::open(db_path)?;
+    // Wait for the worker's writes instead of failing with SQLITE_BUSY.
+    conn.pragma_update(None, "busy_timeout", 30000)?;
     let runner = MaintenanceRunner::new(&conn);
-    runner.run_full_maintenance(
+    runner.run_full_maintenance(&MaintenanceOptions {
         db_path,
-        storage_config.retention_days_raw,
-        storage_config.retention_days_episodes,
-        storage_config.vacuum_min_free_gb,
-        storage_config.vacuum_safety_multiplier,
-        artifact_dir,
-        Some(ARTIFACT_MAX_BYTES),
-    )
+        retention_days_raw: storage_config.retention_days_raw,
+        retention_days_episodes: storage_config.retention_days_episodes,
+        min_free_gb: storage_config.vacuum_min_free_gb,
+        vacuum_safety_multiplier: storage_config.vacuum_safety_multiplier,
+        artifact_dir: artifact_dir.as_deref(),
+        artifact_max_bytes: Some(ARTIFACT_MAX_BYTES),
+        screenshots_dir: Some(screenshots_dir),
+        screenshot_ttl_days,
+    })
 }
