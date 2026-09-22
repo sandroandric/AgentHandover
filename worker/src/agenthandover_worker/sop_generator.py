@@ -341,6 +341,17 @@ Respond with ONLY the JSON object."""
 # Timeline formatting
 # ---------------------------------------------------------------------------
 
+# Verbatim fields (typed text, URLs, compose fields, copied text) are cut to
+# this many characters each in the SOP prompt.
+_VERBATIM_MAX_CHARS = 200
+
+
+def _one_line(text: object, limit: int = _VERBATIM_MAX_CHARS) -> str:
+    """*text* on one line (its lines joined by `` | ``), cut to *limit* chars."""
+    lines = [" ".join(line.split()) for line in str(text or "").splitlines()]
+    return " | ".join(line for line in lines if line)[:limit]
+
+
 def _format_timeline_entry(
     idx: int,
     annotation: dict,
@@ -382,6 +393,23 @@ def _format_timeline_entry(
         active = ui.get("active_element", "")
         if active:
             lines.append(f"  Active: {active}")
+
+    # Verbatim text the steps must quote: what was typed, the links on
+    # screen, and an open compose window's fields.
+    kt = annotation.get("key_text")
+    if isinstance(kt, dict):
+        typed = _one_line(kt.get("typed_text"))
+        if typed:
+            lines.append(f'  Typed: "{typed}"')
+        urls = [_one_line(u) for u in kt.get("urls") or [] if _one_line(u)]
+        if urls:
+            lines.append(f"  URLs: {_one_line(', '.join(urls))}")
+    compose = annotation.get("compose")
+    if isinstance(compose, dict) and compose.get("is_compose_window_open") is not False:
+        for label, key in (("To", "recipient"), ("Subject", "subject"), ("Body first line", "body_first_line")):
+            value = _one_line(compose.get(key))
+            if value:
+                lines.append(f'  Compose {label}: "{value}"')
 
     # Frame diff (what changed since last frame)
     if diff and isinstance(diff, dict):
@@ -438,8 +466,8 @@ def _format_timeline_entry(
             f"  >>> COPY ACTION: User copied content{source_str} "
             f"({byte_size} bytes, {types_str})"
         )
-        if preview:
-            lines.append(f'  >>> Copied text: "{preview[:200]}"')
+        if _one_line(preview):
+            lines.append(f'  >>> Copied text: "{_one_line(preview)}"')
         lines.append(
             "  >>> (Include this as a Copy step (attribute the Copy to the "
             "FROM app above, NOT to whatever app the next frame shows) and "

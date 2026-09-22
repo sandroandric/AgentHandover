@@ -433,7 +433,7 @@ class FocusProcessor:
 
     @staticmethod
     def _extract_clipboard_meta(event: dict) -> dict | None:
-        """Extract clipboard metadata (content_types, byte_size) from an event.
+        """Extract clipboard metadata (content_types, byte_size, preview) from an event.
 
         ClipboardChange events serialize the payload inside ``kind_json``,
         not ``metadata_json``.  The daemon writes it as::
@@ -444,6 +444,7 @@ class FocusProcessor:
                 "byte_size": N,
                 "high_entropy": bool,
                 "content_hash": "...",
+                "content_preview": "...",   # optional
             }
 
         This was historically read from ``metadata_json``, which is always
@@ -473,6 +474,11 @@ class FocusProcessor:
             meta["high_entropy"] = parsed["high_entropy"]
         if parsed.get("content_hash"):
             meta["content_hash"] = parsed["content_hash"]
+        # The copied text itself (present when the daemon's
+        # ``enable_clipboard_preview`` is on): what the Copy/Paste steps
+        # must name.
+        if parsed.get("content_preview"):
+            meta["content_preview"] = str(parsed["content_preview"])
         return meta
 
     # ------------------------------------------------------------------
