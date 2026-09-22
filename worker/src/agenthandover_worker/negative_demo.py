@@ -9,7 +9,13 @@ Detection patterns:
 1. **Undo actions** — keyboard shortcut Ctrl+Z / Cmd+Z
 2. **Cancel workflows** — click on Cancel / Close / Discard / Don't Save
 3. **Discard changes** — click on "Discard changes", "Don't save", "Revert"
-4. **Back after error** — URL navigation backwards after an error page
+4. **Back after error** — a "Go back" click after an error page
+
+Click detectors read only the clicked element's own label (its ARIA label,
+visible text and test id, or a native click's target description), matched
+as whole words.  They never search the page around it: a DOM path through
+``modal-backdrop`` or a bounding box containing 500 is not a cancel or an
+error.
 
 When a negative marker is found the pruner looks backwards (up to 10 events
 or 30 seconds within the same thread) and marks those preceding events as
@@ -20,6 +26,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
@@ -47,16 +54,23 @@ class NegativeDemoPruner:
     # Keyboard shortcuts that indicate an undo action
     UNDO_PATTERNS = ["ctrl+z", "cmd+z", "command+z"]
 
-    # Click-target text patterns that indicate cancel/discard workflows
+    # Clicked-element labels that indicate cancel/discard workflows
     CANCEL_PATTERNS = [
         "cancel",
         "close",
         "discard",
         "don't save",
+        "dont save",
         "revert",
-        "undo",
         "discard changes",
+        "undo",
     ]
+
+    # Clicked-element labels that navigate back (bare "back" is too common)
+    BACK_PATTERNS = ["go back"]
+
+    # Page titles that mark an error page
+    ERROR_PATTERNS = ["error", "404", "500", "503", "not found"]
 
     def prune(self, events: list[dict]) -> PruneResult:
         """Analyse *events* and separate positive from negative demonstrations.
@@ -144,38 +158,45 @@ class NegativeDemoPruner:
 
     def _is_cancel_event(self, event: dict) -> bool:
         """True if event is a click on a cancel/discard/close element."""
-        kind_json = event.get("kind_json", "")
-        metadata_json = event.get("metadata_json", "")
-
-        # The event kind should indicate a click
-        kind_str = kind_json if isinstance(kind_json, str) else json.dumps(kind_json)
-        if "click" not in kind_str.lower():
-            return False
-
-        # Check metadata for cancel-like button text
-        meta_str = self._get_metadata_string(metadata_json).lower()
-        return any(pattern in meta_str for pattern in self.CANCEL_PATTERNS)
+        return _matches(self._click_label(event), self.CANCEL_PATTERNS)
 
     def _is_back_after_error(self, event: dict, prev_events: list[dict]) -> bool:
-        """True if event is a back navigation following an error page."""
-        kind_json = event.get("kind_json", "")
-        metadata_json = event.get("metadata_json", "")
-
-        # Check if current event is a navigation-back type
-        kind_str = kind_json if isinstance(kind_json, str) else json.dumps(kind_json)
-        meta_str = self._get_metadata_string(metadata_json).lower()
-
-        is_back = "back" in meta_str or "back" in kind_str.lower()
-        if not is_back:
+        """True if event is a "Go back" click following an error page."""
+        if not _matches(self._click_label(event), self.BACK_PATTERNS):
             return False
 
-        # Look at recent previous events for error indicators
+        # Look at recent previous events for an error page title
         for prev in reversed(prev_events[-5:]):
-            prev_meta = self._get_metadata_string(prev.get("metadata_json", "")).lower()
-            if any(err in prev_meta for err in ("error", "404", "500", "503", "not found")):
+            if _matches(self._window_title(prev), self.ERROR_PATTERNS):
                 return True
 
         return False
+
+    @staticmethod
+    def _click_label(event: dict) -> str:
+        """The clicked element's own label, lowercased; "" if not a click.
+
+        Browser clicks carry ``metadata.target`` with ``ariaLabel``,
+        ``innerText`` and ``testId``; native clicks carry the ClickIntent
+        ``target_description`` in ``kind_json``.
+        """
+        kind = _as_dict(event.get("kind_json"))
+        click = kind.get("ClickIntent")
+        if click is None:
+            return ""
+        parts: list[str] = []
+        if isinstance(click, dict):
+            parts.append(click.get("target_description") or "")
+        target = _as_dict(event.get("metadata_json")).get("target")
+        if isinstance(target, dict):
+            parts.extend(target.get(k) or "" for k in ("ariaLabel", "innerText", "testId"))
+        label = " ".join(p for p in parts if isinstance(p, str) and p)
+        return label.replace("\u2019", "'").lower()
+
+    @staticmethod
+    def _window_title(event: dict) -> str:
+        title = _as_dict(event.get("window_json")).get("title")
+        return title.lower() if isinstance(title, str) else ""
 
     # ------------------------------------------------------------------
     # Lookback marking
@@ -266,3 +287,23 @@ class NegativeDemoPruner:
         except (json.JSONDecodeError, TypeError):
             return ""
         return window.get("app_id", "")
+
+
+def _as_dict(raw: str | dict | None) -> dict:
+    """A JSON column as a dict; {} when absent or not an object."""
+    if isinstance(raw, dict):
+        return raw
+    if not raw:
+        return {}
+    try:
+        value = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _matches(label: str, patterns: list[str]) -> bool:
+    """True if any pattern occurs in *label* as whole words."""
+    return bool(label) and any(
+        re.search(rf"\b{re.escape(p)}\b", label) for p in patterns
+    )
