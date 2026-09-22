@@ -1,7 +1,7 @@
 """Tests for v2 scene annotation pipeline integration in main.py.
 
-Covers _process_annotations(), _process_diffs(), _read_vlm_v2_config(),
-_check_v2_schema(), and the v2 status reporting additions.
+Covers _process_annotations(), _process_diffs(), _check_v2_schema(),
+and the v2 status reporting additions (config: test_config.py).
 """
 
 from __future__ import annotations
@@ -21,7 +21,6 @@ from agenthandover_worker.main import (
     _check_v2_schema,
     _process_annotations,
     _process_diffs,
-    _read_vlm_v2_config,
     _write_worker_status,
 )
 from agenthandover_worker.scene_annotator import (
@@ -95,55 +94,6 @@ def v2_db(v2_db_path: Path) -> WorkerDB:
     db = WorkerDB(v2_db_path)
     yield db  # type: ignore[misc]
     db.close()
-
-
-# ---------------------------------------------------------------------------
-# _read_vlm_v2_config
-# ---------------------------------------------------------------------------
-
-
-class TestReadVlmV2Config:
-    def test_defaults_when_no_config(self, tmp_path: Path, monkeypatch):
-        """When no config.toml exists, return all defaults."""
-        from agenthandover_worker import main as main_mod
-
-        # Monkeypatch _read_vlm_config_field to return defaults
-        monkeypatch.setattr(
-            main_mod, "_read_vlm_config_field",
-            lambda field, default="": default,
-        )
-
-        cfg = _read_vlm_v2_config()
-        assert cfg["annotation_enabled"] is True
-        assert cfg["annotation_model"] == "qwen3.5:2b"
-        assert cfg["sop_model"] == "qwen3.5:4b"
-        assert cfg["stale_skip_count"] == 3
-        assert cfg["sliding_window_max_age_sec"] == 600
-        assert cfg["ollama_host"] == "http://localhost:11434"
-
-    def test_annotation_disabled(self, monkeypatch):
-        from agenthandover_worker import main as main_mod
-
-        overrides = {"annotation_enabled": "false"}
-        monkeypatch.setattr(
-            main_mod, "_read_vlm_config_field",
-            lambda field, default="": overrides.get(field, default),
-        )
-
-        cfg = _read_vlm_v2_config()
-        assert cfg["annotation_enabled"] is False
-
-    def test_custom_model(self, monkeypatch):
-        from agenthandover_worker import main as main_mod
-
-        overrides = {"annotation_model": "qwen3:4b"}
-        monkeypatch.setattr(
-            main_mod, "_read_vlm_config_field",
-            lambda field, default="": overrides.get(field, default),
-        )
-
-        cfg = _read_vlm_v2_config()
-        assert cfg["annotation_model"] == "qwen3:4b"
 
 
 # ---------------------------------------------------------------------------

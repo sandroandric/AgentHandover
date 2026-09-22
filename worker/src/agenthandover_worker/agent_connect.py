@@ -280,27 +280,13 @@ def connect_codex() -> None:
 
 def connect_openclaw() -> None:
     """Verify and configure OpenClaw integration."""
-    import platform
-    import tomllib
+    from agenthandover_worker.config import load_config
 
-    openclaw_default = Path.home() / ".openclaw" / "workspace"
-
-    # Read config to check custom path
-    if platform.system() == "Darwin":
-        config_path = Path.home() / "Library" / "Application Support" / "agenthandover" / "config.toml"
-    else:
-        config_path = Path.home() / ".config" / "agenthandover" / "config.toml"
-
-    configured_path = openclaw_default
-    if config_path.is_file():
-        try:
-            with open(config_path, "rb") as f:
-                cfg = tomllib.load(f)
-            wp = cfg.get("openclaw", {}).get("workspace_path", "")
-            if wp:
-                configured_path = Path(wp).expanduser()
-        except Exception:
-            pass
+    workspace = load_config().openclaw.workspace_path
+    configured_path = (
+        Path(workspace).expanduser() if workspace
+        else Path.home() / ".openclaw" / "workspace"
+    )
 
     sops_dir = configured_path / "memory" / "apprentice" / "sops"
 

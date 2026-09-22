@@ -600,37 +600,6 @@ class TestStaleFocusSweep:
         assert _sweep_stale_focus_session(tmp_path, 4.0) is False
 
 
-class TestConfig:
-    def _write(self, home: Path, text: str) -> None:
-        import platform
-
-        if platform.system() == "Darwin":
-            d = home / "Library" / "Application Support" / "agenthandover"
-        else:
-            d = home / ".config" / "agenthandover"
-        d.mkdir(parents=True)
-        (d / "config.toml").write_text(text)
-
-    def test_annotation_timeout_and_focus_hours_from_config(self, tmp_path, monkeypatch):
-        from agenthandover_worker.main import _read_float_field, _read_vlm_v2_config
-
-        monkeypatch.setenv("HOME", str(tmp_path))
-        self._write(tmp_path, "[vlm]\nannotation_timeout_seconds = 240\n"
-                              "[focus]\nmax_session_hours = 2.5\n")
-        assert _read_vlm_v2_config()["annotation_timeout_seconds"] == 240.0
-        assert _read_float_field("focus", "max_session_hours", 4.0) == 2.5
-
-    def test_defaults_and_invalid_values(self, tmp_path, monkeypatch):
-        from agenthandover_worker.main import _read_float_field, _read_vlm_v2_config
-
-        monkeypatch.setenv("HOME", str(tmp_path))
-        assert _read_vlm_v2_config()["annotation_timeout_seconds"] == 180.0
-        self._write(tmp_path, '[vlm]\nannotation_timeout_seconds = "soon"\n'
-                              "[focus]\nmax_session_hours = -1\n")
-        assert _read_float_field("vlm", "annotation_timeout_seconds", 180.0) == 180.0
-        assert _read_float_field("focus", "max_session_hours", 4.0) == 4.0
-
-
 # ---------------------------------------------------------------------------
 # SOP generation
 # ---------------------------------------------------------------------------

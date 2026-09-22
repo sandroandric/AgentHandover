@@ -16,6 +16,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from agenthandover_worker.config import config_path as _config_path
+
 
 def detect_platform() -> str:
     """Detect the current platform for VLM backend selection.
@@ -95,16 +97,6 @@ _REMOTE_PROVIDERS = {
         "key_prefix": "AI",
     },
 }
-
-
-def _config_path() -> Path:
-    """Return the OS-appropriate config.toml path."""
-    if platform.system() == "Darwin":
-        return (
-            Path.home() / "Library" / "Application Support"
-            / "agenthandover" / "config.toml"
-        )
-    return Path.home() / ".config" / "agenthandover" / "config.toml"
 
 
 def validate_api_key(provider: str, api_key: str) -> bool:
