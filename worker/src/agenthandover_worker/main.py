@@ -162,8 +162,8 @@ def _export_via_adapter(
     return paths
 
 
-def _read_vlm_config_field(field: str, default: str = "") -> str:
-    """Read a single field from the [vlm] section of config.toml.
+def _read_config_field(section: str, field: str, default: str = "") -> str:
+    """Read a single field from a section of config.toml, as a string.
 
     Falls back to *default* if the field or file is missing.
     """
@@ -183,9 +183,31 @@ def _read_vlm_config_field(field: str, default: str = "") -> str:
     try:
         with open(config_path, "rb") as f:
             cfg = tomllib.load(f)
-        return str(cfg.get("vlm", {}).get(field, default))
+        return str(cfg.get(section, {}).get(field, default))
     except Exception:
         return default
+
+
+def _read_vlm_config_field(field: str, default: str = "") -> str:
+    """Read a single field from the [vlm] section of config.toml."""
+    return _read_config_field("vlm", field, default)
+
+
+def _read_float_field(section: str, field: str, default: float) -> float:
+    """A positive float from config.toml, or *default* when missing/invalid."""
+    raw = _read_config_field(section, field, "")
+    if raw == "":
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        value = float("nan")
+    if not (0 < value < float("inf")):
+        logger.warning(
+            "[%s] %s = %r must be positive; using %s", section, field, raw, default,
+        )
+        return default
+    return value
 
 
 def _read_idle_jobs_config() -> dict:
@@ -338,6 +360,9 @@ def _read_vlm_v2_config() -> dict:
         "ollama_host": _read_vlm_config_field(
             "ollama_host", "http://localhost:11434"
         ),
+        "annotation_timeout_seconds": _read_float_field(
+            "vlm", "annotation_timeout_seconds", 180.0,
+        ),
     }
 
 
@@ -462,38 +487,26 @@ def _process_annotations(
 ) -> dict:
     """Process a batch of unannotated screenshots through the scene annotator.
 
-    Returns stats dict with counts of annotated/skipped/failed events.
+    Returns stats dict with counts of annotated/skipped/failed/blocked/
+    deferred events.
 
     Focus-session events (tagged with ``focus_session_id`` in metadata)
-    are explicitly skipped here and left to the focus_processor to
-    handle. The scene annotator deletes the source JPEG after processing
+    are excluded in the query and left to the focus_processor. The scene
+    annotator deletes the source JPEG after processing
     (``delete_screenshot_after_processing=True``), so if passive annotation
     ran on focus events first, the focus_processor would find
-    ``missing_screenshot`` and fail to generate the SOP.
+    ``missing_screenshot`` and fail to generate the SOP.  Excluding them in
+    SQL (not after the LIMIT) also means focus rows that stay pending can
+    never fill the batch and starve passive frames.
+
+    When Ollama is unreachable (``annotator.ready()`` is False, or a call
+    returns ``deferred``) the batch stops: the rows stay pending and their
+    screenshots are kept for the next attempt after the backoff.
     """
-    unannotated_raw = db.get_unannotated_events(limit=batch_size)
-    if not unannotated_raw:
-        return {"annotated": 0, "skipped": 0, "failed": 0, "blocked": 0}
-
-    # Filter out events that belong to a focus session — they MUST be
-    # processed by the focus_processor (which preserves JPEGs until the
-    # full timeline is built). Leaving them here would race with focus
-    # processing and destroy the screenshots before the SOP is generated.
-    unannotated = []
-    for ev in unannotated_raw:
-        meta_raw = ev.get("metadata_json") or "{}"
-        try:
-            meta = json.loads(meta_raw) if isinstance(meta_raw, str) else meta_raw
-        except (json.JSONDecodeError, TypeError):
-            meta = {}
-        if isinstance(meta, dict) and meta.get("focus_session_id"):
-            continue  # focus-owned — defer to focus_processor
-        unannotated.append(ev)
-
-    if not unannotated:
-        return {"annotated": 0, "skipped": 0, "failed": 0, "blocked": 0}
-
-    stats = {"annotated": 0, "skipped": 0, "failed": 0, "blocked": 0}
+    stats = {"annotated": 0, "skipped": 0, "failed": 0, "blocked": 0, "deferred": 0}
+    unannotated = db.get_unannotated_events(limit=batch_size, exclude_focus=True)
+    if not unannotated or not annotator.ready():
+        return stats
 
     for event in unannotated:
         event_id = event.get("id", "unknown")
@@ -581,6 +594,13 @@ def _process_annotations(
                 event_id[:8],
                 result.error or "",
             )
+        elif result.status == "deferred":
+            # Ollama unreachable: leave this and the remaining rows pending.
+            stats["deferred"] += 1
+            logger.warning(
+                "Annotation deferred for %s: %s", event_id[:8], result.error,
+            )
+            break
         else:
             db.save_annotation(event_id, "", status="failed")
             stats["failed"] += 1
@@ -1934,6 +1954,13 @@ def _process_focus_sessions_v2(
         "focus_v2",
         title,
     )
+    if result.deferred:
+        # Ollama unreachable: keep the signal and the pending rows; the
+        # next tick retries the session.
+        logger.warning(
+            "Focus v2 session '%s' deferred: %s", title, result.error,
+        )
+        return 0
 
     exported = 0
     if result.success and result.sop and not lint_error:
@@ -1976,32 +2003,7 @@ def _process_focus_sessions_v2(
                         title, bool(insights.goal), bool(insights.strategy),
                         len(insights.guardrails),
                     )
-                elif not procedure_dict.get("strategy") or not procedure_dict.get("goal"):
-                    # Post-SOP synthesis failed — fall back to pre-analysis
-                    pre_strategy = getattr(focus_processor, "_last_pre_analysis_strategy", "")
-                    pre_goal = getattr(focus_processor, "_last_pre_analysis_goal", "")
-                    if pre_strategy and not procedure_dict.get("strategy"):
-                        procedure_dict["strategy"] = pre_strategy
-                    if pre_goal and not procedure_dict.get("goal"):
-                        procedure_dict["goal"] = pre_goal
-                    if pre_strategy or pre_goal:
-                        logger.info(
-                            "Focus v2 session '%s': using pre-analysis goal/strategy as fallback",
-                            title,
-                        )
             except Exception:
-                # Post-SOP synthesis crashed — still try pre-analysis fallback
-                pre_strategy = getattr(focus_processor, "_last_pre_analysis_strategy", "")
-                pre_goal = getattr(focus_processor, "_last_pre_analysis_goal", "")
-                if pre_strategy and not procedure_dict.get("strategy"):
-                    procedure_dict["strategy"] = pre_strategy
-                if pre_goal and not procedure_dict.get("goal"):
-                    procedure_dict["goal"] = pre_goal
-                if pre_strategy or pre_goal:
-                    logger.info(
-                        "Focus v2 session '%s': using pre-analysis goal/strategy as fallback (post-SOP failed)",
-                        title,
-                    )
                 logger.debug(
                     "Focus v2 behavioral synthesis failed for '%s'",
                     title, exc_info=True,
@@ -3887,6 +3889,48 @@ def _export_sop_templates(
     _save_sop_cache(sop_templates)
 
 
+def _sweep_stale_focus_session(
+    state_dir: Path, max_session_hours: float,
+) -> bool:
+    """Close a focus recording nobody stopped.
+
+    When ``focus-session.json`` still says ``recording`` and was written
+    more than *max_session_hours* ago (the app or CLI crashed, or the user
+    forgot), rewrite it as ``stopped`` with ``stop_reason = "stale"``.  The
+    daemon then stops tagging frames, and the normal focus path processes
+    the session's rows on this or the next tick.  Returns True when a
+    session was closed.
+    """
+    import time as _time
+
+    signal_path = state_dir / "focus-session.json"
+    try:
+        age_seconds = _time.time() - signal_path.stat().st_mtime
+        with open(signal_path) as f:
+            signal = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return False
+    if not isinstance(signal, dict) or signal.get("status") != "recording":
+        return False
+    if age_seconds < max_session_hours * 3600:
+        return False
+
+    signal["status"] = "stopped"
+    signal["stop_reason"] = "stale"
+    try:
+        _atomic_write_result(signal_path, signal)
+    except Exception:
+        logger.warning("Failed to close stale focus session", exc_info=True)
+        return False
+    logger.warning(
+        "Focus session '%s' (%s) was still recording after %.1f h "
+        "(limit %.1f h); closed as stale",
+        signal.get("title", ""), signal.get("session_id", ""),
+        age_seconds / 3600, max_session_hours,
+    )
+    return True
+
+
 def _clear_focus_signal(signal_path: Path) -> None:
     """Remove the focus session signal file."""
     try:
@@ -4477,6 +4521,9 @@ def main(argv: list[str] | None = None) -> None:
     variant_detector = VariantDetector()
     evidence_normalizer = EvidenceNormalizer(variant_detector=variant_detector)
 
+    # A focus recording still "recording" after this long is closed as stale.
+    focus_max_session_hours = _read_float_field("focus", "max_session_hours", 4.0)
+
     # Behavioral synthesis + evidence extraction
     from agenthandover_worker.behavioral_synthesizer import BehavioralSynthesizer, SynthesizerConfig
     _synth_model = v2_cfg["sop_model"] if v2_cfg else "qwen3.5:4b"
@@ -4767,6 +4814,7 @@ def main(argv: list[str] | None = None) -> None:
             ollama_host=v2_cfg["ollama_host"],
             stale_skip_count=v2_cfg["stale_skip_count"],
             sliding_window_max_age_sec=v2_cfg["sliding_window_max_age_sec"],
+            timeout_seconds=v2_cfg["annotation_timeout_seconds"],
         )
         # Initialize image embedder (SigLIP via mlx-embeddings, optional)
         # Only if user opted in via config.toml [embedding] image_embeddings = true
@@ -4805,6 +4853,10 @@ def main(argv: list[str] | None = None) -> None:
             image_embedder=_image_embedder,
             vector_kb=vector_kb,
         )
+        # Load the annotation model now (with keep_alive) so the first
+        # real frame meets a warm model.  A failure only logs and starts
+        # the transport backoff; annotation retries after it.
+        scene_annotator.preload()
 
         diff_config = DiffConfig(
             model=v2_cfg["annotation_model"],
@@ -4824,7 +4876,6 @@ def main(argv: list[str] | None = None) -> None:
             annotator=scene_annotator,
             differ=frame_differ,
             sop_generator=sop_generator,
-            behavioral_synthesizer=behavioral_synthesizer,
         )
 
         # Task segmenter for passive discovery (CPU-only, no GPU)
@@ -5104,6 +5155,10 @@ def main(argv: list[str] | None = None) -> None:
 
                 # Refresh curation queue after any curation action so UI reflects changes
                 _write_curation_queue(procedure_curator, force=True)
+
+                # Close a recording that was never stopped, so its rows get
+                # processed instead of staying pending forever.
+                _sweep_stale_focus_session(_status_dir(), focus_max_session_hours)
 
                 # Process any completed focus recording sessions first.
                 # Use v2 VLM pipeline when available (semantic SOPs from

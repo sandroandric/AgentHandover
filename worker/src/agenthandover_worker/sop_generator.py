@@ -38,8 +38,11 @@ class SOPGeneratorConfig:
 
     model: str = "qwen3.5:4b"
     ollama_host: str = "http://localhost:11434"
-    num_predict: int = 12000
-    timeout: float = 1800.0  # 30 min — 16GB machines need 10+ min per call
+    # First attempt; the token budget and context come from the model
+    # profile.  30 min: 16GB machines need 10+ min per call.
+    timeout: float = 1800.0
+    # Each retry after an unparseable first answer gets its own timeout.
+    retry_timeout: float = 300.0
     max_timeline_frames: int = 20  # Cap frames sent to SOP gen to keep prompt manageable
 
 
@@ -51,6 +54,8 @@ class GeneratedSOP:
     inference_time_seconds: float = 0.0
     success: bool = True
     error: str | None = None
+    # True when Ollama was unreachable: nothing was consumed, retry later.
+    deferred: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -1392,7 +1397,7 @@ def _call_ollama(
     model: str,
     prompt: str,
     host: str = "http://localhost:11434",
-    num_predict: int = 12000,
+    num_predict: int = 6000,
     system: str = "",
     timeout: float = 1800.0,
     think: bool | str = True,
@@ -1401,18 +1406,19 @@ def _call_ollama(
 ) -> tuple[str, float]:
     """Call Ollama's /api/generate for text-only SOP generation.
 
-    Returns (response_text, inference_time_seconds).
+    Returns (response_text, inference_time_seconds).  Raises
+    ``OllamaUnavailable`` (a ``ConnectionError``) when Ollama is
+    unreachable, ``TimeoutError`` and ``RuntimeError`` otherwise.
 
     Args:
         think: False, True, "low", "medium", or "high". For Gemma 4 models,
             "high" enables deep reasoning which produces better SOPs.
+        format_json: ask for grammar-constrained JSON.  Applied only when
+            *think* is off (Ollama drops thinking under a grammar).
         extra_options: Additional Ollama options merged into the options dict.
             Use model_profiles.get_profile().sop_options() for optimal settings.
     """
-    import urllib.request
-    import urllib.error
-
-    url = f"{host}/api/generate"
+    from agenthandover_worker.scene_annotator import ollama_generate
 
     options: dict = {
         "num_predict": num_predict,
@@ -1433,28 +1439,21 @@ def _call_ollama(
 
     if system:
         payload["system"] = system
-    # format: "json" forces Ollama to use GBNF grammar for valid JSON.
-    # Only safe when think=False (incompatible with thinking mode).
     if format_json and not think:
         payload["format"] = "json"
 
-    body = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(
-        url,
-        data=body,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-
     start = time.monotonic()
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            result = json.loads(resp.read().decode("utf-8"))
-    except urllib.error.URLError as exc:
-        raise ConnectionError(f"Ollama not reachable at {host}: {exc}") from exc
-
+    result = ollama_generate(host, payload, timeout)
     elapsed = time.monotonic() - start
     return result.get("response", ""), elapsed
+
+
+def sop_system_prompt(profile_system: str = "") -> str:
+    """The SOP system prompt: the profile's nudge (if any) followed by the
+    quality rules in ``SOP_SYSTEM_PROMPT``, which always apply."""
+    if profile_system:
+        return profile_system + "\n\n" + SOP_SYSTEM_PROMPT
+    return SOP_SYSTEM_PROMPT
 
 
 # ---------------------------------------------------------------------------
@@ -1464,18 +1463,44 @@ def _call_ollama(
 class SOPGenerator:
     """Generate semantic SOPs from VLM annotations and frame diffs.
 
-    Uses qwen3.5:4b (think=True) for high-quality SOP generation.
+    Token budget, context, sampling and thinking come from the model
+    profile (``model_profiles.get_profile``).
     Designed to run as the final stage in the v2 pipeline.
     """
 
     def __init__(self, config: SOPGeneratorConfig | None = None) -> None:
         self.config = config or SOPGeneratorConfig()
 
+    def _call(
+        self, prompt: str, *, retry: bool = False, system: str | None = None,
+    ) -> tuple[str, float]:
+        """One SOP generation call with the model profile's token budget,
+        context and sampling options.
+
+        The first attempt uses the profile's ``sop_think`` (and
+        grammar-constrained JSON when thinking is off).  A retry, after an
+        unparseable answer, turns thinking off, forces JSON, keeps the same
+        token budget and gets its own ``retry_timeout``.
+        """
+        from agenthandover_worker.model_profiles import get_profile
+
+        profile = get_profile(self.config.model)
+        return _call_ollama(
+            model=self.config.model,
+            prompt=prompt,
+            host=self.config.ollama_host,
+            num_predict=profile.sop_num_predict,
+            system=system if system is not None else sop_system_prompt(profile.sop_system),
+            timeout=self.config.retry_timeout if retry else self.config.timeout,
+            think=False if retry else profile.sop_think,
+            format_json=True,
+            extra_options=profile.sop_options(),
+        )
+
     def generate_from_focus(
         self,
         timeline: list[dict],
         title: str,
-        behavioral_context: str = "",
     ) -> GeneratedSOP:
         """Generate a SOP from a focus recording session.
 
@@ -1517,31 +1542,15 @@ class SOPGenerator:
         # Build prompt
         prompt = _build_focus_prompt(title, meaningful)
 
-        # Inject behavioral context if available (pre-analysis of user intent)
-        if behavioral_context:
-            prompt += f"\n\nBEHAVIORAL CONTEXT (use this to understand the user's intent and filter noise like ads, notifications, or unrelated content):\n{behavioral_context}\n"
-
         # Call VLM with model-specific profile
-        from agenthandover_worker.model_profiles import get_profile
-        profile = get_profile(self.config.model)
         try:
-            raw_response, elapsed = _call_ollama(
-                model=self.config.model,
-                prompt=prompt,
-                host=self.config.ollama_host,
-                num_predict=profile.sop_num_predict,
-                system=profile.sop_system or SOP_SYSTEM_PROMPT,
-                timeout=self.config.timeout,
-                think=profile.sop_think,
-                extra_options={
-                    k: v for k, v in profile.sop_options().items()
-                    if k not in ("num_predict",)
-                },
-            )
+            raw_response, elapsed = self._call(prompt)
         except ConnectionError as exc:
+            # Ollama unreachable: keep the session for a later retry.
             return GeneratedSOP(
                 sop={},
                 success=False,
+                deferred=True,
                 error=f"VLM connection failed: {exc}",
             )
         except Exception as exc:
@@ -1561,15 +1570,9 @@ class SOPGenerator:
             )
             logger.debug("Raw response (attempt 1): %.500s", raw_response[:500])
             try:
-                raw_response2, elapsed2 = _call_ollama(
-                    model=self.config.model,
-                    prompt=prompt + "\n\nIMPORTANT: Respond with ONLY valid JSON. No commentary, no markdown.",
-                    host=self.config.ollama_host,
-                    num_predict=self.config.num_predict,
-                    system=SOP_SYSTEM_PROMPT,
-                    timeout=self.config.timeout,
-                    think=False,
-                    format_json=True,  # Force JSON grammar on retry
+                raw_response2, elapsed2 = self._call(
+                    prompt + "\n\nIMPORTANT: Respond with ONLY valid JSON. No commentary, no markdown.",
+                    retry=True,
                 )
                 elapsed += elapsed2
                 vlm_sop = _parse_sop_response(raw_response2)
@@ -1596,15 +1599,10 @@ class SOPGenerator:
                     '\nRespond with ONLY this JSON structure: '
                     '{"title": "...", "steps": [{"action": "...", "app": "...", "verify": "..."}]}'
                 )
-                raw_response3, elapsed3 = _call_ollama(
-                    model=self.config.model,
-                    prompt=minimal_prompt,
-                    host=self.config.ollama_host,
-                    num_predict=4000,
+                raw_response3, elapsed3 = self._call(
+                    minimal_prompt,
+                    retry=True,
                     system="You output ONLY valid JSON. No explanation.",
-                    timeout=self.config.timeout,
-                    think=False,
-                    format_json=True,
                 )
                 elapsed += elapsed3
                 vlm_sop = _parse_sop_response(raw_response3)
@@ -1689,15 +1687,7 @@ class SOPGenerator:
 
         # Call VLM
         try:
-            raw_response, elapsed = _call_ollama(
-                model=self.config.model,
-                prompt=prompt,
-                host=self.config.ollama_host,
-                num_predict=self.config.num_predict,
-                system=SOP_SYSTEM_PROMPT,
-                timeout=self.config.timeout,
-                think=True,
-            )
+            raw_response, elapsed = self._call(prompt)
         except Exception as exc:
             return GeneratedSOP(
                 sop={},
@@ -1716,14 +1706,8 @@ class SOPGenerator:
                     "Please respond with ONLY a valid JSON object, "
                     "no markdown fences, no explanatory text.\n\n"
                 )
-                raw_response2, elapsed2 = _call_ollama(
-                    model=self.config.model,
-                    prompt=repair_prefix + prompt,
-                    host=self.config.ollama_host,
-                    num_predict=self.config.num_predict,
-                    system=SOP_SYSTEM_PROMPT,
-                    timeout=self.config.timeout,
-                    think=True,
+                raw_response2, elapsed2 = self._call(
+                    repair_prefix + prompt, retry=True,
                 )
                 elapsed += elapsed2
                 vlm_sop = _parse_sop_response(raw_response2)
@@ -1832,15 +1816,7 @@ class SOPGenerator:
 
         # Call VLM
         try:
-            raw_response, elapsed = _call_ollama(
-                model=self.config.model,
-                prompt=prompt,
-                host=self.config.ollama_host,
-                num_predict=self.config.num_predict,
-                system=SOP_SYSTEM_PROMPT,
-                timeout=self.config.timeout,
-                think=True,
-            )
+            raw_response, elapsed = self._call(prompt)
         except Exception as exc:
             return GeneratedSOP(
                 sop={}, success=False,
@@ -1856,14 +1832,8 @@ class SOPGenerator:
                     "Your previous response was not valid JSON. "
                     "Please respond with ONLY a valid JSON object.\n\n"
                 )
-                raw_response2, elapsed2 = _call_ollama(
-                    model=self.config.model,
-                    prompt=repair_prefix + prompt,
-                    host=self.config.ollama_host,
-                    num_predict=self.config.num_predict,
-                    system=SOP_SYSTEM_PROMPT,
-                    timeout=self.config.timeout,
-                    think=True,
+                raw_response2, elapsed2 = self._call(
+                    repair_prefix + prompt, retry=True,
                 )
                 elapsed += elapsed2
                 vlm_sop = _parse_sop_response(raw_response2)

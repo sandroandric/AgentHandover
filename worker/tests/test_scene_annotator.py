@@ -23,6 +23,7 @@ from agenthandover_worker.scene_annotator import (
     _strip_markdown_fences,
     _validate_annotation,
     build_annotation_prompt,
+    annotation_system_prompt,
     _build_context_section,
 )
 
@@ -206,8 +207,9 @@ class TestBuildAnnotationPrompt:
 
     def test_no_context(self):
         prompt = build_annotation_prompt()
-        assert "task_context" in prompt
         assert "PREVIOUS FRAMES" not in prompt
+        # The schema description travels in the system prompt.
+        assert "task_context" in annotation_system_prompt()
 
     def test_empty_context(self):
         prompt = build_annotation_prompt([])
@@ -235,7 +237,7 @@ class TestBuildAnnotationPrompt:
         ]
         prompt = build_annotation_prompt(recent)
         # Should gracefully handle bad JSON — no crash, no context section
-        assert "task_context" in prompt
+        assert "PREVIOUS FRAMES" not in prompt
 
 
 class TestBuildContextSection:
@@ -399,8 +401,9 @@ class TestSceneAnnotator:
         result = annotator.annotate_event(event)
         assert result.status == "missing_screenshot"
 
-    def test_annotate_invalid_json_retries(self, tmp_path):
-        """Invalid JSON triggers one retry."""
+    def test_annotate_invalid_json_is_not_retried(self, tmp_path):
+        """Output is schema-constrained at temperature 0, so an invalid
+        answer (a truncation) is not re-asked: one call, status failed."""
         img = tmp_path / "screenshot.jpg"
         img.write_bytes(b"\xff\xd8\xff\xe0" + b"\x00" * 100)
 
@@ -430,8 +433,9 @@ class TestSceneAnnotator:
         ):
             result = annotator.annotate_event(event)
 
-        assert result.status == "completed"
-        assert call_count[0] == 2  # original + retry
+        assert result.status == "failed"
+        assert result.error == "invalid_json"
+        assert call_count[0] == 1
 
     def test_annotate_both_attempts_fail(self, tmp_path):
         """Both attempts fail → status=failed."""
@@ -510,7 +514,7 @@ class TestSceneAnnotator:
         assert result.status == "completed"
 
     def test_connection_error(self, tmp_path):
-        """Ollama not running → graceful failure."""
+        """Ollama not running → deferred, the frame is kept for later."""
         img = tmp_path / "screenshot.jpg"
         img.write_bytes(b"\xff\xd8\xff\xe0" + b"\x00" * 100)
 
@@ -535,8 +539,16 @@ class TestSceneAnnotator:
         ):
             result = annotator.annotate_event(event)
 
-        assert result.status == "failed"
-        assert "ollama_connection" in result.error
+        assert result.status == "deferred"
+        assert "ollama_unavailable" in result.error
+        assert annotator.stats["deferred"] == 1
+        assert annotator.stats["failed"] == 0
+        # The transport backoff is armed: no probe, no call until it ends.
+        with patch(
+            "agenthandover_worker.scene_annotator._ollama_has_model",
+        ) as probe:
+            assert annotator.ready() is False
+        probe.assert_not_called()
 
     def test_screenshot_deleted_on_success(self, tmp_path):
         """Screenshot file is deleted after successful annotation."""
@@ -590,8 +602,9 @@ class TestSceneAnnotator:
         assert result.status == "failed"
         assert not img.exists(), "Screenshot should be deleted even on failure"
 
-    def test_screenshot_deleted_on_connection_error(self, tmp_path):
-        """Screenshot is deleted when VLM connection fails."""
+    def test_screenshot_kept_on_connection_error(self, tmp_path):
+        """Ollama unreachable: the screenshot is kept so the deferred frame
+        can be annotated once Ollama is back."""
         img = tmp_path / "screenshot.jpg"
         img.write_bytes(b"\xff\xd8\xff\xe0" + b"\x00" * 100)
 
@@ -616,8 +629,8 @@ class TestSceneAnnotator:
         ):
             result = annotator.annotate_event(event)
 
-        assert result.status == "failed"
-        assert not img.exists(), "Screenshot should be deleted even on connection error"
+        assert result.status == "deferred"
+        assert img.exists(), "Screenshot must survive a transport error"
 
     def test_screenshot_kept_when_deletion_disabled(self, tmp_path):
         """Screenshot is kept when delete_screenshot_after_processing is False."""
@@ -806,7 +819,7 @@ class TestOCRInjection:
     Historical bug (caught 2026-04-10): the scene_annotator never fed
     daemon OCR output into the VLM prompt.  Gemma re-read text visually
     from half-res screenshots and misread things like email addresses
-    (e.g. 'sandro@sandric.co' → 'sandro@sandroid.co').  The daemon-
+    (e.g. 'jane@example.com' → 'jane@exarnple.com').  The daemon-
     captured OCR had confidence 1.0 for those exact chars but sat unused.
     """
 
@@ -817,7 +830,7 @@ class TestOCRInjection:
                 "ocr": {
                     "elements": [
                         {"text": "To:", "confidence": 1.0, "bbox_normalized": [0, 0, 0.1, 0.05]},
-                        {"text": "sandro@sandric.co", "confidence": 1.0, "bbox_normalized": [0.1, 0, 0.5, 0.05]},
+                        {"text": "jane@example.com", "confidence": 1.0, "bbox_normalized": [0.1, 0, 0.5, 0.05]},
                         {"text": "Subject:", "confidence": 1.0, "bbox_normalized": [0, 0.05, 0.1, 0.1]},
                         {"text": "daily news for April 10", "confidence": 1.0, "bbox_normalized": [0.1, 0.05, 0.7, 0.1]},
                     ]
@@ -825,7 +838,7 @@ class TestOCRInjection:
             }),
         }
         text = _extract_ocr_text_from_event(event)
-        assert "sandro@sandric.co" in text
+        assert "jane@example.com" in text
         assert "daily news for April 10" in text
         assert "Subject:" in text
 
@@ -892,21 +905,21 @@ class TestOCRInjection:
         containing the actual OCR text and the ground-truth marker."""
         prompt = build_annotation_prompt(
             recent_annotations=None,
-            ocr_text="sandro@sandric.co\ndaily news for April 10",
+            ocr_text="jane@example.com\ndaily news for April 10",
         )
         # Must contain the actual OCR text we passed in
-        assert "sandro@sandric.co" in prompt
+        assert "jane@example.com" in prompt
         assert "daily news for April 10" in prompt
         # Must contain the OCR block header (only present when ocr_text is non-empty)
-        assert "treat as ground truth" in prompt
+        assert "OCR TEXT" in prompt
+        assert "ground truth" not in prompt
 
     def test_build_prompt_omits_ocr_section_when_empty(self):
         """When no OCR text is passed, the OCR block header must not appear."""
         prompt = build_annotation_prompt(ocr_text="")
-        # The OCR block-specific header (from OCR_TEMPLATE) should NOT appear.
-        # Note: the rule text in the template body still mentions "OCR TEXT"
-        # as a general instruction — we check for the distinctive block header.
-        assert "treat as ground truth, not visual guess" not in prompt
+        # The OCR guidance lives in the system prompt; the per-frame prompt
+        # carries the OCR block only when there is OCR text.
+        assert "OCR TEXT" not in prompt
 
     def test_build_prompt_combines_ocr_and_context(self):
         """OCR and sliding-window context can coexist in the same prompt."""
@@ -922,10 +935,10 @@ class TestOCRInjection:
         ]
         prompt = build_annotation_prompt(
             recent_annotations=recent,
-            ocr_text="sandro@sandric.co",
+            ocr_text="jane@example.com",
         )
-        assert "sandro@sandric.co" in prompt
-        assert "treat as ground truth" in prompt
+        assert "jane@example.com" in prompt
+        assert "OCR TEXT" in prompt
         assert "PREVIOUS FRAMES" in prompt
         assert "Gmail" in prompt
 

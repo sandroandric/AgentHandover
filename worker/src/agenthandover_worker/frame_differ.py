@@ -344,15 +344,21 @@ class FrameDiffer:
         prompt = DIFF_PROMPT_TEMPLATE.format(frame_a=frame_a, frame_b=frame_b)
 
         try:
-            from agenthandover_worker.scene_annotator import _call_ollama_vlm
+            from agenthandover_worker.scene_annotator import (
+                ANNOTATION_KEEP_ALIVE, _call_ollama_vlm,
+            )
             from agenthandover_worker.model_profiles import get_profile
             profile = get_profile(self.config.model)
 
+            # The differ runs on the annotation model: the same num_ctx and
+            # keep_alive keep Ollama from reloading or unloading it early.
             raw_response, inference_time = _call_ollama_vlm(
                 model=self.config.model,
                 prompt=prompt,
                 host=self.config.ollama_host,
                 num_predict=profile.diff_num_predict,
+                num_ctx=profile.ann_num_ctx,
+                keep_alive=ANNOTATION_KEEP_ALIVE,
                 system=profile.diff_system or DIFF_SYSTEM_PROMPT,
                 think=profile.diff_think,
                 extra_options={

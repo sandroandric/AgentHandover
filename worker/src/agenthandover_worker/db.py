@@ -178,6 +178,7 @@ class WorkerDB:
         limit: int = 20,
         *,
         focus_first: bool = True,
+        exclude_focus: bool = False,
     ) -> list[dict]:
         """Return events pending scene annotation, ordered for processing.
 
@@ -185,17 +186,27 @@ class WorkerDB:
         (identified by a non-null ``focus_session_id`` in metadata_json)
         are sorted before non-focus events so the annotation loop
         prioritises explicit recording sessions.
+
+        When *exclude_focus* is True, focus-session events are left out
+        entirely.  The passive annotation loop uses this: focus rows belong
+        to the focus processor, and a batch filled with them would starve
+        passive frames for as long as those rows stay pending.
         """
-        order = (
-            "ORDER BY "
-            "(CASE WHEN json_extract(metadata_json, '$.focus_session_id') IS NOT NULL "
-            "THEN 0 ELSE 1 END) ASC, "
-            "timestamp ASC"
-        ) if focus_first else "ORDER BY timestamp ASC"
+        focus_expr = "json_extract(metadata_json, '$.focus_session_id') IS NOT NULL"
+        where = "annotation_status = 'pending'"
+        if exclude_focus:
+            where += f" AND NOT ({focus_expr})"
+            order = "ORDER BY timestamp ASC"
+        elif focus_first:
+            order = (
+                f"ORDER BY (CASE WHEN {focus_expr} THEN 0 ELSE 1 END) ASC, "
+                "timestamp ASC"
+            )
+        else:
+            order = "ORDER BY timestamp ASC"
 
         cur = self._conn.execute(
-            f"SELECT * FROM events WHERE annotation_status = 'pending' "
-            f"{order} LIMIT ?",
+            f"SELECT * FROM events WHERE {where} {order} LIMIT ?",
             (limit,),
         )
         return self._rows_to_dicts(cur.fetchall())

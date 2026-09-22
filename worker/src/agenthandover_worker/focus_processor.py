@@ -21,6 +21,9 @@ from agenthandover_worker.sop_generator import SOPGenerator, GeneratedSOP
 
 logger = logging.getLogger(__name__)
 
+# Annotation statuses the focus path does not re-annotate.
+_ANNOTATION_DONE = ("completed", "skipped", "missing_screenshot")
+
 
 class FocusProcessor:
     """Process completed focus recording sessions through the v2 pipeline.
@@ -37,12 +40,11 @@ class FocusProcessor:
         annotator: SceneAnnotator,
         differ: FrameDiffer,
         sop_generator: SOPGenerator,
-        behavioral_synthesizer: "BehavioralSynthesizer | None" = None,
     ) -> None:
         self.annotator = annotator
         self.differ = differ
         self.sop_generator = sop_generator
-        self.behavioral_synthesizer = behavioral_synthesizer
+        self._last_rich_observations: list[list[dict]] = []
 
     def process_session(
         self,
@@ -91,14 +93,32 @@ class FocusProcessor:
         # Step 0b: Attach clipboard context to adjacent screenshots
         events = self._attach_clipboard_context(events)
 
-        # Step 1: Ensure all events are annotated
+        # Step 1: Ensure all events are annotated.  During the transport
+        # backoff, don't hit Ollama at all; the session waits.
+        needs_annotation = any(
+            e.get("annotation_status", "pending") not in _ANNOTATION_DONE
+            for e in events
+        )
+        if needs_annotation and not self.annotator.ready():
+            return GeneratedSOP(
+                sop={}, success=False, deferred=True,
+                error="Annotation deferred: Ollama unavailable",
+            )
         ann_stats = self._ensure_annotations(db, events, screenshots_dir)
         logger.info(
-            "Focus v2 annotation: %d annotated, %d skipped, %d failed",
+            "Focus v2 annotation: %d annotated, %d skipped, %d failed, %d deferred",
             ann_stats["annotated"],
             ann_stats["skipped"],
             ann_stats["failed"],
+            ann_stats["deferred"],
         )
+        if ann_stats["deferred"]:
+            # Ollama is unreachable: keep the session (rows pending,
+            # screenshots kept) and retry on a later tick.
+            return GeneratedSOP(
+                sop={}, success=False, deferred=True,
+                error="Annotation deferred: Ollama unavailable",
+            )
 
         # Step 2: Ensure frame diffs exist
         diff_stats = self._ensure_diffs(db, events)
@@ -123,74 +143,17 @@ class FocusProcessor:
             len(timeline), len(events),
         )
 
-        # Step 4: Behavioral pre-analysis (optional, informs SOP generation)
-        behavioral_context = ""
-        self._last_pre_analysis_strategy = ""  # expose for fallback
-        self._last_pre_analysis_goal = ""  # expose for fallback
-        # Build the rich-evidence observations once and stash on the
-        # processor so the post-SOP synthesizer in main.py can reuse the
-        # SAME rich data instead of just the abstract SOP steps.
-        rich_observations = [
+        # Rich per-frame observations for the single behavioral synthesis
+        # call that main.py runs after SOP generation.
+        self._last_rich_observations = [
             [
                 self._build_pre_analysis_obs(f)
                 for f in timeline if f.get("annotation")
             ]
         ]
-        self._last_rich_observations = rich_observations
-        if self.behavioral_synthesizer is not None:
-            try:
-                from agenthandover_worker.sop_generator import _generate_slug
-                pre_procedure = {"title": title, "steps": [], "source": "focus"}
-                # Build richer observations from annotations so the model
-                # has enough context to extract a concrete goal.  Include
-                # key_text fields (email addresses, typed text, urls) which
-                # are now populated accurately from daemon OCR — these are
-                # the "verbatim" grounding the synthesizer prompt asks for.
-                timeline_obs = rich_observations
-                insights = self.behavioral_synthesizer.synthesize(
-                    _generate_slug(title), pre_procedure, timeline_obs,
-                    force=True,
-                )
-                if insights.goal:
-                    self._last_pre_analysis_goal = insights.goal
-                if insights.strategy or insights.goal:
-                    self._last_pre_analysis_strategy = insights.strategy
-                    # Goal leads the context so the SOP generator sees
-                    # intent before approach.
-                    pieces: list[str] = []
-                    if insights.goal:
-                        pieces.append(f"User goal: {insights.goal}")
-                    if insights.strategy:
-                        pieces.append(f"User strategy: {insights.strategy}")
-                    if insights.selection_criteria:
-                        crit_strs: list[str] = []
-                        for c in insights.selection_criteria:
-                            # selection_criteria entries are dicts, not objects
-                            if isinstance(c, dict):
-                                val = c.get("criterion", "")
-                                if val:
-                                    crit_strs.append(str(val))
-                        if crit_strs:
-                            pieces.append(
-                                "Selection criteria: " + ", ".join(crit_strs)
-                            )
-                    behavioral_context = "\n".join(pieces) + "\n"
-                    logger.info(
-                        "Focus v2 session '%s': behavioral pre-analysis complete "
-                        "(goal=%s, strategy=%s)",
-                        title, bool(insights.goal), bool(insights.strategy),
-                    )
-            except Exception:
-                logger.debug(
-                    "Behavioral pre-analysis failed for '%s'", title, exc_info=True,
-                )
 
-        # Step 5: Generate SOP (with behavioral context if available)
-        result = self.sop_generator.generate_from_focus(
-            timeline, title,
-            behavioral_context=behavioral_context,
-        )
-        return result
+        # Step 4: Generate SOP
+        return self.sop_generator.generate_from_focus(timeline, title)
 
     @staticmethod
     def _build_pre_analysis_obs(frame: dict) -> dict:
@@ -527,14 +490,17 @@ class FocusProcessor:
         Focus events are processed with priority — we annotate them
         immediately rather than waiting for the background loop.
         """
-        stats = {"annotated": 0, "skipped": 0, "failed": 0, "already_done": 0}
+        stats = {
+            "annotated": 0, "skipped": 0, "failed": 0,
+            "already_done": 0, "deferred": 0,
+        }
 
         for event in events:
             event_id = event.get("id", "unknown")
             status = event.get("annotation_status", "pending")
 
             # Already annotated
-            if status in ("completed", "skipped", "missing_screenshot"):
+            if status in _ANNOTATION_DONE:
                 stats["already_done"] += 1
                 continue
 
@@ -567,6 +533,11 @@ class FocusProcessor:
                     event_id, "", status=result.status
                 )
                 stats["skipped"] += 1
+            elif result.status == "deferred":
+                # Ollama unreachable: leave this and the remaining rows
+                # pending with their screenshots.
+                stats["deferred"] += 1
+                break
             else:
                 db.save_annotation(  # type: ignore[union-attr]
                     event_id, "", status="failed"

@@ -300,7 +300,7 @@ class TestSynthesize:
     def test_goal_field_is_parsed_and_stripped(self):
         """The goal field must be extracted from VLM JSON and stripped."""
         vlm_response = json.dumps({
-            "goal": "  Sends a daily HN digest email to self at sandro@sandric.co  ",
+            "goal": "  Sends a daily HN digest email to self at jane@example.com  ",
             "strategy": "Copy HN top stories, paste into Gmail compose, send",
             "confidence": 0.9,
         })
@@ -312,8 +312,8 @@ class TestSynthesize:
             insights = synth.synthesize(
                 "daily-email", _make_procedure(), _make_observations(1),
             )
-        assert insights.goal == "Sends a daily HN digest email to self at sandro@sandric.co"
-        assert "sandro@sandric.co" in insights.goal
+        assert insights.goal == "Sends a daily HN digest email to self at jane@example.com"
+        assert "jane@example.com" in insights.goal
 
     def test_prompt_requires_concrete_goal(self):
         """The synthesis prompt body must ask for a concrete goal with \
@@ -373,12 +373,12 @@ class TestTimelineEvidence:
     def test_renders_email_addresses_verbatim(self):
         obs = [[
             self._make_rich_frame(
-                email_addresses=["sandro@sandric.co"],
+                email_addresses=["jane@example.com"],
                 typed_text="updates",
             )
         ]]
         out = BehavioralSynthesizer._format_timeline_evidence(obs)
-        assert "sandro@sandric.co" in out
+        assert "jane@example.com" in out
         assert "TIMELINE EVIDENCE" in out
         assert "verbatim" in out
         assert 'typed="updates"' in out
@@ -431,7 +431,7 @@ class TestTimelineEvidence:
                 "action": "compose email",
                 "app": "Gmail",
                 "location": "mail.google.com",
-                "email_addresses": ["sandro@sandric.co"],
+                "email_addresses": ["jane@example.com"],
                 "typed_text": "daily updates email",
             },
             {
@@ -445,7 +445,7 @@ class TestTimelineEvidence:
         prompt = synth._build_prompt(_make_procedure(), rich_obs)
         # The verbatim grounding the synthesizer prompt asks for must
         # actually appear in the prompt body.
-        assert "sandro@sandric.co" in prompt
+        assert "jane@example.com" in prompt
         assert "news.ycombinator.com" in prompt
         assert "daily updates email" in prompt
         assert "Story 1" in prompt
