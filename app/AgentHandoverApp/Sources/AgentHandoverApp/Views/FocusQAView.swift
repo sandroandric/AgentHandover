@@ -164,7 +164,7 @@ struct FocusQAView: View {
                     .padding(.leading, 4)
             }
 
-            TextField("Your answer", text: answerBinding(for: question.index, default: question.default))
+            TextField(Self.placeholder(for: question), text: answerBinding(for: question.index))
                 .textFieldStyle(.plain)
                 .font(.system(size: 13))
                 .padding(.horizontal, 12)
@@ -280,20 +280,45 @@ struct FocusQAView: View {
         }
 
         questionsFile = file
-
-        // Pre-fill answers with defaults
-        for question in file.questions {
-            if answers[question.index] == nil {
-                answers[question.index] = question.default
-            }
-        }
     }
 
-    // MARK: - Answer Binding
+    // MARK: - Answers
 
-    private func answerBinding(for index: Int, default defaultValue: String) -> Binding<String> {
+    /// The value an answer field starts with and shows: only what the user
+    /// typed.  The model's guess is the placeholder, never the value, so an
+    /// untouched field is submitted as unanswered rather than as the guess.
+    static func answerText(for index: Int, in answers: [Int: String]) -> String {
+        answers[index] ?? ""
+    }
+
+    /// Placeholder for a question's answer field: the model's guess, labelled
+    /// as a guess, or a generic hint when the model made none.
+    static func placeholder(for question: FocusQuestion) -> String {
+        let guess = question.default.trimmingCharacters(in: .whitespacesAndNewlines)
+        return guess.isEmpty ? "Your answer" : "Guess: \(guess)"
+    }
+
+    /// The answers written back to the worker: the non-blank text the user
+    /// typed, keyed by question index.  A question left blank is omitted and
+    /// the worker records it as unanswered.
+    static func submittedAnswers(
+        for questions: [FocusQuestion],
+        answers: [Int: String]
+    ) -> [String: String] {
+        var result: [String: String] = [:]
+        for question in questions {
+            let text = answerText(for: question.index, in: answers)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if !text.isEmpty {
+                result[String(question.index)] = text
+            }
+        }
+        return result
+    }
+
+    private func answerBinding(for index: Int) -> Binding<String> {
         Binding(
-            get: { answers[index] ?? defaultValue },
+            get: { Self.answerText(for: index, in: answers) },
             set: { answers[index] = $0 }
         )
     }
@@ -305,12 +330,7 @@ struct FocusQAView: View {
         writeError = nil
 
         file.status = "answered"
-        var answersDict: [String: String] = [:]
-        for question in file.questions {
-            let answer = answers[question.index] ?? question.default
-            answersDict[String(question.index)] = answer
-        }
-        file.answers = answersDict
+        file.answers = Self.submittedAnswers(for: file.questions, answers: answers)
 
         if writeFile(file) {
             didSubmit = true
