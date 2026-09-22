@@ -141,7 +141,7 @@ class ProcedureWriter:
             )
 
         # A regeneration keeps what accumulated on the existing procedure
-        # (evidence, lifecycle, answers' constraints, agent runs).
+        # (evidence, trust, lifecycle, agent runs).
         existing = self._kb.get_procedure(procedure.get("id", ""))
         if existing is not None:
             merge_existing_procedure(procedure, existing)
