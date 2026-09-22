@@ -126,6 +126,30 @@ class KnowledgeBase:
                 results.append(data)
         return results
 
+    def backfill_procedures(self) -> int:
+        """Repair procedures saved before the schema field-mapping fix.
+
+        Rewrites, in place, each procedure file that
+        ``procedure_schema.backfill_procedure_fields`` changes (empty
+        ``description`` filled from ``task_description``; empty step
+        app/location/input/verify filled from ``parameters``).
+
+        Returns the number of procedure files rewritten.
+        """
+        from agenthandover_worker.procedure_schema import backfill_procedure_fields
+
+        proc_dir = self._root / _PROCEDURES_DIR
+        if not proc_dir.is_dir():
+            return 0
+        count = 0
+        for path in sorted(proc_dir.glob("*.json")):
+            data = self._read_json(path)
+            if data is not None and backfill_procedure_fields(data):
+                self.atomic_write_json(path, data)
+                count += 1
+        logger.info("Backfilled %d procedure(s) in %s", count, proc_dir)
+        return count
+
     def delete_procedure(self, slug: str) -> bool:
         """Delete a procedure by slug.  Returns True if deleted."""
         path = self._root / _PROCEDURES_DIR / f"{_sanitize_slug(slug)}.json"

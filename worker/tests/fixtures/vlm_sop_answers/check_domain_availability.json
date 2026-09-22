@@ -1,0 +1,61 @@
+{
+  "title": "Check Domain Availability",
+  "short_title": "Domain Check",
+  "tags": ["browsing"],
+  "description": "Check whether a domain name is available for purchase on Namecheap and note its price.",
+  "outcome": "The user knows whether the domain is available and what it costs.",
+  "when_to_use": "When exploring new domain names for a project.",
+  "prerequisites": ["A web browser"],
+  "steps": [
+    {
+      "step_number": 1,
+      "action": "Open the Namecheap homepage",
+      "description": "Namecheap's domain search is the starting point for every availability check.",
+      "app": "Google Chrome",
+      "location": "https://www.namecheap.com",
+      "input": "",
+      "verify": "The Namecheap homepage loads with the domain search box visible."
+    },
+    {
+      "step_number": 2,
+      "action": "Type the domain name into the search box",
+      "description": "The search box accepts a full domain or a keyword; type the exact domain to get an exact-match result.",
+      "app": "Google Chrome",
+      "location": "Namecheap domain search box",
+      "input": "{{domain_name}}",
+      "verify": "The search box shows the typed domain name."
+    },
+    {
+      "step_number": 3,
+      "action": "Click Search",
+      "description": "Submitting the search opens the results page with the exact match listed first.",
+      "app": "Google Chrome",
+      "location": "https://www.namecheap.com/domains/registration/results/",
+      "input": "",
+      "verify": "The results page lists the domain with an availability badge."
+    },
+    {
+      "step_number": 4,
+      "action": "Read the availability and price of the exact match",
+      "description": "The first row is the exact match; its badge says whether it can be registered and its price is the first-year cost.",
+      "app": "Google Chrome",
+      "location": "Namecheap search results, first row",
+      "input": "",
+      "verify": "The first row shows either an Add to cart button with a price or a Make offer / Taken label."
+    }
+  ],
+  "success_criteria": ["The availability status and price of the domain are known"],
+  "variables": [
+    {
+      "name": "domain_name",
+      "type": "text",
+      "example": "example.com",
+      "description": "Domain to check",
+      "required": true,
+      "sensitive": false,
+      "validation": "A domain name such as example.com"
+    }
+  ],
+  "common_errors": ["If Namecheap shows a captcha, solve it and search again"],
+  "apps_involved": ["Google Chrome"]
+}

@@ -12,10 +12,8 @@ from agenthandover_worker.knowledge_base import KnowledgeBase
 from agenthandover_worker.procedure_schema import (
     PROCEDURE_SCHEMA_VERSION,
     sop_to_procedure,
-    upgrade_v2_to_v3,
     validate_procedure,
 )
-from agenthandover_worker.sop_schema import sop_to_json
 
 
 # ---------------------------------------------------------------------------
@@ -516,55 +514,6 @@ class TestValidateProcedure:
 
 
 # ---------------------------------------------------------------------------
-# Procedure schema — upgrade v2 to v3
-# ---------------------------------------------------------------------------
-
-class TestUpgradeV2ToV3:
-
-    def test_upgrade_from_sop_to_json(self, sample_sop_template: dict) -> None:
-        v2 = sop_to_json(sample_sop_template)
-        v3 = upgrade_v2_to_v3(v2)
-        assert v3["schema_version"] == PROCEDURE_SCHEMA_VERSION
-        assert v3["id"] == "check-expired-domains"
-        assert len(v3["steps"]) == 2
-        assert v3["metadata"]["upgraded_from"] == "3.0.0"
-
-    def test_upgrade_validates_clean(self, sample_sop_template: dict) -> None:
-        v2 = sop_to_json(sample_sop_template)
-        v3 = upgrade_v2_to_v3(v2)
-        errors = validate_procedure(v3)
-        assert errors == [], f"Validation errors: {errors}"
-
-    def test_upgrade_preserves_variables_as_inputs(
-        self, sample_sop_template: dict
-    ) -> None:
-        v2 = sop_to_json(sample_sop_template)
-        v3 = upgrade_v2_to_v3(v2)
-        assert len(v3["inputs"]) == 1
-        assert v3["inputs"][0]["name"] == "search_query"
-
-    def test_upgrade_sets_staleness(self, sample_sop_template: dict) -> None:
-        v2 = sop_to_json(sample_sop_template)
-        v3 = upgrade_v2_to_v3(v2)
-        assert v3["staleness"]["last_observed"] is not None
-        assert v3["staleness"]["last_confirmed"] is None
-
-    def test_upgrade_minimal_v2(self) -> None:
-        """Upgrade a minimal v2 with only required fields."""
-        v2 = {
-            "schema_version": "2.0.0",
-            "slug": "test",
-            "title": "Test",
-            "steps": [{"index": 0, "action": "Do thing", "target": "btn"}],
-        }
-        v3 = upgrade_v2_to_v3(v2)
-        errors = validate_procedure(v3)
-        assert errors == [], f"Validation errors: {errors}"
-        assert v3["id"] == "test"
-        assert v3["steps"][0]["step_id"] == "step_1"
-
-
-# ---------------------------------------------------------------------------
 # Integration: full round-trip through knowledge base
 # ---------------------------------------------------------------------------
 
@@ -582,12 +531,75 @@ class TestKBRoundTrip:
         errors = validate_procedure(loaded)
         assert errors == []
 
-    def test_upgrade_v2_to_kb(
-        self, kb: KnowledgeBase, sample_sop_template: dict
+
+# ---------------------------------------------------------------------------
+# Backfill of procedures saved by older versions (WP-P1)
+# ---------------------------------------------------------------------------
+
+def _legacy_procedure() -> dict:
+    """A procedure as v0.4.0's sop_to_procedure saved generator output:
+    empty description, step fields present only under ``parameters``."""
+    return {
+        "schema_version": "3.2.0",
+        "id": "legacy-flow",
+        "title": "Legacy Flow",
+        "description": "",
+        "task_description": "Do the legacy flow end to end.",
+        "steps": [{
+            "step_id": "step_1",
+            "index": 0,
+            "action": "Open the page",
+            "description": "Start here.",
+            "target": "",
+            "app": "",
+            "location": "",
+            "input": "",
+            "verify": "",
+            "parameters": {
+                "app": "Safari",
+                "location": "https://example.com",
+                "verify": "The page loads.",
+            },
+        }],
+    }
+
+
+class TestBackfillProcedures:
+
+    def test_backfill_fills_description_and_step_fields(
+        self, kb: KnowledgeBase,
     ) -> None:
-        v2 = sop_to_json(sample_sop_template)
-        v3 = upgrade_v2_to_v3(v2)
-        kb.save_procedure(v3)
-        loaded = kb.get_procedure("check-expired-domains")
-        assert loaded is not None
-        assert loaded["schema_version"] == PROCEDURE_SCHEMA_VERSION
+        path = kb.save_procedure(_legacy_procedure())
+        (kb.root / "procedures" / "complete.json").write_text(json.dumps({
+            "id": "complete", "title": "C", "description": "Has one.",
+            "steps": [],
+        }))
+        assert kb.backfill_procedures() == 1
+        data = json.loads(path.read_text())
+        assert data["description"] == "Do the legacy flow end to end."
+        step = data["steps"][0]
+        assert step["app"] == "Safari"
+        assert step["location"] == "https://example.com"
+        assert step["target"] == "https://example.com"
+        assert step["verify"] == "The page loads."
+        # Idempotent: a second run changes nothing
+        assert kb.backfill_procedures() == 0
+
+    def test_backfill_empty_kb(self, tmp_path: Path) -> None:
+        assert KnowledgeBase(root=tmp_path / "none").backfill_procedures() == 0
+
+    def test_cli_flag_backfills_and_exits(
+        self, kb: KnowledgeBase, capsys: pytest.CaptureFixture[str],
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from agenthandover_worker import main as worker_main
+
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        kb.save_procedure(_legacy_procedure())
+        worker_main.main([
+            "--backfill-procedures", "--knowledge-dir", str(kb.root),
+        ])
+        assert "Backfilled 1 procedure(s)" in capsys.readouterr().out
+        assert kb.get_procedure("legacy-flow")["description"]
+        # One-shot: no PID/status files written for the service
+        assert not (tmp_path / "home").exists()

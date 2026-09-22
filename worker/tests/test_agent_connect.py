@@ -16,6 +16,8 @@ from agenthandover_worker.agent_connect import (
     connect_hermes,
     connect_mcp,
 )
+from agenthandover_worker.procedure_schema import sop_to_procedure
+from fixtures.vlm_answers import generated_sop_template
 
 
 @pytest.fixture
@@ -24,15 +26,19 @@ def fake_kb(tmp_path: Path) -> Path:
     proc_dir = tmp_path / "knowledge" / "procedures"
     proc_dir.mkdir(parents=True)
 
-    proc_ready = {
+    # Steps come from the generator (stored model answer -> template ->
+    # procedure) so this fixture cannot drift from the real step shape.
+    proc_ready = sop_to_procedure(
+        generated_sop_template("check_domain_availability")
+    )
+    proc_ready.update({
         "id": "reddit-marketing",
         "title": "Reddit Community Marketing",
         "description": "Daily engagement workflow",
         "lifecycle_state": "agent_ready",
-        "steps": [{"action": "Open Reddit"}, {"action": "Scan posts"}],
         "constraints": {"guardrails": ["Max 5/day"]},
         "voice_profile": {"formality": "casual"},
-    }
+    })
     (proc_dir / "reddit-marketing.json").write_text(
         json.dumps(proc_ready), encoding="utf-8",
     )
@@ -211,6 +217,9 @@ class TestConnectHermes:
         assert "description: Reddit Community Marketing" in content
         assert "Max 5/day" in content
         assert "## Execution Protocol" in content
+        # Generator-shaped steps keep their target and verify line
+        assert "1. Open the Namecheap homepage (target: https://www.namecheap.com)" in content
+        assert "   - Verify: The Namecheap homepage loads" in content
 
         out = capsys.readouterr().out
         assert "Hermes integration ready" in out

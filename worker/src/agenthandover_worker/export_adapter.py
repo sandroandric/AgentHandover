@@ -20,15 +20,23 @@ def procedure_to_sop_template(procedure: dict) -> dict:
     """
     steps = []
     for s in procedure.get("steps", []):
+        # Writers read app/location/input/verify from ``parameters``;
+        # procedures carry them at the top level.  Merge the non-empty
+        # top-level values in so every writer finds them in one place.
+        params = dict(s.get("parameters") or {})
+        for key in ("app", "location", "input", "verify"):
+            if s.get(key):
+                params[key] = s[key]
         step = {
             "step": s.get("action", ""),
+            "description": s.get("description", ""),
             "target": s.get("target", ""),
             "app": s.get("app", ""),
             "location": s.get("location", ""),
             "input": s.get("input", ""),
             "verify": s.get("verify", ""),
             "confidence": s.get("confidence", 0.0),
-            "parameters": s.get("parameters", {}),
+            "parameters": params,
         }
         if s.get("selector"):
             step["selector"] = s["selector"]
