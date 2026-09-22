@@ -2495,11 +2495,12 @@ def _process_passive_discovery(
             task_label[:60], len(demonstrations),
         )
 
-        # Load evidence from prior procedure if it exists
+        # Load evidence from prior procedure if it exists.  The generated
+        # SOP is titled with task_label and slugged by _generate_slug, so
+        # the same call names the procedure an earlier run wrote.
         _prior_evidence: dict | None = None
         try:
-            from agenthandover_worker.skill_render import slugify
-            _candidate_slug = slugify(task_label) if task_label else ""
+            _candidate_slug = _generate_slug(task_label) if task_label else ""
             if _candidate_slug:
                 _prior_proc = knowledge_base.get_procedure(_candidate_slug)
                 if _prior_proc is not None:
