@@ -78,7 +78,6 @@ pub async fn run_observer_loop(
 ) -> Result<()> {
     info!("Observer event loop starting");
 
-    let redactor = Redactor::new();
     let mut dwell = super::dwell::DwellTracker::new(
         Duration::from_secs(config.t_dwell_seconds),
         Duration::from_secs(config.t_scroll_read_seconds),
@@ -282,7 +281,6 @@ pub async fn run_observer_loop(
                         }
 
                         tag_focus_session(&mut event, &active_focus_session_id);
-                        redact_event(&mut event, &redactor);
                         let _ = tx.send(ObserverMessage::Event { event }).await;
                         dwell.on_manipulation_input();
                     }
@@ -300,7 +298,6 @@ pub async fn run_observer_loop(
                             cursor_global_px.clone(),
                         );
                         tag_focus_session(&mut event, &active_focus_session_id);
-                        redact_event(&mut event, &redactor);
                         let _ = tx.send(ObserverMessage::Event { event }).await;
                     }
                     last_window_title = current_title;
@@ -381,7 +378,6 @@ pub async fn run_observer_loop(
 
                             event.metadata["focus_capture"] = serde_json::Value::Bool(true);
                             tag_focus_session(&mut event, &active_focus_session_id);
-                            redact_event(&mut event, &redactor);
                             debug!("Focus capture: DwellSnapshot with screenshot");
                             let _ = tx.send(ObserverMessage::Event { event }).await;
                         }
@@ -456,7 +452,6 @@ pub async fn run_observer_loop(
                     }
 
                     tag_focus_session(&mut event, &active_focus_session_id);
-                    redact_event(&mut event, &redactor);
                     let _ = tx.send(ObserverMessage::Event { event }).await;
                 }
 
@@ -524,7 +519,6 @@ pub async fn run_observer_loop(
                     }
 
                     tag_focus_session(&mut event, &active_focus_session_id);
-                    redact_event(&mut event, &redactor);
                     let _ = tx.send(ObserverMessage::Event { event }).await;
                 }
 
@@ -563,12 +557,18 @@ pub async fn run_storage_writer(
     info!(path = %db_path.display(), "Storage writer starting");
 
     let store = agenthandover_storage::EventStore::open(&db_path)?;
+    // Redaction is a storage invariant: every producer (observer loop,
+    // clipboard monitor, Chrome native messaging) funnels through this
+    // writer, so redacting here and only here guarantees no event reaches
+    // SQLite unredacted, whichever path produced it.
+    let redactor = Redactor::new();
     let mut event_count = 0u64;
 
     // recv() returns None only when ALL senders have been dropped, so every
     // in-flight event is guaranteed to be processed before we exit.
     while let Some(msg) = rx.recv().await {
-        let ObserverMessage::Event { event } = msg;
+        let ObserverMessage::Event { mut event } = msg;
+        redact_event(&mut event, &redactor);
         if let Err(e) = store.insert_event(&event) {
             error!(error = %e, "Failed to insert event");
         } else {

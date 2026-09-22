@@ -149,41 +149,7 @@ async fn main() -> Result<()> {
     // 0 = no message received yet.  Updated by the NM forwarder task.
     let last_nm_message_epoch_ms = Arc::new(AtomicI64::new(0));
 
-    // Load AppConfig from standard config file location, fall back to defaults
-    let app_config = {
-        use agenthandover_common::config::AppConfig;
-
-        let config_path = if cfg!(target_os = "macos") {
-            std::env::var("HOME").ok().map(|home| {
-                std::path::PathBuf::from(home)
-                    .join("Library/Application Support/agenthandover/config.toml")
-            })
-        } else {
-            std::env::var("HOME").ok().map(|home| {
-                std::path::PathBuf::from(home)
-                    .join(".config/agenthandover/config.toml")
-            })
-        };
-
-        match config_path {
-            Some(ref path) if path.is_file() => {
-                match AppConfig::from_file(path) {
-                    Ok(cfg) => {
-                        info!(path = %path.display(), "Loaded configuration from file");
-                        cfg
-                    }
-                    Err(e) => {
-                        error!(path = %path.display(), error = %e, "Failed to parse config, using defaults");
-                        AppConfig::default()
-                    }
-                }
-            }
-            _ => {
-                info!("No config file found, using defaults");
-                AppConfig::default()
-            }
-        }
-    };
+    let app_config = load_app_config();
 
     // Convert AppConfig -> ObserverConfig
     let config = ObserverConfig {
@@ -320,7 +286,7 @@ async fn main() -> Result<()> {
 
         // Run the native messaging server on stdio
         // Full daemon mode doesn't send outbound commands to Chrome — use a dummy channel
-        let mut server = native_messaging::stdio_server();
+        let server = native_messaging::stdio_server();
         let (_dummy_cmd_tx, dummy_cmd_rx) =
             mpsc::channel::<native_messaging::DaemonCommand>(1);
         if let Err(e) = server.run(nm_event_tx, dummy_cmd_rx).await {
@@ -483,6 +449,11 @@ async fn main() -> Result<()> {
         use agenthandover_daemon::platform::clipboard_monitor;
         let clip_tx = tx.clone();
         let clip_shutdown_rx = shutdown_tx.subscribe();
+        // Clipboard text is stored only when the user opted in.
+        let clip_preview_max_chars = app_config
+            .privacy
+            .enable_clipboard_preview
+            .then_some(app_config.privacy.clipboard_preview_max_chars);
         tokio::spawn(async move {
             let (clip_event_tx, mut clip_event_rx) = mpsc::channel(256);
 
@@ -529,7 +500,7 @@ async fn main() -> Result<()> {
                 }
             });
 
-            clipboard_monitor::run_clipboard_monitor(clip_event_tx, clip_shutdown_rx).await;
+            clipboard_monitor::run_clipboard_monitor(clip_event_tx, clip_shutdown_rx, clip_preview_max_chars).await;
             forwarder.abort();
         })
     };
@@ -655,7 +626,7 @@ async fn run_native_messaging_bridge() -> Result<()> {
     }
 
     // Run native messaging — this blocks until Chrome closes the pipe
-    let mut server = native_messaging::stdio_server();
+    let server = native_messaging::stdio_server();
     let (nm_event_tx, mut nm_event_rx) = mpsc::channel::<agenthandover_common::event::Event>(256);
 
     // Track the last active Chrome tab ID for outbound DOM snapshot requests.
@@ -724,7 +695,10 @@ async fn run_native_messaging_bridge() -> Result<()> {
     });
 
     // Spawn DOM request task: polls focus signal file every 2s and sends
-    // `request_snapshot` to Chrome when focus recording is active.
+    // `request_snapshot` to Chrome when focus recording is active.  Each
+    // request carries `[privacy] capture_input_values` so the content
+    // script knows whether to include form-field values in the snapshot.
+    let capture_input_values = load_app_config().privacy.capture_input_values;
     let dom_tab_id = Arc::clone(&last_active_tab_id);
     let dom_cmd_tx = cmd_tx.clone();
     let dom_request_handle = tokio::spawn(async move {
@@ -757,6 +731,7 @@ async fn run_native_messaging_bridge() -> Result<()> {
             let payload = serde_json::json!({
                 "tabId": tab_id,
                 "reason": "focus_recording",
+                "captureInputValues": capture_input_values,
             });
 
             if dom_cmd_tx
@@ -805,6 +780,43 @@ async fn run_native_messaging_bridge() -> Result<()> {
 
     info!("NM bridge exiting");
     Ok(())
+}
+
+/// Load AppConfig from the standard config file location, falling back to
+/// defaults when the file is missing or unparseable.
+fn load_app_config() -> agenthandover_common::config::AppConfig {
+    use agenthandover_common::config::AppConfig;
+
+    let config_path = if cfg!(target_os = "macos") {
+        std::env::var("HOME").ok().map(|home| {
+            std::path::PathBuf::from(home)
+                .join("Library/Application Support/agenthandover/config.toml")
+        })
+    } else {
+        std::env::var("HOME").ok().map(|home| {
+            std::path::PathBuf::from(home)
+                .join(".config/agenthandover/config.toml")
+        })
+    };
+
+    match config_path {
+        Some(ref path) if path.is_file() => {
+            match AppConfig::from_file(path) {
+                Ok(cfg) => {
+                    info!(path = %path.display(), "Loaded configuration from file");
+                    cfg
+                }
+                Err(e) => {
+                    error!(path = %path.display(), error = %e, "Failed to parse config, using defaults");
+                    AppConfig::default()
+                }
+            }
+        }
+        _ => {
+            info!("No config file found, using defaults");
+            AppConfig::default()
+        }
+    }
 }
 
 /// Derive an encryption key unique to this machine.

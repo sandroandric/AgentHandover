@@ -1,4 +1,34 @@
-use agenthandover_daemon::capture::clipboard::{ClipboardMeta, hash_content, is_high_entropy};
+use agenthandover_daemon::capture::clipboard::{clipboard_preview, ClipboardMeta, hash_content, is_high_entropy};
+
+#[test]
+fn test_clipboard_preview_off_by_default() {
+    // `enable_clipboard_preview = false` maps to `None`: no text is kept.
+    assert_eq!(clipboard_preview(b"meeting notes", true, false, None), None);
+}
+
+#[test]
+fn test_clipboard_preview_honours_max_chars() {
+    assert_eq!(
+        clipboard_preview(b"  meeting notes for monday  ", true, false, Some(7)),
+        Some("meeting".to_string())
+    );
+    // Char-based truncation never splits a multi-byte character.
+    assert_eq!(
+        clipboard_preview("héllo wörld".as_bytes(), true, false, Some(4)),
+        Some("héll".to_string())
+    );
+    assert_eq!(clipboard_preview(b"notes", true, false, Some(0)), None);
+}
+
+#[test]
+fn test_clipboard_preview_second_line_gates() {
+    // Opted in, but high-entropy content, non-text types, invalid UTF-8
+    // and whitespace-only text still get no preview.
+    assert_eq!(clipboard_preview(b"notes", true, true, Some(200)), None);
+    assert_eq!(clipboard_preview(b"notes", false, false, Some(200)), None);
+    assert_eq!(clipboard_preview(&[0xff, 0xfe], true, false, Some(200)), None);
+    assert_eq!(clipboard_preview(b"   ", true, false, Some(200)), None);
+}
 
 #[test]
 fn test_hash_content_deterministic() {

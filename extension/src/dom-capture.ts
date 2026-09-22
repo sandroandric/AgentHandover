@@ -16,6 +16,12 @@
  *   - CSS rot stripping (Emotion, styled-components, CSS Modules, generic hashed classes)
  *   - Semantic anchor extraction (role, aria-label, data-testid, innerText, bbox)
  *   - Interactive element state capture (enabled, checked, selected)
+ *   - Contenteditable roots (compose windows, docs) captured as one node
+ *     carrying their text
+ *
+ * Privacy: `<input>` / `<textarea>` values are captured only when the
+ * daemon's `[privacy] capture_input_values` is true (off by default); the
+ * flag arrives with each snapshot request.  Password values never are.
  */
 
 import type { DomNode } from './types';
@@ -44,6 +50,15 @@ export const MAX_NODE_COUNT = 3000;
 
 /** Minimum element dimension in pixels; elements smaller are filtered out. */
 export const MIN_ELEMENT_SIZE = 1;
+
+/** Options for a single snapshot. */
+export interface CaptureOptions {
+  /** Include `<input>` / `<textarea>` values (never password values).
+   *  Mirrors `[privacy] capture_input_values`; default false. */
+  captureInputValues?: boolean;
+}
+
+const DEFAULT_CAPTURE_OPTIONS: CaptureOptions = { captureInputValues: false };
 
 // ---------------------------------------------------------------------------
 // CSS Rot Detection Patterns
@@ -94,7 +109,7 @@ const INLINE_TEXT_TAGS = new Set([
   'DD', 'DEL', 'DFN', 'DT', 'EM', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6',
   'I', 'INS', 'KBD', 'LABEL', 'LI', 'MARK', 'OPTION', 'P', 'PRE', 'Q',
   'RP', 'RT', 'RUBY', 'S', 'SAMP', 'SMALL', 'SPAN', 'STRONG', 'SUB',
-  'SUP', 'TD', 'TH', 'TEXTAREA', 'TIME', 'U', 'VAR',
+  'SUP', 'TD', 'TH', 'TIME', 'U', 'VAR',
 ]);
 
 // ---------------------------------------------------------------------------
@@ -330,7 +345,10 @@ function buildRowNode(row: HTMLTableRowElement): DomNode {
  * with the element, while ignoring implementation details like generated
  * class names.
  */
-export function extractNodeInfo(element: Element): DomNode {
+export function extractNodeInfo(
+  element: Element,
+  options: CaptureOptions = DEFAULT_CAPTURE_OPTIONS,
+): DomNode {
   const tag = element.tagName.toLowerCase();
   const node: DomNode = { tag };
 
@@ -348,15 +366,9 @@ export function extractNodeInfo(element: Element): DomNode {
 
   // Accessible name via aria-labelledby (resolve to text).
   if (!ariaLabel) {
-    const labelledBy = element.getAttribute('aria-labelledby');
-    if (labelledBy) {
-      const labelElement = element.ownerDocument.getElementById(labelledBy);
-      if (labelElement) {
-        const labelText = labelElement.textContent?.trim();
-        if (labelText) {
-          node.name = truncateText(labelText);
-        }
-      }
+    const labelText = resolveLabelledBy(element);
+    if (labelText) {
+      node.name = truncateText(labelText);
     }
   }
 
@@ -390,13 +402,12 @@ export function extractNodeInfo(element: Element): DomNode {
     if (element.type && element.type !== 'text') {
       node.tag = `input[type=${element.type}]`;
     }
-    // Capture placeholder as name if no aria-label.
-    if (!node.ariaLabel && element.placeholder) {
+    // Placeholder is the name only when no accessible name exists.
+    if (!node.ariaLabel && !node.name && element.placeholder) {
       node.name = element.placeholder;
     }
-    // Capture value for non-password inputs — use higher limit for
-    // user-produced text (most valuable for workflow learning).
-    if (element.type !== 'password' && element.value) {
+    // Typed values only when the user opted in; password values never.
+    if (options.captureInputValues && element.type !== 'password' && element.value) {
       node.innerText = truncateText(element.value, MAX_INPUT_TEXT_LENGTH);
     }
   } else if (element instanceof HTMLSelectElement) {
@@ -417,11 +428,11 @@ export function extractNodeInfo(element: Element): DomNode {
     node.state = {
       enabled: !element.disabled,
     };
-    if (!node.ariaLabel && element.placeholder) {
+    if (!node.ariaLabel && !node.name && element.placeholder) {
       node.name = element.placeholder;
     }
-    // Capture textarea value — user-produced text, use higher limit.
-    if (element.value) {
+    // Typed values only when the user opted in.
+    if (options.captureInputValues && element.value) {
       node.innerText = truncateText(element.value, MAX_INPUT_TEXT_LENGTH);
     }
   }
@@ -458,6 +469,48 @@ export function extractNodeInfo(element: Element): DomNode {
   }
 
   return node;
+}
+
+/**
+ * Resolves `aria-labelledby` to its accessible-name text.  The attribute
+ * holds a space-separated list of ids; each referenced element's text is
+ * joined in order.  Ids are looked up in the element's own root (document
+ * or shadow root) so labels inside web components resolve too.
+ */
+function resolveLabelledBy(element: Element): string {
+  const ids = element.getAttribute('aria-labelledby')?.trim().split(/\s+/) ?? [];
+  const root = element.getRootNode() as Document | ShadowRoot;
+  const lookup = typeof root.getElementById === 'function' ? root : element.ownerDocument;
+  return ids
+    .map((id) => lookup.getElementById(id)?.textContent?.trim() ?? '')
+    .filter((text) => text.length > 0)
+    .join(' ');
+}
+
+// ---------------------------------------------------------------------------
+// Contenteditable
+// ---------------------------------------------------------------------------
+
+/**
+ * True when the element is editable rich text.  Uses the browser's
+ * `isContentEditable`; jsdom does not implement it, so fall back to the
+ * nearest `contenteditable` attribute.
+ */
+function isEditable(element: Element | null): boolean {
+  if (!element) return false;
+  const native = (element as HTMLElement).isContentEditable;
+  if (typeof native === 'boolean') return native;
+  const host = element.closest('[contenteditable]');
+  return host !== null && host.getAttribute('contenteditable')?.toLowerCase() !== 'false';
+}
+
+/**
+ * True for the outermost element of a contenteditable region (a Gmail
+ * compose body, a Notion block, a Google Docs canvas host).  Its text is
+ * what the user wrote; its descendants are formatting.
+ */
+export function isContentEditableRoot(element: Element): boolean {
+  return isEditable(element) && !isEditable(element.parentElement);
 }
 
 // ---------------------------------------------------------------------------
@@ -502,12 +555,14 @@ export interface NodeCounter {
  * @param node     The DOM node to process.
  * @param depth    Current recursion depth (capped at MAX_TREE_DEPTH).
  * @param counter  Shared counter tracking total nodes produced (for MAX_NODE_COUNT).
+ * @param options  Per-snapshot capture options (input values opt-in).
  * @returns        A DomNode if the element is visible and relevant, or null.
  */
 export function walkDOM(
   node: Node,
   depth: number = 0,
   counter: NodeCounter = { count: 0, truncated: false },
+  options: CaptureOptions = DEFAULT_CAPTURE_OPTIONS,
 ): DomNode | null {
   // Guard against infinite recursion.
   if (depth > MAX_TREE_DEPTH) {
@@ -570,8 +625,18 @@ export function walkDOM(
   }
 
   // Build the DomNode for this element.
-  const domNode = extractNodeInfo(element);
+  const domNode = extractNodeInfo(element, options);
   counter.count++;
+
+  // A contenteditable root becomes one node holding the text the user
+  // wrote; its descendants are formatting and would only duplicate it.
+  if (isContentEditableRoot(element)) {
+    const text = ((element as HTMLElement).innerText ?? element.textContent ?? '').trim();
+    if (text) {
+      domNode.innerText = truncateText(text, MAX_INPUT_TEXT_LENGTH);
+    }
+    return domNode;
+  }
 
   // Capture inline text for leaf-like elements.
   if (INLINE_TEXT_TAGS.has(tag)) {
@@ -591,7 +656,7 @@ export function walkDOM(
         counter.truncated = true;
         break;
       }
-      const childNode = walkDOM(shadowChild, depth + 1, counter);
+      const childNode = walkDOM(shadowChild, depth + 1, counter, options);
       if (childNode) {
         childNode.isShadowRoot = true;
         children.push(childNode);
@@ -612,7 +677,7 @@ export function walkDOM(
       continue;
     }
 
-    const childNode = walkDOM(child, depth + 1, counter);
+    const childNode = walkDOM(child, depth + 1, counter, options);
     if (childNode) {
       children.push(childNode);
     }
@@ -639,7 +704,9 @@ export function walkDOM(
  * This is the function called by the content script in response to
  * snapshot requests from the background service worker.
  */
-export function captureViewportDOM(): DomNode[] {
+export function captureViewportDOM(
+  options: CaptureOptions = DEFAULT_CAPTURE_OPTIONS,
+): DomNode[] {
   const body = document.body;
   if (!body) {
     return [];
@@ -653,7 +720,7 @@ export function captureViewportDOM(): DomNode[] {
       counter.truncated = true;
       break;
     }
-    const node = walkDOM(child, 0, counter);
+    const node = walkDOM(child, 0, counter, options);
     if (node) {
       roots.push(node);
     }

@@ -77,3 +77,68 @@ fn test_detects_sensitive_content() {
     assert!(r.contains_sensitive("my key is AKIAIOSFODNN7EXAMPLE"));
     assert!(!r.contains_sensitive("hello world"));
 }
+
+/// Each provider-specific secret shape is redacted and replaced by its marker.
+#[test]
+fn test_redacts_provider_secret_shapes() {
+    let r = Redactor::new();
+    let cases = [
+        ("sk-ant-api03-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789_-abcd", "[REDACTED_ANTHROPIC_KEY]"),
+        ("sk-proj-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789", "[REDACTED_OPENAI_KEY]"),
+        (concat!("sk_", "live_51HqLyjWDarjtT1zdp7dcXYZ"), "[REDACTED_STRIPE_KEY]"),
+        (concat!("sk_", "test_4eC39HqLyjWDarjtT1zdp7dc"), "[REDACTED_STRIPE_KEY]"),
+        (concat!("rk_", "live_51HqLyjWDarjtT1zdp7dcXYZ"), "[REDACTED_STRIPE_KEY]"),
+        ("AIzaSyA-1234567890abcdefghijklmnopqrstu", "[REDACTED_GOOGLE_API_KEY]"),
+        ("github_pat_11ABCDEFG0123456789_abcdefghijklmnopqrstuvwxyz", "[REDACTED_GITHUB_TOKEN]"),
+        ("ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij", "[REDACTED_GITHUB_TOKEN]"),
+        ("gho_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij", "[REDACTED_GITHUB_TOKEN]"),
+        ("ghs_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij", "[REDACTED_GITHUB_TOKEN]"),
+        ("glpat-AbCdEfGhIjKlMnOpQrSt", "[REDACTED_GITLAB_TOKEN]"),
+        (concat!("hf_", "AbCdEfGhIjKlMnOpQrStUvWxYzAbCdEfGh"), "[REDACTED_HF_TOKEN]"),
+        (
+            "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U",
+            "[REDACTED_JWT]",
+        ),
+    ];
+    for (secret, marker) in cases {
+        let input = format!("copied {} into the form", secret);
+        let output = r.redact(&input);
+        assert!(!output.contains(secret), "{} should be redacted, got {}", secret, output);
+        assert_eq!(output, format!("copied {} into the form", marker), "wrong marker for {}", secret);
+        assert!(r.contains_sensitive(&input), "{} should be flagged sensitive", secret);
+    }
+}
+
+/// Labelled secrets keep their label and lose their value; the rest of the
+/// text survives.
+#[test]
+fn test_redacts_labelled_passwords() {
+    let r = Redactor::new();
+    assert_eq!(r.redact("password: hunter2 please"), "password: [REDACTED_PASSWORD] please");
+    assert_eq!(r.redact("Password=hunter2"), "Password=[REDACTED_PASSWORD]");
+    assert_eq!(
+        r.redact("https://h.example/login?user=a&pwd=s3cret&x=1"),
+        "https://h.example/login?user=a&pwd=[REDACTED_PASSWORD]&x=1"
+    );
+    assert_eq!(r.redact("passwd = 'quoted'"), "passwd = [REDACTED_PASSWORD]");
+    // A bare label with no value is left alone.
+    assert_eq!(r.redact("Password:"), "Password:");
+    // Redaction is idempotent: stored text redacted twice does not change.
+    let once = r.redact("pwd=hunter2");
+    assert_eq!(r.redact(&once), once);
+}
+
+/// Near-miss strings that look like prefixes but are ordinary text stay intact.
+#[test]
+fn test_does_not_redact_prefix_lookalikes() {
+    let r = Redactor::new();
+    for input in [
+        "the sk-ant prefix is used by Anthropic",
+        "use hf_ tokens for Hugging Face",
+        "risk_test_plan.md",
+        "eyJ is how base64 JSON starts",
+        "AIza is a Google prefix",
+    ] {
+        assert_eq!(r.redact(input), input);
+    }
+}

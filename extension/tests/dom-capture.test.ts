@@ -16,7 +16,7 @@
  * See tests/integration/ for Python-based pipeline integration tests.
  */
 
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import {
   stripCssRot,
   isCssRot,
@@ -738,19 +738,35 @@ describe('MAX_NODE_COUNT cap', () => {
     expect(counter.truncated).toBe(true);
   });
 
+  // Walking 3,000+ nodes in jsdom takes ~3 s on an idle machine, almost all
+  // of it in jsdom's getComputedStyle cascade.  The visibility check is not
+  // what this test is about, so it is stubbed to "visible" for the fixture,
+  // and the test carries an explicit timeout so a loaded CI host cannot
+  // trip vitest's 5 s default.  The cap assertions are unchanged.
   it('captureViewportDOM appends #truncated marker when cap is hit', () => {
+    const styleSpy = vi
+      .spyOn(window, 'getComputedStyle')
+      .mockReturnValue({ display: 'block', visibility: 'visible' } as CSSStyleDeclaration);
+
     // Create more elements than MAX_NODE_COUNT.
     // Each element is a leaf, so each produces exactly 1 node.
     const count = MAX_NODE_COUNT + 100;
+    const fragment = document.createDocumentFragment();
     for (let i = 0; i < count; i++) {
       const el = document.createElement('span');
       el.textContent = `N${i}`;
-      document.body.appendChild(el);
+      fragment.appendChild(el);
       // Place them in viewport.
       mockBBox(el, { x: 0, y: 0, width: 50, height: 10 });
     }
+    document.body.appendChild(fragment);
 
-    const result = captureViewportDOM();
+    let result: ReturnType<typeof captureViewportDOM>;
+    try {
+      result = captureViewportDOM();
+    } finally {
+      styleSpy.mockRestore();
+    }
 
     // The last element should be the truncation marker.
     const lastNode = result[result.length - 1];
@@ -760,7 +776,7 @@ describe('MAX_NODE_COUNT cap', () => {
     // Total real nodes (excluding marker) should be at most MAX_NODE_COUNT.
     const realNodes = result.filter((n) => n.tag !== '#truncated');
     expect(realNodes.length).toBeLessThanOrEqual(MAX_NODE_COUNT);
-  });
+  }, 30_000);
 
   it('captureViewportDOM does not add #truncated when under cap', () => {
     // Create just a few elements — well under the cap.
@@ -775,6 +791,188 @@ describe('MAX_NODE_COUNT cap', () => {
     const marker = result.find((n) => n.tag === '#truncated');
     expect(marker).toBeUndefined();
     expect(result.length).toBe(5);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Privacy: form values behind capture_input_values
+// ---------------------------------------------------------------------------
+
+describe('input value capture (capture_input_values)', () => {
+  beforeEach(() => {
+    setViewportSize(1024, 768);
+    document.body.innerHTML = '';
+  });
+
+  it('does not capture <input> values by default', () => {
+    const el = document.createElement('input');
+    el.value = 'jane@example.com';
+    mockBBox(el, {});
+    expect(extractNodeInfo(el).innerText).toBeUndefined();
+    expect(extractNodeInfo(el, { captureInputValues: false }).innerText).toBeUndefined();
+  });
+
+  it('captures <input> values when opted in', () => {
+    const el = document.createElement('input');
+    el.value = 'jane@example.com';
+    mockBBox(el, {});
+    expect(extractNodeInfo(el, { captureInputValues: true }).innerText).toBe('jane@example.com');
+  });
+
+  it('never captures password values, even when opted in', () => {
+    const el = document.createElement('input');
+    el.type = 'password';
+    el.value = 'supersecret123';
+    mockBBox(el, {});
+    expect(extractNodeInfo(el, { captureInputValues: true }).innerText).toBeUndefined();
+  });
+
+  it('does not capture <textarea> values by default, captures them when opted in', () => {
+    const el = document.createElement('textarea');
+    el.value = 'draft reply';
+    mockBBox(el, {});
+    expect(extractNodeInfo(el).innerText).toBeUndefined();
+    expect(extractNodeInfo(el, { captureInputValues: true }).innerText).toBe('draft reply');
+  });
+
+  it('does not leak a <textarea> default value through the inline-text path', () => {
+    const el = document.createElement('textarea');
+    el.textContent = 'prefilled secret';
+    document.body.appendChild(el);
+    mockBBox(el, { x: 0, y: 0, width: 300, height: 100 });
+
+    const [node] = captureViewportDOM();
+    expect(node.tag).toBe('textarea');
+    expect(node.innerText).toBeUndefined();
+    expect(captureViewportDOM({ captureInputValues: true })[0].innerText).toBe('prefilled secret');
+  });
+
+  it('threads the option through walkDOM to nested inputs', () => {
+    const form = document.createElement('form');
+    const input = document.createElement('input');
+    input.value = 'ACME Corp';
+    form.appendChild(input);
+    document.body.appendChild(form);
+    mockBBox(form, { x: 0, y: 0, width: 400, height: 100 });
+    mockBBox(input, { x: 0, y: 0, width: 200, height: 30 });
+
+    expect(captureViewportDOM()[0].children![0].innerText).toBeUndefined();
+    expect(captureViewportDOM({ captureInputValues: true })[0].children![0].innerText).toBe('ACME Corp');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Contenteditable roots and accessible names
+// ---------------------------------------------------------------------------
+
+describe('contenteditable roots', () => {
+  beforeEach(() => {
+    setViewportSize(1024, 768);
+    document.body.innerHTML = '';
+  });
+
+  it('captures a Gmail-style compose body as one node with its text and no duplicate children', () => {
+    const labelEl = document.createElement('span');
+    labelEl.id = 'compose-label';
+    labelEl.textContent = 'Message Body';
+    document.body.appendChild(labelEl);
+    mockBBox(labelEl, { x: 0, y: 0, width: 100, height: 20 });
+
+    const compose = document.createElement('div');
+    compose.setAttribute('contenteditable', 'true');
+    compose.setAttribute('role', 'textbox');
+    compose.setAttribute('aria-multiline', 'true');
+    compose.setAttribute('aria-labelledby', 'compose-label');
+    compose.innerHTML =
+      '<div>Hi Bob,</div><div><b>Invoice</b> attached for <span>March</span>.</div><div><br></div><div>Thanks</div>';
+    document.body.appendChild(compose);
+    mockBBox(compose, { x: 0, y: 40, width: 600, height: 300 });
+    for (const child of Array.from(compose.querySelectorAll('*'))) {
+      mockBBox(child, { x: 0, y: 40, width: 600, height: 20 });
+    }
+
+    const result = captureViewportDOM();
+    const bodies = result.filter((n) => n.role === 'textbox');
+    expect(bodies).toHaveLength(1);
+    const [body] = bodies;
+    expect(body.name).toBe('Message Body');
+    expect(body.innerText).toContain('Hi Bob,');
+    expect(body.innerText).toContain('Invoice attached for March.');
+    expect(body.innerText).toContain('Thanks');
+    // Formatting descendants are not emitted as separate nodes.
+    expect(body.children).toBeUndefined();
+    // Nothing else in the snapshot repeats the body text.
+    const others = JSON.stringify(result.filter((n) => n !== body));
+    expect(others).not.toContain('Hi Bob');
+    expect(others).not.toContain('Invoice');
+  });
+
+  it('captures contenteditable text without the input-values opt-in', () => {
+    const editor = document.createElement('div');
+    editor.setAttribute('contenteditable', '');
+    editor.textContent = 'Meeting notes';
+    document.body.appendChild(editor);
+    mockBBox(editor, { x: 0, y: 0, width: 400, height: 100 });
+
+    expect(captureViewportDOM()[0].innerText).toBe('Meeting notes');
+  });
+
+  it('treats contenteditable="false" as not editable', () => {
+    const el = document.createElement('div');
+    el.setAttribute('contenteditable', 'false');
+    const child = document.createElement('p');
+    child.textContent = 'read only';
+    el.appendChild(child);
+    document.body.appendChild(el);
+    mockBBox(el, { x: 0, y: 0, width: 400, height: 100 });
+    mockBBox(child, { x: 0, y: 0, width: 400, height: 20 });
+
+    const [node] = captureViewportDOM();
+    expect(node.innerText).toBeUndefined();
+    expect(node.children).toHaveLength(1);
+    expect(node.children![0].innerText).toBe('read only');
+  });
+});
+
+describe('aria-labelledby resolution', () => {
+  beforeEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  it('joins every id in a space-separated list', () => {
+    document.body.innerHTML = '<span id="a">Billing</span><span id="b">address</span>';
+    const el = document.createElement('input');
+    el.setAttribute('aria-labelledby', 'a  b missing');
+    document.body.appendChild(el);
+    mockBBox(el, {});
+    expect(extractNodeInfo(el).name).toBe('Billing address');
+  });
+
+  it('keeps the labelledby name over a placeholder', () => {
+    document.body.innerHTML = '<span id="lbl">Company</span>';
+    const input = document.createElement('input');
+    input.setAttribute('aria-labelledby', 'lbl');
+    input.placeholder = 'e.g. ACME';
+    document.body.appendChild(input);
+    mockBBox(input, {});
+    expect(extractNodeInfo(input).name).toBe('Company');
+
+    const area = document.createElement('textarea');
+    area.setAttribute('aria-labelledby', 'lbl');
+    area.placeholder = 'type here';
+    document.body.appendChild(area);
+    mockBBox(area, {});
+    expect(extractNodeInfo(area).name).toBe('Company');
+  });
+
+  it('resolves ids inside the same shadow root', () => {
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    const shadow = host.attachShadow({ mode: 'open' });
+    shadow.innerHTML = '<span id="inner">Search mail</span><input aria-labelledby="inner">';
+    const input = shadow.querySelector('input')!;
+    mockBBox(input, {});
+    expect(extractNodeInfo(input).name).toBe('Search mail');
   });
 });
 

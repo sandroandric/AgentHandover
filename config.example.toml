@@ -18,6 +18,7 @@ enable_inline_secret_redaction = true
 enable_clipboard_preview = false
 clipboard_preview_max_chars = 200
 secure_field_drop = true
+capture_input_values = false     # include <input>/<textarea> values in browser DOM snapshots
 
 [browser]
 extension_id = "jpemkdcihaijkolbkankcldmiimmmnfo"
