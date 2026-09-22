@@ -494,3 +494,79 @@ class TestMergeIntegration:
             # Both procedures share Chrome and Slack
             assert "Chrome" in family["shared_apps"]
             assert "Slack" in family["shared_apps"]
+
+
+class _SpyDetector(VariantDetector):
+    """A real VariantDetector that records its semantic_align calls."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.calls = 0
+
+    def semantic_align(self, *args, **kwargs):
+        self.calls += 1
+        return super().semantic_align(*args, **kwargs)
+
+
+class TestRealDetectorAlignment:
+    """Pins that the normalizer drives a real VariantDetector (not a Mock)
+    and consumes the AlignedStep indices it returns."""
+
+    def test_normalize_uses_semantic_align_indices(self):
+        """An inserted step in demo 3 must not shift later positions: the
+        aligned path groups 'Click search' from all three demos, which the
+        positional fallback would not."""
+        detector = _SpyDetector()
+        normalizer = EvidenceNormalizer(variant_detector=detector)
+        demos = [
+            [_step("Open browser"), _step("Click search")],
+            [_step("Open browser"), _step("Click search")],
+            [_step("Open browser"), _step("Download file", app="Finder"),
+             _step("Click search")],
+        ]
+        result = normalizer.normalize("aligned", demos)
+
+        assert detector.calls == 2
+        assert [ns.canonical_action for ns in result] == [
+            "open browser", "click search",
+        ]
+        assert [ns.observation_count for ns in result] == [3, 3]
+
+    def test_merge_with_evidence_uses_semantic_align_indices(self):
+        """Matching steps accumulate counts in place; a step only in the
+        new observation is appended as a variant."""
+        detector = _SpyDetector()
+        normalizer = EvidenceNormalizer(variant_detector=detector)
+        proc = {
+            "id": "real-align",
+            "schema_version": "3.0.0",
+            "steps": [
+                {"action": "Open browser", "app": "Chrome", "observation_count": 2},
+                {"action": "Click search", "app": "Chrome", "observation_count": 2},
+            ],
+            "evidence": {"total_observations": 2},
+        }
+        new_obs = [_step("Open browser"), _step("Download file", app="Finder"),
+                   _step("Click search")]
+
+        merged = normalizer.merge_with_evidence(proc, new_obs)
+
+        assert detector.calls == 1
+        steps = merged["steps"]
+        assert [s["action"] for s in steps] == [
+            "Open browser", "Click search", "Download file",
+        ]
+        assert [s["observation_count"] for s in steps] == [3, 3, 1]
+        assert steps[2]["_variant"] is True
+        assert merged["evidence"]["total_observations"] == 3
+
+    def test_alignment_attribute_error_propagates(self):
+        """A detector without semantic_align is a programming error and must
+        surface, not silently degrade to the append fallback."""
+
+        class _Broken:
+            pass
+
+        normalizer = EvidenceNormalizer(variant_detector=_Broken())  # type: ignore[arg-type]
+        with pytest.raises(AttributeError):
+            normalizer.normalize("broken", [[_step("a")], [_step("a")]])
