@@ -1266,12 +1266,19 @@ struct SOPDetailView: View {
                     rawAction = String(rawAction[appMatch.upperBound...])
                 }
 
+                // Drop the packet's "[step_id] " prefix; the circle shows the number.
+                if let idMatch = rawAction.range(of: #"^\[[^\]]+\]\s+"#, options: .regularExpression) {
+                    rawAction = String(rawAction[idMatch.upperBound...])
+                }
+
                 // Note: "open `location`." lines are kept as-is (cleaned later via cleanMarkdown)
 
                 currentAction = rawAction
                 currentVerify = nil
             } else if trimmed.hasPrefix("_") && trimmed.hasSuffix("_") && currentAction != nil {
                 currentVerify = String(trimmed.dropFirst().dropLast())
+            } else if trimmed.hasPrefix("App: ") && currentAction != nil {
+                currentApp = String(trimmed.dropFirst(5))
             } else if trimmed.lowercased().hasPrefix("verify:") && currentAction != nil {
                 currentVerify = String(trimmed.dropFirst(7)).trimmingCharacters(in: .whitespaces)
             } else if !trimmed.isEmpty, currentAction != nil {
