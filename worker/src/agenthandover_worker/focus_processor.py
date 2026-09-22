@@ -686,28 +686,37 @@ class FocusProcessor:
 
     @staticmethod
     def _attach_clicks(db: object, timeline: list[dict]) -> None:
-        """Give each frame the Chrome clicks made while it was on screen.
+        """Give each frame the Chrome clicks made on its page.
 
         Extension events carry no ``focus_session_id``, so they are found by
-        time: a click belongs to the last frame at or before it, when that
-        frame shows the same host (the page the user clicked on).
+        time.  A click belongs to the last frame at or before it when that
+        frame shows the click's host (the page the user clicked on);
+        otherwise, when the page came on screen with the click itself (an
+        app switch into Chrome), to the first frame after it on that host
+        within the DOM tolerance.  A click no frame shows is left out.
         """
-        if not timeline:
+        timed = [
+            (when, frame) for frame in timeline
+            if (when := parse_timestamp(frame.get("timestamp"))) is not None
+        ]
+        if not timed:
             return
-        times = [parse_timestamp(f.get("timestamp")) for f in timeline]
-        if times[0] is None or times[-1] is None:
-            return
-        end = times[-1] + timedelta(seconds=_DOM_TOLERANCE_SEC)
+        slack = timedelta(seconds=_DOM_TOLERANCE_SEC)
         clicks = db.get_click_intents(  # type: ignore[union-attr]
-            timeline[0]["timestamp"], end.isoformat(),
+            (timed[0][0] - slack).isoformat(), (timed[-1][0] + slack).isoformat(),
         )
         for click in clicks:
             when = parse_timestamp(click.get("timestamp"))
-            if when is None:
+            host = url_host(click.get("url"))
+            if when is None or not host:
                 continue
-            owner = None
-            for frame, frame_time in zip(timeline, times):
-                if frame_time is not None and frame_time <= when:
-                    owner = frame
-            if owner is not None and owner.get("host") and owner["host"] == url_host(click.get("url")):
+            before = [frame for t, frame in timed if t <= when]
+            owner = before[-1] if before and before[-1].get("host") == host else None
+            if owner is None:
+                owner = next(
+                    (frame for t, frame in timed
+                     if when < t <= when + slack and frame.get("host") == host),
+                    None,
+                )
+            if owner is not None:
                 owner["click_targets"].append(click)
