@@ -20,7 +20,7 @@ from typing import Callable
 
 import pytest
 
-from agenthandover_worker import bundle_compiler, staleness_detector
+from agenthandover_worker import bundle_compiler, scene_annotator, staleness_detector
 from agenthandover_worker import main as worker_main
 from journeys.cassette import Cassette, open_cassette
 from journeys.driver import Clock, JourneyWorker
@@ -146,7 +146,21 @@ def clock(monkeypatch: pytest.MonkeyPatch) -> Clock:
     monkeypatch.setattr(staleness_detector, "procedure_freshness", freshness_on_clock)
     # bundle_compiler binds the name at import; the other callers import it per call.
     monkeypatch.setattr(bundle_compiler, "procedure_freshness", freshness_on_clock)
+    # The annotator's Ollama backoff (time.monotonic deadlines) runs on the
+    # journey clock, so a journey waits out an outage by advancing it.
+    monkeypatch.setattr(scene_annotator, "time", _MonotonicOnClock(journey_clock))
     return journey_clock
+
+
+class _MonotonicOnClock:
+    """Stands in for the ``time`` module inside ``scene_annotator``, which
+    uses it only for ``time.monotonic()`` backoff deadlines."""
+
+    def __init__(self, clock: Clock) -> None:
+        self._clock = clock
+
+    def monotonic(self) -> float:
+        return self._clock.now().timestamp()
 
 
 @pytest.fixture()

@@ -9,14 +9,15 @@ then read the packet an agent receives.
 from __future__ import annotations
 
 import re
+import statistics
 
 from agenthandover_worker.skill_render import render_packet
+from journeys.conftest import JOURNEY_MODELS
 from journeys.focus_run import start_focus_run, tick_until_skill
 from journeys.packet import parse_packet
 
-# Cassette model-seconds (Ollama's total_duration) one focus run may spend.
-# Budget for a 10-minute recording on the target model split.
-FOCUS_MODEL_SECONDS = 1800
+# WP-C5: a focus run annotates at most this many keyframes before the Skill.
+KEYFRAMES = 20
 
 
 def _run(events_db, worker, clock, temp_home, cassette):
@@ -54,8 +55,25 @@ def test_focus_recording_becomes_a_complete_skill(
 def test_focus_run_stays_within_its_model_budget(
     events_db, worker, clock, temp_home, cassette,
 ) -> None:
+    """Time to Skill, in cassette model-seconds, is at most 20 keyframe
+    annotations plus the calls on the SOP model (WP-C5's bound)."""
     run, _proc, _packet = _run(events_db, worker, clock, temp_home, cassette)
-    assert run.tape.model_seconds() <= FOCUS_MODEL_SECONDS
+    budget = focus_budget_seconds(run.tape)
+    assert run.tape.model_seconds() <= budget, (run.tape.model_seconds(), budget)
+
+
+def focus_budget_seconds(tape) -> float:
+    annotation = [
+        e["response"]["total_duration"] / 1e9 for e in tape.served
+        if e["request"].get("model") == JOURNEY_MODELS["annotation_model"]
+        and e["request"].get("images")
+    ]
+    sop = [
+        e["response"].get("total_duration", 0) / 1e9 for e in tape.served
+        if e["request"].get("model") == JOURNEY_MODELS["sop_model"]
+    ]
+    assert annotation and sop, "the run made no annotation or no SOP-model call"
+    return KEYFRAMES * statistics.median(annotation) + sum(sop)
 
 
 def test_focus_packet_has_no_assumed_text(

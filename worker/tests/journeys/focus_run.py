@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
+from agenthandover_worker import trigger_spool
 from journeys.cassette import Cassette
 from journeys.conftest import JOURNEY_MODELS, TempHome
 from journeys.driver import Clock, JourneyWorker
@@ -83,3 +84,16 @@ def tick_until_skill(run: FocusRun, clock: Clock, *, max_ticks: int = 6) -> dict
         f"no procedure after {max_ticks} ticks: {run.ticks!r}; "
         f"state dir holds {sorted(p.name for p in state_dir.iterdir())}"
     )
+
+
+def approve_for_agents(run: FocusRun, clock: Clock, slug: str) -> dict:
+    """What the app's "Approve for agents" does: one ``lifecycle-promote``
+    trigger in the spool, then the worker's next tick.  Returns that tick."""
+    trigger_spool.write_trigger(
+        run.worker.state_dir, "lifecycle-promote",
+        {"procedure_slug": slug, "to_state": "agent_ready"},
+    )
+    clock.advance(seconds=TICK_SECONDS)
+    tick = run.worker.run_tick()
+    run.ticks.append(tick)
+    return tick
