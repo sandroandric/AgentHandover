@@ -13,8 +13,8 @@ from pathlib import Path
 
 from agenthandover_worker.export_adapter import SOPExportAdapter
 from agenthandover_worker.exporter import AtomicWriter
-from agenthandover_worker.sop_format import SOPFormatter
-from agenthandover_worker.sop_schema import sop_to_json
+from agenthandover_worker.procedure_schema import sop_to_procedure
+from agenthandover_worker.skill_render import render_packet
 
 
 class GenericWriter(SOPExportAdapter):
@@ -31,149 +31,30 @@ class GenericWriter(SOPExportAdapter):
         self.sops_dir = self.sops_dir_path
         self.metadata_dir = self.output_dir / "metadata"
         self.json_export = json_export
-        self.formatter = SOPFormatter()
 
     def _ensure_dirs(self) -> None:
         self.sops_dir_path.mkdir(parents=True, exist_ok=True)
         self.metadata_dir.mkdir(parents=True, exist_ok=True)
 
     def write_sop(self, sop_template: dict) -> Path:
-        """Write a single SOP as .md (and optionally .json)."""
-        self._ensure_dirs()
-        slug = sop_template.get("slug", "unknown")
-
-        # Write Markdown
-        md_content = self.formatter.format_sop(sop_template)
-        md_path = self.sops_dir_path / f"sop.{slug}.md"
-        AtomicWriter.write(md_path, md_content)
-
-        # Write JSON if enabled
-        if self.json_export:
-            json_data = sop_to_json(sop_template)
-            json_path = self.sops_dir_path / f"sop.{slug}.json"
-            AtomicWriter.write(json_path, json.dumps(json_data, indent=2, default=str))
-
-        return md_path
+        """Write a single SOP template (converted to a procedure first)."""
+        return self.write_procedure(sop_to_procedure(sop_template))
 
     def write_procedure(self, procedure: dict) -> Path:
-        """Write a v3 procedure as .md (with v3 sections) + .json.
+        """Write ``sop.<slug>.md`` (and ``sop.<slug>.v3.json`` when enabled).
 
-        The JSON output contains the full v3 procedure dict for machine
-        consumption.  The markdown includes appended v3 sections
-        (environment, constraints, expected outcomes).
+        The markdown is ``render_packet(procedure, target="generic")``;
+        the JSON is the procedure itself, for machine consumption.
         """
-        from agenthandover_worker.export_adapter import procedure_to_sop_template
-
         self._ensure_dirs()
-        slug = procedure.get("id", procedure.get("slug", "unknown"))
-
-        # Render base SOP markdown
-        sop_template = procedure_to_sop_template(procedure)
-        md_content = self.formatter.format_sop(sop_template)
-
-        # Append v3-only sections (including behavioral fields)
-        extra_lines: list[str] = []
-
-        # Voice & style guidance
-        from agenthandover_worker.export_adapter import render_voice_style_section
-        extra_lines.extend(render_voice_style_section(procedure))
-
-        # Strategy
-        strategy = procedure.get("strategy")
-        if strategy:
-            extra_lines.append("## Strategy")
-            extra_lines.append(strategy)
-            extra_lines.append("")
-
-        # Evidence summary (pre-synthesis fallback)
-        evidence_summary = procedure.get("evidence_summary")
-        if evidence_summary and not strategy:
-            extra_lines.append("## Observed Patterns")
-            extra_lines.append(evidence_summary)
-            extra_lines.append("")
-
-        # Selection criteria
-        selection = procedure.get("selection_criteria", [])
-        if selection:
-            extra_lines.append("## Selection Criteria")
-            for sc in selection:
-                criterion = sc.get("criterion", "")
-                if criterion:
-                    extra_lines.append(f"- {criterion}")
-            extra_lines.append("")
-
-        # Content templates
-        templates = procedure.get("content_templates", [])
-        if templates:
-            extra_lines.append("## Content Templates")
-            for ct in templates:
-                template = ct.get("template", "")
-                if template:
-                    extra_lines.append(f"- {template}")
-            extra_lines.append("")
-
-        # Environment
-        env = procedure.get("environment", {})
-        if env.get("required_apps") or env.get("accounts") or env.get("setup_actions"):
-            extra_lines.append("## Environment")
-            for app in env.get("required_apps", []):
-                extra_lines.append(f"- Required app: {app}")
-            for acct in env.get("accounts", []):
-                svc = acct.get("service", "unknown")
-                identity = acct.get("identity", "")
-                extra_lines.append(f"- Account: {svc}" + (f" ({identity})" if identity else ""))
-            for action in env.get("setup_actions", []):
-                extra_lines.append(f"- Setup: {action}")
-            extra_lines.append("")
-
-        # Constraints / guardrails
-        constraints = procedure.get("constraints", {})
-        trust_level = constraints.get("trust_level", "")
-        guardrails = constraints.get("guardrails", [])
-        if trust_level or guardrails:
-            extra_lines.append("## Constraints")
-            if trust_level:
-                extra_lines.append(f"- Trust level: {trust_level}")
-            for g in guardrails:
-                extra_lines.append(f"- {g}")
-            extra_lines.append("")
-
-        # Expected outcomes
-        outcomes = procedure.get("expected_outcomes", [])
-        if outcomes:
-            extra_lines.append("## Expected Outcomes")
-            for o in outcomes:
-                if isinstance(o, dict):
-                    desc = o.get("description", o.get("type", ""))
-                    extra_lines.append(f"- {desc}")
-                else:
-                    extra_lines.append(f"- {o}")
-            extra_lines.append("")
-
-        # Workflow rhythm
-        rhythm = procedure.get("workflow_rhythm", {})
-        if rhythm and rhythm.get("phases"):
-            extra_lines.append("## Workflow Rhythm")
-            avg_dur = rhythm.get("avg_duration_minutes")
-            if avg_dur:
-                extra_lines.append(f"- Duration: ~{avg_dur:.0f} min")
-            for phase in rhythm.get("phases", []):
-                name = phase.get("name", "")
-                dur = phase.get("typical_duration_minutes", 0)
-                extra_lines.append(f"- {name}: ~{dur} min")
-            extra_lines.append("")
-
-        if extra_lines:
-            md_content += "\n" + "\n".join(extra_lines)
+        slug = str(procedure.get("id") or procedure.get("slug") or "unknown")
 
         md_path = self.sops_dir_path / f"sop.{slug}.md"
-        AtomicWriter.write(md_path, md_content)
+        AtomicWriter.write(md_path, render_packet(procedure, target="generic"))
 
-        # Write full v3 procedure JSON (primary machine-readable output)
         if self.json_export:
-            json_path = self.sops_dir_path / f"sop.{slug}.v3.json"
             AtomicWriter.write(
-                json_path,
+                self.sops_dir_path / f"sop.{slug}.v3.json",
                 json.dumps(procedure, indent=2, default=str),
             )
 

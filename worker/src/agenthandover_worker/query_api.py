@@ -30,11 +30,10 @@ import threading
 from dataclasses import asdict
 from typing import Any
 
+from agenthandover_worker import __version__
 from agenthandover_worker.knowledge_base import KnowledgeBase
 
 logger = logging.getLogger(__name__)
-
-_VERSION = "0.1.0"
 
 # URL patterns
 _PROCEDURE_SLUG_RE = re.compile(r"^/procedures/([a-zA-Z0-9_-]+)$")
@@ -173,7 +172,7 @@ class QueryAPIHandler(http.server.BaseHTTPRequestHandler):
     # ------------------------------------------------------------------
 
     def _handle_health(self) -> None:
-        self._send_json({"status": "ok", "version": _VERSION})
+        self._send_json({"status": "ok", "version": __version__})
 
     def _handle_procedures_list(self) -> None:
         kb: KnowledgeBase = self.server.knowledge_base  # type: ignore[attr-defined]
@@ -825,10 +824,9 @@ class QueryAPIHandler(http.server.BaseHTTPRequestHandler):
         # hardcoded string. Previously frozen at "0.2.0" through three
         # releases — the REST /version endpoint was lying about which
         # worker the agent was talking to.
-        from agenthandover_worker import __version__ as worker_version
         from agenthandover_worker.procedure_schema import PROCEDURE_SCHEMA_VERSION
         self._send_json({
-            "worker_version": worker_version,
+            "worker_version": __version__,
             "schema_version": PROCEDURE_SCHEMA_VERSION,
         })
 

@@ -2,24 +2,21 @@
 
 Implements sections 10.4 and 10.5 of the AgentHandover spec.  Provides:
 - ``AtomicWriter``: crash-safe file writes via temp + fsync + rename
-- ``IndexGenerator``: generates ``index.md`` catalog of all SOPs
-- ``SOPExporter``: orchestrates the full export pipeline
+- ``IndexGenerator``: generates ``index.md`` catalog of all SOPs on disk
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING
+
+from agenthandover_worker.export_adapter import procedure_to_sop_template
 
 logger = logging.getLogger(__name__)
-
-if TYPE_CHECKING:
-    from agenthandover_worker.sop_format import SOPFormatter
-    from agenthandover_worker.sop_versioner import SOPVersioner
 
 
 class AtomicWriter:
@@ -161,72 +158,37 @@ class IndexGenerator:
         return "\n".join(lines)
 
     def update_index(self, sops_dir: Path, sop_entries: list[dict]) -> None:
-        """Atomically write the index.md file.
+        """Atomically write ``index.md`` listing every SOP on disk.
 
-        The index file is placed in the parent of ``sops_dir``
-        (i.e. alongside the ``sops/`` directory).
+        The catalogue is built from the ``sop.<slug>.v3.json`` procedures
+        in *sops_dir* (``archive/`` excluded), so a batch that touches one
+        SOP never drops the others.  *sop_entries* (templates from the
+        current batch) are merged over the disk entries by slug, so a
+        fresh batch wins.  The index file is placed in the parent of
+        ``sops_dir`` (alongside the ``sops/`` directory).
         """
-        content = self.generate_index(sops_dir, sop_entries)
+        entries = {e.get("slug", "unknown"): e for e in load_disk_entries(sops_dir)}
+        for entry in sop_entries:
+            entries[entry.get("slug", "unknown")] = entry
+        content = self.generate_index(sops_dir, list(entries.values()))
         AtomicWriter.write(sops_dir.parent / "index.md", content)
 
 
-class SOPExporter:
-    """Orchestrate SOP export with atomic writes and index maintenance.
+def load_disk_entries(sops_dir: Path) -> list[dict]:
+    """SOP template entries for every ``sop.*.v3.json`` in *sops_dir*.
 
-    Combines formatting, versioning, atomic writing, and index generation
-    into a single export pipeline.
+    Only the top level is read, so archived versions never appear.
+    Unreadable files are skipped with a warning.
     """
-
-    def __init__(self, base_dir: str | Path):
-        self.base_dir = Path(base_dir)
-        self.sops_dir = self.base_dir / "sops"
-        self.writer = AtomicWriter()
-        self.index_gen = IndexGenerator()
-        self.versioner: SOPVersioner | None = None  # Set externally
-        self.formatter: SOPFormatter | None = None  # Set externally
-
-    def export_sop(self, sop_template: dict) -> Path:
-        """Export a single SOP: format, version, atomic write, update index.
-
-        Returns:
-            Path to the written SOP file.
-        """
-        if self.formatter is None:
-            raise RuntimeError("SOPExporter.formatter must be set before export")
-        if self.versioner is None:
-            raise RuntimeError("SOPExporter.versioner must be set before export")
-
-        # Format the SOP content
-        content = self.formatter.format_sop(sop_template)
-        slug = sop_template.get("slug", "unknown")
-
-        # Write with versioning (handles archiving / draft detection)
-        result_path = self.versioner.write_sop(slug, content, self.formatter)
-
-        # Update index with this single SOP
-        self.index_gen.update_index(self.sops_dir, [sop_template])
-
-        return result_path
-
-    def export_all(self, sop_templates: list[dict]) -> list[Path]:
-        """Export multiple SOPs and update the index.
-
-        Returns:
-            List of paths to all written SOP files.
-        """
-        if self.formatter is None:
-            raise RuntimeError("SOPExporter.formatter must be set before export")
-        if self.versioner is None:
-            raise RuntimeError("SOPExporter.versioner must be set before export")
-
-        paths: list[Path] = []
-        for template in sop_templates:
-            content = self.formatter.format_sop(template)
-            slug = template.get("slug", "unknown")
-            result_path = self.versioner.write_sop(slug, content, self.formatter)
-            paths.append(result_path)
-
-        # Update index with all SOPs
-        self.index_gen.update_index(self.sops_dir, sop_templates)
-
-        return paths
+    entries: list[dict] = []
+    if not sops_dir.is_dir():
+        return entries
+    for path in sorted(sops_dir.glob("sop.*.v3.json")):
+        try:
+            proc = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            logger.warning("Skipping unreadable procedure %s", path, exc_info=True)
+            continue
+        if isinstance(proc, dict):
+            entries.append(procedure_to_sop_template(proc))
+    return entries

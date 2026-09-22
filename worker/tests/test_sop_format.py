@@ -1,13 +1,11 @@
-"""Tests for the SOP Formatter — YAML frontmatter and manual edit detection."""
+"""Tests for manual edit detection of rendered SOP files."""
 
 from __future__ import annotations
 
-import hashlib
 from pathlib import Path
 
-import pytest
-import yaml
-
+from agenthandover_worker.procedure_schema import sop_to_procedure
+from agenthandover_worker.skill_render import render_packet
 from agenthandover_worker.sop_format import SOPFormatter
 
 
@@ -57,64 +55,15 @@ def _sample_sop_template(
     }
 
 
+def _rendered(template: dict | None = None) -> str:
+    return render_packet(
+        sop_to_procedure(template or _sample_sop_template()), target="openclaw",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
-
-
-class TestFormatSOPWithFrontmatter:
-    """Full YAML frontmatter generation."""
-
-    def test_output_has_frontmatter(self):
-        formatter = SOPFormatter()
-        template = _sample_sop_template()
-        result = formatter.format_sop(template)
-
-        # Must start with ---
-        assert result.startswith("---\n")
-        # Must have closing ---
-        parts = result.split("---")
-        assert len(parts) >= 3  # before, frontmatter, after
-
-    def test_frontmatter_has_required_fields(self):
-        formatter = SOPFormatter()
-        template = _sample_sop_template()
-        result = formatter.format_sop(template)
-
-        fm, _ = formatter._extract_frontmatter_and_body(result)
-
-        assert fm["sop_version"] == 1
-        assert fm["sop_slug"] == "test_workflow"
-        assert fm["sop_title"] == "Test Workflow"
-        assert "agenthandover" in fm["generated_by"]
-        assert "generated_at" in fm
-        assert fm["evidence_window"] == "last_30_days"
-        assert "confidence_summary" in fm
-        assert "confidence_score_avg" in fm
-        assert "generated_body_hash" in fm
-        assert fm["apps_involved"] == ["Chrome"]
-
-    def test_body_contains_steps(self):
-        formatter = SOPFormatter()
-        template = _sample_sop_template()
-        result = formatter.format_sop(template)
-
-        _, body = formatter._extract_frontmatter_and_body(result)
-
-        assert "Submit button" in body
-        assert "Email field" in body
-        assert "Click" in body
-        assert "Type" in body
-
-    def test_body_has_numbered_steps(self):
-        formatter = SOPFormatter()
-        template = _sample_sop_template()
-        result = formatter.format_sop(template)
-
-        _, body = formatter._extract_frontmatter_and_body(result)
-
-        assert "1. **Click**" in body
-        assert "2. **Type**" in body
 
 
 class TestBodyHashComputation:
@@ -154,8 +103,7 @@ class TestManualEditDetectionNoEdit:
 
     def test_no_edit_detected(self, tmp_path: Path):
         formatter = SOPFormatter()
-        template = _sample_sop_template()
-        content = formatter.format_sop(template)
+        content = _rendered()
 
         filepath = tmp_path / "test_sop.md"
         filepath.write_text(content, encoding="utf-8")
@@ -170,8 +118,7 @@ class TestManualEditDetectionEdited:
 
     def test_edit_detected(self, tmp_path: Path):
         formatter = SOPFormatter()
-        template = _sample_sop_template()
-        content = formatter.format_sop(template)
+        content = _rendered()
 
         filepath = tmp_path / "test_sop.md"
         filepath.write_text(content, encoding="utf-8")
@@ -207,59 +154,6 @@ class TestFrontmatterExtraction:
         assert "Just a markdown file" in body
 
 
-class TestConfidenceSummary:
-    """High/medium/low classification."""
-
-    def test_high_confidence(self):
-        formatter = SOPFormatter()
-        assert formatter._confidence_label(0.90) == "high"
-        assert formatter._confidence_label(0.85) == "high"
-
-    def test_medium_confidence(self):
-        formatter = SOPFormatter()
-        assert formatter._confidence_label(0.70) == "medium"
-        assert formatter._confidence_label(0.60) == "medium"
-
-    def test_low_confidence(self):
-        formatter = SOPFormatter()
-        assert formatter._confidence_label(0.50) == "low"
-        assert formatter._confidence_label(0.0) == "low"
-
-
-class TestInputVariablesInFrontmatter:
-    """Variables listed correctly in frontmatter."""
-
-    def test_variables_appear_in_frontmatter(self):
-        formatter = SOPFormatter()
-        template = _sample_sop_template(
-            variables=[
-                {"name": "customer_name", "type": "string", "example": "Alice"},
-                {"name": "order_id", "type": "number", "example": "12345"},
-            ]
-        )
-        result = formatter.format_sop(template)
-        fm, _ = formatter._extract_frontmatter_and_body(result)
-
-        assert len(fm["input_variables"]) == 2
-        var_names = [v["name"] for v in fm["input_variables"]]
-        assert "customer_name" in var_names
-        assert "order_id" in var_names
-
-    def test_variable_types_preserved(self):
-        formatter = SOPFormatter()
-        template = _sample_sop_template(
-            variables=[
-                {"name": "count", "type": "number", "example": "42"},
-            ]
-        )
-        result = formatter.format_sop(template)
-        fm, _ = formatter._extract_frontmatter_and_body(result)
-
-        var = fm["input_variables"][0]
-        assert var["type"] == "number"
-        assert var["example"] == "42"
-
-
 class TestMissingFileNotEdited:
     """New file -> not edited."""
 
@@ -274,162 +168,28 @@ class TestMissingFileNotEdited:
     def test_file_without_hash_not_edited(self, tmp_path: Path):
         formatter = SOPFormatter()
         filepath = tmp_path / "no_hash.md"
-        filepath.write_text("---\nsop_version: 1\n---\n\n# Content\n", encoding="utf-8")
+        filepath.write_text("---\nname: x\n---\n\n# Content\n", encoding="utf-8")
 
         was_edited, reason = formatter.detect_manual_edit(str(filepath))
         assert was_edited is False
         assert reason == "no_hash_in_frontmatter"
 
-
-# ---------------------------------------------------------------------------
-# LLM-enhanced fields in body and frontmatter
-# ---------------------------------------------------------------------------
-
-
-class TestTaskDescriptionInBody:
-    """Task description section appears in formatted body."""
-
-    def test_task_description_in_body(self):
+    def test_legacy_file_is_replaceable(self, tmp_path: Path):
+        """Pre-renderer files hashed only part of their body; never 'edited'."""
         formatter = SOPFormatter()
-        template = _sample_sop_template()
-        template["task_description"] = "This workflow automates form submission."
-        result = formatter.format_sop(template)
-        _, body = formatter._extract_frontmatter_and_body(result)
-        assert "## Task Description" in body
-        assert "This workflow automates form submission." in body
+        filepath = tmp_path / "legacy.md"
+        filepath.write_text(
+            "---\nsop_version: 1\ngenerated_body_hash: sha256:abc\n---\n\n# X\n",
+            encoding="utf-8",
+        )
+        assert formatter.detect_manual_edit(str(filepath)) == (False, "legacy_format")
 
-    def test_task_description_before_steps(self):
-        formatter = SOPFormatter()
-        template = _sample_sop_template()
-        template["task_description"] = "Automates form submission."
-        result = formatter.format_sop(template)
-        _, body = formatter._extract_frontmatter_and_body(result)
-        desc_pos = body.index("## Task Description")
-        steps_pos = body.index("## Steps")
-        assert desc_pos < steps_pos
-
-    def test_no_task_description_section_when_absent(self):
-        formatter = SOPFormatter()
-        template = _sample_sop_template()
-        result = formatter.format_sop(template)
-        _, body = formatter._extract_frontmatter_and_body(result)
-        assert "## Task Description" not in body
-
-    def test_task_description_in_frontmatter(self):
-        formatter = SOPFormatter()
-        template = _sample_sop_template()
-        template["task_description"] = "Form submission workflow."
-        result = formatter.format_sop(template)
-        fm, _ = formatter._extract_frontmatter_and_body(result)
-        assert fm["task_description"] == "Form submission workflow."
-
-    def test_task_description_absent_from_frontmatter_when_not_set(self):
-        formatter = SOPFormatter()
-        template = _sample_sop_template()
-        result = formatter.format_sop(template)
-        fm, _ = formatter._extract_frontmatter_and_body(result)
-        assert "task_description" not in fm
-
-
-class TestExecutionOverviewInBody:
-    """Execution overview section appears in formatted body."""
-
-    def test_execution_overview_in_body(self):
-        formatter = SOPFormatter()
-        template = _sample_sop_template()
-        template["execution_overview"] = {
-            "goal": "Submit contact form",
-            "typical_duration": "30 seconds",
-        }
-        result = formatter.format_sop(template)
-        _, body = formatter._extract_frontmatter_and_body(result)
-        assert "## Execution Overview" in body
-        assert "**Goal**: Submit contact form" in body
-        assert "**Typical Duration**: 30 seconds" in body
-
-    def test_execution_overview_before_steps(self):
-        formatter = SOPFormatter()
-        template = _sample_sop_template()
-        template["execution_overview"] = {"goal": "Test"}
-        result = formatter.format_sop(template)
-        _, body = formatter._extract_frontmatter_and_body(result)
-        overview_pos = body.index("## Execution Overview")
-        steps_pos = body.index("## Steps")
-        assert overview_pos < steps_pos
-
-    def test_no_execution_overview_section_when_absent(self):
-        formatter = SOPFormatter()
-        template = _sample_sop_template()
-        result = formatter.format_sop(template)
-        _, body = formatter._extract_frontmatter_and_body(result)
-        assert "## Execution Overview" not in body
-
-    def test_execution_overview_in_frontmatter(self):
-        formatter = SOPFormatter()
-        template = _sample_sop_template()
-        template["execution_overview"] = {
-            "goal": "Submit form",
-            "prerequisites": "Browser open",
-        }
-        result = formatter.format_sop(template)
-        fm, _ = formatter._extract_frontmatter_and_body(result)
-        assert fm["execution_overview"]["goal"] == "Submit form"
-        assert fm["execution_overview"]["prerequisites"] == "Browser open"
-
-    def test_execution_overview_absent_from_frontmatter_when_not_set(self):
-        formatter = SOPFormatter()
-        template = _sample_sop_template()
-        result = formatter.format_sop(template)
-        fm, _ = formatter._extract_frontmatter_and_body(result)
-        assert "execution_overview" not in fm
-
-    def test_empty_execution_overview_not_in_body(self):
-        formatter = SOPFormatter()
-        template = _sample_sop_template()
-        template["execution_overview"] = {}
-        result = formatter.format_sop(template)
-        _, body = formatter._extract_frontmatter_and_body(result)
-        assert "## Execution Overview" not in body
-
-    def test_non_dict_execution_overview_not_in_body(self):
-        formatter = SOPFormatter()
-        template = _sample_sop_template()
-        template["execution_overview"] = "not a dict"
-        result = formatter.format_sop(template)
-        _, body = formatter._extract_frontmatter_and_body(result)
-        assert "## Execution Overview" not in body
-
-
-class TestBothEnhancedFieldsTogether:
-    """Both task_description and execution_overview together."""
-
-    def test_both_sections_present(self):
-        formatter = SOPFormatter()
-        template = _sample_sop_template()
-        template["task_description"] = "Automates form submission."
-        template["execution_overview"] = {
-            "goal": "Submit the form",
-            "success_criteria": "Confirmation page shown",
-        }
-        result = formatter.format_sop(template)
-        _, body = formatter._extract_frontmatter_and_body(result)
-
-        assert "## Task Description" in body
-        assert "## Execution Overview" in body
-        assert "## Steps" in body
-
-        # Order: title > task desc > overview > steps
-        desc_pos = body.index("## Task Description")
-        overview_pos = body.index("## Execution Overview")
-        steps_pos = body.index("## Steps")
-        assert desc_pos < overview_pos < steps_pos
-
-    def test_both_in_frontmatter(self):
-        formatter = SOPFormatter()
-        template = _sample_sop_template()
-        template["task_description"] = "Automates form submission."
-        template["execution_overview"] = {"goal": "Submit form"}
-        result = formatter.format_sop(template)
-        fm, _ = formatter._extract_frontmatter_and_body(result)
-        assert "task_description" in fm
-        assert "execution_overview" in fm
+    def test_triple_dash_inside_a_value_does_not_end_frontmatter(self):
+        content = render_packet(
+            sop_to_procedure(_sample_sop_template(title="A --- B: C")),
+            target="openclaw",
+        )
+        fm, body = SOPFormatter._extract_frontmatter_and_body(content)
+        assert fm["title"] == "A --- B: C"
+        assert body.startswith("# A --- B: C\n")
+        assert fm["generated_body_hash"] == SOPFormatter._compute_body_hash(body)

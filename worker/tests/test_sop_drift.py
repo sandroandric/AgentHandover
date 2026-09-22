@@ -8,6 +8,8 @@ from pathlib import Path
 
 import pytest
 
+from agenthandover_worker.procedure_schema import sop_to_procedure
+from agenthandover_worker.skill_render import render_packet
 from agenthandover_worker.sop_format import SOPFormatter
 from agenthandover_worker.sop_versioner import SOPVersioner
 
@@ -33,7 +35,7 @@ def _make_sop_content(formatter: SOPFormatter, slug: str = "test_sop") -> str:
         "episode_count": 3,
         "apps_involved": ["Chrome"],
     }
-    return formatter.format_sop(template)
+    return render_packet(sop_to_procedure(template), target="openclaw")
 
 
 def _make_sop_content_v2(formatter: SOPFormatter, slug: str = "test_sop") -> str:
@@ -54,7 +56,7 @@ def _make_sop_content_v2(formatter: SOPFormatter, slug: str = "test_sop") -> str
         "episode_count": 5,
         "apps_involved": ["Chrome", "Slack"],
     }
-    return formatter.format_sop(template)
+    return render_packet(sop_to_procedure(template), target="openclaw")
 
 
 # ---------------------------------------------------------------------------

@@ -789,7 +789,7 @@ def _refresh_claude_commands(
         from agenthandover_worker.agent_connect import connect_claude_code
         connect_claude_code(
             commands_dir=commands_dir,
-            skills_dir=skills_dir if skills_dir is not None else _skills_dir(),
+            skills_dir=skills_dir if skills_dir is not None else load_config().export.skills_dir,
         )
         logger.info("Refreshed Claude Code slash commands and Skills")
     except Exception:

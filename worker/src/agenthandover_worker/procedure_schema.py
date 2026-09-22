@@ -1,7 +1,6 @@
 """v3 procedure schema — extended machine-readable format.
 
-Upgrades the v2 SOP JSON schema (``sop_schema.py``) to a full v3
-"procedure" format that includes:
+Defines the v3 "procedure" format, which includes:
 
 - ``inputs`` / ``outputs`` — typed parameters with defaults
 - ``environment`` — required apps, accounts, setup actions
@@ -79,7 +78,7 @@ _V3_SECTIONS = {
 
 
 def _confidence_label(score: float) -> str:
-    """Map confidence score to label (same thresholds as sop_schema.py)."""
+    """Map an average confidence score to high / medium / low."""
     if score >= 0.85:
         return "high"
     if score >= 0.60:
@@ -157,6 +156,8 @@ def sop_to_procedure(sop_template: dict) -> dict:
     # Convert variables to typed inputs
     inputs = []
     for var in variables:
+        if isinstance(var, str):  # legacy templates list bare names
+            var = {"name": var}
         inp: dict = {
             "name": var.get("name", ""),
             "type": var.get("type", "string"),
@@ -165,6 +166,10 @@ def sop_to_procedure(sop_template: dict) -> dict:
         }
         if "description" in var:
             inp["description"] = var["description"]
+        # A sensitive variable is a credential: renderers name it and tell
+        # the agent to take the value from its credential store.
+        if var.get("sensitive") or var.get("type") == "password":
+            inp["credential"] = True
         if "example" in var:
             inp["example"] = var["example"]
         if "min" in var:

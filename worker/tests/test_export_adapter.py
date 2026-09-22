@@ -7,7 +7,7 @@ from pathlib import Path
 from agenthandover_worker.export_adapter import SOPExportAdapter
 from agenthandover_worker.openclaw_writer import OpenClawWriter
 from agenthandover_worker.generic_writer import GenericWriter
-from agenthandover_worker.sop_schema import sop_to_json, validate_sop_json, SOP_SCHEMA_VERSION
+from agenthandover_worker.procedure_schema import PROCEDURE_SCHEMA_VERSION
 
 
 class TestSOPExportAdapterInterface:
@@ -41,17 +41,17 @@ class TestGenericWriter:
         assert path.exists()
         assert path.name == "sop.test-login.md"
 
-        json_path = tmp_path / "sops" / "sop.test-login.json"
+        json_path = tmp_path / "sops" / "sop.test-login.v3.json"
         assert json_path.exists()
         data = json.loads(json_path.read_text())
-        assert data["schema_version"] == SOP_SCHEMA_VERSION
-        assert data["slug"] == "test-login"
+        assert data["schema_version"] == PROCEDURE_SCHEMA_VERSION
+        assert data["id"] == "test-login"
 
     def test_write_sop_without_json(self, tmp_path):
         writer = GenericWriter(output_dir=tmp_path, json_export=False)
         sop = {"slug": "no-json", "title": "No JSON", "steps": []}
         writer.write_sop(sop)
-        assert not (tmp_path / "sops" / "sop.no-json.json").exists()
+        assert not list((tmp_path / "sops").glob("sop.no-json*.json"))
 
     def test_list_sops(self, tmp_path):
         writer = GenericWriter(output_dir=tmp_path)
@@ -73,39 +73,3 @@ class TestGenericWriter:
         data = json.loads(path.read_text())
         assert data["total"] == 42
         assert data["metadata_type"] == "test_report"
-
-
-class TestSOPSchema:
-    """Test the JSON schema module."""
-
-    def test_sop_to_json_basic(self):
-        sop = {
-            "slug": "my-sop",
-            "title": "My SOP",
-            "steps": [{"step": "click", "target": "btn", "confidence": 0.9}],
-            "confidence_avg": 0.9,
-            "episode_count": 5,
-            "apps_involved": ["Chrome", "Slack"],
-            "variables": [{"name": "url", "type": "string", "description": "Target URL"}],
-        }
-        result = sop_to_json(sop)
-        assert result["schema_version"] == SOP_SCHEMA_VERSION
-        assert result["slug"] == "my-sop"
-        assert len(result["steps"]) == 1
-        assert result["steps"][0]["index"] == 0
-        assert len(result["variables"]) == 1
-
-    def test_validate_valid(self):
-        data = sop_to_json({"slug": "test", "title": "Test", "steps": []})
-        errors = validate_sop_json(data)
-        assert errors == []
-
-    def test_validate_missing_fields(self):
-        errors = validate_sop_json({})
-        assert len(errors) >= 3  # slug, title, steps at minimum
-
-    def test_validate_wrong_version(self):
-        data = sop_to_json({"slug": "x", "title": "X", "steps": []})
-        data["schema_version"] = "99.0.0"
-        errors = validate_sop_json(data)
-        assert any("Unsupported schema" in e for e in errors)
