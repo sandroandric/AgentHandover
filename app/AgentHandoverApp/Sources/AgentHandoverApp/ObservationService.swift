@@ -109,7 +109,7 @@ final class ObservationService {
         }
     }
 
-    private func getFocusedWindow(displays: [ObservationDisplayInfo]) -> ObservationWindowInfo? {
+    func getFocusedWindow(displays: [ObservationDisplayInfo]) -> ObservationWindowInfo? {
         let options: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
         guard let windowList = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else {
             return nil
