@@ -25,6 +25,12 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
+from agenthandover_worker.json_extract import extract_json
+from agenthandover_worker.ollama import (  # noqa: F401 - OllamaUnavailable re-exported
+    OllamaClient,
+    OllamaUnavailable,
+)
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -500,28 +506,6 @@ def build_annotation_prompt(
 # JSON validation / repair
 # ---------------------------------------------------------------------------
 
-_FENCE_RE = re.compile(
-    r"```(?:json)?\s*\n?(.*?)\n?\s*```",
-    re.DOTALL,
-)
-
-_THINK_RE = re.compile(
-    r"<think>.*?</think>",
-    re.DOTALL,
-)
-
-
-def _strip_markdown_fences(text: str) -> str:
-    """Remove markdown code fences and thinking tags from VLM output."""
-    # Strip <think>...</think> blocks (Qwen thinking mode artefact)
-    text = _THINK_RE.sub("", text).strip()
-    # Extract content inside fences if present
-    match = _FENCE_RE.search(text)
-    if match:
-        return match.group(1).strip()
-    return text.strip()
-
-
 def _validate_annotation(raw: str) -> dict | None:
     """Parse and validate an annotation JSON string.
 
@@ -529,16 +513,9 @@ def _validate_annotation(raw: str) -> dict | None:
     Tolerant of missing optional fields but requires the top-level
     structure and task_context.what_doing at minimum.
     """
-    cleaned = _strip_markdown_fences(raw)
-    if not cleaned:
-        return None
-
     try:
-        data = json.loads(cleaned)
-    except json.JSONDecodeError:
-        return None
-
-    if not isinstance(data, dict):
+        data = extract_json(raw)
+    except ValueError:
         return None
 
     # Must have task_context with what_doing at minimum
@@ -608,12 +585,6 @@ class _StaleTracker:
 # Ollama VLM client
 # ---------------------------------------------------------------------------
 
-class OllamaUnavailable(ConnectionError):
-    """Ollama could not serve the call: unreachable (refused, reset, DNS)
-    or the model is not pulled (HTTP 404).  Retrying later can succeed, so
-    callers defer the work instead of discarding it."""
-
-
 def _call_ollama_vlm(
     *,
     model: str,
@@ -635,9 +606,9 @@ def _call_ollama_vlm(
     Returns (response_text, inference_time_seconds).
 
     Raises:
-        OllamaUnavailable: Ollama unreachable or the model is missing.
+        OllamaUnavailable: Ollama unreachable, the model is missing, or 5xx.
         TimeoutError: no response within *timeout*.
-        RuntimeError: any other HTTP error.
+        OllamaBadResponse: any other HTTP error or a non-JSON reply.
 
     Args:
         think: False, True, "low", "medium", or "high". Controls reasoning
@@ -659,114 +630,28 @@ def _call_ollama_vlm(
     if extra_options:
         options.update(extra_options)
 
-    payload: dict = {
-        "model": model,
-        "prompt": prompt,
-        "stream": False,
-        # think must be a top-level parameter, NOT inside options.
-        "think": think,
-        "options": options,
-    }
-
-    if system:
-        payload["system"] = system
-    if format is not None:
-        payload["format"] = format
-    if keep_alive is not None:
-        payload["keep_alive"] = keep_alive
-
-    # Attach image
     if image_path and not image_base64:
         img_path = Path(image_path)
         if img_path.is_file():
-            with open(img_path, "rb") as f:
-                image_base64 = base64.b64encode(f.read()).decode("ascii")
+            image_base64 = base64.b64encode(img_path.read_bytes()).decode("ascii")
 
-    if image_base64:
-        payload["images"] = [image_base64]
-
-    start = time.monotonic()
-    result = ollama_generate(host, payload, timeout)
-    elapsed = time.monotonic() - start
-    return result.get("response", ""), elapsed
-
-
-def ollama_generate(host: str, payload: dict, timeout: float) -> dict:
-    """POST *payload* to ``{host}/api/generate`` and return the reply.
-
-    Classifies failures so callers can tell "try again later" from "this
-    call failed":
-
-    Raises:
-        OllamaUnavailable: Ollama unreachable (refused, reset, DNS) or the
-            model is not pulled (HTTP 404), or it answered 5xx.
-        TimeoutError: no reply within *timeout*.
-        RuntimeError: any other HTTP error.
-    """
-    import urllib.request
-    import urllib.error
-
-    host_model = payload.get("model", "?")
-    req = urllib.request.Request(
-        f"{host}/api/generate",
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-        method="POST",
+    response = OllamaClient(host).generate(
+        model,
+        prompt,
+        system=system,
+        images=[image_base64] if image_base64 else None,
+        options=options,
+        format=format,
+        think=think,
+        keep_alive=keep_alive,
+        timeout=timeout,
     )
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            result = json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        if exc.code == 404:
-            raise OllamaUnavailable(
-                f"model {host_model!r} not available at {host}"
-            ) from exc
-        if exc.code >= 500:
-            # Ollama answers 5xx while a model fails to load or runs out of
-            # memory: the server is there but cannot serve now, so defer.
-            raise OllamaUnavailable(
-                f"Ollama HTTP {exc.code} at {host}: {exc.reason}"
-            ) from exc
-        raise RuntimeError(f"Ollama HTTP {exc.code} at {host}: {exc.reason}") from exc
-    except urllib.error.URLError as exc:
-        if isinstance(exc.reason, TimeoutError):
-            raise TimeoutError(f"Ollama timed out after {timeout:.0f}s") from exc
-        raise OllamaUnavailable(f"Ollama not reachable at {host}: {exc}") from exc
-    except ConnectionError as exc:  # reset/refused while reading the reply
-        raise OllamaUnavailable(f"Ollama connection lost at {host}: {exc}") from exc
-
-    logger.debug(
-        "ollama generate model=%s prompt_eval_count=%s eval_count=%s "
-        "done_reason=%s",
-        host_model, result.get("prompt_eval_count"), result.get("eval_count"),
-        result.get("done_reason"),
-    )
-    if result.get("done_reason") == "length":
-        logger.warning(
-            "Ollama output for %s hit num_predict=%s and was truncated",
-            host_model, (payload.get("options") or {}).get("num_predict"),
-        )
-    return result
+    return response.text, response.elapsed
 
 
 def _ollama_has_model(host: str, model: str, timeout: float = 3.0) -> bool:
     """GET /api/tags: True when Ollama answers and has *model* pulled."""
-    import urllib.request
-
-    wanted = model if ":" in model else f"{model}:latest"
-    try:
-        with urllib.request.urlopen(f"{host}/api/tags", timeout=timeout) as resp:
-            tags = json.loads(resp.read().decode("utf-8"))
-    except Exception:
-        return False
-    for entry in tags.get("models") or []:
-        if not isinstance(entry, dict):
-            continue
-        for key in ("name", "model"):
-            name = str(entry.get(key) or "")
-            if name == wanted or name == model:
-                return True
-    return False
+    return OllamaClient(host).has_model(model, timeout=timeout)
 
 
 # After a transport failure, annotation waits this long before trying
@@ -857,15 +742,12 @@ class SceneAnnotator:
 
         profile = get_profile(self.config.model)
         try:
-            _, elapsed = _call_ollama_vlm(
-                model=self.config.model,
-                prompt="",
-                host=self.config.ollama_host,
-                num_predict=1,
-                num_ctx=profile.ann_num_ctx,
+            elapsed = OllamaClient(self.config.ollama_host).preload(
+                self.config.model,
+                self.config.keep_alive,
+                options={"num_predict": 1, "num_ctx": profile.ann_num_ctx},
                 timeout=self.config.timeout_seconds,
-                keep_alive=self.config.keep_alive,
-            )
+            ).elapsed
         except ConnectionError as exc:  # OllamaUnavailable and kin
             logger.warning("Annotation model preload deferred: %s", exc)
             self._defer()

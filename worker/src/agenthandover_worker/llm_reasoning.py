@@ -20,22 +20,20 @@ All methods return ``ReasoningResult``; callers check ``.success`` and
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
-import re
-import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, TYPE_CHECKING
+
+from agenthandover_worker.json_extract import clean_model_text, extract_json
+from agenthandover_worker.ollama import OllamaClient
 
 if TYPE_CHECKING:
     from agenthandover_worker.vlm_queue import VLMFallbackQueue
 
 logger = logging.getLogger(__name__)
 
-_THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
-_FENCE_RE = re.compile(r"```(?:json)?\s*\n?(.*?)\n?\s*```", re.DOTALL)
 
 _ABSTENTION_MARKER = "INSUFFICIENT_EVIDENCE"
 
@@ -311,52 +309,25 @@ class LLMReasoner:
         num_predict: int | None = None,
         think: bool | None = None,
     ) -> tuple[str, float]:
-        """Call Ollama /api/generate. This is the mock boundary for tests."""
-        import urllib.request
-        import urllib.error
+        """Call Ollama /api/generate. This is the mock boundary for tests.
 
+        Returns the answer without ``<think>`` blocks and the call's
+        wall-clock seconds.
+        """
         use_think = think if think is not None else self.config.think
-
-        url = f"{self.config.ollama_host}/api/generate"
-        payload: dict = {
-            "model": self.config.model,
-            "prompt": prompt,
-            "stream": False,
-            "think": use_think,
-            "options": {
+        response = OllamaClient(self.config.ollama_host).generate(
+            self.config.model,
+            prompt,
+            system=system,
+            options={
                 "num_predict": num_predict or self.config.num_predict,
                 "num_ctx": 16384,
                 "temperature": 0.3,
             },
-        }
-        if system:
-            payload["system"] = system
-
-        body = json.dumps(payload).encode("utf-8")
-        req = urllib.request.Request(
-            url, data=body,
-            headers={"Content-Type": "application/json"},
-            method="POST",
+            think=use_think,
+            timeout=self.config.timeout,
         )
-
-        start = time.monotonic()
-        try:
-            with urllib.request.urlopen(
-                req, timeout=self.config.timeout,
-            ) as resp:
-                result = json.loads(resp.read().decode("utf-8"))
-        except urllib.error.URLError as exc:
-            raise ConnectionError(
-                f"Ollama not reachable at {self.config.ollama_host}: {exc}"
-            ) from exc
-
-        elapsed = time.monotonic() - start
-        raw = result.get("response", "")
-
-        # Strip thinking tags
-        raw = _THINK_RE.sub("", raw).strip()
-
-        return raw, elapsed
+        return clean_model_text(response.text), response.elapsed
 
     # ------------------------------------------------------------------
     # Parsing helpers
@@ -365,35 +336,12 @@ class LLMReasoner:
     @staticmethod
     def _parse_json(raw: str | Any) -> dict | None:
         """Extract a JSON dict from raw text."""
-        if not isinstance(raw, str) or not raw.strip():
+        if not isinstance(raw, str):
             return None
-
-        text = raw.strip()
-
-        # Try extracting from markdown fences
-        match = _FENCE_RE.search(text)
-        if match:
-            text = match.group(1).strip()
-
-        # Direct parse
         try:
-            data = json.loads(text)
-            if isinstance(data, dict):
-                return data
-        except json.JSONDecodeError:
-            pass
-
-        # Fallback: find first { and try from there
-        for i, ch in enumerate(text):
-            if ch == "{":
-                try:
-                    data = json.loads(text[i:])
-                    if isinstance(data, dict):
-                        return data
-                except json.JSONDecodeError:
-                    continue
-
-        return None
+            return extract_json(raw)
+        except ValueError:
+            return None
 
     @staticmethod
     def _parse_yesno(raw: str | Any) -> bool | None:

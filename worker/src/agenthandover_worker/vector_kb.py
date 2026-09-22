@@ -13,15 +13,14 @@ Design choices:
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 import math
 import sqlite3
 import struct
-import urllib.error
-import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from agenthandover_worker.ollama import OllamaClient, OllamaError
 
 logger = logging.getLogger(__name__)
 
@@ -145,38 +144,13 @@ class VectorKB:
 
         Raises ConnectionError if Ollama is unreachable.
         """
-        if not texts:
-            return []
 
-        model = model or self.config.embedding_model
-        all_embeddings: list[list[float]] = []
-
-        for start in range(0, len(texts), self.config.batch_size):
-            batch = texts[start : start + self.config.batch_size]
-            payload = json.dumps({"model": model, "input": batch}).encode("utf-8")
-            req = urllib.request.Request(
-                f"{self.config.ollama_host}/api/embed",
-                data=payload,
-                headers={"Content-Type": "application/json"},
-                method="POST",
-            )
-            try:
-                with urllib.request.urlopen(
-                    req, timeout=self.config.timeout_seconds,
-                ) as resp:
-                    result = json.loads(resp.read().decode("utf-8"))
-            except urllib.error.URLError as exc:
-                raise ConnectionError(
-                    f"Ollama not reachable at {self.config.ollama_host}: {exc}"
-                ) from exc
-
-            embeddings = result.get("embeddings", [])
-            # Pad with empty vectors if count doesn't match
-            while len(embeddings) < len(batch):
-                embeddings.append([])
-            all_embeddings.extend(embeddings[: len(batch)])
-
-        return all_embeddings
+        return OllamaClient(self.config.ollama_host).embed(
+            model or self.config.embedding_model,
+            texts,
+            batch_size=self.config.batch_size,
+            timeout=self.config.timeout_seconds,
+        )
 
     # ------------------------------------------------------------------
     # Cosine similarity
@@ -239,7 +213,7 @@ class VectorKB:
                     return False
                 embedding = embeddings[0]
                 self._cycle_embed_count += 1
-            except ConnectionError:
+            except (ConnectionError, OllamaError):
                 logger.debug("Ollama unavailable for embedding", exc_info=True)
                 return False
 
@@ -311,7 +285,7 @@ class VectorKB:
         texts = [t[3] for t in to_embed]
         try:
             computed = self.compute_embeddings(texts)
-        except ConnectionError:
+        except (ConnectionError, OllamaError):
             logger.debug("Ollama unavailable for batch embedding", exc_info=True)
             return 0
 
@@ -356,7 +330,7 @@ class VectorKB:
         """Embed *query_text* and find closest vectors by cosine similarity."""
         try:
             embeddings = self.compute_embeddings([query_text])
-        except ConnectionError:
+        except (ConnectionError, OllamaError):
             logger.debug("Ollama unavailable for search embedding")
             return []
 

@@ -18,13 +18,13 @@ Re-trigger: every 3 additional observations after last synthesis.
 
 from __future__ import annotations
 
-import json
 import logging
-import re
-import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
+
+from agenthandover_worker.json_extract import extract_json
+from agenthandover_worker.ollama import OllamaClient
 
 logger = logging.getLogger(__name__)
 
@@ -216,77 +216,22 @@ def _call_ollama_text(
     extra_options: dict | None = None,
 ) -> tuple[str, float]:
     """Call Ollama's /api/generate for text-only synthesis."""
-    from agenthandover_worker.scene_annotator import ollama_generate
-
     options: dict = {"num_predict": num_predict}
     if extra_options:
         options.update(extra_options)
 
-    payload: dict = {
-        "model": model,
-        "prompt": prompt,
-        "stream": False,
-        "think": think,
-        "options": options,
-    }
-    if system:
-        payload["system"] = system
-
-    start = time.monotonic()
-    result = ollama_generate(host, payload, timeout)
-    elapsed = time.monotonic() - start
-    return result.get("response", ""), elapsed
-
-
-_FENCE_RE = re.compile(r"```(?:json)?\s*\n?(.*?)\n?\s*```", re.DOTALL)
-_THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
+    response = OllamaClient(host).generate(
+        model, prompt, system=system, options=options, think=think, timeout=timeout,
+    )
+    return response.text, response.elapsed
 
 
 def _parse_json_response(raw: str) -> dict | None:
-    """Parse a VLM JSON response, handling fences, thinking tags, and truncation."""
-    text = _THINK_RE.sub("", raw).strip()
-    match = _FENCE_RE.search(text)
-    if match:
-        text = match.group(1).strip()
-    if not text:
-        return None
-
-    # Find the first { to start of JSON
-    start = text.find("{")
-    if start < 0:
-        return None
-    text = text[start:]
-
-    # Try direct parse
+    """Parse a synthesis JSON response, repairing truncation at the token limit."""
     try:
-        data = json.loads(text)
-        return data if isinstance(data, dict) else None
-    except json.JSONDecodeError:
-        pass
-
-    # Try repairing truncated JSON by closing open brackets
-    repaired = text
-    open_braces = repaired.count("{") - repaired.count("}")
-    open_brackets = repaired.count("[") - repaired.count("]")
-
-    # Strip trailing partial content (after last complete value)
-    # Find the last comma or complete value before truncation
-    for trim_char in [",", '"', "}", "]"]:
-        last_pos = repaired.rfind(trim_char)
-        if last_pos > 0:
-            candidate = repaired[:last_pos + 1]
-            # Close open brackets/braces
-            suffix = "]" * max(0, candidate.count("[") - candidate.count("]"))
-            suffix += "}" * max(0, candidate.count("{") - candidate.count("}"))
-            try:
-                data = json.loads(candidate + suffix)
-                if isinstance(data, dict):
-                    logger.debug("Repaired truncated behavioral JSON (%d open braces closed)", open_braces)
-                    return data
-            except json.JSONDecodeError:
-                continue
-
-    return None
+        return extract_json(raw, repair_truncated=True)
+    except ValueError:
+        return None
 
 
 # ---------------------------------------------------------------------------

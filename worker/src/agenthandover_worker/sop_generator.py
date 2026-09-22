@@ -16,14 +16,14 @@ Two modes:
 
 from __future__ import annotations
 
-import json
 import logging
 import re
-import time
 from dataclasses import dataclass, field
 from typing import Any
 
 from agenthandover_worker.confidence import compute_v2_confidence
+from agenthandover_worker.json_extract import extract_json
+from agenthandover_worker.ollama import OllamaClient
 
 logger = logging.getLogger(__name__)
 
@@ -674,113 +674,24 @@ def _build_enriched_passive_prompt(
 # Response parsing
 # ---------------------------------------------------------------------------
 
-_FENCE_RE = re.compile(r"```(?:json)?\s*\n?(.*?)\n?\s*```", re.DOTALL)
-_THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
-
-
 def _parse_sop_response(raw: str) -> dict | None:
-    """Parse the VLM's JSON response into a SOP dict.
+    """Parse the model's JSON response into a SOP dict.
 
-    Handles markdown fences, thinking tags, truncated JSON, and Qwen noise.
+    ``extract_json`` handles thinking tags, fences, end tokens and JSON
+    truncated at the token limit; a SOP must have a title and a list of
+    steps.
     """
-    # Strip thinking tags
-    text = _THINK_RE.sub("", raw).strip()
-
-    # Strip Qwen end-of-text tokens and trailing noise
-    for token in ("<|endoftext|>", "<|im_end|>", "<|end|>"):
-        text = text.split(token)[0]
-    text = text.strip()
-
-    # Try to extract from markdown fences
-    match = _FENCE_RE.search(text)
-    if match:
-        text = match.group(1).strip()
-
-    if not text:
-        return None
-
-    # Find the first { to locate JSON start
-    json_start = text.find("{")
-    if json_start < 0:
-        return None
-    text = text[json_start:]
-
-    # Try direct parse
     try:
-        data = json.loads(text)
-    except json.JSONDecodeError:
-        # Try to repair truncated JSON by closing open brackets
-        data = _try_repair_json(text)
-
-    if not isinstance(data, dict):
+        data = extract_json(raw, repair_truncated=True)
+    except ValueError:
         return None
 
-    # Minimal validation: must have title and steps
     if "title" not in data:
         return None
     if "steps" not in data or not isinstance(data["steps"], list):
         return None
 
     return data
-
-
-def _try_repair_json(text: str) -> dict | None:
-    """Attempt to repair truncated JSON from a model that hit its token limit.
-
-    Strategy: progressively trim from the end and close open brackets.
-    """
-    # Count open brackets
-    opens = 0
-    open_sq = 0
-    in_string = False
-    escape = False
-
-    for ch in text:
-        if escape:
-            escape = False
-            continue
-        if ch == "\\":
-            escape = True
-            continue
-        if ch == '"' and not escape:
-            in_string = not in_string
-            continue
-        if in_string:
-            continue
-        if ch == "{":
-            opens += 1
-        elif ch == "}":
-            opens -= 1
-        elif ch == "[":
-            open_sq += 1
-        elif ch == "]":
-            open_sq -= 1
-
-    # Try closing open brackets
-    if opens > 0 or open_sq > 0:
-        # Trim any trailing partial value (incomplete string, number, etc.)
-        # Find last complete value (ends with }, ], ", number, true, false, null)
-        trimmed = text.rstrip()
-        # Remove trailing comma if present
-        if trimmed.endswith(","):
-            trimmed = trimmed[:-1]
-
-        # Close open brackets
-        repair = trimmed + ("]" * max(0, open_sq)) + ("}" * max(0, opens))
-        try:
-            return json.loads(repair)
-        except json.JSONDecodeError:
-            pass
-
-    # Try finding a valid JSON substring by trimming from the end
-    for end in range(len(text), max(len(text) - 500, 0), -1):
-        candidate = text[:end]
-        try:
-            return json.loads(candidate)
-        except json.JSONDecodeError:
-            continue
-
-    return None
 
 
 _GENERIC_VAR_EXAMPLES = frozenset({
@@ -1389,7 +1300,7 @@ def _smart_sample_focus(frames: list[dict], max_frames: int) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# Ollama client (reused from scene_annotator)
+# Ollama call
 # ---------------------------------------------------------------------------
 
 def _call_ollama(
@@ -1418,8 +1329,6 @@ def _call_ollama(
         extra_options: Additional Ollama options merged into the options dict.
             Use model_profiles.get_profile().sop_options() for optimal settings.
     """
-    from agenthandover_worker.scene_annotator import ollama_generate
-
     options: dict = {
         "num_predict": num_predict,
         "num_ctx": 24576,
@@ -1428,24 +1337,16 @@ def _call_ollama(
     if extra_options:
         options.update(extra_options)
 
-    payload: dict = {
-        "model": model,
-        "prompt": prompt,
-        "stream": False,
-        # think must be a top-level parameter, NOT inside options.
-        "think": think,
-        "options": options,
-    }
-
-    if system:
-        payload["system"] = system
-    if format_json and not think:
-        payload["format"] = "json"
-
-    start = time.monotonic()
-    result = ollama_generate(host, payload, timeout)
-    elapsed = time.monotonic() - start
-    return result.get("response", ""), elapsed
+    response = OllamaClient(host).generate(
+        model,
+        prompt,
+        system=system,
+        options=options,
+        format="json" if format_json and not think else None,
+        think=think,
+        timeout=timeout,
+    )
+    return response.text, response.elapsed
 
 
 def sop_system_prompt(profile_system: str = "") -> str:

@@ -8,6 +8,7 @@ VLM fallback enqueuing, SOP induction, formatting, and export.
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import logging
 import os
@@ -21,6 +22,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from agenthandover_worker.clipboard_linker import ClipboardLinker
+from agenthandover_worker.config import load_config
 from agenthandover_worker.confidence import ConfidenceScorer, is_native_app_context
 from agenthandover_worker.db import WorkerDB
 from agenthandover_worker.episode_builder import EpisodeBuilder
@@ -28,6 +30,8 @@ from agenthandover_worker.exporter import IndexGenerator
 from agenthandover_worker.focus_processor import FocusProcessor
 from agenthandover_worker.frame_differ import DiffConfig, FrameDiffer
 from agenthandover_worker.negative_demo import NegativeDemoPruner
+from agenthandover_worker.ollama import OllamaError
+from agenthandover_worker.ops_telemetry import MODEL_USAGE
 from agenthandover_worker.export_adapter import SOPExportAdapter
 from agenthandover_worker.openclaw_writer import OpenClawWriter
 from agenthandover_worker.scene_annotator import AnnotationConfig, SceneAnnotator
@@ -162,108 +166,6 @@ def _export_via_adapter(
     return paths
 
 
-def _read_config_field(section: str, field: str, default: str = "") -> str:
-    """Read a single field from a section of config.toml, as a string.
-
-    Falls back to *default* if the field or file is missing.
-    """
-    import tomllib
-
-    if _platform.system() == "Darwin":
-        config_path = (
-            Path.home() / "Library" / "Application Support"
-            / "agenthandover" / "config.toml"
-        )
-    else:
-        config_path = Path.home() / ".config" / "agenthandover" / "config.toml"
-
-    if not config_path.is_file():
-        return default
-
-    try:
-        with open(config_path, "rb") as f:
-            cfg = tomllib.load(f)
-        return str(cfg.get(section, {}).get(field, default))
-    except Exception:
-        return default
-
-
-def _read_vlm_config_field(field: str, default: str = "") -> str:
-    """Read a single field from the [vlm] section of config.toml."""
-    return _read_config_field("vlm", field, default)
-
-
-def _read_float_field(section: str, field: str, default: float) -> float:
-    """A positive float from config.toml, or *default* when missing/invalid."""
-    raw = _read_config_field(section, field, "")
-    if raw == "":
-        return default
-    try:
-        value = float(raw)
-    except ValueError:
-        value = float("nan")
-    if not (0 < value < float("inf")):
-        logger.warning(
-            "[%s] %s = %r must be positive; using %s", section, field, raw, default,
-        )
-        return default
-    return value
-
-
-def _read_idle_jobs_config() -> dict:
-    """Read [idle_jobs] from config.toml and return kwargs for SchedulerConfig.
-
-    Returns an empty dict if the section is missing or unreadable.
-    """
-    import tomllib
-    from datetime import time as dt_time
-
-    if _platform.system() == "Darwin":
-        config_path = (
-            Path.home() / "Library" / "Application Support"
-            / "agenthandover" / "config.toml"
-        )
-    else:
-        config_path = Path.home() / ".config" / "agenthandover" / "config.toml"
-
-    if not config_path.is_file():
-        return {}
-
-    try:
-        with open(config_path, "rb") as f:
-            cfg = tomllib.load(f)
-        section = cfg.get("idle_jobs", {})
-        if not section:
-            return {}
-
-        result: dict = {}
-        if "require_ac_power" in section:
-            result["require_ac_power"] = bool(section["require_ac_power"])
-        if "min_battery_percent" in section:
-            result["min_battery_percent"] = int(section["min_battery_percent"])
-        if "max_cpu_percent" in section:
-            result["max_cpu_percent"] = int(section["max_cpu_percent"])
-        if "max_temp_c" in section:
-            result["max_temp_c"] = int(section["max_temp_c"])
-        if "run_window_local_time" in section:
-            # Format: "HH:MM-HH:MM"
-            window = section["run_window_local_time"]
-            parts = window.split("-")
-            if len(parts) == 2:
-                start_parts = parts[0].strip().split(":")
-                end_parts = parts[1].strip().split(":")
-                result["run_window_start"] = dt_time(
-                    int(start_parts[0]), int(start_parts[1])
-                )
-                result["run_window_end"] = dt_time(
-                    int(end_parts[0]), int(end_parts[1])
-                )
-        return result
-    except Exception:
-        logger.debug("Failed to read [idle_jobs] config", exc_info=True)
-        return {}
-
-
 def _read_keychain_api_key(provider: str) -> str:
     """Read an API key from macOS Keychain (set by SwiftUI onboarding).
 
@@ -297,169 +199,6 @@ def _read_keychain_api_key(provider: str) -> str:
     except Exception:
         pass
     return ""
-
-
-def _read_llm_config() -> dict:
-    """Read the entire [llm] section from config.toml.
-
-    Returns a dict with defaults for missing fields.
-    """
-    import tomllib
-
-    if _platform.system() == "Darwin":
-        config_path = (
-            Path.home() / "Library" / "Application Support"
-            / "agenthandover" / "config.toml"
-        )
-    else:
-        config_path = Path.home() / ".config" / "agenthandover" / "config.toml"
-
-    defaults = {
-        "enhance_sops": True,
-        "max_enhancements_per_day": 20,
-        "model": "",
-        "timeout_seconds": 60,
-        "temperature": 0.3,
-        "max_tokens": 800,
-    }
-
-    if not config_path.is_file():
-        return defaults
-
-    try:
-        with open(config_path, "rb") as f:
-            cfg = tomllib.load(f)
-        llm = cfg.get("llm", {})
-        for key, default_val in defaults.items():
-            if key in llm:
-                defaults[key] = llm[key]
-        return defaults
-    except Exception:
-        return defaults
-
-
-def _read_vlm_v2_config() -> dict:
-    """Read v2 scene annotation pipeline config from the [vlm] section.
-
-    Returns a dict with defaults for all v2-specific fields.
-    """
-    return {
-        "annotation_enabled": _read_vlm_config_field(
-            "annotation_enabled", "true"
-        ).lower() in ("true", "1", "yes"),
-        "annotation_model": _read_vlm_config_field(
-            "annotation_model", "qwen3.5:2b"
-        ),
-        "sop_model": _read_vlm_config_field("sop_model", "qwen3.5:4b"),
-        "stale_skip_count": int(
-            _read_vlm_config_field("stale_skip_count", "3")
-        ),
-        "sliding_window_max_age_sec": int(
-            _read_vlm_config_field("sliding_window_max_age_sec", "600")
-        ),
-        "ollama_host": _read_vlm_config_field(
-            "ollama_host", "http://localhost:11434"
-        ),
-        "annotation_timeout_seconds": _read_float_field(
-            "vlm", "annotation_timeout_seconds", 180.0,
-        ),
-    }
-
-
-def _read_sop_config() -> dict:
-    """Read the [sop] section from config.toml.
-
-    Returns a dict with defaults for missing fields.
-    """
-    import tomllib
-
-    if _platform.system() == "Darwin":
-        config_path = (
-            Path.home() / "Library" / "Application Support"
-            / "agenthandover" / "config.toml"
-        )
-    else:
-        config_path = Path.home() / ".config" / "agenthandover" / "config.toml"
-
-    defaults = {
-        "auto_approve": False,
-    }
-
-    if not config_path.is_file():
-        return defaults
-
-    try:
-        with open(config_path, "rb") as f:
-            cfg = tomllib.load(f)
-        sop = cfg.get("sop", {})
-        if "auto_approve" in sop:
-            defaults["auto_approve"] = bool(sop["auto_approve"])
-        return defaults
-    except Exception:
-        return defaults
-
-
-def _config_path() -> str | None:
-    """Return the path to config.toml, or None if it does not exist."""
-    if _platform.system() == "Darwin":
-        p = (
-            Path.home() / "Library" / "Application Support"
-            / "agenthandover" / "config.toml"
-        )
-    else:
-        p = Path.home() / ".config" / "agenthandover" / "config.toml"
-    return str(p) if p.is_file() else None
-
-
-def _skills_dir() -> Path:
-    """Return the Claude Code skills root for ``ClaudeSkillWriter``.
-
-    Reads ``[export] claude_skills_dir`` from config.toml (``~`` is
-    expanded); defaults to ``~/.claude/skills``.
-    """
-    default = Path.home() / ".claude" / "skills"
-    config_file = _config_path()
-    if config_file is None:
-        return default
-    try:
-        import tomllib
-        with open(config_file, "rb") as f:
-            cfg = tomllib.load(f)
-        configured = cfg.get("export", {}).get("claude_skills_dir")
-    except Exception:
-        logger.warning("Could not read [export] claude_skills_dir", exc_info=True)
-        return default
-    if not configured:
-        return default
-    return Path(str(configured)).expanduser()
-
-
-def _read_feature_flags() -> dict:
-    """Read [features] section from config.toml.
-
-    Returns dict of feature flags with all defaulting to True.
-    """
-    defaults = {
-        "activity_classification": True,
-        "continuity_tracking": True,
-        "lifecycle_management": True,
-        "curation": True,
-        "runtime_validation": True,
-    }
-    config_file = _config_path()
-    if config_file is None or not Path(config_file).exists():
-        return defaults
-    try:
-        import tomllib
-        with open(config_file, "rb") as f:
-            cfg = tomllib.load(f)
-        features = cfg.get("features", {})
-        for key in defaults:
-            if key in features:
-                defaults[key] = bool(features[key])
-    except Exception:
-        pass
-    return defaults
 
 
 def _check_v2_schema(db: "WorkerDB") -> bool:
@@ -846,6 +585,8 @@ def _write_worker_status(
         status["v2_annotation_enabled"] = True
         status["v2_annotations_today"] = v2_annotations_today
         status["v2_diffs_today"] = v2_diffs_today
+    # Tokens and Ollama timings per model since the worker started.
+    status["model_calls"] = MODEL_USAGE.snapshot()
     sdir = _status_dir()
     sdir.mkdir(parents=True, exist_ok=True)
     target = sdir / "worker-status.json"
@@ -4077,7 +3818,10 @@ def _check_export_trigger(
     if fmt in ("claude-skill", "all"):
         try:
             from agenthandover_worker.claude_skill_writer import ClaudeSkillWriter
-            skills_dir = Path(output_dir) / "skills" if output_dir else _skills_dir()
+            skills_dir = (
+                Path(output_dir) / "skills" if output_dir
+                else load_config().export.skills_dir
+            )
             writer = ClaudeSkillWriter(skills_dir=skills_dir)
             paths = _export_via_adapter(writer, sop_templates, procedure_writer)
             exported += len(paths)
@@ -4424,29 +4168,25 @@ def main(argv: list[str] | None = None) -> None:
     knowledge_base = KnowledgeBase(root=args.knowledge_dir)
     knowledge_base.ensure_structure()
 
+    # One read of config.toml for the whole worker run.
+    cfg = load_config()
+    vlm_cfg = cfg.vlm
+
     # Config validation
     try:
-        config_validator = ConfigValidator()
-        config_file = (
-            Path.home() / "Library" / "Application Support" / "agenthandover" / "config.toml"
-            if _platform.system() == "Darwin"
-            else Path.home() / ".config" / "agenthandover" / "config.toml"
-        )
-        if config_file.is_file():
-            import tomllib
-            with open(config_file, "rb") as f:
-                raw_config = tomllib.load(f)
-            issues = config_validator.validate(raw_config)
-            for issue in issues:
-                log_fn = logger.error if issue.severity == "error" else logger.warning
-                log_fn("Config [%s.%s]: %s", issue.section, issue.key, issue.message)
+        for issue in ConfigValidator().validate(cfg.raw):
+            log_fn = logger.error if issue.severity == "error" else logger.warning
+            log_fn("Config [%s.%s]: %s", issue.section, issue.key, issue.message)
     except Exception:
         logger.debug("Config validation skipped", exc_info=True)
 
     ops_telemetry = OpsTelemetry(knowledge_base)
 
-    feature_flags = _read_feature_flags()
-    logger.info("Feature flags: %s", {k: v for k, v in feature_flags.items() if not v} or "all enabled")
+    features = cfg.features
+    logger.info(
+        "Feature flags: %s",
+        [k for k, v in vars(features).items() if not v] or "all enabled",
+    )
 
     # Forward declarations — these are initialized later but referenced
     # by module constructors. Python 3.14 requires locals to be assigned
@@ -4461,7 +4201,7 @@ def main(argv: list[str] | None = None) -> None:
     # Build PrivacyZoneConfig from user's config.toml [privacy.zones]
     _pz_cfg = PrivacyZoneConfig()
     try:
-        _pz_raw = raw_config.get("privacy", {}).get("zones", {})
+        _pz_raw = cfg.privacy_zones
         if _pz_raw:
             _pz_cfg = PrivacyZoneConfig(
                 full_observation=_pz_raw.get("full_observation", []),
@@ -4481,7 +4221,7 @@ def main(argv: list[str] | None = None) -> None:
     staleness_detector = StalenessDetector(knowledge_base)
     profile_builder = ProfileBuilder(knowledge_base)
     activity_classifier = None
-    if feature_flags["activity_classification"]:
+    if features.activity_classification:
         user_policy = UserPolicy(knowledge_base)
         activity_classifier = ActivityClassifier(
             profile=knowledge_base.get_profile(),
@@ -4489,12 +4229,6 @@ def main(argv: list[str] | None = None) -> None:
         )
     pattern_detector = PatternDetector(knowledge_base)
     constraint_manager = ConstraintManager(knowledge_base)
-
-    # Load v2 VLM config early — the LLM reasoner and behavioral synthesizer
-    # below and the annotation pipeline further down all need this dict.
-    # Python scoping makes `v2_cfg` a local because of the later
-    # assignment, so reading it before this line raises UnboundLocalError.
-    v2_cfg = _read_vlm_v2_config()
 
     # Shared LLM reasoning utility — must be created before modules that use it.
     # VLMFallbackQueue is imported at module level (line 40) — do NOT re-import
@@ -4506,7 +4240,7 @@ def main(argv: list[str] | None = None) -> None:
     vlm_queue = VLMFallbackQueue()
     from agenthandover_worker.llm_reasoning import LLMReasoner, ReasoningConfig
     llm_reasoner = LLMReasoner(
-        config=ReasoningConfig(ollama_host=v2_cfg["ollama_host"]),
+        config=ReasoningConfig(ollama_host=vlm_cfg.ollama_host),
         vlm_queue=vlm_queue,
     )
 
@@ -4516,7 +4250,7 @@ def main(argv: list[str] | None = None) -> None:
 
     # Phase 4: Execution monitoring, correction detection, trust advisor
     runtime_validator = None
-    if feature_flags["runtime_validation"]:
+    if features.runtime_validation:
         runtime_validator = RuntimeValidator(knowledge_base)
     execution_monitor = ExecutionMonitor(knowledge_base)
     correction_detector = CorrectionDetector(knowledge_base, llm_reasoner=llm_reasoner)
@@ -4524,7 +4258,7 @@ def main(argv: list[str] | None = None) -> None:
     session_linker = SessionLinker(knowledge_base, llm_reasoner=llm_reasoner, vector_kb=vector_kb)
     digest_generator = DigestGenerator(knowledge_base)
     continuity_tracker = None
-    if feature_flags["continuity_tracking"]:
+    if features.continuity_tracking:
         procedure_matcher_obj = ProcedureMatcher(kb=knowledge_base, vector_kb=vector_kb)
         continuity_tracker = ContinuityTracker(
             kb=knowledge_base,
@@ -4539,12 +4273,12 @@ def main(argv: list[str] | None = None) -> None:
     evidence_normalizer = EvidenceNormalizer(variant_detector=variant_detector)
 
     # A focus recording still "recording" after this long is closed as stale.
-    focus_max_session_hours = _read_float_field("focus", "max_session_hours", 4.0)
+    focus_max_session_hours = cfg.focus.max_session_hours
 
     # Behavioral synthesis + evidence extraction
     from agenthandover_worker.behavioral_synthesizer import BehavioralSynthesizer, SynthesizerConfig
-    _synth_model = v2_cfg["sop_model"] if v2_cfg else "qwen3.5:4b"
-    _synth_host = v2_cfg.get("ollama_host", "http://localhost:11434") if v2_cfg else "http://localhost:11434"
+    _synth_model = vlm_cfg.sop_model
+    _synth_host = vlm_cfg.ollama_host
     behavioral_synthesizer = BehavioralSynthesizer(
         config=SynthesizerConfig(model=_synth_model, ollama_host=_synth_host),
         vlm_queue=vlm_queue,
@@ -4560,7 +4294,7 @@ def main(argv: list[str] | None = None) -> None:
     # Phase 5: Curation orchestrator
     procedure_curator = None
     quality_judge = None
-    if feature_flags["curation"]:
+    if features.curation:
         from agenthandover_worker.quality_judge import QualityJudge
         quality_judge = QualityJudge(llm_reasoner)
         procedure_curator = ProcedureCurator(
@@ -4582,11 +4316,11 @@ def main(argv: list[str] | None = None) -> None:
         )
 
         # Warn if using Gemma 4 but Ollama is too old
-        ann_model = v2_cfg["annotation_model"] if v2_cfg else "qwen3.5:2b"
-        sop_model = v2_cfg["sop_model"] if v2_cfg else "qwen3.5:4b"
+        ann_model = vlm_cfg.annotation_model
+        sop_model = vlm_cfg.sop_model
         uses_gemma = "gemma4" in ann_model or "gemma4" in sop_model
         if uses_gemma:
-            ollama_host = v2_cfg.get("ollama_host", "http://localhost:11434") if v2_cfg else "http://localhost:11434"
+            ollama_host = vlm_cfg.ollama_host
             if not ollama_supports_gemma4(ollama_host):
                 logger.warning(
                     "Gemma 4 QAT models require Ollama 0.30.6+. "
@@ -4627,13 +4361,13 @@ def main(argv: list[str] | None = None) -> None:
         sop_writer = SkillMdWriter(workspace_dir=args.sops_dir.parent.parent)
     elif args.adapter == "claude-skill":
         from agenthandover_worker.claude_skill_writer import ClaudeSkillWriter
-        sop_writer = ClaudeSkillWriter(skills_dir=_skills_dir())
+        sop_writer = ClaudeSkillWriter(skills_dir=cfg.export.skills_dir)
     elif args.adapter == "all":
         sop_writer = OpenClawWriter(workspace_dir=args.sops_dir.parent.parent)
         from agenthandover_worker.skill_md_writer import SkillMdWriter
         skill_md_writer = SkillMdWriter(workspace_dir=args.sops_dir.parent.parent)
         from agenthandover_worker.claude_skill_writer import ClaudeSkillWriter
-        claude_skill_writer = ClaudeSkillWriter(skills_dir=_skills_dir())
+        claude_skill_writer = ClaudeSkillWriter(skills_dir=cfg.export.skills_dir)
     else:
         sop_writer = OpenClawWriter(workspace_dir=args.sops_dir.parent.parent)
 
@@ -4641,8 +4375,8 @@ def main(argv: list[str] | None = None) -> None:
     from agenthandover_worker.vlm_worker import VLMWorker, VLMConfig, VLMBackend
     vlm_worker = None
     vlm_available = False
-    vlm_mode_str = _read_vlm_config_field("mode", "local")
-    vlm_provider_str = _read_vlm_config_field("provider", "")
+    vlm_mode_str = vlm_cfg.mode
+    vlm_provider_str = vlm_cfg.provider
 
     if vlm_mode_str == "remote" and vlm_provider_str:
         # --- Remote mode: use cloud API ---
@@ -4662,8 +4396,8 @@ def main(argv: list[str] | None = None) -> None:
             logger.error("Unknown VLM provider: %s", vlm_provider_str)
         else:
             try:
-                remote_model = _read_vlm_config_field("model", "")
-                api_key_env = _read_vlm_config_field("api_key_env", "")
+                remote_model = vlm_cfg.model
+                api_key_env = vlm_cfg.api_key_env
                 # Resolve the actual API key:
                 # 1. Check env var (standard path, works with shell profiles)
                 # 2. Fall back to macOS Keychain (set by SwiftUI onboarding)
@@ -4723,7 +4457,7 @@ def main(argv: list[str] | None = None) -> None:
                     backend_type = None  # type: ignore[assignment]
                 if backend_type is not None:
                     # Read optional model override from config.toml [vlm] section
-                    config_model = _read_vlm_config_field("model", "")
+                    config_model = vlm_cfg.model
                     vlm_kwargs: dict = {"backend": backend_type}
                     if config_model:
                         vlm_kwargs["model_name"] = config_model
@@ -4749,7 +4483,7 @@ def main(argv: list[str] | None = None) -> None:
 
     # Initialize LLM-enhanced SOP descriptions
     sop_enhancer = None
-    llm_config = _read_llm_config()
+    llm_config = dataclasses.asdict(cfg.llm)
 
     # CLI args override config
     if args.enhance_sops is not None:
@@ -4770,8 +4504,8 @@ def main(argv: list[str] | None = None) -> None:
             vlm_cfg_dict = {
                 "mode": vlm_mode_str,
                 "provider": vlm_provider_str,
-                "model": _read_vlm_config_field("model", ""),
-                "api_key_env": _read_vlm_config_field("api_key_env", ""),
+                "model": vlm_cfg.model,
+                "api_key_env": vlm_cfg.api_key_env,
             }
             llm_backend = create_llm_backend(llm_config, vlm_cfg_dict)
             if llm_backend is not None:
@@ -4815,10 +4549,9 @@ def main(argv: list[str] | None = None) -> None:
         )
 
     # Initialize v2 scene annotation pipeline
-    # v2_cfg already loaded near the top of main() for behavioral synthesizer.
     scene_annotator: SceneAnnotator | None = None
     frame_differ: FrameDiffer | None = None
-    v2_annotation_enabled = v2_cfg["annotation_enabled"]
+    v2_annotation_enabled = vlm_cfg.annotation_enabled
     screenshots_dir = _status_dir() / "screenshots"
 
     focus_processor: FocusProcessor | None = None
@@ -4827,31 +4560,16 @@ def main(argv: list[str] | None = None) -> None:
 
     if v2_annotation_enabled:
         ann_config = AnnotationConfig(
-            model=v2_cfg["annotation_model"],
-            ollama_host=v2_cfg["ollama_host"],
-            stale_skip_count=v2_cfg["stale_skip_count"],
-            sliding_window_max_age_sec=v2_cfg["sliding_window_max_age_sec"],
-            timeout_seconds=v2_cfg["annotation_timeout_seconds"],
+            model=vlm_cfg.annotation_model,
+            ollama_host=vlm_cfg.ollama_host,
+            stale_skip_count=vlm_cfg.stale_skip_count,
+            sliding_window_max_age_sec=vlm_cfg.sliding_window_max_age_sec,
+            timeout_seconds=vlm_cfg.annotation_timeout_seconds,
         )
         # Initialize image embedder (SigLIP via mlx-embeddings, optional)
         # Only if user opted in via config.toml [embedding] image_embeddings = true
         _image_embedder = None
-        _image_emb_enabled = False
-        try:
-            import tomllib as _tomllib
-            _cfg_path = (
-                Path.home() / "Library" / "Application Support" / "agenthandover" / "config.toml"
-                if _platform.system() == "Darwin"
-                else Path.home() / ".config" / "agenthandover" / "config.toml"
-            )
-            if _cfg_path.is_file():
-                with open(_cfg_path, "rb") as _cf:
-                    _emb_cfg = _tomllib.load(_cf).get("embedding", {})
-                    _image_emb_enabled = _emb_cfg.get("image_embeddings", False)
-        except Exception:
-            pass
-
-        if _image_emb_enabled:
+        if cfg.embedding.image_embeddings:
             try:
                 from agenthandover_worker.vector_kb import ImageEmbedder
                 _image_embedder = ImageEmbedder()
@@ -4876,15 +4594,15 @@ def main(argv: list[str] | None = None) -> None:
         scene_annotator.preload()
 
         diff_config = DiffConfig(
-            model=v2_cfg["annotation_model"],
-            ollama_host=v2_cfg["ollama_host"],
+            model=vlm_cfg.annotation_model,
+            ollama_host=vlm_cfg.ollama_host,
         )
         frame_differ = FrameDiffer(config=diff_config)
 
         # SOP generator (4B thinking model) for focus session SOPs
         sop_gen_config = SOPGeneratorConfig(
-            model=v2_cfg["sop_model"],
-            ollama_host=v2_cfg["ollama_host"],
+            model=vlm_cfg.sop_model,
+            ollama_host=vlm_cfg.ollama_host,
         )
         sop_generator = SOPGenerator(config=sop_gen_config)
 
@@ -4897,7 +4615,7 @@ def main(argv: list[str] | None = None) -> None:
 
         # Task segmenter for passive discovery (CPU-only, no GPU)
         seg_config = SegmenterConfig(
-            ollama_host=v2_cfg["ollama_host"],
+            ollama_host=vlm_cfg.ollama_host,
         )
         task_segmenter = TaskSegmenter(
             config=seg_config,
@@ -4909,10 +4627,10 @@ def main(argv: list[str] | None = None) -> None:
         logger.info(
             "v2 scene annotation pipeline enabled "
             "(annotation=%s, sop=%s, stale_skip=%d, window=%ds)",
-            v2_cfg["annotation_model"],
-            v2_cfg["sop_model"],
-            v2_cfg["stale_skip_count"],
-            v2_cfg["sliding_window_max_age_sec"],
+            vlm_cfg.annotation_model,
+            vlm_cfg.sop_model,
+            vlm_cfg.stale_skip_count,
+            vlm_cfg.sliding_window_max_age_sec,
         )
     else:
         logger.info("v2 scene annotation pipeline disabled by config")
@@ -4939,18 +4657,7 @@ def main(argv: list[str] | None = None) -> None:
     # Phase 4: Start query API server (if enabled in config)
     query_api_server = None
     try:
-        import tomllib as _tomllib
-        _cfg_path = (
-            Path.home() / "Library" / "Application Support" / "agenthandover" / "config.toml"
-            if _platform.system() == "Darwin"
-            else Path.home() / ".config" / "agenthandover" / "config.toml"
-        )
-        _knowledge_cfg = {}
-        if _cfg_path.is_file():
-            with open(_cfg_path, "rb") as _cf:
-                _knowledge_cfg = _tomllib.load(_cf).get("knowledge", {})
-        _api_enabled = _knowledge_cfg.get("query_api_enabled", True)
-        if _api_enabled:
+        if cfg.knowledge.query_api_enabled:
             from agenthandover_worker.query_api import QueryAPIServer
             from agenthandover_worker.procedure_verifier import ProcedureVerifier
             procedure_verifier = ProcedureVerifier(knowledge_base, runtime_validator=runtime_validator)
@@ -4960,7 +4667,7 @@ def main(argv: list[str] | None = None) -> None:
                 verifier=procedure_verifier,
                 adapters=bundle_adapters,
             )
-            _api_port = _knowledge_cfg.get("query_api_port", 9477)
+            _api_port = cfg.knowledge.query_api_port
             query_api_server = QueryAPIServer(
                 knowledge_base=knowledge_base,
                 port=_api_port,
@@ -4985,14 +4692,11 @@ def main(argv: list[str] | None = None) -> None:
         logger.debug("Query API server not started", exc_info=True)
 
     # Read SOP review config
-    sop_config = _read_sop_config()
-    sop_auto_approve = sop_config["auto_approve"]
+    sop_auto_approve = cfg.sop.auto_approve
     logger.info("SOP auto_approve: %s", sop_auto_approve)
 
     # Initialize scheduler gate (GAP 5)
-    # Read idle_jobs config from config.toml if available
-    _idle_cfg = _read_idle_jobs_config()
-    idle_gate = IdleJobGate(SchedulerConfig(**_idle_cfg))
+    idle_gate = IdleJobGate(SchedulerConfig(**cfg.idle_jobs.scheduler_kwargs()))
 
     # Cumulative counters for status reporting
     started_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -5043,7 +4747,7 @@ def main(argv: list[str] | None = None) -> None:
     try:
         from agenthandover_worker.vector_kb import VectorKB, VectorKBConfig
         vkb_config = VectorKBConfig(
-            ollama_host=v2_cfg["ollama_host"] if v2_cfg else "http://localhost:11434",
+            ollama_host=vlm_cfg.ollama_host,
         )
         vector_kb = VectorKB(args.db_path, vkb_config)
         # Health check: verify embedding model is available
@@ -5062,7 +4766,7 @@ def main(argv: list[str] | None = None) -> None:
                     vkb_config.embedding_model, vkb_config.embedding_model,
                 )
                 vector_kb = None
-        except ConnectionError:
+        except (ConnectionError, OllamaError):
             logger.warning(
                 "Vector KB model '%s' not available — "
                 "run 'ollama pull %s' to enable semantic search",
@@ -5197,14 +4901,14 @@ def main(argv: list[str] | None = None) -> None:
                         focus_questioner=focus_questioner_inst,
                         knowledge_base=knowledge_base,
                         vector_kb=vector_kb,
-                        ollama_host=v2_cfg.get("ollama_host", "http://localhost:11434") if v2_cfg else "http://localhost:11434",
+                        ollama_host=vlm_cfg.ollama_host,
                         # Use the SAME model the user configured for SOP
                         # generation (from config.toml) for Q&A question
                         # generation too. Previous versions hardcoded
                         # qwen3.5:4b via ReasoningConfig's default, which
                         # silently failed for Gemma-4-only users (16GB+
                         # recommended tier) because they never pulled qwen.
-                        qna_model=v2_cfg.get("sop_model", "qwen3.5:4b") if v2_cfg else "qwen3.5:4b",
+                        qna_model=vlm_cfg.sop_model,
                     )
                 else:
                     focus_sops = _process_focus_sessions(
@@ -5862,7 +5566,7 @@ def main(argv: list[str] | None = None) -> None:
                         logger.debug("Staleness check failed", exc_info=True)
 
                     # Lifecycle: auto-demote stale procedures
-                    if feature_flags["lifecycle_management"]:
+                    if features.lifecycle_management:
                         try:
                             transitions = lifecycle_manager.apply_auto_transitions()
                             if transitions:
