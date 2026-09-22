@@ -15,6 +15,13 @@ from pathlib import Path
 
 import pytest
 
+# Sandboxed HOME: must be registered before any agenthandover_worker import.
+from home_sandbox import (  # noqa: F401  (pytest discovers these by name)
+    pytest_configure,
+    pytest_unconfigure,
+    real_home_untouched,
+)
+
 # ---------------------------------------------------------------------------
 # Schema — mirrors crates/storage/src/migrations/v001 + v002 exactly
 # ---------------------------------------------------------------------------

@@ -42,7 +42,7 @@ def _load_procedures() -> list[dict]:
     return procedures
 
 
-def connect_claude_code() -> None:
+def connect_claude_code(commands_dir: Path | None = None) -> None:
     """Set up Claude Code integration.
 
     Creates:
@@ -50,8 +50,12 @@ def connect_claude_code() -> None:
        execution instructions (steps, strategy, guardrails, reporting).
     2. A meta-index /agenthandover-list command that lists all skills.
     3. Removes stale commands for procedures that are no longer agent_ready.
+
+    Args:
+        commands_dir: Where the command files go.  Defaults to
+            ``~/.claude/commands``.
     """
-    skills_dir = Path.home() / ".claude" / "commands"
+    skills_dir = commands_dir if commands_dir is not None else Path.home() / ".claude" / "commands"
     skills_dir.mkdir(parents=True, exist_ok=True)
 
     procedures = _load_procedures()
