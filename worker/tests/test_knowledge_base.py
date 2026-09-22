@@ -12,10 +12,8 @@ from agenthandover_worker.knowledge_base import KnowledgeBase
 from agenthandover_worker.procedure_schema import (
     PROCEDURE_SCHEMA_VERSION,
     sop_to_procedure,
-    upgrade_v2_to_v3,
     validate_procedure,
 )
-from agenthandover_worker.sop_schema import sop_to_json
 
 
 # ---------------------------------------------------------------------------
@@ -516,55 +514,6 @@ class TestValidateProcedure:
 
 
 # ---------------------------------------------------------------------------
-# Procedure schema — upgrade v2 to v3
-# ---------------------------------------------------------------------------
-
-class TestUpgradeV2ToV3:
-
-    def test_upgrade_from_sop_to_json(self, sample_sop_template: dict) -> None:
-        v2 = sop_to_json(sample_sop_template)
-        v3 = upgrade_v2_to_v3(v2)
-        assert v3["schema_version"] == PROCEDURE_SCHEMA_VERSION
-        assert v3["id"] == "check-expired-domains"
-        assert len(v3["steps"]) == 2
-        assert v3["metadata"]["upgraded_from"] == "3.0.0"
-
-    def test_upgrade_validates_clean(self, sample_sop_template: dict) -> None:
-        v2 = sop_to_json(sample_sop_template)
-        v3 = upgrade_v2_to_v3(v2)
-        errors = validate_procedure(v3)
-        assert errors == [], f"Validation errors: {errors}"
-
-    def test_upgrade_preserves_variables_as_inputs(
-        self, sample_sop_template: dict
-    ) -> None:
-        v2 = sop_to_json(sample_sop_template)
-        v3 = upgrade_v2_to_v3(v2)
-        assert len(v3["inputs"]) == 1
-        assert v3["inputs"][0]["name"] == "search_query"
-
-    def test_upgrade_sets_staleness(self, sample_sop_template: dict) -> None:
-        v2 = sop_to_json(sample_sop_template)
-        v3 = upgrade_v2_to_v3(v2)
-        assert v3["staleness"]["last_observed"] is not None
-        assert v3["staleness"]["last_confirmed"] is None
-
-    def test_upgrade_minimal_v2(self) -> None:
-        """Upgrade a minimal v2 with only required fields."""
-        v2 = {
-            "schema_version": "2.0.0",
-            "slug": "test",
-            "title": "Test",
-            "steps": [{"index": 0, "action": "Do thing", "target": "btn"}],
-        }
-        v3 = upgrade_v2_to_v3(v2)
-        errors = validate_procedure(v3)
-        assert errors == [], f"Validation errors: {errors}"
-        assert v3["id"] == "test"
-        assert v3["steps"][0]["step_id"] == "step_1"
-
-
-# ---------------------------------------------------------------------------
 # Integration: full round-trip through knowledge base
 # ---------------------------------------------------------------------------
 
@@ -581,13 +530,3 @@ class TestKBRoundTrip:
         assert loaded["steps"][0]["action"] == proc["steps"][0]["action"]
         errors = validate_procedure(loaded)
         assert errors == []
-
-    def test_upgrade_v2_to_kb(
-        self, kb: KnowledgeBase, sample_sop_template: dict
-    ) -> None:
-        v2 = sop_to_json(sample_sop_template)
-        v3 = upgrade_v2_to_v3(v2)
-        kb.save_procedure(v3)
-        loaded = kb.get_procedure("check-expired-domains")
-        assert loaded is not None
-        assert loaded["schema_version"] == PROCEDURE_SCHEMA_VERSION

@@ -14,7 +14,8 @@ Upgrades the v2 SOP JSON schema (``sop_schema.py``) to a full v3
 - ``recurrence`` — detected pattern, day, time, avg_duration
 
 The v3 procedure is the canonical format stored in the knowledge base.
-Existing v2 SOPs are upgraded via ``upgrade_v2_to_v3()``.
+SOP templates (generator output) are converted via ``sop_to_procedure()``;
+converting an existing v3 procedure is a no-op.
 """
 
 from __future__ import annotations
@@ -102,13 +103,26 @@ def sop_to_procedure(sop_template: dict) -> dict:
     Returns:
         v3 procedure dict ready for storage in the knowledge base.
     """
+    # Idempotence: an already-v3 procedure passes through unchanged.  Without
+    # this guard a second conversion keys the result "unknown" (v3 has no
+    # slug) and drops inputs, guardrails, answers and lifecycle state.
+    if (
+        str(sop_template.get("schema_version", "")).startswith("3.")
+        and sop_template.get("id")
+    ):
+        return sop_template
+
     steps = sop_template.get("steps", [])
-    variables = sop_template.get("variables", [])
+    variables = sop_template.get("variables") or sop_template.get("inputs") or []
     confidence_avg = sop_template.get("confidence_avg", 0.0)
 
     # Convert steps
     proc_steps = []
     for i, step in enumerate(steps):
+        # The generator (``_vlm_sop_to_template``) writes app/location/input/
+        # verify only under ``parameters``; other producers write them at the
+        # top level.  Read both so neither shape loses fields here.
+        p = step.get("parameters") or {}
         proc_step: dict = {
             "step_id": f"step_{i + 1}",
             "index": i,
@@ -122,13 +136,13 @@ def sop_to_procedure(sop_template: dict) -> dict:
             # step (6/6 in the test recording) — the loss was at this
             # exact boundary.
             "description": step.get("description", ""),
-            "target": step.get("target", ""),
-            "app": step.get("app", ""),
-            "location": step.get("location", ""),
-            "input": step.get("input", ""),
-            "verify": step.get("verify", ""),
+            "target": step.get("target") or p.get("target", ""),
+            "app": step.get("app") or p.get("app", ""),
+            "location": step.get("location") or p.get("location", ""),
+            "input": step.get("input") or p.get("input", ""),
+            "verify": step.get("verify") or p.get("verify", ""),
             "selector": step.get("selector"),
-            "parameters": step.get("parameters", {}),
+            "parameters": p,
             "confidence": step.get("confidence", 0.0),
             "on_failure": step.get("on_failure", {
                 "strategy": "abort",
@@ -165,10 +179,13 @@ def sop_to_procedure(sop_template: dict) -> dict:
 
     procedure: dict = {
         "schema_version": PROCEDURE_SCHEMA_VERSION,
-        "id": sop_template.get("slug", "unknown"),
+        "id": sop_template.get("slug") or sop_template.get("id") or "unknown",
         "title": sop_template.get("title", "Untitled"),
         "short_title": sop_template.get("short_title", ""),
-        "description": sop_template.get("description", ""),
+        "description": (
+            sop_template.get("description")
+            or sop_template.get("task_description", "")
+        ),
         "tags": sop_template.get("tags", []),
         "confidence_avg": round(confidence_avg, 4),
         "confidence_summary": _confidence_label(confidence_avg),
@@ -205,7 +222,7 @@ def sop_to_procedure(sop_template: dict) -> dict:
             "contradictions": [],
             "total_observations": sop_template.get("episode_count", 0),
         },
-        "constraints": {
+        "constraints": sop_template.get("constraints") or {
             "trust_level": "observe",
             "guardrails": [],
         },
@@ -503,150 +520,3 @@ def validate_procedure(data: dict) -> list[str]:
             )
 
     return errors
-
-
-def upgrade_v2_to_v3(sop_json: dict) -> dict:
-    """Upgrade a v2 sop_schema.py output to v3 procedure format.
-
-    Accepts the output of ``sop_schema.sop_to_json()`` and converts
-    it to a v3 procedure dict.
-
-    Args:
-        sop_json: v2 JSON dict (schema_version 2.0.0 or earlier).
-
-    Returns:
-        v3 procedure dict.
-    """
-    now_iso = datetime.now(timezone.utc).isoformat()
-    confidence_avg = sop_json.get("confidence_avg", 0.0)
-
-    # Convert v2 steps to v3 steps
-    proc_steps = []
-    for step in sop_json.get("steps", []):
-        proc_step: dict = {
-            "step_id": f"step_{step.get('index', 0) + 1}",
-            "index": step.get("index", 0),
-            "action": step.get("action", ""),
-            "target": step.get("target", ""),
-            "app": step.get("app", ""),
-            "location": step.get("location", ""),
-            "input": step.get("input", ""),
-            "verify": step.get("verify", ""),
-            "selector": step.get("selector"),
-            "parameters": step.get("parameters", {}),
-            "confidence": step.get("confidence", 0.0),
-            "on_failure": {
-                "strategy": "abort",
-                "max_retries": 0,
-                "delay_seconds": 0,
-            },
-        }
-        if step.get("pre_state"):
-            proc_step["pre_state"] = step["pre_state"]
-        proc_steps.append(proc_step)
-
-    # Convert v2 variables to inputs
-    inputs = []
-    for var in sop_json.get("variables", []):
-        inp: dict = {
-            "name": var.get("name", ""),
-            "type": var.get("type", "string"),
-            "required": True,
-            "default": None,
-        }
-        if "description" in var:
-            inp["description"] = var["description"]
-        if "example" in var:
-            inp["example"] = var["example"]
-        inputs.append(inp)
-
-    procedure: dict = {
-        "schema_version": PROCEDURE_SCHEMA_VERSION,
-        "id": sop_json.get("slug", "unknown"),
-        "title": sop_json.get("title", "Untitled"),
-        "short_title": sop_json.get("short_title", ""),
-        "description": sop_json.get("description", ""),
-        "tags": sop_json.get("tags", []),
-        "confidence_avg": round(confidence_avg, 4),
-        "confidence_summary": _confidence_label(confidence_avg),
-        "episode_count": sop_json.get("episode_count", 0),
-        "evidence_window": sop_json.get("evidence_window", "last_30_days"),
-        "apps_involved": sop_json.get("apps_involved", []),
-        "source": sop_json.get("source", "unknown"),
-        "steps": proc_steps,
-        "inputs": inputs,
-        "outputs": [],
-        "environment": {
-            "required_apps": sop_json.get("apps_involved", []),
-            "accounts": [],
-            "setup_actions": [],
-        },
-        "branches": [],
-        "expected_outcomes": [],
-        "staleness": {
-            "last_observed": sop_json.get("generated_at", now_iso),
-            "last_confirmed": None,
-            "drift_signals": [],
-            "confidence_trend": [round(confidence_avg, 4)] if confidence_avg > 0 else [],
-        },
-        "evidence": {
-            "observations": [],
-            "step_evidence": [],
-            "contradictions": [],
-            "total_observations": sop_json.get("episode_count", 0),
-        },
-        "constraints": {
-            "trust_level": "observe",
-            "guardrails": [],
-        },
-        "recurrence": {
-            "pattern": None,
-            "day": None,
-            "time": None,
-            "avg_duration_minutes": None,
-            "observations": 0,
-        },
-        "chain": {
-            "depends_on": [],      # slugs this procedure requires to run first
-            "followed_by": [],     # slugs commonly executed after this one
-            "co_occurrence_count": 0,
-            "can_compose": False,  # True if this can be part of a macro procedure
-        },
-        "lifecycle_state": "observed",
-        "lifecycle_history": [],
-        "compiled_outputs": {},
-        "variant_family": sop_json.get("variant_family", None),
-        "variants": sop_json.get("variants", []),
-        "parameters_extracted": sop_json.get("parameters_extracted", []),
-        # Behavioral synthesis (empty on upgrade — populated by synthesizer)
-        "strategy": None,
-        "selection_criteria": [],
-        "content_templates": [],
-        "workflow_rhythm": {},
-        "behavioral_confidence": None,
-        "last_synthesized": None,
-        "execution_hints": {},
-        # Style & voice (empty on upgrade — populated by future analysis)
-        "voice_profile": {},
-        "content_samples": [],
-        "preconditions": sop_json.get("preconditions", []),
-        "postconditions": sop_json.get("postconditions", []),
-        "exceptions_seen": sop_json.get("exceptions_seen", []),
-        "generated_at": sop_json.get("generated_at", now_iso),
-        "upgraded_at": now_iso,
-        "metadata": {
-            "generator": "agenthandover",
-            "generator_version": _WORKER_VERSION,
-            "schema_version": PROCEDURE_SCHEMA_VERSION,
-            "upgraded_from": sop_json.get("schema_version", "unknown"),
-        },
-    }
-
-    # Carry over optional fields
-    for optional_key in (
-        "task_description", "execution_overview", "confidence_breakdown",
-    ):
-        if optional_key in sop_json:
-            procedure[optional_key] = sop_json[optional_key]
-
-    return procedure
