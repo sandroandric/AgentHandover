@@ -13,8 +13,8 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from agenthandover_worker import bundle_compiler, staleness_detector
-from agenthandover_worker import main as worker_main
+from agenthandover_worker import bundle_compiler, staleness_detector, trigger_spool
+from agenthandover_worker.config import load_config
 from journeys.driver import Clock
 
 
@@ -73,6 +73,22 @@ def test_passive_discovery_follows_the_clock(events_db, worker, clock) -> None:
     assert journey.run_tick()["passive_sops"] is not None
 
 
+def test_tick_drains_the_trigger_spool_through_mains_handlers(
+    events_db, worker, clock, temp_home,
+) -> None:
+    fixture = events_db("focus_dailynews", rebase_to=clock.now())
+    journey = worker(fixture)
+    trigger_spool.write_trigger(temp_home.data_dir, "search-query", {"query": ""})
+
+    assert journey.run_tick()["triggers_consumed"] == 1
+    assert trigger_spool.pending(temp_home.data_dir) == []
+    result = json.loads(
+        (temp_home.data_dir / "search-query-result.json").read_text(encoding="utf-8")
+    )
+    assert result == {"error": "Empty search query", "results": []}
+    assert journey.run_tick()["triggers_consumed"] == 0
+
+
 def test_clock_is_the_default_now_for_freshness(clock: Clock) -> None:
     proc = {"staleness": {"last_observed": clock.now().isoformat()}}
     fresh = staleness_detector.procedure_freshness(proc)
@@ -94,8 +110,10 @@ def test_clock_is_aware_and_only_moves_forward() -> None:
 
 
 def test_cassette_fixture_points_the_worker_at_the_cassette(cassette, temp_home) -> None:
-    before = worker_main._read_vlm_v2_config()["ollama_host"]
+    before = load_config().vlm.ollama_host
     tape = cassette("cassette_selftest")
-    assert worker_main._read_vlm_v2_config()["ollama_host"] == tape.host != before
+    cfg = load_config()
+    assert cfg.path == temp_home.config_file
+    assert cfg.vlm.ollama_host == tape.host != before
     assert os.environ["OLLAMA_HOST"] == tape.host
-    assert worker_main._read_config_field("knowledge", "query_api_enabled") == "False"
+    assert cfg.knowledge.query_api_enabled is False

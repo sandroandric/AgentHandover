@@ -3,17 +3,18 @@ controllable clock.
 
 ``main()`` builds its components and runs its poll loop inline, so until
 WP-S6 splits it, ``JourneyWorker`` builds the same components the same way
-(the config readers are ``main``'s own, so ``config.toml`` in the test's
-``HOME`` decides models, hosts and feature flags) and ``run_tick()`` calls
+(one ``load_config()`` read, as in ``main()``, so ``config.toml`` in the
+test's ``HOME`` decides models, hosts and feature flags) and ``run_tick()`` calls
 the loop body's processors in the loop's order:
 
-1. the trigger processors (retry, approval, failed query, search, recall,
-   trust accept / dismiss, staleness reviewed, lifecycle promote, merge,
-   drift reviewed, lifecycle dismiss) and the curation queue refresh;
+1. ``trigger_spool.drain`` over main()'s trigger handlers (retry, approve,
+   failed query, search, recall, trust accept / dismiss, staleness
+   reviewed, lifecycle promote, merge, drift reviewed, lifecycle dismiss,
+   export) and the curation queue refresh;
 2. the stale focus-session sweep, then ``_process_focus_sessions_v2``
-   (or the v1 path when the v2 pipeline is off) and the export trigger;
-3. ``run_pipeline`` over unprocessed events, marking them processed and
-   persisting VLM jobs;
+   (or the v1 path when the v2 pipeline is off);
+3. ``run_pipeline`` over one ``EventRetryGuard`` batch of unprocessed
+   events, marking them processed and persisting VLM jobs;
 4. ``_process_annotations`` and ``_process_diffs``;
 5. ``_process_passive_discovery`` every 2 hours of *clock* time while no
    focus session is pending;
@@ -26,15 +27,22 @@ staleness / lifecycle / curation pass and the status heartbeat.  Journeys
 that need those wait for WP-S6.
 
 ``main()`` logs an exception inside an iteration and carries on with the
-next one; ``run_tick()`` lets it propagate so the journey fails at its cause.
+next one (shrinking or quarantining the event batch); ``run_tick()`` lets it
+propagate so the journey fails at its cause.  A failing trigger handler is
+logged and skipped by ``trigger_spool.drain`` itself, in both.
 """
 
 from __future__ import annotations
 
+import dataclasses
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from agenthandover_worker import main as wm
+from agenthandover_worker import trigger_spool
+from agenthandover_worker.config import load_config
+from agenthandover_worker.loop_guard import EventRetryGuard
+from agenthandover_worker.ollama import OllamaError
 
 PASSIVE_DISCOVERY_INTERVAL = timedelta(seconds=7200)  # main(): _PASSIVE_DISCOVERY_INTERVAL
 
@@ -97,6 +105,7 @@ class JourneyWorker:
         from agenthandover_worker.variant_detector import VariantDetector
         from agenthandover_worker.vector_kb import VectorKB, VectorKBConfig
 
+        self.adapter = adapter
         self.db_path = Path(db_path)
         self.sops_dir = Path(sops_dir)
         self.clock = clock
@@ -104,10 +113,11 @@ class JourneyWorker:
         self.screenshots_dir = self.state_dir / "screenshots"
         self._last_passive_discovery: datetime | None = None
 
-        flags = wm._read_feature_flags()
-        v2_cfg = wm._read_vlm_v2_config()
-        self.v2_cfg = v2_cfg
-        host = v2_cfg["ollama_host"]
+        cfg = load_config()
+        self.cfg = cfg
+        vlm_cfg = cfg.vlm
+        features = cfg.features
+        host = vlm_cfg.ollama_host
 
         kb = KnowledgeBase(root=Path(knowledge_dir))
         kb.ensure_structure()
@@ -118,10 +128,20 @@ class JourneyWorker:
             lifecycle_manager=self.lifecycle_manager, vector_kb=None, llm_reasoner=None,
         )
         self.kb_export_adapter = KnowledgeBaseExportAdapter(kb)
-        self.privacy_checker = PrivacyZoneChecker(config=PrivacyZoneConfig())
+        pz_cfg = PrivacyZoneConfig()
+        pz_raw = cfg.privacy_zones
+        if pz_raw:
+            pz_cfg = PrivacyZoneConfig(
+                full_observation=pz_raw.get("full_observation", []),
+                metadata_only=pz_raw.get("metadata_only", []),
+                blocked=pz_raw.get("blocked", []),
+                blocked_urls=pz_raw.get("blocked_urls", []),
+                auto_pause=pz_raw.get("auto_pause", []),
+            )
+        self.privacy_checker = PrivacyZoneChecker(config=pz_cfg)
         self.staleness_detector = StalenessDetector(kb)
         self.activity_classifier = None
-        if flags["activity_classification"]:
+        if features.activity_classification:
             self.activity_classifier = ActivityClassifier(
                 profile=kb.get_profile(), policy=UserPolicy(kb),
             )
@@ -135,20 +155,20 @@ class JourneyWorker:
             self.activity_classifier._llm_reasoner = llm_reasoner
         self.trust_advisor = TrustAdvisor(kb)
         self.continuity_tracker = None
-        if flags["continuity_tracking"]:
+        if features.continuity_tracking:
             self.continuity_tracker = ContinuityTracker(
                 kb=kb, matcher=ProcedureMatcher(kb=kb, vector_kb=None),
             )
         self.variant_detector = VariantDetector()
         self.evidence_normalizer = EvidenceNormalizer(variant_detector=self.variant_detector)
-        self.focus_max_session_hours = wm._read_float_field("focus", "max_session_hours", 4.0)
+        self.focus_max_session_hours = cfg.focus.max_session_hours
         self.behavioral_synthesizer = BehavioralSynthesizer(
-            config=SynthesizerConfig(model=v2_cfg["sop_model"], ollama_host=host),
+            config=SynthesizerConfig(model=vlm_cfg.sop_model, ollama_host=host),
             vlm_queue=self.vlm_queue, knowledge_base=kb,
         )
         self.focus_questioner = FocusQuestioner(llm_reasoner=llm_reasoner)
         self.procedure_curator = None
-        if flags["curation"]:
+        if features.curation:
             self.procedure_curator = ProcedureCurator(
                 kb=kb,
                 staleness_detector=self.staleness_detector,
@@ -172,7 +192,7 @@ class JourneyWorker:
             self.sop_writer = GenericWriter(output_dir=self.sops_dir)
         elif adapter == "claude-skill":
             from agenthandover_worker.claude_skill_writer import ClaudeSkillWriter
-            self.sop_writer = ClaudeSkillWriter(skills_dir=wm._skills_dir())
+            self.sop_writer = ClaudeSkillWriter(skills_dir=cfg.export.skills_dir)
         elif adapter == "openclaw":
             self.sop_writer = wm.OpenClawWriter(workspace_dir=self.sops_dir.parent.parent)
         else:
@@ -180,14 +200,14 @@ class JourneyWorker:
 
         # SOP enhancement and the SOP inducer, as main() sets them up.
         self.sop_enhancer = None
-        llm_config = wm._read_llm_config()
+        llm_config = dataclasses.asdict(cfg.llm)
         if llm_config.get("enhance_sops", True):
             from agenthandover_worker.sop_enhancer import SOPEnhancer, create_llm_backend
             backend = create_llm_backend(llm_config, {
-                "mode": wm._read_vlm_config_field("mode", "local"),
-                "provider": wm._read_vlm_config_field("provider", ""),
-                "model": wm._read_vlm_config_field("model", ""),
-                "api_key_env": wm._read_vlm_config_field("api_key_env", ""),
+                "mode": vlm_cfg.mode,
+                "provider": vlm_cfg.provider,
+                "model": vlm_cfg.model,
+                "api_key_env": vlm_cfg.api_key_env,
             })
             if backend is not None:
                 self.sop_enhancer = SOPEnhancer(
@@ -202,24 +222,24 @@ class JourneyWorker:
         self.focus_processor = None
         self.task_segmenter = None
         self.sop_generator = None
-        if v2_cfg["annotation_enabled"]:
+        if vlm_cfg.annotation_enabled:
             self.scene_annotator = wm.SceneAnnotator(
                 config=wm.AnnotationConfig(
-                    model=v2_cfg["annotation_model"],
+                    model=vlm_cfg.annotation_model,
                     ollama_host=host,
-                    stale_skip_count=v2_cfg["stale_skip_count"],
-                    sliding_window_max_age_sec=v2_cfg["sliding_window_max_age_sec"],
-                    timeout_seconds=v2_cfg["annotation_timeout_seconds"],
+                    stale_skip_count=vlm_cfg.stale_skip_count,
+                    sliding_window_max_age_sec=vlm_cfg.sliding_window_max_age_sec,
+                    timeout_seconds=vlm_cfg.annotation_timeout_seconds,
                 ),
                 image_embedder=None,
                 vector_kb=None,
             )
             self.scene_annotator.preload()
             self.frame_differ = wm.FrameDiffer(
-                config=wm.DiffConfig(model=v2_cfg["annotation_model"], ollama_host=host),
+                config=wm.DiffConfig(model=vlm_cfg.annotation_model, ollama_host=host),
             )
             self.sop_generator = wm.SOPGenerator(
-                config=wm.SOPGeneratorConfig(model=v2_cfg["sop_model"], ollama_host=host),
+                config=wm.SOPGeneratorConfig(model=vlm_cfg.sop_model, ollama_host=host),
             )
             self.focus_processor = wm.FocusProcessor(
                 annotator=self.scene_annotator,
@@ -233,14 +253,14 @@ class JourneyWorker:
                 vector_kb=None,
             )
         self.activity_searcher = ActivitySearcher(db_path=self.db_path)
-        self.sop_auto_approve = wm._read_sop_config()["auto_approve"]
+        self.sop_auto_approve = cfg.sop.auto_approve
 
         # Vector KB with main()'s health check: unavailable -> None.
         self.vector_kb = None
         vector_kb = VectorKB(self.db_path, VectorKBConfig(ollama_host=host))
         try:
             embedding = vector_kb.compute_embeddings(["health check"])
-        except ConnectionError:
+        except (ConnectionError, OllamaError):
             embedding = None
         if embedding and embedding[0]:
             self.vector_kb = vector_kb
@@ -251,7 +271,77 @@ class JourneyWorker:
         self.v2_schema_ok = (
             self.scene_annotator is not None and wm._check_v2_schema(self.db)
         )
+        self.event_guard = EventRetryGuard(max_batch=100)
+        self.trigger_handlers = self._trigger_handlers()
+        assert set(self.trigger_handlers) == set(trigger_spool.KINDS)
+        trigger_spool.migrate_legacy(self.state_dir)
         wm._write_sops_index(self.db, kb, force=True)
+
+    def _export_kwargs(self) -> dict:
+        return {
+            "openclaw_writer": self.sop_writer,
+            "skill_md_writer": self.skill_md_writer,
+            "claude_skill_writer": self.claude_skill_writer,
+            "index_generator": self.index_generator,
+            "procedure_writer": self.procedure_writer,
+            "kb_export_adapter": self.kb_export_adapter,
+        }
+
+    def _trigger_handlers(self) -> dict:
+        """main()'s ``trigger_handlers``, bound to these components."""
+        db = self.db
+        export_kwargs = self._export_kwargs()
+        return {
+            "retry": lambda t: wm._process_retry_triggers(
+                t, db,
+                focus_processor=self.focus_processor,
+                sop_generator=self.sop_generator,
+                screenshots_dir=self.screenshots_dir,
+                sop_auto_approve=self.sop_auto_approve,
+                **export_kwargs,
+            ),
+            "approve": lambda t: wm._process_approval_triggers(
+                t, db, vector_kb=self.vector_kb, **export_kwargs,
+            ),
+            "failed-query": lambda t: wm._process_failed_query_trigger(t, db),
+            "search-query": lambda t: wm._process_search_trigger(t, self.activity_searcher),
+            "recall-query": lambda t: wm._process_recall_trigger(t, self.activity_searcher),
+            "trust-accept": lambda t: wm._process_trust_accept_trigger(
+                t, self.trust_advisor, self.constraint_manager,
+            ),
+            "trust-dismiss": lambda t: wm._process_trust_dismiss_trigger(t, self.trust_advisor),
+            "staleness-reviewed": lambda t: wm._process_staleness_reviewed_trigger(
+                t, self.staleness_detector, self.knowledge_base,
+            ),
+            "lifecycle-promote": lambda t: wm._process_lifecycle_promote_trigger(
+                t,
+                lifecycle_manager=self.lifecycle_manager,
+                db=db,
+                approve=lambda slug: wm._approve_sop(
+                    db, slug, vector_kb=self.vector_kb, **export_kwargs,
+                ),
+                knowledge_base=self.knowledge_base,
+                claude_skill_writer=(
+                    self.claude_skill_writer
+                    or (self.sop_writer if self.adapter == "claude-skill" else None)
+                ),
+            ),
+            "merge": lambda t: wm._process_merge_trigger(
+                t, procedure_curator=self.procedure_curator,
+            ),
+            "drift-reviewed": lambda t: wm._process_drift_reviewed_trigger(
+                t, procedure_curator=self.procedure_curator,
+            ),
+            "lifecycle-dismiss": lambda t: wm._process_lifecycle_dismiss_trigger(
+                t, procedure_curator=self.procedure_curator,
+            ),
+            "export": lambda t: wm._check_export_trigger(
+                t,
+                openclaw_writer=self.sop_writer,
+                sops_dir=self.sops_dir,
+                procedure_writer=self.procedure_writer,
+            ),
+        }
 
     def close(self) -> None:
         self.db.close()
@@ -271,33 +361,11 @@ class JourneyWorker:
         Returns what the iteration did, for assertions.
         """
         db = self.db
-        writers = {
-            "openclaw_writer": self.sop_writer,
-            "skill_md_writer": self.skill_md_writer,
-            "claude_skill_writer": self.claude_skill_writer,
-            "index_generator": self.index_generator,
-            "procedure_writer": self.procedure_writer,
-            "kb_export_adapter": self.kb_export_adapter,
-        }
+        writers = self._export_kwargs()
         if self.vector_kb is not None:
             self.vector_kb.reset_cycle_budget()
 
-        wm._process_retry_triggers(
-            db, focus_processor=self.focus_processor, sop_generator=self.sop_generator,
-            screenshots_dir=self.screenshots_dir, sop_auto_approve=self.sop_auto_approve,
-            **writers,
-        )
-        wm._process_approval_triggers(db, vector_kb=self.vector_kb, **writers)
-        wm._process_failed_query_trigger(db)
-        wm._process_search_trigger(self.activity_searcher)
-        wm._process_recall_trigger(self.activity_searcher)
-        wm._process_trust_accept_trigger(self.trust_advisor, self.constraint_manager)
-        wm._process_trust_dismiss_trigger(self.trust_advisor)
-        wm._process_staleness_reviewed_trigger(self.staleness_detector, self.knowledge_base)
-        wm._process_lifecycle_promote_trigger(lifecycle_manager=self.lifecycle_manager)
-        wm._process_merge_trigger(procedure_curator=self.procedure_curator)
-        wm._process_drift_reviewed_trigger(procedure_curator=self.procedure_curator)
-        wm._process_lifecycle_dismiss_trigger(procedure_curator=self.procedure_curator)
+        triggers_consumed = trigger_spool.drain(self.state_dir, self.trigger_handlers)
         wm._write_curation_queue(self.procedure_curator, force=True)
 
         wm._sweep_stale_focus_session(self.state_dir, self.focus_max_session_hours)
@@ -311,8 +379,8 @@ class JourneyWorker:
                 focus_questioner=self.focus_questioner,
                 knowledge_base=self.knowledge_base,
                 vector_kb=self.vector_kb,
-                ollama_host=self.v2_cfg["ollama_host"],
-                qna_model=self.v2_cfg["sop_model"],
+                ollama_host=self.cfg.vlm.ollama_host,
+                qna_model=self.cfg.vlm.sop_model,
                 **writers,
             )
         else:
@@ -330,12 +398,8 @@ class JourneyWorker:
             )
         if focus_sops > 0:
             wm._write_sops_index(db, self.knowledge_base)
-        wm._check_export_trigger(
-            openclaw_writer=self.sop_writer, sops_dir=self.sops_dir,
-            procedure_writer=self.procedure_writer,
-        )
 
-        unprocessed = db.get_unprocessed_events(limit=100)
+        unprocessed = db.get_unprocessed_events(limit=self.event_guard.batch_limit)
         summary = None
         if unprocessed:
             summary = wm.run_pipeline(
@@ -349,6 +413,7 @@ class JourneyWorker:
                 sop_inducer=self.sop_inducer,
                 sop_enhancer=self.sop_enhancer,
                 db=db,
+                sop_auto_approve=self.sop_auto_approve,
                 **writers,
             )
             if summary["sops_exported"] > 0:
@@ -356,6 +421,7 @@ class JourneyWorker:
             event_ids = [ev["id"] for ev in unprocessed if "id" in ev]
             if event_ids:
                 db.mark_events_processed(event_ids)
+            self.event_guard.succeeded(event_ids)
             if summary["vlm_enqueued"] > 0:
                 wm._persist_vlm_jobs(db, self.vlm_queue)
 
@@ -397,6 +463,7 @@ class JourneyWorker:
 
         wm._write_sops_index(db, self.knowledge_base)
         return {
+            "triggers_consumed": triggers_consumed,
             "focus_sops": focus_sops,
             "pipeline": summary,
             "annotations": ann_stats,
