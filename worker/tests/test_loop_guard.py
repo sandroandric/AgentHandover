@@ -25,7 +25,7 @@ from agenthandover_worker.loop_guard import (
     interruptible_sleep,
 )
 
-from conftest import insert_event
+from daemon_db import insert_event
 
 
 class TestErrorBackoff:
