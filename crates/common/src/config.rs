@@ -37,7 +37,6 @@ pub struct ObserverConfig {
     pub t_scroll_read_seconds: u64,
     pub capture_screenshots: bool,
     pub screenshot_max_per_minute: u32,
-    pub multi_monitor_mode: String,
     /// Screenshot format: "jpeg" (default, half-res) or "png" (full-res).
     #[serde(default = "default_screenshot_format")]
     pub screenshot_format: String,
@@ -224,7 +223,6 @@ impl Default for ObserverConfig {
             t_scroll_read_seconds: 8,
             capture_screenshots: true,
             screenshot_max_per_minute: 20,
-            multi_monitor_mode: "focused_window".into(),
             screenshot_format: default_screenshot_format(),
             screenshot_quality: default_screenshot_quality(),
             screenshot_scale: default_screenshot_scale(),

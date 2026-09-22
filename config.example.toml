@@ -8,7 +8,6 @@ t_dwell_seconds = 3
 t_scroll_read_seconds = 8
 capture_screenshots = true
 screenshot_max_per_minute = 20
-multi_monitor_mode = "focused_window"
 screenshot_format = "jpeg"       # "jpeg" (half-res, recommended) or "png" (full-res)
 screenshot_quality = 70          # JPEG quality 1-100 (only used for jpeg format)
 screenshot_scale = 0.5           # 0.5 = half resolution (recommended for VLM)
