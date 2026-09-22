@@ -22,6 +22,7 @@ pub struct MaintenanceRecord {
     pub date: NaiveDate,
     pub finished_at: DateTime<Utc>,
     pub events_purged: u64,
+    /// Files deleted: legacy `.bin` artifacts plus expired screenshot JPEGs.
     pub artifacts_purged: u64,
     pub bytes_freed: u64,
 }
