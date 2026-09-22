@@ -175,6 +175,10 @@ check_installed_prefix() {
         test "$(plist_value "${plist}" ProgramArguments.0)" = "${lib}/venv/bin/python"
     check "worker plist: logs under the user's data dir" \
         test "$(plist_value "${plist}" StandardErrorPath)" = "${dd}/logs/worker.stderr.log"
+    check "worker plist: stdout log under the user's data dir" \
+        test "$(plist_value "${plist}" StandardOutPath)" = "${dd}/logs/worker.stdout.log"
+    check "worker plist: no placeholder or /tmp path left" \
+        bash -c "! grep -qE '__AH_LOG_DIR__|/tmp/' \"\$1\"" _ "${plist}"
 
     local nm="${p}/home/Library/Application Support/Google/Chrome/NativeMessagingHosts/com.agenthandover.host.json"
     check "native messaging manifest points at this prefix's daemon" \

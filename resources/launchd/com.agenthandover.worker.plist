@@ -38,11 +38,14 @@
     <key>LowPriorityBackgroundIO</key>
     <true/>
 
+    <!-- Logs live in the user's data dir (never world-readable /tmp): the
+         postinstall replaces __AH_LOG_DIR__ with
+         ~/Library/Application Support/agenthandover/logs. -->
     <key>StandardOutPath</key>
-    <string>/tmp/com.agenthandover.worker.stdout.log</string>
+    <string>__AH_LOG_DIR__/worker.stdout.log</string>
 
     <key>StandardErrorPath</key>
-    <string>/tmp/com.agenthandover.worker.stderr.log</string>
+    <string>__AH_LOG_DIR__/worker.stderr.log</string>
 
     <key>WorkingDirectory</key>
     <string>/usr/local/lib/agenthandover</string>
