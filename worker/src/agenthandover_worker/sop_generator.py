@@ -22,6 +22,8 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from agenthandover_worker.confidence import compute_v2_confidence
+from agenthandover_worker.dom import select_anchor
+from agenthandover_worker.event_helpers import display_name
 from agenthandover_worker.json_extract import extract_json
 from agenthandover_worker.ollama import OllamaClient
 
@@ -101,7 +103,8 @@ Generate a JSON SOP with this exact structure:
       "app": "<application name>",
       "location": "<URL, file path, or screen location>",
       "input": "<text to type or value to enter — the EXACT observed value, or empty string if the step has no input>",
-      "verify": "<concrete check to confirm THIS step succeeded — what should the agent observe? REQUIRED — cannot be empty. If no specific check exists, write 'wait briefly for the action to complete and the next UI state to render' rather than leaving blank.>"
+      "verify": "<concrete check to confirm THIS step succeeded — what should the agent observe? REQUIRED — cannot be empty. If no specific check exists, write 'wait briefly for the action to complete and the next UI state to render' rather than leaving blank.>",
+      "frames": [<the TIMELINE frame numbers this step was observed in, e.g. 3, 4>]
     }}
   ],
   "success_criteria": ["<how to confirm the entire task succeeded>"],
@@ -122,6 +125,7 @@ Generate a JSON SOP with this exact structure:
 
 Rules:
 - EVERY STEP MUST INCLUDE A NON-EMPTY `description` AND `verify`. The `description` explains why and how; the `verify` describes what tells the agent the step worked. Empty strings for these fields are not acceptable and will cause the SOP to be rejected.
+- Each step's "frames" lists the numbers of the TIMELINE frames ("Frame N") that show it; use only numbers from the timeline.
 - Include EVERY meaningful step (navigation, data entry, confirmation, copy, paste, submit, save). Intermediate actions like typing into a field and then submitting are TWO separate steps — do not collapse them into one. The agent needs both the input action AND the submit action visible to execute correctly.
 - Skip redundant frames (reading, scrolling without action)
 - DETECT ACCIDENTAL CLICKS vs INTENTIONAL NAVIGATION: use your \
@@ -341,6 +345,17 @@ Respond with ONLY the JSON object."""
 # Timeline formatting
 # ---------------------------------------------------------------------------
 
+# Verbatim fields (typed text, URLs, compose fields, copied text) are cut to
+# this many characters each in the SOP prompt.
+_VERBATIM_MAX_CHARS = 200
+
+
+def _one_line(text: object, limit: int = _VERBATIM_MAX_CHARS) -> str:
+    """*text* on one line (its lines joined by `` | ``), cut to *limit* chars."""
+    lines = [" ".join(line.split()) for line in str(text or "").splitlines()]
+    return " | ".join(line for line in lines if line)[:limit]
+
+
 def _format_timeline_entry(
     idx: int,
     annotation: dict,
@@ -353,7 +368,7 @@ def _format_timeline_entry(
 
     # Time + app
     ts_short = timestamp[11:19] if len(timestamp) > 19 else timestamp
-    app = annotation.get("app", "Unknown")
+    app = display_name(annotation.get("app")) or "Unknown"
     location = annotation.get("location", "")
     what_doing = annotation.get("task_context", {}).get("what_doing", "")
 
@@ -382,6 +397,23 @@ def _format_timeline_entry(
         active = ui.get("active_element", "")
         if active:
             lines.append(f"  Active: {active}")
+
+    # Verbatim text the steps must quote: what was typed, the links on
+    # screen, and an open compose window's fields.
+    kt = annotation.get("key_text")
+    if isinstance(kt, dict):
+        typed = _one_line(kt.get("typed_text"))
+        if typed:
+            lines.append(f'  Typed: "{typed}"')
+        urls = [_one_line(u) for u in kt.get("urls") or [] if _one_line(u)]
+        if urls:
+            lines.append(f"  URLs: {_one_line(', '.join(urls))}")
+    compose = annotation.get("compose")
+    if isinstance(compose, dict) and compose.get("is_compose_window_open") is not False:
+        for label, key in (("To", "recipient"), ("Subject", "subject"), ("Body first line", "body_first_line")):
+            value = _one_line(compose.get(key))
+            if value:
+                lines.append(f'  Compose {label}: "{value}"')
 
     # Frame diff (what changed since last frame)
     if diff and isinstance(diff, dict):
@@ -438,8 +470,8 @@ def _format_timeline_entry(
             f"  >>> COPY ACTION: User copied content{source_str} "
             f"({byte_size} bytes, {types_str})"
         )
-        if preview:
-            lines.append(f'  >>> Copied text: "{preview[:200]}"')
+        if _one_line(preview):
+            lines.append(f'  >>> Copied text: "{_one_line(preview)}"')
         lines.append(
             "  >>> (Include this as a Copy step (attribute the Copy to the "
             "FROM app above, NOT to whatever app the next frame shows) and "
@@ -907,9 +939,17 @@ def _vlm_sop_to_template(
             if isinstance(v, str):
                 step["parameters"][_pk] = _unwrap_double_templated(v)
 
-        # Try to extract CSS selector from DOM nodes
-        selector = _extract_selector_for_step(raw_step, timeline, step_idx)
-        step["selector"] = selector
+        # Evidence: the frames the model cites for this step (none when it
+        # cites none: unknown, not guessed), their DOM snapshots, and the
+        # clicked element's anchor from them.
+        frames = _step_frames(raw_step, timeline)
+        step["evidence"] = {
+            "frames": [f.get("event_id") for f in frames if f.get("event_id")],
+            "dom_snapshot_ids": list(dict.fromkeys(
+                f["dom_snapshot_id"] for f in frames if f.get("dom_snapshot_id")
+            )),
+        }
+        step["anchor"] = _anchor_for_step(raw_step, frames)
 
         steps.append(step)
 
@@ -1120,105 +1160,53 @@ def _generate_slug(title: str) -> str:
     return slug[:80] if slug else "untitled"
 
 
-def _extract_selector_for_step(
-    raw_step: dict,
-    timeline: list[dict] | None,
-    step_index: int,
-) -> str | None:
-    """Match a VLM step to DOM nodes and extract the best CSS selector.
+def _step_frames(raw_step: dict, timeline: list[dict] | None) -> list[dict]:
+    """The timeline entries a step's ``frames`` (1-based numbers, as in the
+    prompt's "Frame N") point at; invalid numbers are dropped."""
+    if not timeline or not isinstance(raw_step.get("frames"), list):
+        return []
+    picked: list[dict] = []
+    for number in raw_step["frames"]:
+        try:
+            idx = int(number) - 1
+        except (TypeError, ValueError):
+            continue
+        if 0 <= idx < len(timeline) and timeline[idx] not in picked:
+            picked.append(timeline[idx])
+    return picked
 
-    Strategy:
-    1. Map step_index to the nearest timeline entry
-    2. If it has dom_nodes, search for elements matching the step's action target
-    3. Priority: aria-label > data-testid > id > role+tag
+
+def _words(text: object) -> set[str]:
+    return {w for w in re.findall(r"[a-z0-9']+", str(text or "").lower()) if len(w) > 2}
+
+
+def _anchor_for_step(raw_step: dict, frames: list[dict]) -> dict | None:
+    """The anchor of the element the step acts on, from its frames.
+
+    Among the Chrome clicks made on the step's frames, the one whose target
+    text shares the most words with the step is the step's click; its
+    anchor comes from the frame's DOM snapshot (:func:`dom.select_anchor`).
+    Without clicks, a snapshot's own interacted element is used.
     """
-    if not timeline:
-        return None
-
-    # Map step index to timeline entry (steps may be fewer than frames)
-    if step_index < len(timeline):
-        entry = timeline[step_index]
-    elif timeline:
-        entry = timeline[-1]
-    else:
-        return None
-
-    dom_nodes = entry.get("dom_nodes")
-    if not dom_nodes or not isinstance(dom_nodes, list):
-        return None
-
-    # What are we looking for?
-    if isinstance(raw_step, str):
-        raw_step = {"action": raw_step}
-    action = raw_step.get("action", "").lower()
-    location = raw_step.get("location", "").lower()
-    input_val = raw_step.get("input", "")
-
-    # Search DOM nodes for the best match
-    best_selector = None
-    best_score = 0
-
-    for node in dom_nodes:
-        if not isinstance(node, dict):
-            continue
-
-        tag = node.get("tag", "").lower()
-        text = node.get("text", node.get("innerText", "")).strip()
-        aria = node.get("ariaLabel", node.get("aria-label", "")).strip()
-        test_id = node.get("testId", node.get("data-testid", "")).strip()
-        node_id = node.get("id", "").strip()
-        role = node.get("role", "").strip()
-        node_type = node.get("type", "").strip()
-
-        # Score how well this node matches the step
-        score = 0
-
-        # Text match with step action or input
-        if text and action:
-            text_lower = text.lower()
-            if any(word in text_lower for word in action.split() if len(word) > 2):
-                score += 2
-        if text and input_val and input_val.lower() in text.lower():
-            score += 3
-
-        # Interactive elements get a bonus
-        if tag in ("button", "a", "input", "select", "textarea"):
-            score += 1
-        if role in ("button", "link", "textbox", "combobox", "menuitem", "tab"):
-            score += 1
-
-        if score <= 0:
-            continue
-
-        # Build the best selector based on available attributes
-        selector = None
-        selector_score = score
-
-        if aria:
-            selector = f"[aria-label='{aria}']"
-            selector_score += 5
-        elif test_id:
-            selector = f"[data-testid='{test_id}']"
-            selector_score += 4
-        elif node_id:
-            selector = f"#{node_id}"
-            selector_score += 4
-        elif text and len(text) < 50:
-            # Use text content with tag
-            if tag:
-                selector = f"{tag}:has-text('{text[:40]}')"
-            else:
-                selector = f"*:has-text('{text[:40]}')"
-            selector_score += 2
-        elif role and tag:
-            selector = f"{tag}[role='{role}']"
-            selector_score += 1
-
-        if selector and selector_score > best_score:
-            best_selector = selector
-            best_score = selector_score
-
-    return best_selector
+    step_words = _words(" ".join(
+        str(raw_step.get(k) or "") for k in ("action", "description", "location", "input")
+    ))
+    best: tuple[int, dict, dict] | None = None
+    for frame in frames:
+        for click in frame.get("click_targets") or []:
+            target = click.get("target") or {}
+            overlap = len(step_words & _words(
+                f"{target.get('innerText', '')} {target.get('ariaLabel', '')}"
+            ))
+            if best is None or overlap > best[0]:
+                best = (overlap, frame, target)
+    if best is not None:
+        return select_anchor(best[1].get("dom_nodes"), best[2])
+    for frame in frames:
+        anchor = select_anchor(frame.get("dom_nodes"), None)
+        if anchor:
+            return anchor
+    return None
 
 
 # ---------------------------------------------------------------------------

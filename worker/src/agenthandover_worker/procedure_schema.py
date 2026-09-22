@@ -94,6 +94,16 @@ def procedure_steps(proc: dict) -> list[dict]:
     return [s for s in proc.get("steps") or [] if isinstance(s, dict)]
 
 
+def _step_evidence(evidence: object) -> dict:
+    """A step's evidence pointers: ``frames`` (event ids) and
+    ``dom_snapshot_ids``, each a list (empty when unknown)."""
+    evidence = evidence if isinstance(evidence, dict) else {}
+    return {
+        key: list(evidence.get(key) or [])
+        for key in ("frames", "dom_snapshot_ids")
+    }
+
+
 def _confidence_label(score: float) -> str:
     """Map an average confidence score to high / medium / low."""
     if score >= 0.85:
@@ -158,6 +168,11 @@ def sop_to_procedure(sop_template: dict) -> dict:
             "input": step.get("input") or p.get("input", ""),
             "verify": step.get("verify") or p.get("verify", ""),
             "selector": step.get("selector"),
+            # The clicked element's anchor ({role, name, selector}) and the
+            # frames / DOM snapshots the step was written from; empty lists
+            # mean unknown.
+            "anchor": step.get("anchor"),
+            "evidence": _step_evidence(step.get("evidence")),
             "parameters": p,
             "confidence": step.get("confidence", 0.0),
             "on_failure": step.get("on_failure", {
@@ -379,6 +394,17 @@ def validate_procedure(data: dict) -> list[str]:
                     continue
                 if "action" not in step:
                     errors.append(f"steps[{i}] missing required field: action")
+                anchor = step.get("anchor")
+                if anchor is not None and not isinstance(anchor, dict):
+                    errors.append(f"steps[{i}].anchor must be a dict or null")
+                ev = step.get("evidence")
+                if ev is not None and not (
+                    isinstance(ev, dict)
+                    and all(isinstance(ev.get(k, []), list) for k in ("frames", "dom_snapshot_ids"))
+                ):
+                    errors.append(
+                        f"steps[{i}].evidence must be a dict of frames and dom_snapshot_ids lists"
+                    )
                 # Validate on_failure if present
                 if "on_failure" in step:
                     of = step["on_failure"]

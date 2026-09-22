@@ -53,7 +53,7 @@ The extension connects to the daemon automatically. Check `agenthandover status`
 
 - `background.ts` — Service worker, manages native messaging connection
 - `content.ts` — Content script injected into all pages
-- `dom-capture.ts` — DOM snapshot extraction (structure, not content)
+- `dom-capture.ts` — DOM snapshots: the interacted element's anchor chain (role, name, test id, selector) and a text digest of the viewport, under 8 KB
 - `click-capture.ts` — Click intent with UI element metadata
 - `dwell-tracker.ts` — Reading/scrolling pattern detection
 - `secure-field.ts` — Password/sensitive field exclusion

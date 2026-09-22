@@ -112,7 +112,7 @@ def row_counts(rows: list[dict]) -> dict:
         ocr = metadata.get("ocr")
         counts["chrome_extension"] += window.get("app_id") == "com.google.Chrome"
         counts["clipboard_with_preview"] += bool(kind.get("content_preview"))
-        counts["dom_snapshots"] += isinstance(metadata.get("nodes"), list)
+        counts["dom_snapshots"] += any(isinstance(metadata.get(k), list) for k in ("anchors", "nodes"))
         counts["focus_tagged"] += "focus_session_id" in metadata
         counts["with_ocr_text"] += isinstance(ocr, dict) and bool(ocr.get("full_text"))
         counts["with_screenshot"] += "screenshot_path" in metadata

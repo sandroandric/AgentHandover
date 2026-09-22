@@ -38,8 +38,9 @@ def procedure_to_sop_template(procedure: dict) -> dict:
             "confidence": s.get("confidence", 0.0),
             "parameters": params,
         }
-        if s.get("selector"):
-            step["selector"] = s["selector"]
+        for key in ("selector", "anchor", "evidence"):
+            if s.get(key):
+                step[key] = s[key]
         if s.get("pre_state"):
             step["pre_state"] = s["pre_state"]
         steps.append(step)

@@ -1,8 +1,10 @@
 /**
  * AgentHandover Observer — Viewport-Bounded DOM Snapshot Capture
  *
- * Captures a semantic DOM tree of all elements currently visible within the
- * browser viewport.  The snapshot is designed for downstream workflow learning,
+ * Walks a semantic DOM tree of all elements currently visible within the
+ * browser viewport.  What a snapshot sends (`captureSnapshot`) is not that
+ * tree but the anchor set of the element the user interacted with and a
+ * text digest of the tree, under 8 KB.  The walk is designed for downstream workflow learning,
  * not pixel-perfect rendering — so we extract semantic anchors (ARIA labels,
  * roles, data-testid, visible innerText, bounding boxes) and deliberately
  * strip generated/hashed CSS class names ("CSS rot") that change across
@@ -21,10 +23,13 @@
  *
  * Privacy: `<input>` / `<textarea>` values are captured only when the
  * daemon's `[privacy] capture_input_values` is true (off by default); the
- * flag arrives with each snapshot request.  Password values never are.
+ * flag arrives with each snapshot request.  Secure-field values (passwords,
+ * revealed passwords, one-time codes, card numbers; see `isSecureField`)
+ * never are, in the tree or in an anchor, and a secure field is never
+ * recorded as the interacted element.
  */
 
-import type { DomNode } from './types';
+import type { DomAnchor, DomNode } from './types';
 import { isSecureField } from './secure-field';
 
 // ---------------------------------------------------------------------------
@@ -229,82 +234,98 @@ export function truncateText(text: string, maxChars: number = MAX_TEXT_LENGTH): 
 
 /**
  * Given a `<table>` element, builds a DomNode tree that includes at most
- * `maxRows` visible rows.  This prevents huge data tables from bloating
- * the snapshot.
+ * `maxRows` visible rows per section.  This prevents huge data tables from
+ * bloating the snapshot.
  *
  * Strategy:
- *   - Always include `<thead>` / `<tfoot>` rows.
- *   - For `<tbody>` (or direct `<tr>` children), include only the first
- *     `maxRows` rows that are visible in the viewport.
- *   - If rows were truncated, append a synthetic marker node.
+ *   - `<thead>` / `<tfoot>`: their first `maxRows` rows.
+ *   - `<tbody>` (or direct `<tr>` children): the first `maxRows` rows that
+ *     are visible in the viewport.
+ *   - Cells keep their own text and their children (the links, buttons and
+ *     inputs an agent clicks), walked like any other element.
+ *   - Every emitted node (table, section, row, cell, cell content) counts
+ *     against the snapshot's `MAX_NODE_COUNT`; at the cap emission stops
+ *     and `counter.truncated` is set.
+ *   - If rows were left out, append a synthetic marker node.
  */
 export function truncateTable(
   table: HTMLTableElement,
   maxRows: number = MAX_TABLE_ROWS,
+  depth: number = 0,
+  counter: NodeCounter = { count: 0, truncated: false },
+  options: CaptureOptions = DEFAULT_CAPTURE_OPTIONS,
 ): DomNode {
-  const node = extractNodeInfo(table);
+  const node = extractNodeInfo(table, options);
+  counter.count++;
   node.children = [];
 
-  // Collect all row-containing sections (<thead>, <tbody>, <tfoot>, or loose <tr>).
-  const sections = Array.from(table.children);
+  const full = (): boolean => {
+    if (counter.count >= MAX_NODE_COUNT) {
+      counter.truncated = true;
+      return true;
+    }
+    return false;
+  };
+
   let visibleBodyRowCount = 0;
   let totalBodyRowCount = 0;
 
-  for (const section of sections) {
-    if (!(section instanceof HTMLElement)) continue;
+  const bodyRow = (row: HTMLTableRowElement, into: DomNode[]): void => {
+    // Skip invisible rows (display:none or visibility:hidden) from the count
+    try {
+      const rowStyle = window.getComputedStyle(row);
+      if (rowStyle.display === 'none' || rowStyle.visibility === 'hidden') {
+        return;
+      }
+    } catch {
+      // getComputedStyle can throw for detached elements; include the row
+    }
+    totalBodyRowCount++;
+    if (visibleBodyRowCount < maxRows && isInViewport(row) && !full()) {
+      into.push(buildRowNode(row, depth + 2, counter, options));
+      visibleBodyRowCount++;
+    }
+  };
+
+  for (const section of Array.from(table.children)) {
+    if (!(section instanceof HTMLElement) || full()) continue;
 
     const sectionTag = section.tagName.toUpperCase();
 
     if (sectionTag === 'THEAD' || sectionTag === 'TFOOT') {
-      // Always include head/foot — they contain column headers/summaries.
-      const sectionNode = extractNodeInfo(section);
+      // Head/foot rows carry the column headers and summaries.
+      const sectionNode = extractNodeInfo(section, options);
+      counter.count++;
       sectionNode.children = [];
+      let rows = 0;
       for (const row of Array.from(section.children)) {
-        if (row instanceof HTMLTableRowElement) {
-          sectionNode.children.push(buildRowNode(row));
-        }
+        if (!(row instanceof HTMLTableRowElement)) continue;
+        if (rows >= maxRows || full()) break;
+        sectionNode.children.push(buildRowNode(row, depth + 2, counter, options));
+        rows++;
       }
       node.children.push(sectionNode);
     } else if (sectionTag === 'TBODY') {
-      const bodyNode = extractNodeInfo(section);
+      const bodyNode = extractNodeInfo(section, options);
+      counter.count++;
       bodyNode.children = [];
-
       for (const row of Array.from(section.children)) {
-        if (!(row instanceof HTMLTableRowElement)) continue;
-
-        // Skip invisible rows (display:none or visibility:hidden) from the count
-        try {
-          const rowStyle = window.getComputedStyle(row);
-          if (rowStyle.display === 'none' || rowStyle.visibility === 'hidden') {
-            continue;
-          }
-        } catch {
-          // getComputedStyle can throw for detached elements; include the row
-        }
-
-        totalBodyRowCount++;
-
-        if (visibleBodyRowCount < maxRows && isInViewport(row)) {
-          bodyNode.children.push(buildRowNode(row));
-          visibleBodyRowCount++;
-        }
+        if (row instanceof HTMLTableRowElement) bodyRow(row, bodyNode.children);
       }
-
       node.children.push(bodyNode);
     } else if (sectionTag === 'TR') {
       // Loose <tr> directly under <table> (non-standard but common).
-      totalBodyRowCount++;
-      if (visibleBodyRowCount < maxRows && isInViewport(section as HTMLTableRowElement)) {
-        node.children.push(buildRowNode(section as HTMLTableRowElement));
-        visibleBodyRowCount++;
-      }
+      bodyRow(section as HTMLTableRowElement, node.children);
     } else if (sectionTag === 'CAPTION' || sectionTag === 'COLGROUP') {
-      // Include caption and colgroup as-is.
-      node.children.push(extractNodeInfo(section));
+      const extra = extractNodeInfo(section, options);
+      counter.count++;
+      const text = getDirectText(section);
+      if (text) extra.innerText = truncateText(text);
+      node.children.push(extra);
     }
   }
 
-  // If we truncated rows, add a marker so consumers know the data is partial.
+  // If we left rows out, add a marker so consumers know the data is partial.
   if (visibleBodyRowCount < totalBodyRowCount) {
     node.children.push({
       tag: '#truncated',
@@ -316,18 +337,40 @@ export function truncateTable(
 }
 
 /**
- * Build a DomNode for a single table row, including its cells.
+ * Build a DomNode for a single table row: its cells with their own text,
+ * and each cell's element children walked like the rest of the page.
  */
-function buildRowNode(row: HTMLTableRowElement): DomNode {
-  const rowNode = extractNodeInfo(row);
+function buildRowNode(
+  row: HTMLTableRowElement,
+  depth: number,
+  counter: NodeCounter,
+  options: CaptureOptions,
+): DomNode {
+  const rowNode = extractNodeInfo(row, options);
+  counter.count++;
   rowNode.children = [];
 
   for (const cell of Array.from(row.cells)) {
-    const cellNode = extractNodeInfo(cell);
+    if (counter.count >= MAX_NODE_COUNT) {
+      counter.truncated = true;
+      break;
+    }
+    const cellNode = extractNodeInfo(cell, options);
+    counter.count++;
     const text = getDirectText(cell);
     if (text) {
       cellNode.innerText = truncateText(text);
     }
+    const children: DomNode[] = [];
+    for (const child of Array.from(cell.children)) {
+      if (counter.count >= MAX_NODE_COUNT) {
+        counter.truncated = true;
+        break;
+      }
+      const childNode = walkDOM(child, depth + 1, counter, options);
+      if (childNode) children.push(childNode);
+    }
+    if (children.length > 0) cellNode.children = children;
     rowNode.children.push(cellNode);
   }
 
@@ -609,21 +652,30 @@ export function walkDOM(
     }
   }
 
-  // Viewport check — skip leaf elements completely outside the viewport.
-  // For container elements (those with children), we always recurse into
-  // their children even if the container itself is off-viewport, because
-  // children may be positioned independently and still be visible.
+  // Viewport check, for leaves only.  Containers are always walked (their
+  // children may be positioned independently and still be visible).  A
+  // leaf with a box is kept when the box is on screen.  A zero-size leaf
+  // is kept only when it carries an anchor (its own text, an aria-label, a
+  // test id or a role): `display: contents` wrappers and `<slot>`s report a
+  // 0x0 box yet hold the text an agent reads, while an empty 0x0 element
+  // is noise in the node budget.
   const rect = element.getBoundingClientRect();
   const hasNonTrivialSize = rect.width >= MIN_ELEMENT_SIZE && rect.height >= MIN_ELEMENT_SIZE;
-
-  if (hasNonTrivialSize && !isInViewport(element) && element.children.length === 0) {
-    return null; // Skip leaf nodes outside viewport
+  const isLeaf = element.children.length === 0;
+  if (isLeaf) {
+    const hasAnchor =
+      getDirectText(element).length > 0 ||
+      element.hasAttribute('aria-label') ||
+      element.hasAttribute('data-testid') ||
+      element.hasAttribute('role');
+    if (hasNonTrivialSize ? !isInViewport(element) : !hasAnchor) {
+      return null;
+    }
   }
-  // For containers: continue to process children even if container is off-viewport
 
   // Special handling for tables.
   if (element instanceof HTMLTableElement) {
-    return truncateTable(element);
+    return truncateTable(element, MAX_TABLE_ROWS, depth, counter, options);
   }
 
   // Build the DomNode for this element.
@@ -737,4 +789,264 @@ export function captureViewportDOM(
   }
 
   return roots;
+}
+
+// ---------------------------------------------------------------------------
+// Snapshot payload: anchors and a text digest, not the tree
+// ---------------------------------------------------------------------------
+//
+// What the worker reads from a snapshot is the anchor of the element the
+// user acted on (to tell an agent what to click) and some visible text (to
+// tell pages apart).  Sending the whole viewport tree wrote hundreds of
+// kilobytes per capture; the snapshot now carries only:
+//   - `anchors`: the element interacted with since the previous snapshot
+//     (flagged `interacted`) and its ancestors up to the nearest landmark,
+//     each with role, accessible name, data-testid, aria-label, href and a
+//     composed-path selector;
+//   - `digest`: visible headings and list-row labels, at most
+//     MAX_DIGEST_CHARS.
+
+/** Cap on the text digest (visible headings and list-row labels). */
+export const MAX_DIGEST_CHARS = 4096;
+
+/** Cap on the serialized anchors + digest, so a snapshot message with its
+ *  url stays under 8 KB. */
+export const MAX_SNAPSHOT_CHARS = 7000;
+
+/** At most this many records: the element and its nearest ancestors. */
+export const MAX_ANCHOR_CHAIN = 8;
+
+const ANCHOR_TEXT_MAX = 80;
+const ANCHOR_HREF_MAX = 200;
+const DIGEST_LINE_MAX = 120;
+
+const LANDMARK_TAGS = new Set(['MAIN', 'NAV', 'HEADER', 'FOOTER', 'ASIDE', 'FORM', 'DIALOG']);
+const LANDMARK_ROLES = new Set([
+  'main', 'navigation', 'banner', 'contentinfo', 'complementary', 'form',
+  'region', 'search', 'dialog', 'alertdialog',
+]);
+const HEADING_TAGS = new Set(['h1', 'h2', 'h3', 'h4', 'h5', 'h6']);
+const ROW_TAGS = new Set(['li', 'tr']);
+const PLAIN_TOKEN = /^[A-Za-z_][\w-]*$/;
+
+/** What a DOM snapshot sends. */
+export interface DomSnapshot {
+  anchors: DomAnchor[];
+  digest: string;
+  /** True when the viewport walk hit MAX_NODE_COUNT. */
+  truncated: boolean;
+}
+
+/** The element the user last clicked or focused, until a snapshot takes it. */
+let interacted: Element | null = null;
+
+/**
+ * Record the element the user interacted with (click or focus target).
+ * The next snapshot reports it and its ancestors, then forgets it, so an
+ * anchor appears once, next to the interaction.
+ */
+export function noteInteraction(target: EventTarget | null | undefined): void {
+  // A secure field (password, one-time code, card number) is never the
+  // anchor: content.ts already skips interactions while one is focused;
+  // this holds even when the listeners fire before that flag is set.
+  interacted = target instanceof Element && !isSecureField(target) ? target : null;
+}
+
+function oneLine(text: string | null | undefined, max: number = ANCHOR_TEXT_MAX): string {
+  return (text ?? '').replace(/\s+/g, ' ').trim().slice(0, max);
+}
+
+function visibleText(el: Element): string {
+  const html = el as HTMLElement;
+  return oneLine(typeof html.innerText === 'string' ? html.innerText : el.textContent);
+}
+
+function isLandmark(el: Element): boolean {
+  const role = el.getAttribute('role');
+  if (role && LANDMARK_ROLES.has(role)) return true;
+  if (LANDMARK_TAGS.has(el.tagName.toUpperCase())) return true;
+  return el.tagName.toUpperCase() === 'SECTION' && el.hasAttribute('aria-label');
+}
+
+/** The parent element, crossing from a shadow root to its host. */
+function composedParent(el: Element): Element | null {
+  if (el.parentElement) return el.parentElement;
+  const root = el.getRootNode();
+  return root instanceof ShadowRoot ? root.host : null;
+}
+
+/** `tag#id.class` for one element; hashed classes (CSS rot) left out. */
+function selectorSegment(el: Element): string {
+  let segment = el.tagName.toLowerCase();
+  if (el.id && PLAIN_TOKEN.test(el.id)) segment += `#${el.id}`;
+  const classes = stripCssRot(Array.from(el.classList)).filter((c) => PLAIN_TOKEN.test(c));
+  for (const cls of classes.slice(0, 2)) segment += `.${cls}`;
+  return segment;
+}
+
+function labelFor(el: Element): string {
+  if (!el.id) return '';
+  const root = el.getRootNode() as Document | ShadowRoot;
+  if (typeof root.querySelector !== 'function') return '';
+  const label = root.querySelector(`label[for="${el.id.replace(/"/g, '\\"')}"]`);
+  return oneLine(label?.textContent);
+}
+
+/** The accessible name an agent would use for the element. */
+function accessibleName(el: Element): string {
+  const aria = oneLine(el.getAttribute('aria-label'));
+  if (aria) return aria;
+  const labelledBy = oneLine(resolveLabelledBy(el));
+  if (labelledBy) return labelledBy;
+  if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement) {
+    return labelFor(el) || oneLine(el.getAttribute('placeholder')) || oneLine(el.getAttribute('title'));
+  }
+  return visibleText(el) || oneLine(el.getAttribute('title'));
+}
+
+/** Origin and path of a link: query strings and fragments carry search
+ *  terms, session ids and tokens (the daemon keeps page URLs the same way). */
+function originAndPath(href: string): string {
+  try {
+    const url = new URL(href, window.location.href);
+    return url.protocol === 'http:' || url.protocol === 'https:' ? url.origin + url.pathname : '';
+  } catch {
+    return '';
+  }
+}
+
+function anchorRecord(el: Element, selector: string, isTarget: boolean, options: CaptureOptions): DomAnchor {
+  const record: DomAnchor = { tag: el.tagName.toLowerCase(), selector };
+  if (el instanceof HTMLInputElement) record.type = (el.type || 'text').toLowerCase();
+  if (el.id) record.id = el.id;
+  const role = el.getAttribute('role');
+  if (role) record.role = role;
+  const name = accessibleName(el);
+  if (name) record.name = name;
+  const aria = el.getAttribute('aria-label');
+  if (aria) record.ariaLabel = oneLine(aria);
+  const testId =
+    el.getAttribute('data-testid') || el.getAttribute('data-test-id') || el.getAttribute('data-cy');
+  if (testId) record.testId = testId;
+  const href = el.getAttribute('href');
+  if (href && el.tagName.toUpperCase() === 'A') {
+    record.href = originAndPath((el as HTMLAnchorElement).href || href).slice(0, ANCHOR_HREF_MAX);
+  }
+  const isField = el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement;
+  if (!isField) {
+    const text = visibleText(el);
+    if (text) record.text = text;
+  }
+  if (isTarget) {
+    record.interacted = true;
+    if (options.captureInputValues) {
+      // Secure fields (see isSecureField) never, whatever the option.
+      let value = '';
+      if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
+        if (!isSecureField(el)) value = el.value;
+      } else if (isEditable(el)) value = (el as HTMLElement).innerText ?? el.textContent ?? '';
+      if (value.trim()) record.value = truncateText(value.trim());
+    }
+  }
+  return record;
+}
+
+/**
+ * The anchor records for `el` and its ancestors up to the nearest landmark
+ * (inclusive), innermost first, at most MAX_ANCHOR_CHAIN.  Each record's
+ * selector is the composed path from the outermost collected element down
+ * to it.
+ */
+export function anchorChain(el: Element, options: CaptureOptions = DEFAULT_CAPTURE_OPTIONS): DomAnchor[] {
+  const chain: Element[] = [];
+  let current: Element | null = el;
+  while (current && chain.length < MAX_ANCHOR_CHAIN) {
+    const tag = current.tagName.toUpperCase();
+    if (tag === 'BODY' || tag === 'HTML') break;
+    chain.push(current);
+    if (isLandmark(current)) break;
+    current = composedParent(current);
+  }
+  const segments = chain.map(selectorSegment);
+  return chain.map((node, i) =>
+    anchorRecord(node, segments.slice(i).reverse().join(' > '), i === 0, options),
+  );
+}
+
+function nodeText(node: DomNode): string {
+  const own = oneLine(node.innerText || node.ariaLabel, DIGEST_LINE_MAX);
+  if (own) return own;
+  const parts: string[] = [];
+  for (const child of node.children ?? []) {
+    const text = nodeText(child);
+    if (text) parts.push(text);
+    if (parts.join(' ').length >= DIGEST_LINE_MAX) break;
+  }
+  return oneLine(parts.join(' '), DIGEST_LINE_MAX);
+}
+
+function firstLinkText(node: DomNode): string {
+  for (const child of node.children ?? []) {
+    if (child.tag === 'a' || child.role === 'link') {
+      const text = nodeText(child);
+      if (text) return text;
+    }
+    const nested = firstLinkText(child);
+    if (nested) return nested;
+  }
+  return '';
+}
+
+/**
+ * The visible headings and list-row labels (a row's first link, else its
+ * text) of a viewport tree, one per line, deduplicated, at most
+ * MAX_DIGEST_CHARS.
+ */
+export function buildDigest(nodes: DomNode[]): string {
+  const lines: string[] = [];
+  const seen = new Set<string>();
+  let size = 0;
+  const stack = [...nodes].reverse();
+  while (stack.length > 0 && size < MAX_DIGEST_CHARS) {
+    const node = stack.pop()!;
+    let line = '';
+    if (HEADING_TAGS.has(node.tag) || node.role === 'heading') {
+      line = nodeText(node);
+    } else if (ROW_TAGS.has(node.tag) || node.role === 'row' || node.role === 'listitem') {
+      line = firstLinkText(node) || nodeText(node);
+    }
+    if (line && !seen.has(line)) {
+      seen.add(line);
+      lines.push(line);
+      size += line.length + 1;
+      continue; // a row's label stands for its contents
+    }
+    for (const child of [...(node.children ?? [])].reverse()) stack.push(child);
+  }
+  return lines.join('\n').slice(0, MAX_DIGEST_CHARS);
+}
+
+/**
+ * The snapshot payload: the interacted element's anchor chain (then the
+ * interaction is forgotten) and the viewport's text digest, within
+ * MAX_SNAPSHOT_CHARS (outermost ancestors dropped first, then the digest
+ * shortened).
+ */
+export function captureSnapshot(options: CaptureOptions = DEFAULT_CAPTURE_OPTIONS): DomSnapshot {
+  const tree = captureViewportDOM(options);
+  const target = interacted && interacted.isConnected ? interacted : null;
+  interacted = null;
+  const snapshot: DomSnapshot = {
+    anchors: target ? anchorChain(target, options) : [],
+    digest: buildDigest(tree),
+    truncated: tree.some((node) => node.tag === '#truncated'),
+  };
+  while (JSON.stringify(snapshot).length > MAX_SNAPSHOT_CHARS && snapshot.anchors.length > 1) {
+    snapshot.anchors.pop();
+  }
+  const excess = JSON.stringify(snapshot).length - MAX_SNAPSHOT_CHARS;
+  if (excess > 0) {
+    snapshot.digest = snapshot.digest.slice(0, Math.max(0, snapshot.digest.length - excess));
+  }
+  return snapshot;
 }

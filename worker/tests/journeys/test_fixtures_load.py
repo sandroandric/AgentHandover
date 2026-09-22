@@ -45,7 +45,8 @@ def _counts(db_path: Path) -> dict:
             ),
             "dom_snapshots": one(
                 "SELECT COUNT(*) FROM events "
-                "WHERE json_type(metadata_json, '$.nodes') = 'array'"
+                "WHERE json_type(metadata_json, '$.anchors') = 'array' "
+                "   OR json_type(metadata_json, '$.nodes') = 'array'"
             ),
             "focus_tagged": one(
                 "SELECT COUNT(*) FROM events "

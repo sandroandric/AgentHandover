@@ -25,6 +25,7 @@ from typing import Literal
 import yaml
 
 from agenthandover_worker import __version__
+from agenthandover_worker.event_helpers import display_name
 from agenthandover_worker.procedure_schema import procedure_steps, step_key
 
 Target = Literal[
@@ -289,6 +290,22 @@ def _section(heading: str, lines: list[str]) -> str | None:
     return "\n".join([f"## {heading}", "", *lines])
 
 
+def _anchor_line(step: dict) -> str:
+    """``link "Sign in" (`selector`)`` from the step's anchor, or the
+    legacy bare selector."""
+    anchor = step.get("anchor")
+    if isinstance(anchor, dict):
+        role = str(anchor.get("role") or "").strip()
+        name = str(anchor.get("name") or "").strip()
+        selector = str(anchor.get("selector") or "").strip()
+        label = " ".join(p for p in (role, f'"{name}"' if name else "") if p)
+        if selector:
+            return f"{label} (`{selector}`)" if label else f"`{selector}`"
+        if label:
+            return label
+    return f"`{step['selector']}`" if step.get("selector") else ""
+
+
 def _render_step(num: int, step: dict) -> list[str]:
     step_id = step_key(step, num - 1)
     intent = str(
@@ -298,14 +315,14 @@ def _render_step(num: int, step: dict) -> list[str]:
     detail = str(step.get("description") or "").strip()
     if detail and detail != intent:
         lines.append(f"   Detail: {detail}")
-    app = _field(step, "app")
+    app = display_name(_field(step, "app"))
     target = _field(step, "location") or _field(step, "target")
     for label, value in (
         ("App", app),
         ("Target", target),
         ("Input", _field(step, "input")),
         ("Verify", _field(step, "verify")),
-        ("Anchor", f"`{step['selector']}`" if step.get("selector") else ""),
+        ("Anchor", _anchor_line(step)),
     ):
         if value:
             lines.append(f"   {label}: {value}")

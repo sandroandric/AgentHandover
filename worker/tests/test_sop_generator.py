@@ -362,7 +362,9 @@ class TestVlmSopToTemplate:
         assert step["step"] == "Navigate to Expensify new report page"
         assert step["parameters"]["app"] == "Google Chrome"
         assert step["parameters"]["location"] == "https://expensify.com/report/new"
-        assert step["selector"] is None  # v2 SOPs are semantic
+        # No timeline: nothing to point at (unknown, not guessed).
+        assert step["anchor"] is None
+        assert step["evidence"] == {"frames": [], "dom_snapshot_ids": []}
 
     def test_variables_conversion(self):
         vlm_sop = _make_vlm_sop_json()
@@ -594,111 +596,78 @@ class TestSOPGeneratorConfig:
 
 
 # ------------------------------------------------------------------
-# Selector extraction from DOM nodes
+# Step evidence and anchors (WP-P3)
 # ------------------------------------------------------------------
 
 
-class TestExtractSelectorForStep:
-    """Test _extract_selector_for_step with various DOM node shapes."""
+def _frame(event_id, *, snapshot_id=None, nodes=None, clicks=()):
+    return {
+        "annotation": {"app": "Google Chrome", "location": "https://news.ycombinator.com/"},
+        "event_id": event_id,
+        "dom_snapshot_id": snapshot_id,
+        "dom_nodes": nodes,
+        "click_targets": [{"event_id": f"click-{event_id}", "target": t} for t in clicks],
+        "timestamp": "2026-09-15T08:30:00+00:00",
+    }
 
-    def test_returns_none_without_timeline(self) -> None:
-        from agenthandover_worker.sop_generator import _extract_selector_for_step
 
-        result = _extract_selector_for_step(
-            {"action": "Click Submit"}, None, 0
-        )
-        assert result is None
+_HN_TREE = [{
+    "tag": "table", "children": [
+        {"tag": "tr", "children": [
+            {"tag": "span", "innerText": "3."},
+            {"tag": "a", "innerText": "SQLite's WAL mode, explained with diagrams"},
+        ]},
+    ],
+}]
+_HN_CLICK = {
+    "tagName": "a",
+    "innerText": "SQLite's WAL mode, explained with diagrams",
+    "composedPath": ["a", "span.titleline", "td.title", "tr.athing"],
+}
 
-    def test_returns_none_without_dom_nodes(self) -> None:
-        from agenthandover_worker.sop_generator import _extract_selector_for_step
 
-        timeline = [{"annotation": {}, "diff": None, "dom_nodes": None}]
-        result = _extract_selector_for_step(
-            {"action": "Click Submit"}, timeline, 0
-        )
-        assert result is None
+class TestStepEvidence:
+    def test_cited_frames_become_event_ids_and_snapshot_ids(self) -> None:
+        timeline = [
+            _frame("f1", snapshot_id="dom-1", nodes=_HN_TREE),
+            _frame("f2", snapshot_id="dom-1", nodes=_HN_TREE),
+            _frame("f3"),
+        ]
+        vlm_sop = {"steps": [
+            {"action": "Open the story", "frames": [1, 2, 99, "x"]},
+            {"action": "Read it", "frames": [3]},
+        ]}
+        steps = _vlm_sop_to_template(vlm_sop, timeline=timeline)["steps"]
+        assert steps[0]["evidence"] == {"frames": ["f1", "f2"], "dom_snapshot_ids": ["dom-1"]}
+        assert steps[1]["evidence"] == {"frames": ["f3"], "dom_snapshot_ids": []}
 
-    def test_extracts_aria_label_selector(self) -> None:
-        from agenthandover_worker.sop_generator import _extract_selector_for_step
+    def test_uncited_step_has_empty_evidence_and_no_anchor(self) -> None:
+        timeline = [_frame("f1", snapshot_id="dom-1", nodes=_HN_TREE, clicks=[_HN_CLICK])]
+        step = _vlm_sop_to_template({"steps": [{"action": "Open the story"}]}, timeline=timeline)["steps"][0]
+        assert step["evidence"] == {"frames": [], "dom_snapshot_ids": []}
+        assert step["anchor"] is None
 
-        timeline = [{
-            "annotation": {},
-            "diff": None,
-            "dom_nodes": [
-                {"tag": "button", "text": "Submit", "ariaLabel": "Submit form", "role": "button"},
-            ],
-        }]
-        result = _extract_selector_for_step(
-            {"action": "Click Submit button"}, timeline, 0
-        )
-        assert result is not None
-        assert "aria-label" in result
-        assert "Submit form" in result
+    def test_anchor_comes_from_the_clicked_nested_node(self) -> None:
+        timeline = [_frame("f1", snapshot_id="dom-1", nodes=_HN_TREE, clicks=[_HN_CLICK])]
+        vlm_sop = {"steps": [{"action": "Open the SQLite WAL story", "frames": [1]}]}
+        step = _vlm_sop_to_template(vlm_sop, timeline=timeline)["steps"][0]
+        assert step["anchor"] == {
+            "role": "link",
+            "name": "SQLite's WAL mode, explained with diagrams",
+            "selector": 'role=link[name="SQLite\'s WAL mode, explained with diagrams"]',
+        }
 
-    def test_extracts_testid_selector(self) -> None:
-        from agenthandover_worker.sop_generator import _extract_selector_for_step
+    def test_the_click_sharing_words_with_the_step_wins(self) -> None:
+        other = {"tagName": "a", "innerText": "login", "composedPath": ["a"]}
+        timeline = [_frame("f1", nodes=_HN_TREE, clicks=[other, _HN_CLICK])]
+        vlm_sop = {"steps": [{"action": "Open the SQLite WAL story", "frames": [1]}]}
+        anchor = _vlm_sop_to_template(vlm_sop, timeline=timeline)["steps"][0]["anchor"]
+        assert anchor["name"].startswith("SQLite")
 
-        timeline = [{
-            "annotation": {},
-            "diff": None,
-            "dom_nodes": [
-                {"tag": "button", "text": "Submit", "testId": "submit-btn"},
-            ],
-        }]
-        result = _extract_selector_for_step(
-            {"action": "Click Submit"}, timeline, 0
-        )
-        assert result is not None
-        assert "data-testid" in result
-        assert "submit-btn" in result
-
-    def test_extracts_id_selector(self) -> None:
-        from agenthandover_worker.sop_generator import _extract_selector_for_step
-
-        timeline = [{
-            "annotation": {},
-            "diff": None,
-            "dom_nodes": [
-                {"tag": "input", "text": "Search", "id": "search-input", "role": "textbox"},
-            ],
-        }]
-        result = _extract_selector_for_step(
-            {"action": "Type in Search box"}, timeline, 0
-        )
-        assert result is not None
-        assert result == "#search-input"
-
-    def test_no_match_returns_none(self) -> None:
-        from agenthandover_worker.sop_generator import _extract_selector_for_step
-
-        timeline = [{
-            "annotation": {},
-            "diff": None,
-            "dom_nodes": [
-                {"tag": "div", "text": "Just a paragraph with no relevance"},
-            ],
-        }]
-        result = _extract_selector_for_step(
-            {"action": "Click the special hidden element"}, timeline, 0
-        )
-        # div is not interactive, so no score bonus => None
-        assert result is None
-
-    def test_step_index_beyond_timeline_uses_last(self) -> None:
-        from agenthandover_worker.sop_generator import _extract_selector_for_step
-
-        timeline = [{
-            "annotation": {},
-            "diff": None,
-            "dom_nodes": [
-                {"tag": "button", "text": "Next", "ariaLabel": "Next page", "role": "button"},
-            ],
-        }]
-        result = _extract_selector_for_step(
-            {"action": "Click Next"}, timeline, 99
-        )
-        assert result is not None
-        assert "Next page" in result
+    def test_focus_prompt_asks_for_frames(self) -> None:
+        prompt = _build_focus_prompt("Daily news", [_frame("f1")])
+        assert '"frames": [<the TIMELINE frame numbers' in prompt
+        assert "Frame 1: Google Chrome" in prompt
 
 
 # ---------------------------------------------------------------------------
