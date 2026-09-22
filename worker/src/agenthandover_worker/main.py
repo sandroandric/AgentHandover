@@ -5005,7 +5005,12 @@ def main(argv: list[str] | None = None) -> None:
                     db, slug, vector_kb=vector_kb, **export_kwargs,
                 ),
                 knowledge_base=knowledge_base,
-                claude_skill_writer=claude_skill_writer,
+                # With --adapter claude-skill the primary writer is the
+                # Claude Skill writer.
+                claude_skill_writer=(
+                    claude_skill_writer
+                    or (sop_writer if args.adapter == "claude-skill" else None)
+                ),
             ),
             "merge": lambda t: _process_merge_trigger(
                 t, procedure_curator=procedure_curator,
