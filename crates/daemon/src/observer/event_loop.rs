@@ -181,7 +181,7 @@ pub async fn run_observer_loop(
 
                 // 1. Pull app-owned observation state. The app is the sole
                 // TCC principal for Accessibility and Screen Recording.
-                let observation = crate::observation::snapshot();
+                let observation = crate::observation::snapshot_async().await;
 
                 // 2. Check for secure field — if focused, skip all capture.
                 if observation
@@ -599,8 +599,8 @@ struct ScreenshotResult {
     skipped_dhash: bool,
 }
 
-/// Capture a screenshot, check dHash for change detection, and save a plain
-/// JPEG for the VLM annotation pipeline (the only on-disk copy of the frame).
+/// Capture a frame, check dHash for change detection, and write the app's
+/// JPEG as-is for the VLM annotation pipeline (the only on-disk copy of the frame).
 ///
 /// If the screenshot is too similar to the previous one (hamming distance < threshold),
 /// returns a result with `skipped_dhash = true` — the caller should skip the event.
@@ -615,10 +615,11 @@ async fn capture_screenshot(
     const MAX_RETRIES: u32 = 2;
 
     for attempt in 0..=MAX_RETRIES {
-        match crate::capture::screenshot::capture_main_display() {
-            Some((width, height, raw_pixels)) => {
+        match crate::capture::screenshot::capture_frame(screenshot_scale, screenshot_quality).await {
+            Ok(frame) => {
                 // Compute perceptual hash for change detection
-                let dhash = crate::capture::dhash::compute_dhash(&raw_pixels, width, height);
+                let dhash =
+                    crate::capture::dhash::compute_dhash(&frame.bgra, frame.width, frame.height);
                 let distance = crate::capture::dhash::hamming_distance(dhash, last_dhash);
 
                 if distance < dhash_threshold {
@@ -636,30 +637,29 @@ async fn capture_screenshot(
                     };
                 }
 
-                debug!(dhash_distance = distance, "Screenshot captured");
-                let screenshot_path = save_vlm_jpeg(
-                    &raw_pixels,
-                    width,
-                    height,
-                    screenshots_dir,
-                    screenshot_scale,
-                    screenshot_quality,
+                debug!(
+                    dhash_distance = distance,
+                    width = frame.width,
+                    height = frame.height,
+                    jpeg_bytes = frame.jpeg.len(),
+                    "Screenshot captured"
                 );
+                let screenshot_path = write_vlm_jpeg(&frame.jpeg, screenshots_dir);
 
                 return ScreenshotResult {
-                    raw_pixels: Some((width, height, raw_pixels)),
+                    raw_pixels: Some((frame.width, frame.height, frame.bgra)),
                     screenshot_path,
                     dhash,
                     skipped_dhash: false,
                 };
             }
-            None => {
-                if attempt < MAX_RETRIES {
-                    warn!(attempt = attempt + 1, "Screenshot capture returned None, retrying");
-                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                } else {
-                    error!("Screenshot capture failed after {} retries (no permission?)", MAX_RETRIES + 1);
-                }
+            Err(e) if e.is_retryable() && attempt < MAX_RETRIES => {
+                warn!(attempt = attempt + 1, error = %e, "Screenshot capture failed, retrying");
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            Err(e) => {
+                error!(error = %e, attempts = attempt + 1, "Screenshot capture failed");
+                break;
             }
         }
     }
@@ -687,37 +687,22 @@ async fn capture_screenshot(
     }
 }
 
-/// Save a plain (unencrypted) half-resolution JPEG for the VLM annotation pipeline.
+/// Write the app-encoded JPEG for the VLM annotation pipeline (no re-encode).
 ///
 /// The Python worker's scene annotator reads these directly via the `screenshot_path`
 /// stored in event metadata. The worker deletes each file once it has been
 /// annotated; daily maintenance deletes any left older than `vlm.job_ttl_days`.
-fn save_vlm_jpeg(
-    raw_pixels: &[u8],
-    width: usize,
-    height: usize,
-    screenshots_dir: &Path,
-    scale: f64,
-    quality: u8,
-) -> Option<PathBuf> {
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn write_vlm_jpeg(jpeg: &[u8], screenshots_dir: &Path) -> Option<PathBuf> {
     if let Err(e) = std::fs::create_dir_all(screenshots_dir) {
         warn!(error = %e, dir = %screenshots_dir.display(), "Failed to create screenshots directory");
         return None;
     }
 
-    let filename = format!("{}.jpg", Uuid::new_v4());
-    let path = screenshots_dir.join(&filename);
-
-    match crate::capture::jpeg_converter::save_screenshot_jpeg(
-        raw_pixels,
-        width as u32,
-        height as u32,
-        scale,
-        quality,
-        &path,
-    ) {
-        Ok(size) => {
-            debug!(path = %path.display(), size_bytes = size, "VLM screenshot JPEG saved");
+    let path = screenshots_dir.join(format!("{}.jpg", Uuid::new_v4()));
+    match std::fs::write(&path, jpeg) {
+        Ok(()) => {
+            debug!(path = %path.display(), size_bytes = jpeg.len(), "VLM screenshot JPEG saved");
             Some(path)
         }
         Err(e) => {

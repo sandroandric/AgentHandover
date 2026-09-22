@@ -173,24 +173,13 @@ fn check_accessibility() -> bool {
 
 #[cfg(target_os = "macos")]
 fn check_screen_recording() -> bool {
+    // Read-only TCC check: no capture (CGDisplayCreateImage is obsoleted in
+    // macOS 15 and would itself trigger the permission prompt).
     #[link(name = "CoreGraphics", kind = "framework")]
     extern "C" {
-        fn CGMainDisplayID() -> u32;
-        fn CGDisplayCreateImage(display_id: u32) -> *const std::ffi::c_void;
+        fn CGPreflightScreenCaptureAccess() -> bool;
     }
-    #[link(name = "CoreFoundation", kind = "framework")]
-    extern "C" {
-        fn CFRelease(cf: *const std::ffi::c_void);
-    }
-    unsafe {
-        let image = CGDisplayCreateImage(CGMainDisplayID());
-        if image.is_null() {
-            false
-        } else {
-            CFRelease(image);
-            true
-        }
-    }
+    unsafe { CGPreflightScreenCaptureAccess() }
 }
 
 #[cfg(not(target_os = "macos"))]
