@@ -60,7 +60,7 @@ fn test_schema_version() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join("test_ver.db");
     let store = EventStore::open(&db_path).unwrap();
-    assert_eq!(store.schema_version(), 3);
+    assert_eq!(store.schema_version(), 4);
 }
 
 #[test]
@@ -98,4 +98,50 @@ fn test_no_backup_on_fresh_db() {
         .filter(|e| e.file_name().to_string_lossy().contains(".bak-"))
         .collect();
     assert_eq!(backup_files.len(), 0, "No backup should be created for a brand-new database");
+}
+
+#[test]
+fn test_v004_drops_dom_trees_older_than_the_retention_window() {
+    let tmp = TempDir::new().unwrap();
+    let db_path = tmp.path().join("v3.db");
+    {
+        // A database the previous daemon (schema 3) wrote.
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        for sql in [
+            include_str!("../src/migrations/v001_initial.sql"),
+            include_str!("../src/migrations/v002_add_display_ids_spanned.sql"),
+            include_str!("../src/migrations/v003_add_scene_annotation.sql"),
+        ] {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.pragma_update(None, "user_version", 3).unwrap();
+        let insert = |id: &str, age_days: i64, metadata: &str| {
+            let ts = (Utc::now() - chrono::Duration::days(age_days)).to_rfc3339();
+            conn.execute(
+                "INSERT INTO events (id, timestamp, kind_json, display_topology_json, \
+                 primary_display_id, metadata_json) \
+                 VALUES (?1, ?2, '{\"type\":\"DwellSnapshot\"}', '[]', '', ?3)",
+                rusqlite::params![id, ts, metadata],
+            )
+            .unwrap();
+        };
+        insert("old-tree", 30, r#"{"nodes":[{"tag":"div"}],"url":"https://a.example/"}"#);
+        insert("new-tree", 1, r#"{"nodes":[{"tag":"div"}],"url":"https://a.example/"}"#);
+        insert("old-anchors", 30, r#"{"anchors":[],"digest":"x","url":"https://a.example/"}"#);
+    }
+
+    let store = EventStore::open(&db_path).unwrap();
+    assert_eq!(store.schema_version(), 4);
+    let metadata = |id: &str| -> serde_json::Value {
+        let text: String = store
+            .connection()
+            .query_row("SELECT metadata_json FROM events WHERE id = ?1", [id], |r| r.get(0))
+            .unwrap();
+        serde_json::from_str(&text).unwrap()
+    };
+    let old = metadata("old-tree");
+    assert!(old.get("nodes").is_none(), "tree outside the window is dropped: {old}");
+    assert_eq!(old["url"], "https://a.example/", "the rest of the row stays");
+    assert!(metadata("new-tree")["nodes"].is_array(), "tree inside the window stays");
+    assert_eq!(metadata("old-anchors")["digest"], "x");
 }

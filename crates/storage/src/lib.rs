@@ -94,6 +94,11 @@ impl EventStore {
                     .execute_batch(include_str!("migrations/v003_add_scene_annotation.sql"))?;
             }
 
+            if current_version < 4 {
+                self.conn
+                    .execute_batch(include_str!("migrations/v004_drop_old_dom_trees.sql"))?;
+            }
+
             self.conn
                 .pragma_update(None, "user_version", schema::CURRENT_SCHEMA_VERSION)?;
         }
