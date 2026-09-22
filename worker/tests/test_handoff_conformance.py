@@ -194,7 +194,7 @@ class TestGeneratorFieldsSurvive:
         proc = sop_to_procedure(sample_sop_template)
         proc["constraints"]["guardrails"] = ["Never buy a domain"]
         pw.write_procedure(proc, "focus", "s1")
-        pw.update_procedure(proc["id"], proc, source="focus", source_id="s2")
+        pw.write_procedure(proc, "focus", "s2")
         assert kb.get_procedure("unknown") is None
         assert not list(kb.root.rglob("unknown.json"))
         saved = kb.get_procedure("check-domain-availability")
@@ -498,7 +498,7 @@ class TestExecutionFeedback:
         assert exec_id
 
         for step in sample_procedure["steps"][:2]:
-            monitor.record_step(exec_id, str(step["index"]), step["action"])
+            monitor.record_step(exec_id, step["step_id"], step["action"])
 
         record = monitor.complete_execution(exec_id)
         assert record.status == ExecutionStatus.COMPLETED
@@ -522,7 +522,7 @@ class TestExecutionFeedback:
 
         exec_id = monitor.start_execution(sample_procedure["id"], "test-agent")
         # Record a different action than expected
-        monitor.record_step(exec_id, "0", "Completely different action")
+        monitor.record_step(exec_id, "step_1", "Completely different action")
         record = monitor.complete_execution(exec_id)
 
         assert record.status == ExecutionStatus.DEVIATED

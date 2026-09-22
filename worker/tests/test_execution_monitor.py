@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -10,9 +11,8 @@ import pytest
 from agenthandover_worker.knowledge_base import KnowledgeBase
 from agenthandover_worker.execution_monitor import (
     ExecutionMonitor,
-    ExecutionRecord,
     ExecutionStatus,
-    ExecutionStep,
+    actions_equivalent,
 )
 
 
@@ -130,7 +130,7 @@ class TestRecordStep:
 
     def test_record_matching_step(self, monitor: ExecutionMonitor) -> None:
         eid = monitor.start_execution("deploy-app")
-        monitor.record_step(eid, "0", "Open terminal")
+        monitor.record_step(eid, "step_1", "Open terminal")
         record = monitor.get_execution(eid)
         assert record is not None
         step = record.steps[0]
@@ -142,7 +142,7 @@ class TestRecordStep:
         self, monitor: ExecutionMonitor
     ) -> None:
         eid = monitor.start_execution("deploy-app")
-        monitor.record_step(eid, "0", "Open browser instead")
+        monitor.record_step(eid, "step_1", "Open browser instead")
         record = monitor.get_execution(eid)
         assert record is not None
         step = record.steps[0]
@@ -154,7 +154,7 @@ class TestRecordStep:
         self, monitor: ExecutionMonitor
     ) -> None:
         eid = monitor.start_execution("deploy-app")
-        monitor.record_step(eid, "0", "open terminal")
+        monitor.record_step(eid, "step_1", "open terminal")
         record = monitor.get_execution(eid)
         assert record is not None
         assert record.steps[0].status == ExecutionStatus.COMPLETED
@@ -173,7 +173,7 @@ class TestRecordStep:
         self, monitor: ExecutionMonitor
     ) -> None:
         """Recording a step for unknown execution_id does not raise."""
-        monitor.record_step("nonexistent-id", "0", "whatever")
+        assert monitor.record_step("nonexistent-id", "step_1", "whatever") is None
 
 
 # ---------------------------------------------------------------------------
@@ -185,7 +185,7 @@ class TestRecordDeviation:
 
     def test_explicit_deviation(self, monitor: ExecutionMonitor) -> None:
         eid = monitor.start_execution("deploy-app")
-        monitor.record_deviation(eid, "1", "Skipped authentication check")
+        monitor.record_deviation(eid, "step_2", "Skipped authentication check")
         record = monitor.get_execution(eid)
         assert record is not None
         assert len(record.deviations) == 1
@@ -206,7 +206,7 @@ class TestRecordDeviation:
         self, monitor: ExecutionMonitor
     ) -> None:
         """Deviation for unknown execution_id does not raise."""
-        monitor.record_deviation("fake-id", "0", "whatever")
+        monitor.record_deviation("fake-id", "step_1", "whatever")
 
 
 # ---------------------------------------------------------------------------
@@ -224,7 +224,7 @@ class TestCompleteExecution:
         assert record.status == ExecutionStatus.COMPLETED
         assert record.completed_at is not None
         # No longer active
-        assert eid not in monitor._active_executions
+        assert monitor.get_execution(eid).status is ExecutionStatus.COMPLETED
         # In history
         assert len(monitor.get_history()) == 1
 
@@ -238,7 +238,7 @@ class TestCompleteExecution:
         self, monitor: ExecutionMonitor
     ) -> None:
         eid = monitor.start_execution("deploy-app")
-        monitor.record_deviation(eid, "0", "Used different tool")
+        monitor.record_deviation(eid, "step_1", "Used different tool")
         record = monitor.complete_execution(eid)
         assert record.status == ExecutionStatus.DEVIATED
 
@@ -264,7 +264,8 @@ class TestFailExecution:
     def test_fail_moves_to_history(self, monitor: ExecutionMonitor) -> None:
         eid = monitor.start_execution("deploy-app")
         monitor.fail_execution(eid, "Timeout")
-        assert eid not in monitor._active_executions
+        with pytest.raises(KeyError):
+            monitor.complete_execution(eid)
         assert len(monitor.get_history()) == 1
 
     def test_fail_unknown_raises(self, monitor: ExecutionMonitor) -> None:
@@ -288,7 +289,7 @@ class TestAbortExecution:
     def test_abort_moves_to_history(self, monitor: ExecutionMonitor) -> None:
         eid = monitor.start_execution("deploy-app")
         monitor.abort_execution(eid)
-        assert eid not in monitor._active_executions
+        assert monitor.record_step(eid, "step_1", "Open terminal") is None
         assert len(monitor.get_history()) == 1
 
     def test_abort_unknown_raises(self, monitor: ExecutionMonitor) -> None:
@@ -429,7 +430,7 @@ class TestSuccessRate:
         self, monitor: ExecutionMonitor
     ) -> None:
         eid = monitor.start_execution("deploy-app")
-        monitor.record_deviation(eid, "0", "Went off script")
+        monitor.record_deviation(eid, "step_1", "Went off script")
         monitor.complete_execution(eid)
 
         stats = monitor.get_success_rate("deploy-app")
@@ -499,7 +500,7 @@ class TestPersistence:
     def test_save_and_load(self, kb_with_proc: KnowledgeBase) -> None:
         monitor1 = ExecutionMonitor(kb_with_proc)
         eid = monitor1.start_execution("deploy-app", agent_id="agent-x")
-        monitor1.record_step(eid, "0", "Open terminal")
+        monitor1.record_step(eid, "step_1", "Open terminal")
         monitor1.complete_execution(eid, outcomes=[{"ok": True}])
 
         # Create a new monitor that loads from the same KB
@@ -521,27 +522,73 @@ class TestPersistence:
         eid = monitor.start_execution("deploy-app")
         monitor.complete_execution(eid)
 
-        path = kb_with_proc.root / "observations" / "executions.json"
-        assert path.is_file()
-        data = json.loads(path.read_text())
-        assert "records" in data
-        assert "updated_at" in data
+        path = kb_with_proc.root / "observations" / "runs.db"
+        assert monitor.db_path == path
+        conn = sqlite3.connect(str(path))
+        try:
+            rows = conn.execute("SELECT execution_id, status FROM runs").fetchall()
+        finally:
+            conn.close()
+        assert rows == [(eid, "completed")]
+        assert not (kb_with_proc.root / "observations" / "executions.json").exists()
 
     def test_load_empty_kb(self, kb: KnowledgeBase) -> None:
         """Monitor starts fine with no prior history file."""
         monitor = ExecutionMonitor(kb)
         assert monitor.get_history() == []
 
-    def test_corrupt_history_file(
+    def test_corrupt_legacy_file(
         self, kb_with_proc: KnowledgeBase
     ) -> None:
-        """Corrupt JSON file is handled gracefully."""
+        """A corrupt v0.4 executions.json is left alone, not imported."""
         obs_dir = kb_with_proc.root / "observations"
         obs_dir.mkdir(parents=True, exist_ok=True)
         (obs_dir / "executions.json").write_text("{invalid json!!!")
 
         monitor = ExecutionMonitor(kb_with_proc)
         assert monitor.get_history() == []
+        assert (obs_dir / "executions.json").is_file()
+
+    def test_imports_legacy_json_once(
+        self, kb_with_proc: KnowledgeBase
+    ) -> None:
+        """v0.4 runs move into the table; the file is renamed, not deleted."""
+        obs_dir = kb_with_proc.root / "observations"
+        obs_dir.mkdir(parents=True, exist_ok=True)
+        legacy = {
+            "records": [{
+                "execution_id": "old-run",
+                "procedure_slug": "deploy-app",
+                "agent_id": "a",
+                "status": "failed",
+                "started_at": "2026-01-01T00:00:00+00:00",
+                "completed_at": "2026-01-01T00:05:00+00:00",
+                "steps": [{"step_id": "0", "expected_action": "Open terminal",
+                           "status": "completed"}],
+                "error": "boom",
+            }],
+        }
+        (obs_dir / "executions.json").write_text(json.dumps(legacy))
+
+        ExecutionMonitor(kb_with_proc)
+        monitor = ExecutionMonitor(kb_with_proc)  # a second open does not re-import
+        assert [r.execution_id for r in monitor.get_history()] == ["old-run"]
+        assert monitor.get_success_rate("deploy-app")["last_failure"] == (
+            "2026-01-01T00:05:00+00:00"
+        )
+        assert not (obs_dir / "executions.json").exists()
+        assert (obs_dir / "executions.json.imported").is_file()
+
+    def test_second_monitor_sees_active_run(
+        self, kb_with_proc: KnowledgeBase
+    ) -> None:
+        """The MCP server and the worker are separate processes: a run one
+        of them starts is visible to (and finishable by) the other."""
+        eid = ExecutionMonitor(kb_with_proc).start_execution("deploy-app")
+        other = ExecutionMonitor(kb_with_proc)
+        other.record_step(eid, "step_1", "Open terminal")
+        other.complete_execution(eid)
+        assert ExecutionMonitor(kb_with_proc).get_success_rate("deploy-app")["completed"] == 1
 
     def test_persistence_of_failed_execution(
         self, kb_with_proc: KnowledgeBase
@@ -561,7 +608,7 @@ class TestPersistence:
     ) -> None:
         monitor1 = ExecutionMonitor(kb_with_proc)
         eid = monitor1.start_execution("deploy-app")
-        monitor1.record_step(eid, "0", "Used different terminal")
+        monitor1.record_step(eid, "step_1", "Used different terminal")
         monitor1.complete_execution(eid)
 
         monitor2 = ExecutionMonitor(kb_with_proc)
@@ -569,3 +616,123 @@ class TestPersistence:
         assert rec is not None
         assert rec.status == ExecutionStatus.DEVIATED
         assert len(rec.deviations) == 1
+
+
+# ---------------------------------------------------------------------------
+# Step ids and deviations (WP-I3, coverage audit #28)
+# ---------------------------------------------------------------------------
+
+
+class TestStepMatching:
+
+    def test_expected_step_ids_are_the_packet_ids(
+        self, monitor: ExecutionMonitor
+    ) -> None:
+        record = monitor.get_execution(monitor.start_execution("deploy-app"))
+        assert [s.step_id for s in record.steps] == ["step_1", "step_2", "step_3"]
+
+    def test_procedure_step_ids_are_kept(self, kb: KnowledgeBase) -> None:
+        kb.save_procedure(_make_procedure("custom", steps=[
+            {"step_id": "login", "action": "Log in"},
+            {"action": "Open report"},
+        ]))
+        monitor = ExecutionMonitor(kb)
+        record = monitor.get_execution(monitor.start_execution("custom"))
+        assert [s.step_id for s in record.steps] == ["login", "step_2"]
+        # ``1`` is the first step by position, whatever its id.
+        assert monitor.record_step(record.execution_id, "1").step_id == "login"
+
+    @pytest.mark.parametrize("reported", ["step_2", "2", "Step 2", " step-2 "])
+    def test_id_and_ordinal_land_on_the_same_step(
+        self, monitor: ExecutionMonitor, reported: str
+    ) -> None:
+        eid = monitor.start_execution("deploy-app")
+        step = monitor.record_step(eid, reported, "Pushed with git instead", deviated=True)
+        assert step is not None and step.step_id == "step_2"
+        record = monitor.get_execution(eid)
+        assert len(record.steps) == 3
+        assert [d["step_id"] for d in record.deviations] == ["step_2"]
+        assert record.steps[1].status is ExecutionStatus.DEVIATED
+        assert record.steps[0].status is ExecutionStatus.IN_PROGRESS
+
+    def test_ordinal_out_of_range_is_dynamic(self, monitor: ExecutionMonitor) -> None:
+        eid = monitor.start_execution("deploy-app")
+        monitor.record_step(eid, "step_0", "Something")
+        monitor.record_step(eid, "4", "Something else")
+        record = monitor.get_execution(eid)
+        assert [s.step_id for s in record.steps[3:]] == ["step_0", "4"]
+        assert record.deviations == []
+
+    def test_empty_actual_action_is_no_claim(self, monitor: ExecutionMonitor) -> None:
+        eid = monitor.start_execution("deploy-app")
+        step = monitor.record_step(eid, "step_1", "")
+        assert step.status is ExecutionStatus.COMPLETED
+        assert step.actual_action is None
+        assert monitor.get_execution(eid).deviations == []
+
+    def test_reported_deviation_without_action(self, monitor: ExecutionMonitor) -> None:
+        eid = monitor.start_execution("deploy-app")
+        monitor.record_step(eid, "step_3", deviated=True, notes="Checked the logs instead")
+        record = monitor.get_execution(eid)
+        assert record.deviations[0]["step_id"] == "step_3"
+        assert record.deviations[0]["detail"] == "Checked the logs instead"
+
+    def test_one_deviation_per_step(self, monitor: ExecutionMonitor) -> None:
+        eid = monitor.start_execution("deploy-app")
+        monitor.record_step(eid, "step_2", "Pushed with git", deviated=True, notes="first")
+        monitor.record_deviation(eid, "2", "second")
+        record = monitor.get_execution(eid)
+        assert [(d["step_id"], d["detail"]) for d in record.deviations] == [("step_2", "second")]
+
+    def test_later_matching_report_clears_the_deviation(
+        self, monitor: ExecutionMonitor
+    ) -> None:
+        eid = monitor.start_execution("deploy-app")
+        monitor.record_step(eid, "step_1", "Opened a browser")
+        monitor.record_step(eid, "step_1", "Opened the terminal")
+        record = monitor.get_execution(eid)
+        assert record.deviations == []
+        assert record.steps[0].status is ExecutionStatus.COMPLETED
+
+    def test_paraphrase_is_not_a_deviation(self, monitor: ExecutionMonitor) -> None:
+        eid = monitor.start_execution("deploy-app")
+        monitor.record_step(eid, "step_2", "ran the deploy command")
+        assert monitor.get_execution(eid).deviations == []
+
+
+class TestActionsEquivalent:
+
+    @pytest.mark.parametrize(("expected", "actual"), [
+        ("Open terminal", "open terminal"),
+        ("Open Chrome and go to example.com", "opened chrome, went to example.com"),
+        ("Run deploy command", "Ran the deploy commands"),
+    ])
+    def test_equivalent(self, expected: str, actual: str) -> None:
+        assert actions_equivalent(expected, actual)
+
+    @pytest.mark.parametrize(("expected", "actual"), [
+        ("Click Submit", "Press Enter in the search field"),
+        ("Open terminal", "Open browser instead"),
+        ("Verify deployment", "Skipped verification"),
+    ])
+    def test_different(self, expected: str, actual: str) -> None:
+        assert not actions_equivalent(expected, actual)
+
+
+class TestSuccessRateFields:
+
+    def test_counts_deviated_steps_and_times(self, monitor: ExecutionMonitor) -> None:
+        eid = monitor.start_execution("deploy-app")
+        monitor.record_step(eid, "step_1", "Open browser instead")
+        monitor.record_step(eid, "step_3", deviated=True)
+        monitor.complete_execution(eid)
+        eid2 = monitor.start_execution("deploy-app")
+        failed = monitor.fail_execution(eid2, "boom")
+        monitor.start_execution("deploy-app")  # still running: not counted
+
+        stats = monitor.get_success_rate("deploy-app")
+        assert stats["total"] == 2
+        assert stats["deviated"] == 1 and stats["failed"] == 1
+        assert stats["deviations"] == 2
+        assert stats["last_failure"] == failed.completed_at
+        assert stats["last_run"] == failed.completed_at

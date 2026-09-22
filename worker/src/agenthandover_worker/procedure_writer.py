@@ -188,54 +188,6 @@ class ProcedureWriter:
         )
         return path
 
-    def update_procedure(
-        self,
-        slug: str,
-        new_template: dict,
-        *,
-        source: str = "passive",
-        source_id: str = "",
-        event_count: int = 0,
-        duration_minutes: int = 0,
-    ) -> Path:
-        """Update an existing procedure with a new SOP template.
-
-        Merges the new template's data while preserving existing
-        evidence, staleness history, and constraints.
-
-        Returns the path to the updated procedure file.
-        """
-        existing = self._kb.get_procedure(slug)
-
-        # Convert new template to v3
-        new_template.setdefault("source", source)
-        new_proc = sop_to_procedure(new_template)
-
-        # Enrich environment
-        self._enrich_environment(new_proc, new_template)
-
-        if existing is not None:
-            merge_existing_procedure(new_proc, existing)
-
-        # Save
-        path = self._kb.save_procedure(new_proc)
-
-        # Add evidence
-        if source_id:
-            self._evidence.add_observation(
-                slug,
-                ObservationEvidence(
-                    date=datetime.now(timezone.utc).strftime("%Y-%m-%d"),
-                    type=source,
-                    duration_minutes=duration_minutes,
-                    session_id=source_id,
-                    event_count=event_count,
-                ),
-            )
-
-        logger.info("Updated procedure '%s'", slug)
-        return path
-
     # ------------------------------------------------------------------
     # Environment enrichment
     # ------------------------------------------------------------------

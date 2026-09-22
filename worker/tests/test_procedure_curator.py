@@ -200,10 +200,10 @@ class TestUpgradeCandidates:
     """Tests for detect_upgrade_candidates()."""
 
     def test_observed_with_3_episodes_suggests_draft(self, kb, curator):
-        """observed + 3 episodes + conf 0.70 should suggest draft."""
+        """observed + 3 episodes + score 0.7*0.72 + 0.3*0.5 = 0.654 suggests draft."""
         proc = _make_proc(
             "obs-proc", ["Chrome"], ["Open site", "Click button"],
-            confidence=0.70, episodes=3, lifecycle="observed",
+            confidence=0.72, episodes=3, lifecycle="observed",
         )
         _save(kb, proc)
 
@@ -236,11 +236,12 @@ class TestUpgradeCandidates:
         assert "low-conf" not in {c.slug for c in candidates}
 
     def test_draft_to_reviewed(self, kb, curator):
-        """draft + 5 episodes + conf 0.80 + freshness 0.8 should suggest reviewed."""
+        """draft + 5 episodes + score 0.7*0.80 + 0.3*0.9 = 0.83 + fresh suggests reviewed."""
         now = datetime.now(timezone.utc)
         proc = _make_proc(
             "good-draft", ["Chrome"], ["Open site", "Click button", "Enter data"],
             confidence=0.80, episodes=5, lifecycle="draft",
+            execution_confidence=0.9,
         )
         proc["staleness"]["last_observed"] = now.isoformat()
         proc["evidence"]["contradictions"] = []
@@ -250,6 +251,19 @@ class TestUpgradeCandidates:
         match = [c for c in candidates if c.slug == "good-draft"]
         assert len(match) == 1
         assert match[0].proposed_state == "reviewed"
+        assert "Score 0.83 >= 0.75" in match[0].reasons
+
+    def test_draft_without_runs_needs_more_grounding(self, kb, curator):
+        """Before any agent run execution_confidence is 0.5: 0.7*0.80 + 0.15 = 0.71 < 0.75."""
+        now = datetime.now(timezone.utc)
+        proc = _make_proc(
+            "unrun-draft", ["Chrome"], ["Open site", "Click button", "Enter data"],
+            confidence=0.80, episodes=5, lifecycle="draft",
+        )
+        proc["staleness"]["last_observed"] = now.isoformat()
+        _save(kb, proc)
+
+        assert "unrun-draft" not in {c.slug for c in curator.detect_upgrade_candidates()}
 
     def test_verified_to_agent_ready(self, kb, curator):
         """verified + recently confirmed should suggest agent_ready."""
@@ -529,18 +543,12 @@ class TestCurationQueue:
         )
         _save(kb, proc)
 
-        # Write execution stats
-        exec_path = kb.root / "observations" / "executions.json"
-        kb.atomic_write_json(exec_path, {
-            "procedures": {
-                "trust-proc": {
-                    "total": 10,
-                    "successes": 10,
-                    "failures": 0,
-                    "last_failure": None,
-                }
-            }
-        })
+        # Ten completed agent runs in the runs table
+        from agenthandover_worker.execution_monitor import ExecutionMonitor
+
+        monitor = ExecutionMonitor(kb)
+        for _ in range(10):
+            monitor.complete_execution(monitor.start_execution("trust-proc"))
 
         # Re-create curator so TrustAdvisor loads the stats
         sd = StalenessDetector(kb)
@@ -696,3 +704,53 @@ class TestCurate:
         )
         assert total > 0
         assert summary.total_queue_items > 0
+
+
+class TestUpgradeScore:
+    """One scale for confidence_avg whatever produced it (coverage audit #38)."""
+
+    def test_formula(self):
+        from agenthandover_worker.procedure_curator import upgrade_score
+
+        assert upgrade_score({"confidence_avg": 0.8, "execution_confidence": 0.9}) == pytest.approx(0.83)
+        assert upgrade_score({"confidence_avg": 0.8}) == pytest.approx(0.71)
+        assert upgrade_score({}) == pytest.approx(0.15)
+
+    def test_v1_and_v2_procedures_rank_on_the_same_scale(self):
+        """A pattern mined by the v1 inducer and a v2 generated SOP with the
+        same evidence (3 demonstrations, one variable, no scene annotations)
+        get the same confidence_avg, whatever the v1 translator's per-step
+        confidences were."""
+        from agenthandover_worker.confidence import compute_v2_confidence
+        from agenthandover_worker.procedure_curator import upgrade_score
+        from agenthandover_worker.procedure_schema import sop_to_procedure
+        from agenthandover_worker.sop_inducer import SOPInducer
+
+        steps = [
+            {"step": "click", "target": "New invoice", "confidence": 0.97,
+             "parameters": {"app": "Chrome"}},
+            {"step": "type", "target": "Customer", "confidence": 0.99,
+             "parameters": {"app": "Chrome", "value": "Acme"}},
+            {"step": "click", "target": "Send", "confidence": 0.98,
+             "parameters": {"app": "Chrome"}},
+        ]
+        episodes = []
+        for customer in ("Acme", "Globex", "Initech"):
+            ep = [dict(s, parameters=dict(s["parameters"])) for s in steps]
+            ep[1]["parameters"]["value"] = customer
+            episodes.append(ep)
+
+        mined = SOPInducer(min_support=0.5, min_pattern_length=3).induce(episodes)
+        assert mined, "the inducer found no pattern"
+        v1 = mined[0]
+        assert v1["step_confidence_mean"] > 0.95  # the old v1 scale
+        v2 = {
+            "steps": v1["steps"],
+            "variables": v1["variables"],
+            "episode_count": v1["episode_count"],
+        }
+        v2["confidence_avg"] = compute_v2_confidence(v2).total
+
+        assert v1["confidence_avg"] == v2["confidence_avg"]
+        assert v1["confidence_avg"] < v1["step_confidence_mean"]
+        assert upgrade_score(sop_to_procedure(v1)) == upgrade_score(sop_to_procedure(v2))
