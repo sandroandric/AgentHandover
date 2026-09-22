@@ -524,6 +524,19 @@ class TestFocusPath:
         assert result.deferred and not result.success
         sop_gen.generate_from_focus.assert_not_called()
 
+    def test_backoff_skips_annotation_calls(self, db_conn, tmp_path):
+        db_file, conn = db_conn
+        _insert(conn, "f1", "2026-09-22T10:00:00.000Z", {"focus_session_id": "s"})
+        processor, sop_gen = self._processor()
+        processor.annotator.ready.return_value = False
+        with WorkerDB(db_file) as db:
+            result = processor.process_session(
+                db, "s", "Task", db.get_focus_session_events("s"),
+                screenshots_dir=tmp_path,
+            )
+        assert result.deferred
+        processor.annotator.annotate_event.assert_not_called()
+
     def test_deferred_session_keeps_the_signal(self, tmp_path, monkeypatch):
         from agenthandover_worker import main as main_mod
 

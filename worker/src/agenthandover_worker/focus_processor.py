@@ -21,6 +21,9 @@ from agenthandover_worker.sop_generator import SOPGenerator, GeneratedSOP
 
 logger = logging.getLogger(__name__)
 
+# Annotation statuses the focus path does not re-annotate.
+_ANNOTATION_DONE = ("completed", "skipped", "missing_screenshot")
+
 
 class FocusProcessor:
     """Process completed focus recording sessions through the v2 pipeline.
@@ -90,7 +93,17 @@ class FocusProcessor:
         # Step 0b: Attach clipboard context to adjacent screenshots
         events = self._attach_clipboard_context(events)
 
-        # Step 1: Ensure all events are annotated
+        # Step 1: Ensure all events are annotated.  During the transport
+        # backoff, don't hit Ollama at all; the session waits.
+        needs_annotation = any(
+            e.get("annotation_status", "pending") not in _ANNOTATION_DONE
+            for e in events
+        )
+        if needs_annotation and not self.annotator.ready():
+            return GeneratedSOP(
+                sop={}, success=False, deferred=True,
+                error="Annotation deferred: Ollama unavailable",
+            )
         ann_stats = self._ensure_annotations(db, events, screenshots_dir)
         logger.info(
             "Focus v2 annotation: %d annotated, %d skipped, %d failed, %d deferred",
@@ -487,7 +500,7 @@ class FocusProcessor:
             status = event.get("annotation_status", "pending")
 
             # Already annotated
-            if status in ("completed", "skipped", "missing_screenshot"):
+            if status in _ANNOTATION_DONE:
                 stats["already_done"] += 1
                 continue
 
