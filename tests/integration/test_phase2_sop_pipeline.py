@@ -35,7 +35,7 @@ from agenthandover_worker.clipboard_linker import ClipboardLinker
 from agenthandover_worker.confidence import ConfidenceScorer
 from agenthandover_worker.db import WorkerDB
 from agenthandover_worker.episode_builder import EpisodeBuilder
-from agenthandover_worker.exporter import AtomicWriter, IndexGenerator, SOPExporter
+from agenthandover_worker.exporter import AtomicWriter, IndexGenerator
 from agenthandover_worker.models.semantic_step import Evidence, SemanticStep
 from agenthandover_worker.negative_demo import NegativeDemoPruner
 from agenthandover_worker.openclaw_writer import OpenClawWriter
@@ -46,6 +46,8 @@ from agenthandover_worker.scheduler import (
     SchedulerConfig,
     SystemConditions,
 )
+from agenthandover_worker.procedure_schema import sop_to_procedure
+from agenthandover_worker.skill_render import render_packet
 from agenthandover_worker.sop_format import SOPFormatter
 from agenthandover_worker.sop_inducer import SOPInducer
 from agenthandover_worker.sop_versioner import SOPVersioner
@@ -583,36 +585,27 @@ class TestFullPipelineRepeatedWorkflow:
         assert best_sop["title"], "SOP title should not be empty"
 
         # ===============================================================
-        # PHASE G: Format SOPs via SOPFormatter
+        # PHASE G: Render SOPs with the one Skill renderer
         # ===============================================================
         formatter = SOPFormatter()
         for template in sop_templates:
-            content = formatter.format_sop(template)
+            content = render_packet(sop_to_procedure(template), target="openclaw")
 
             # Verify YAML frontmatter structure
             assert content.startswith("---\n"), "SOP should start with YAML frontmatter"
-            assert "---\n\n" in content, "Frontmatter should be closed by ---"
+            frontmatter, body = formatter._extract_frontmatter_and_body(content)
 
-            # Parse frontmatter
-            fm_end = content.index("---", 3)
-            fm_text = content[3:fm_end].strip()
-            frontmatter = yaml.safe_load(fm_text)
-
-            assert frontmatter["sop_version"] == 1
-            assert frontmatter["sop_slug"] == template["slug"]
-            assert frontmatter["sop_title"] == template["title"]
+            assert frontmatter["name"]
+            assert frontmatter["title"] == template["title"]
             assert "generated_by" in frontmatter
-            assert "generated_at" in frontmatter
-            assert "generated_body_hash" in frontmatter
             assert frontmatter["generated_body_hash"].startswith("sha256:")
-            assert frontmatter["confidence_summary"] in ("high", "medium", "low")
+            assert frontmatter["generated_body_hash"] == formatter._compute_body_hash(body)
 
             # Verify body has numbered steps
-            body = content[fm_end + 3:].strip()
             assert "## Steps" in body, "SOP body should have Steps section"
 
         # ===============================================================
-        # PHASE H: Export via SOPExporter + OpenClawWriter
+        # PHASE H: Export via OpenClawWriter
         # ===============================================================
         writer = OpenClawWriter(workspace_dir=openclaw_workspace)
         writer.ensure_directory_structure()
@@ -905,8 +898,11 @@ class TestManualEditDetection:
         first_path = writer.write_sop(template)
         assert first_path.exists()
 
-        # Second write without editing — should archive and overwrite
-        second_path = writer.write_sop(template)
+        # Rewriting identical content leaves the canonical file alone
+        assert writer.write_sop(template) == first_path
+
+        # A changed SOP without a manual edit — should archive and overwrite
+        second_path = writer.write_sop({**template, "confidence_avg": 0.93})
         assert second_path.exists()
         assert "v2_draft" not in second_path.name, (
             "Without manual edit, should overwrite canonical (not create draft)"
@@ -1479,19 +1475,26 @@ class TestSOPVersionerArchiveChain:
             "apps_involved": [],
         }
 
+        def render(run: int) -> str:
+            return render_packet(
+                sop_to_procedure({**template, "title": f"Chain Test SOP run {run}"}),
+                target="openclaw",
+            )
+
         # Run 1: write canonical
-        content_v1 = formatter.format_sop(template)
-        path_v1 = versioner.write_sop("chain_test", content_v1, formatter)
+        path_v1 = versioner.write_sop("chain_test", render(1), formatter)
         assert path_v1.name == "sop.chain_test.md"
 
         # Run 2: should archive v1, write new canonical
-        content_v2 = formatter.format_sop(template)
-        path_v2 = versioner.write_sop("chain_test", content_v2, formatter)
+        path_v2 = versioner.write_sop("chain_test", render(2), formatter)
         assert path_v2.name == "sop.chain_test.md"
 
+        # Unchanged content is not archived again
+        assert versioner.write_sop("chain_test", render(2), formatter) == path_v2
+        assert len(versioner.list_versions("chain_test")) == 1
+
         # Run 3: should archive v2, write new canonical
-        content_v3 = formatter.format_sop(template)
-        path_v3 = versioner.write_sop("chain_test", content_v3, formatter)
+        path_v3 = versioner.write_sop("chain_test", render(3), formatter)
         assert path_v3.name == "sop.chain_test.md"
 
         # Archive should have 2 versions (v1 and v2 archived)

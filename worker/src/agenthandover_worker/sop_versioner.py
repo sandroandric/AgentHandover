@@ -43,6 +43,7 @@ class SOPVersioner:
         """Write a SOP file with versioning.
 
         If no existing file: write directly.
+        If the existing file already has this content: leave it.
         If existing file not manually edited: archive old, write new.
         If existing file manually edited: write as v2_draft, don't overwrite.
 
@@ -56,6 +57,11 @@ class SOPVersioner:
         if not canonical.exists():
             # No existing file — write atomically
             AtomicWriter.write(canonical, content)
+            return canonical
+
+        # Rendering is deterministic: identical content needs no new
+        # version (and archiving it would only duplicate the file).
+        if canonical.read_text(encoding="utf-8") == content:
             return canonical
 
         # Existing file found — check for manual edits

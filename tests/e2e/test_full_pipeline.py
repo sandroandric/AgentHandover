@@ -359,12 +359,14 @@ class TestExportAdapters:
         md_path = writer.write_sop(sop)
         assert md_path.exists()
 
-        json_path = tmp_path / "sops" / "sop.e2e-generic.json"
+        json_path = tmp_path / "sops" / "sop.e2e-generic.v3.json"
         assert json_path.exists()
 
+        from agenthandover_worker.procedure_schema import PROCEDURE_SCHEMA_VERSION
+
         data = json.loads(json_path.read_text())
-        assert data["schema_version"] == "3.0.0"
-        assert data["slug"] == "e2e-generic"
+        assert data["schema_version"] == PROCEDURE_SCHEMA_VERSION
+        assert data["id"] == "e2e-generic"
 
     def test_adapter_list_sops(self, tmp_path: Path):
         from agenthandover_worker.generic_writer import GenericWriter
