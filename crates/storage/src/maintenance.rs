@@ -13,11 +13,12 @@ impl<'a> MaintenanceRunner<'a> {
         Self { conn }
     }
 
-    /// Delete events older than `retention_days` that have been processed.
+    /// Delete events older than `retention_days` that have left the queue
+    /// (processed = 1, or quarantined by the worker as -1).
     /// Returns the number of rows deleted.
     pub fn purge_old_events(&self, retention_days: u32) -> Result<usize> {
         let deleted = self.conn.execute(
-            "DELETE FROM events WHERE processed = 1 AND datetime(timestamp) < datetime('now', ?1)",
+            "DELETE FROM events WHERE processed != 0 AND datetime(timestamp) < datetime('now', ?1)",
             [format!("-{} days", retention_days)],
         )?;
         info!(deleted, retention_days, "Purged old processed events");
@@ -31,7 +32,7 @@ impl<'a> MaintenanceRunner<'a> {
         let mut stmt = self.conn.prepare(
             "SELECT a.file_path FROM artifacts a \
              INNER JOIN events e ON a.event_id = e.id \
-             WHERE e.processed = 1 AND datetime(e.timestamp) < datetime('now', ?1)",
+             WHERE e.processed != 0 AND datetime(e.timestamp) < datetime('now', ?1)",
         )?;
 
         let paths: Vec<String> = stmt
@@ -43,7 +44,7 @@ impl<'a> MaintenanceRunner<'a> {
             self.conn.execute(
                 "DELETE FROM artifacts WHERE event_id IN (\
                     SELECT e.id FROM events e \
-                    WHERE e.processed = 1 AND datetime(e.timestamp) < datetime('now', ?1)\
+                    WHERE e.processed != 0 AND datetime(e.timestamp) < datetime('now', ?1)\
                 )",
                 [format!("-{} days", retention_days)],
             )?;

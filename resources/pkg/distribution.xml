@@ -16,4 +16,9 @@
         <pkg-ref id="com.agenthandover.pkg"/>
     </choice>
     <pkg-ref id="com.agenthandover.pkg" version="0.1.0" onConclusion="none">agenthandover-component.pkg</pkg-ref>
+    <pkg-ref id="com.agenthandover.pkg">
+        <must-close>
+            <app id="com.agenthandover.app"/>
+        </must-close>
+    </pkg-ref>
 </installer-gui-script>
