@@ -48,11 +48,29 @@ impl Redactor {
             (Regex::new(r"\b(\d{3}-\d{2}-\d{4})\b").unwrap(), "[REDACTED_SSN]"),
             // Private keys (PEM format)
             (Regex::new(r"(?s)(-----BEGIN\s+(?:RSA\s+|EC\s+|DSA\s+)?PRIVATE KEY-----.*?-----END\s+(?:RSA\s+|EC\s+|DSA\s+)?PRIVATE KEY-----)").unwrap(), "[REDACTED_PRIVATE_KEY]"),
-            // GitHub tokens
-            (Regex::new(r"(ghp_[A-Za-z0-9]{36,})").unwrap(), "[REDACTED_GITHUB_TOKEN]"),
-            (Regex::new(r"(gho_[A-Za-z0-9]{36,})").unwrap(), "[REDACTED_GITHUB_TOKEN]"),
+            // GitHub tokens: classic (ghp_/gho_/ghu_/ghs_/ghr_) and fine-grained PATs
+            (Regex::new(r"(gh[pousr]_[A-Za-z0-9]{36,})").unwrap(), "[REDACTED_GITHUB_TOKEN]"),
+            (Regex::new(r"(github_pat_[A-Za-z0-9_]{22,})").unwrap(), "[REDACTED_GITHUB_TOKEN]"),
             // Slack tokens
             (Regex::new(r"(xox[bpors]-[A-Za-z0-9\-]{10,})").unwrap(), "[REDACTED_SLACK_TOKEN]"),
+            // Anthropic API keys (must run before the OpenAI pattern)
+            (Regex::new(r"(sk-ant-[A-Za-z0-9_\-]{20,})").unwrap(), "[REDACTED_ANTHROPIC_KEY]"),
+            // OpenAI project keys
+            (Regex::new(r"(sk-proj-[A-Za-z0-9_\-]{20,})").unwrap(), "[REDACTED_OPENAI_KEY]"),
+            // Stripe secret and restricted keys (live and test)
+            (Regex::new(r"\b([sr]k_(?:live|test)_[A-Za-z0-9]{16,})").unwrap(), "[REDACTED_STRIPE_KEY]"),
+            // Google API keys
+            (Regex::new(r"(AIza[0-9A-Za-z_\-]{35})").unwrap(), "[REDACTED_GOOGLE_API_KEY]"),
+            // GitLab personal access tokens
+            (Regex::new(r"(glpat-[A-Za-z0-9_\-]{20,})").unwrap(), "[REDACTED_GITLAB_TOKEN]"),
+            // Hugging Face tokens
+            (Regex::new(r"\b(hf_[A-Za-z0-9]{30,})").unwrap(), "[REDACTED_HF_TOKEN]"),
+            // JSON Web Tokens: three base64url segments, header starts with `{"`
+            (Regex::new(r"\b(eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,})").unwrap(), "[REDACTED_JWT]"),
+            // Labelled secrets (`password: hunter2`, `pwd=hunter2`): keep the
+            // label, drop the value. The value stops at whitespace, a quote or
+            // a URL/list separator so the rest of the line survives.
+            (Regex::new(r#"(?i)\b((?:password|passwd|passphrase|pwd)[ \t]*[=:][ \t]*)['"]?[^\s'"&,;]+['"]?"#).unwrap(), "${1}[REDACTED_PASSWORD]"),
         ];
 
         // Credit card pattern — matches are validated with Luhn before redacting.
