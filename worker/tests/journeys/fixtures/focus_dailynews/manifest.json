@@ -1,0 +1,36 @@
+{
+  "name": "focus_dailynews",
+  "description": "10-minute focus recording: read Hacker News in Chrome, copy three stories' titles and links into a Notes note with a summary each, copy the digest and post it in a Slack channel in Chrome.",
+  "source": {
+    "kind": "generated",
+    "by": "worker/tests/journeys/record/generate_focus_dailynews.py",
+    "note": "Replace with a real session via record/record_focus_session.py."
+  },
+  "schema_version": 3,
+  "recorded_start": "2026-09-15T08:30:00.900802+00:00",
+  "recorded_end": "2026-09-15T08:39:59.300075+00:00",
+  "focus_session": {
+    "session_id": "1a85097c-b382-4864-93f3-3b1ba42dd34f",
+    "title": "Daily news digest",
+    "started_at": "2026-09-15T08:29:59Z",
+    "stopped_at": "2026-09-15T08:40:00Z"
+  },
+  "row_counts": {
+    "events": 538,
+    "by_kind": {
+      "AppSwitch": 6,
+      "ClickIntent": 5,
+      "ClipboardChange": 4,
+      "DwellSnapshot": 511,
+      "FocusChange": 5,
+      "ScrollReadSnapshot": 1,
+      "WindowTitleChange": 6
+    },
+    "chrome_extension": 314,
+    "clipboard_with_preview": 4,
+    "dom_snapshots": 300,
+    "focus_tagged": 220,
+    "with_ocr_text": 208,
+    "with_screenshot": 208
+  }
+}
