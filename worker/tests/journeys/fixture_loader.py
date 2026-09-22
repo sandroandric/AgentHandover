@@ -97,6 +97,34 @@ def write_rows(fixture_dir: Path, rows: list[dict]) -> None:
             gz.write(payload)
 
 
+def row_counts(rows: list[dict]) -> dict:
+    """The ``row_counts`` a fixture's manifest records for its rows."""
+    kinds: dict[str, int] = {}
+    counts = dict.fromkeys((
+        "chrome_extension", "clipboard_with_preview", "dom_snapshots",
+        "focus_tagged", "with_ocr_text", "with_screenshot",
+    ), 0)
+    for row in rows:
+        kind = json.loads(row["kind_json"])
+        kinds[kind["type"]] = kinds.get(kind["type"], 0) + 1
+        metadata = json.loads(row["metadata_json"])
+        window = json.loads(row["window_json"]) if row["window_json"] else {}
+        ocr = metadata.get("ocr")
+        counts["chrome_extension"] += window.get("app_id") == "com.google.Chrome"
+        counts["clipboard_with_preview"] += bool(kind.get("content_preview"))
+        counts["dom_snapshots"] += isinstance(metadata.get("nodes"), list)
+        counts["focus_tagged"] += "focus_session_id" in metadata
+        counts["with_ocr_text"] += isinstance(ocr, dict) and bool(ocr.get("full_text"))
+        counts["with_screenshot"] += "screenshot_path" in metadata
+    return {"events": len(rows), "by_kind": dict(sorted(kinds.items())), **counts}
+
+
+def write_manifest(fixture_dir: Path, manifest: dict) -> None:
+    (fixture_dir / "manifest.json").write_text(
+        json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8",
+    )
+
+
 def _dump_metadata(metadata: dict) -> str:
     # serde_json without preserve_order: sorted keys, compact separators.
     return json.dumps(metadata, sort_keys=True, separators=(",", ":"), ensure_ascii=False)

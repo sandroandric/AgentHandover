@@ -54,9 +54,12 @@ from pathlib import Path
 JOURNEYS_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(JOURNEYS_DIR.parent))  # worker/tests, for daemon_db
 
+from daemon_db import schema_version  # noqa: E402
 from journeys.fixture_loader import (  # noqa: E402
     FIXTURES_DIR,
     SCREENSHOTS_TOKEN,
+    row_counts,
+    write_manifest,
     write_rows,
 )
 
@@ -550,19 +553,6 @@ def build() -> Generator:
 
 def manifest_for(gen: Generator) -> dict:
     rows = [row for _, row in gen.rows]
-    kinds: Counter[str] = Counter()
-    counts = Counter()
-    for row in rows:
-        kinds[json.loads(row["kind_json"])["type"]] += 1
-        metadata = json.loads(row["metadata_json"])
-        window = json.loads(row["window_json"]) if row["window_json"] else {}
-        counts["focus_tagged"] += "focus_session_id" in metadata
-        counts["with_screenshot"] += "screenshot_path" in metadata
-        counts["with_ocr_text"] += bool(metadata.get("ocr", {}).get("full_text"))
-        counts["dom_snapshots"] += isinstance(metadata.get("nodes"), list)
-        counts["chrome_extension"] += window.get("app_id") == "com.google.Chrome"
-        kind = json.loads(row["kind_json"])
-        counts["clipboard_with_preview"] += bool(kind.get("content_preview"))
     return {
         "name": NAME,
         "description": (
@@ -575,7 +565,7 @@ def manifest_for(gen: Generator) -> dict:
             "by": "worker/tests/journeys/record/generate_focus_dailynews.py",
             "note": "Replace with a real session via record/record_focus_session.py.",
         },
-        "schema_version": 3,
+        "schema_version": schema_version(),
         "recorded_start": rows[0]["timestamp"],
         "recorded_end": rows[-1]["timestamp"],
         "focus_session": {
@@ -585,11 +575,7 @@ def manifest_for(gen: Generator) -> dict:
             "started_at": (START - timedelta(seconds=1)).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "stopped_at": (START + timedelta(seconds=STOPPED_AT)).strftime("%Y-%m-%dT%H:%M:%SZ"),
         },
-        "row_counts": {
-            "events": len(rows),
-            "by_kind": dict(sorted(kinds.items())),
-            **dict(sorted(counts.items())),
-        },
+        "row_counts": row_counts(rows),
     }
 
 
@@ -598,9 +584,7 @@ def main() -> None:
     out = FIXTURES_DIR / NAME
     out.mkdir(parents=True, exist_ok=True)
     write_rows(out, [row for _, row in gen.rows])
-    (out / "manifest.json").write_text(
-        json.dumps(manifest_for(gen), indent=2) + "\n", encoding="utf-8",
-    )
+    write_manifest(out, manifest_for(gen))
     print(f"wrote {len(gen.rows)} rows to {out}")
 
 
