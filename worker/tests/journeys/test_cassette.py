@@ -476,3 +476,66 @@ def test_record_against_real_ollama(tmp_path):
                     _get(replay.host, "/api/version"),
                     _get(replay.host, "/api/tags")]
     assert replayed == recorded
+
+
+# ---------------------------------------------------------------------------
+# Production wiring: every Ollama client main() builds honours ollama_host
+# ---------------------------------------------------------------------------
+
+
+def test_main_points_the_llm_reasoner_at_the_configured_host(
+    tmp_path, tmp_db_path, monkeypatch
+):
+    """main() used to build ``LLMReasoner(ReasoningConfig())``, so reasoner
+    calls went to localhost:11434 whatever ``[vlm] ollama_host`` said, and a
+    journey's cassette would not see them."""
+    import logging
+    import signal
+
+    from agenthandover_worker import llm_reasoning
+    from agenthandover_worker import main as worker_main
+
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    config_dir = (
+        home / "Library" / "Application Support" / "agenthandover"
+        if worker_main._platform.system() == "Darwin"
+        else home / ".config" / "agenthandover"
+    )
+    config_dir.mkdir(parents=True)
+    (config_dir / "config.toml").write_text(
+        '[vlm]\nollama_host = "http://127.0.0.1:1"\n'
+    )
+
+    class Built(Exception):
+        pass
+
+    built: list = []
+
+    class CapturingReasoner:
+        def __init__(self, config=None, vlm_queue=None):
+            built.append(config)
+            raise Built
+
+    monkeypatch.setattr(llm_reasoning, "LLMReasoner", CapturingReasoner)
+    handlers = {s: signal.getsignal(s) for s in (signal.SIGINT, signal.SIGTERM)}
+    root = logging.getLogger()
+    root_handlers, root_level = list(root.handlers), root.level
+    try:
+        with pytest.raises(Built):
+            worker_main.main([
+                "--db-path", str(tmp_db_path),
+                "--sops-dir", str(tmp_path / "sops"),
+                "--knowledge-dir", str(tmp_path / "kb"),
+                "--log-level", "ERROR",
+            ])
+    finally:
+        for sig, handler in handlers.items():
+            signal.signal(sig, handler)
+        for handler in list(root.handlers):
+            if handler not in root_handlers:
+                root.removeHandler(handler)
+                handler.close()
+        root.setLevel(root_level)
+
+    assert built[0].ollama_host == "http://127.0.0.1:1"

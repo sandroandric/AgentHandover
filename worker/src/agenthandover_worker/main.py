@@ -4541,6 +4541,12 @@ def main(argv: list[str] | None = None) -> None:
     pattern_detector = PatternDetector(knowledge_base)
     constraint_manager = ConstraintManager(knowledge_base)
 
+    # Load v2 VLM config early — the LLM reasoner and behavioral synthesizer
+    # below and the annotation pipeline further down all need this dict.
+    # Python scoping makes `v2_cfg` a local because of the later
+    # assignment, so reading it before this line raises UnboundLocalError.
+    v2_cfg = _read_vlm_v2_config()
+
     # Shared LLM reasoning utility — must be created before modules that use it.
     # VLMFallbackQueue is imported at module level (line 40) — do NOT re-import
     # it here, that shadows the module-level binding and makes Python treat
@@ -4550,7 +4556,10 @@ def main(argv: list[str] | None = None) -> None:
     # the worker/llm_reasoning module is deliberately loaded lazily here.
     vlm_queue = VLMFallbackQueue()
     from agenthandover_worker.llm_reasoning import LLMReasoner, ReasoningConfig
-    llm_reasoner = LLMReasoner(config=ReasoningConfig(), vlm_queue=vlm_queue)
+    llm_reasoner = LLMReasoner(
+        config=ReasoningConfig(ollama_host=v2_cfg["ollama_host"]),
+        vlm_queue=vlm_queue,
+    )
 
     # Wire LLM reasoner into activity classifier (created before reasoner)
     if activity_classifier is not None:
@@ -4583,12 +4592,6 @@ def main(argv: list[str] | None = None) -> None:
 
     variant_detector = VariantDetector()
     evidence_normalizer = EvidenceNormalizer(variant_detector=variant_detector)
-
-    # Load v2 VLM config early — both the behavioral synthesizer init
-    # below and the annotation pipeline further down need this dict.
-    # Python scoping makes `v2_cfg` a local because of the later
-    # assignment, so reading it before this line raises UnboundLocalError.
-    v2_cfg = _read_vlm_v2_config()
 
     # Behavioral synthesis + evidence extraction
     from agenthandover_worker.behavioral_synthesizer import BehavioralSynthesizer, SynthesizerConfig
