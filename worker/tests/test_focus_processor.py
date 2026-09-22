@@ -876,11 +876,9 @@ class TestFocusSOPValidationRegenerates:
                 source="focus", source_id=session_id,
                 error="SOP failed validation", title="Check Domain Availability",
             )
-            (tmp_path / "retry-trigger.json").write_text(
-                json.dumps({"failure_id": failure_id}),
-            )
             with patch("agenthandover_worker.main._status_dir", return_value=tmp_path):
                 _process_retry_triggers(
+                    {"failure_id": failure_id},
                     db,
                     focus_processor=processor,
                     openclaw_writer=writer,
