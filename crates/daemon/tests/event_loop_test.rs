@@ -17,7 +17,7 @@ async fn test_observer_loop_starts_and_stops() {
 
     // Run the loop for a short time then signal shutdown
     let handle = tokio::spawn(async move {
-        run_observer_loop(config, tx, shutdown_rx, None, capture_paused).await
+        run_observer_loop(config, tx, shutdown_rx, None, capture_paused, Arc::new(AtomicBool::new(false))).await
     });
 
     // Let it run briefly
@@ -45,8 +45,8 @@ async fn test_observer_loop_starts_and_stops() {
 #[tokio::test]
 async fn test_observer_config_defaults() {
     let config = ObserverConfig::default();
-    assert_eq!(config.t_dwell_seconds, 3);
-    assert_eq!(config.t_scroll_read_seconds, 8);
     assert!(config.capture_screenshots);
     assert_eq!(config.screenshot_max_per_minute, 20);
+    assert_eq!(config.focus_screenshot_max_per_minute, 40);
+    assert_eq!(config.dhash_threshold, 1);
 }
