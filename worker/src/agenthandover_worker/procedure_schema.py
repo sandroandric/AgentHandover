@@ -1,7 +1,6 @@
 """v3 procedure schema — extended machine-readable format.
 
-Upgrades the v2 SOP JSON schema (``sop_schema.py``) to a full v3
-"procedure" format that includes:
+Defines the v3 "procedure" format, which includes:
 
 - ``inputs`` / ``outputs`` — typed parameters with defaults
 - ``environment`` — required apps, accounts, setup actions
@@ -79,7 +78,7 @@ _V3_SECTIONS = {
 
 
 def _confidence_label(score: float) -> str:
-    """Map confidence score to label (same thresholds as sop_schema.py)."""
+    """Map an average confidence score to high / medium / low."""
     if score >= 0.85:
         return "high"
     if score >= 0.60:
