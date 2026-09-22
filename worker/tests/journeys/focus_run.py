@@ -12,6 +12,7 @@ merges each question's default.
 from __future__ import annotations
 
 import json
+import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -60,10 +61,17 @@ def start_focus_run(
     temp_home: TempHome,
     cassette: Callable[..., Cassette],
     adapter: str = "openclaw",
+    ollama_down_for: int = 0,
 ) -> FocusRun:
-    """Models, cassette, fixture and signal in place; no tick run yet."""
+    """Models, cassette, fixture and signal in place; no tick run yet.
+
+    ``ollama_down_for`` asks the cassette (``/__cassette/down``) to answer
+    that many API requests with HTTP 503 before the worker starts."""
     temp_home.configure(vlm=JOURNEY_MODELS)
     tape = cassette(FOCUS_CASSETTE)
+    if ollama_down_for:
+        with urllib.request.urlopen(f"{tape.host}/__cassette/down?n={ollama_down_for}") as reply:
+            assert json.load(reply)["down"] == ollama_down_for
     fixture = events_db("focus_dailynews", rebase_to=clock.now())
     fixture.write_focus_signal(temp_home.data_dir)
     return FocusRun(fixture=fixture, worker=worker(fixture, adapter=adapter), tape=tape)

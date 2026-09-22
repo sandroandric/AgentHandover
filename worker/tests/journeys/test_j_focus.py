@@ -14,7 +14,7 @@ import statistics
 from agenthandover_worker.skill_render import render_packet
 from journeys.conftest import JOURNEY_MODELS
 from journeys.focus_run import start_focus_run, tick_until_skill
-from journeys.packet import parse_packet
+from journeys.packet import assert_matches_golden, parse_packet
 
 # WP-C5: a focus run annotates at most this many keyframes before the Skill.
 KEYFRAMES = 20
@@ -50,6 +50,15 @@ def test_focus_recording_becomes_a_complete_skill(
     for step in steps:
         for field in ("App", "Target", "Verify"):
             assert step.fields.get(field), f"step {step.number} has no {field}:\n{step.text}"
+
+
+def test_focus_packet_matches_the_reviewed_golden(
+    events_db, worker, clock, temp_home, cassette,
+) -> None:
+    """Replaying the cassette gives the packet reviewed once in
+    ``golden/``; J-ollama-down compares against the same file."""
+    _run_, proc, _packet = _run(events_db, worker, clock, temp_home, cassette)
+    assert_matches_golden("focus_dailynews.claude-skill.md", render_packet(proc, target="claude-skill"))
 
 
 def test_focus_run_stays_within_its_model_budget(

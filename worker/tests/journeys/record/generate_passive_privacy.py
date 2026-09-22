@@ -76,13 +76,14 @@ class Generator(_FocusGenerator):
     def __init__(self) -> None:
         super().__init__()
         self.rng = random.Random(SEED)
+        self.windows = WINDOWS
 
     def _time(self, offset: float) -> datetime:
         return START + timedelta(seconds=offset, microseconds=self.rng.randrange(1, 999))
 
     def native(self, offset: float, kind: dict, app_id: str, title: str,
                metadata: dict | None = None) -> None:
-        window = WINDOWS[app_id]
+        window = self.windows[app_id]
         cx, cy = self._cursor(window)
         self._add(offset, {
             "id": str(self._uuid()),

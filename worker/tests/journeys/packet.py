@@ -3,11 +3,14 @@ then markdown sections, the steps as numbered blocks."""
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass
+from pathlib import Path
 
 import yaml
 
+GOLDEN_DIR = Path(__file__).parent / "golden"
 _STEP_HEAD = re.compile(r"^(\d+)\. \[([^\]]+)\] (.*)$")
 
 
@@ -49,6 +52,21 @@ class Packet:
             if sep and label:
                 steps[-1].fields[label] = value
         return steps
+
+
+def assert_matches_golden(name: str, text: str) -> None:
+    """``text`` equals ``golden/<name>``.  With ``AH_UPDATE_GOLDEN=1`` the
+    golden is rewritten instead (review the diff before committing it)."""
+    path = GOLDEN_DIR / name
+    if os.environ.get("AH_UPDATE_GOLDEN") == "1":
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+        return
+    assert path.is_file(), f"no golden {path}; write it with AH_UPDATE_GOLDEN=1 and review it"
+    assert text == path.read_text(encoding="utf-8"), (
+        f"packet differs from {path}; if the change is intended, rewrite it "
+        "with AH_UPDATE_GOLDEN=1 and review the diff"
+    )
 
 
 def parse_packet(text: str) -> Packet:
