@@ -770,9 +770,10 @@ def _refresh_claude_commands(
 ) -> None:
     """Make Claude Code see exactly the agent_ready procedures.
 
-    Regenerates the /ah-{slug} commands from the agent_ready procedures
-    in the knowledge base (removing the rest), then removes exported
-    Skills whose procedure is no longer agent_ready.  *commands_dir* and
+    Writes ``<skills>/<slug>/SKILL.md`` for every agent_ready procedure
+    in the knowledge base, removes exported Skills whose procedure is no
+    longer agent_ready, and rewrites the ``agenthandover-list`` command
+    that points at them (``agent_connect.connect_claude_code``).  *commands_dir* and
     *skills_dir* override ``~/.claude/commands`` and the configured
     Skills root.  Never raises: a failed refresh must not undo the
     lifecycle change or approval that asked for it.
@@ -783,7 +784,7 @@ def _refresh_claude_commands(
             commands_dir=commands_dir,
             skills_dir=skills_dir if skills_dir is not None else load_config().export.skills_dir,
         )
-        logger.info("Refreshed Claude Code slash commands and Skills")
+        logger.info("Refreshed Claude Code Skills")
     except Exception:
         logger.warning("Failed to refresh Claude Code commands", exc_info=True)
 
@@ -2235,7 +2236,7 @@ def _check_focus_answers(
     # Clean up Q&A files
     clear_focus_qa_files(state_dir)
 
-    # Refresh Claude Code slash commands with the new/updated procedure
+    # Refresh the Claude Code Skills with the new/updated procedure
     _refresh_claude_commands()
 
     logger.info(
