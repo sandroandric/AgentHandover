@@ -40,6 +40,10 @@ class AlignedStep:
     parameters_differ: list[str] = field(default_factory=list)
     step_a: dict | None = None
     step_b: dict | None = None
+    # Positions of ``step_a`` in sequence A and ``step_b`` in sequence B
+    # (None on the side that has a gap).
+    index_a: int | None = None
+    index_b: int | None = None
 
 
 @dataclass
@@ -68,7 +72,7 @@ def _self_align(steps: list[dict]) -> list[AlignedStep]:
         AlignedStep(
             position=k, action_a=s.get("action", ""),
             action_b=s.get("action", ""), similarity=1.0,
-            is_match=True, step_a=s, step_b=s,
+            is_match=True, step_a=s, step_b=s, index_a=k, index_b=k,
         )
         for k, s in enumerate(steps)
     ]
@@ -101,10 +105,12 @@ class VariantDetector:
             return []
         if m == 0:
             return [AlignedStep(position=j, action_b=steps_b[j].get("action", ""),
-                                is_insertion=True, step_b=steps_b[j]) for j in range(n)]
+                                is_insertion=True, step_b=steps_b[j], index_b=j)
+                    for j in range(n)]
         if n == 0:
             return [AlignedStep(position=i, action_a=steps_a[i].get("action", ""),
-                                is_insertion=True, step_a=steps_a[i]) for i in range(m)]
+                                is_insertion=True, step_a=steps_a[i], index_a=i)
+                    for i in range(m)]
 
         gap = self._gap_penalty
 
@@ -138,16 +144,19 @@ class VariantDetector:
                         is_match=sim >= self._match_threshold,
                         parameters_differ=self._differing_params(steps_a[i - 1], steps_b[j - 1]),
                         step_a=steps_a[i - 1], step_b=steps_b[j - 1],
+                        index_a=i - 1, index_b=j - 1,
                     ))
                     i -= 1; j -= 1
                     continue
             if i > 0 and (j == 0 or S[i - 1][j] + gap == S[i][j]):
                 aligned.append(AlignedStep(position=0, action_a=steps_a[i - 1].get("action", ""),
-                                           is_insertion=True, step_a=steps_a[i - 1]))
+                                           is_insertion=True, step_a=steps_a[i - 1],
+                                           index_a=i - 1))
                 i -= 1
             else:
                 aligned.append(AlignedStep(position=0, action_b=steps_b[j - 1].get("action", ""),
-                                           is_insertion=True, step_b=steps_b[j - 1]))
+                                           is_insertion=True, step_b=steps_b[j - 1],
+                                           index_b=j - 1))
                 j -= 1
 
         aligned.reverse()

@@ -834,3 +834,177 @@ class TestEdgeCases:
         assert len(spans) == 1
         # Duration = last_frame.timestamp - first_frame.timestamp = 10 minutes = 600s
         assert spans[0].total_duration_seconds == 600
+
+
+# ---------------------------------------------------------------------------
+# NEW_TASK is "no candidate", idempotent ingestion, retention, matching
+# ---------------------------------------------------------------------------
+
+EMB_CODING_08 = [0.9, 0.1, 0.6, 0.0]   # cosine ~0.83 with CODING
+
+
+class TestNewTaskIsNoCandidate:
+    def test_only_new_task_candidates_attach_nowhere(self, tracker):
+        """Every eligible span classifies as NEW_TASK: the segment starts
+        its own active span and the existing span is untouched."""
+        span = _make_span(
+            "sp-yt", "Watching videos", ["YouTube"], EMB_YOUTUBE,
+            last_seen=_ts(T0, minutes=0), segments=["seg-yt-0"],
+        )
+        segment = _make_test_segment(
+            "seg-code", "Writing code", "VS Code", EMB_CODING,
+            start_time=_ts(T0, minutes=10),
+        )
+        assert tracker.classify_relationship(segment, span).continuity_type \
+            is ContinuityType.NEW_TASK
+
+        spans = tracker.build_graph([segment], existing_spans=[span])
+
+        assert [s.segments for s in spans] == [["seg-yt-0"], ["seg-code"]]
+        # Not "uncertain": a NEW_TASK edge is not a close candidate.
+        assert spans[1].state != "uncertain"
+        assert spans[1].parent_span_id is None
+
+    def test_real_match_beats_inverted_new_task_score(self, tracker):
+        """A 0.83 RESUME match wins over a NEW_TASK edge whose inverted
+        score (~0.99) is numerically higher."""
+        unrelated = _make_span(
+            "sp-yt", "Watching videos", ["YouTube"], EMB_YOUTUBE,
+            last_seen=_ts(T0, minutes=0), segments=["seg-yt-0"],
+        )
+        related = _make_span(
+            "sp-code", "Writing code", ["Terminal"], EMB_CODING_08,
+            last_seen=_ts(T0, minutes=0), segments=["seg-code-0"],
+        )
+        segment = _make_test_segment(
+            "seg-code-1", "Writing code", "VS Code", EMB_CODING,
+            start_time=_ts(T0, minutes=10),
+        )
+        new_task = tracker.classify_relationship(segment, unrelated)
+        resume = tracker.classify_relationship(segment, related)
+        assert new_task.continuity_type is ContinuityType.NEW_TASK
+        assert resume.continuity_type is ContinuityType.RESUME
+        assert 0.8 <= resume.confidence < new_task.confidence
+
+        spans = tracker.build_graph([segment], existing_spans=[unrelated, related])
+
+        assert len(spans) == 2
+        by_id = {s.span_id: s for s in spans}
+        assert by_id["sp-code"].segments == ["seg-code-0", "seg-code-1"]
+        assert by_id["sp-yt"].segments == ["seg-yt-0"]
+
+
+class TestIdempotentIngestion:
+    def _segments(self):
+        return [
+            _make_test_segment(
+                "seg-a", "Writing code", "VS Code", EMB_CODING,
+                start_time=_ts(T0, minutes=0), end_time=_ts(T0, minutes=10),
+            ),
+            _make_test_segment(
+                "seg-b", "Writing code", "VS Code", EMB_CODING_VARIANT,
+                start_time=_ts(T0, minutes=20), end_time=_ts(T0, minutes=30),
+            ),
+        ]
+
+    def test_second_run_over_same_segments_changes_nothing(self, tracker, kb):
+        first = tracker.build_graph(self._segments())
+        assert tracker.save_spans(first) is True
+        path = kb.root / "observations" / "continuity_spans.json"
+        before = path.read_bytes()
+
+        second = tracker.build_graph(self._segments())
+
+        assert [(s.segments, s.total_duration_seconds, s.interruption_count)
+                for s in second] == [
+            (s.segments, s.total_duration_seconds, s.interruption_count)
+            for s in first
+        ]
+        assert first[0].segments == ["seg-a", "seg-b"]
+        assert first[0].total_duration_seconds == 1200
+        assert tracker.save_spans(second) is False
+        assert path.read_bytes() == before
+
+    def test_new_segment_after_rerun_still_ingested(self, tracker):
+        # Recent timestamps, so the span is still "active" for the rerun.
+        base = datetime.now(timezone.utc) - timedelta(hours=1)
+
+        def at(minutes):
+            return (base + timedelta(minutes=minutes)).isoformat().replace("+00:00", "Z")
+
+        def segments():
+            return [
+                _make_test_segment(
+                    "seg-a", "Writing code", "VS Code", EMB_CODING,
+                    start_time=at(0), end_time=at(10),
+                ),
+                _make_test_segment(
+                    "seg-b", "Writing code", "VS Code", EMB_CODING_VARIANT,
+                    start_time=at(20), end_time=at(30),
+                ),
+            ]
+
+        spans = tracker.build_graph(segments(), existing_spans=[])
+        later = _make_test_segment(
+            "seg-c", "Writing code", "VS Code", EMB_CODING,
+            start_time=at(40), end_time=at(45),
+        )
+        spans = tracker.build_graph(segments() + [later], existing_spans=spans)
+        assert len(spans) == 1
+        assert spans[0].segments == ["seg-a", "seg-b", "seg-c"]
+        assert spans[0].total_duration_seconds == 1500
+
+
+class TestSpanRetention:
+    def test_spans_older_than_retention_window_are_dropped(self, tracker):
+        old = _make_span(
+            "sp-old", "Designing UI", ["Figma"], EMB_DESIGN,
+            last_seen=_ts(T0, days=-43), state="completed",
+        )
+        recent_enough = _make_span(
+            "sp-41d", "Designing UI", ["Figma"], EMB_DESIGN,
+            last_seen=_ts(T0, days=-41), state="completed",
+        )
+        segment = _make_test_segment(
+            "seg-now", "Writing code", "VS Code", EMB_CODING,
+            start_time=_ts(T0, minutes=0),
+        )
+        spans = tracker.build_graph([segment], existing_spans=[old, recent_enough])
+        assert {s.span_id for s in spans} >= {"sp-41d"}
+        assert "sp-old" not in {s.span_id for s in spans}
+        assert any(s.segments == ["seg-now"] for s in spans)
+
+
+class TestProcedureMatchingUsesMatchSpan:
+    def test_real_matcher_fills_candidates(self, kb):
+        from agenthandover_worker.procedure_matcher import ProcedureMatcher
+        from agenthandover_worker.procedure_schema import sop_to_procedure
+
+        kb.save_procedure(sop_to_procedure({
+            "slug": "review-github-pr",
+            "title": "Review GitHub Pull Request",
+            "steps": [
+                {"step": "Open GitHub PR page", "action": "Open GitHub PR page",
+                 "target": "https://github.com/org/repo/pulls", "app": "Chrome",
+                 "location": "https://github.com/org/repo/pulls"},
+            ],
+            "variables": [],
+            "confidence_avg": 0.85,
+            "episode_count": 3,
+            "apps_involved": ["Chrome"],
+            "preconditions": [],
+            "source": "test",
+        }))
+        tracker = ContinuityTracker(
+            kb=kb, matcher=ProcedureMatcher(kb, match_threshold=0.40),
+        )
+        segment = _make_test_segment(
+            "seg-pr", "Open GitHub pull request for review", "Chrome", EMB_CODING,
+            start_time=_ts(T0, minutes=0),
+        )
+
+        spans = tracker.build_graph([segment], existing_spans=[])
+
+        assert len(spans) == 1
+        candidates = spans[0].matched_procedure_candidates
+        assert candidates and candidates[0][0] == "review-github-pr"

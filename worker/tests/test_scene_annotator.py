@@ -928,3 +928,53 @@ class TestOCRInjection:
         assert "treat as ground truth" in prompt
         assert "PREVIOUS FRAMES" in prompt
         assert "Gmail" in prompt
+
+
+class TestAnnotationContextWindow:
+    def test_num_ctx_comes_from_model_profile(self, tmp_path):
+        """The Ollama request carries the profile's ann_num_ctx, not the
+        client's 8192 default."""
+        from agenthandover_worker.model_profiles import ModelProfile
+
+        img = tmp_path / "screenshot.jpg"
+        img.write_bytes(b"\xff\xd8\xff\xe0" + b"\x00" * 100)
+        event = {
+            "id": "evt-ctx",
+            "timestamp": "2026-03-03T09:14:50.000Z",
+            "artifact_ids_json": '["screenshot"]',
+            "metadata_json": json.dumps({"screenshot_path": str(img)}),
+            "window_json": "{}",
+            "annotation_status": "pending",
+        }
+        profile = ModelProfile(model="test-vlm", family="test", ann_num_ctx=12288)
+        sent: list[dict] = []
+
+        class _Resp:
+            def __init__(self, body: bytes) -> None:
+                self._body = body
+
+            def read(self) -> bytes:
+                return self._body
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        def _urlopen(req, timeout=None):
+            sent.append(json.loads(req.data.decode("utf-8")))
+            return _Resp(json.dumps({"response": _canned_vlm_response()}).encode())
+
+        annotator = SceneAnnotator(
+            AnnotationConfig(model="test-vlm", delete_screenshot_after_processing=False),
+        )
+        with patch(
+            "agenthandover_worker.model_profiles.get_profile", return_value=profile,
+        ), patch("urllib.request.urlopen", side_effect=_urlopen):
+            result = annotator.annotate_event(event)
+
+        assert result.status == "completed"
+        assert len(sent) == 1
+        assert sent[0]["options"]["num_ctx"] == 12288
+        assert sent[0]["options"]["num_predict"] == profile.ann_num_predict

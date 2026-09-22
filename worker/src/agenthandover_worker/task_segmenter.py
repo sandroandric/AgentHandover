@@ -1,8 +1,8 @@
 """Task segmenter for passive workflow discovery (v2 pipeline).
 
 Replaces the heuristic episode_builder.py.  Uses VLM scene annotations
-and text embeddings to identify, cluster, and stitch task segments from
-the continuous annotation stream.
+and text embeddings to identify and cluster task segments from the
+continuous annotation stream.
 
 Pipeline:
   1. Load completed annotations from a time window
@@ -10,12 +10,12 @@ Pipeline:
   3. Compute text embeddings via Ollama ``/api/embed`` (all-minilm:l6-v2)
   4. Cluster by cosine similarity ≥ threshold (default 0.75)
   5. Filter noise: drop clusters where ALL frames have is_workflow=False
-  6. Stitch interrupted workflows: merge same-cluster segments separated
-     by noise within a configurable gap (default 30 min)
+  6. Split each cluster into contiguous segments wherever two consecutive
+     frames are more than ``stitch_max_gap_seconds`` apart (default 30 min),
+     so a same-cluster return within that gap stays one segment
   7. Output: ``TaskSegment`` objects with ordered event lists
 
-Cross-session linking deferred to Phase 3 enhancement — this module
-provides the core segmentation and stitching logic.
+Cross-segment linking lives in ``continuity_tracker``.
 """
 
 from __future__ import annotations
@@ -57,7 +57,7 @@ class SegmenterConfig:
     min_workflow_ratio: float = 0.0  # ratio of is_workflow=True frames
     # 0.0 means keep clusters with at least 1 workflow frame
 
-    # Interrupted workflow stitching
+    # A larger gap between consecutive same-cluster frames starts a new segment
     stitch_max_gap_seconds: int = 1800  # 30 minutes
 
     # Minimum demonstrations for SOP generation
@@ -481,64 +481,6 @@ def _make_segment(
     )
 
 
-def _stitch_interrupted_workflows(
-    segments: list[TaskSegment],
-    noise_segments: list[TaskSegment],
-    max_gap_seconds: int = 1800,
-) -> list[TaskSegment]:
-    """Stitch interrupted workflows: merge segments of the same cluster
-    separated by noise within max_gap_seconds.
-
-    If cluster A appears at time T, then noise at T+5min, then cluster A
-    again at T+10min, merge the two A segments into one.
-    """
-    if len(segments) < 2:
-        return segments
-
-    # Sort all segments by start_time
-    sorted_segs = sorted(segments, key=lambda s: s.start_time)
-
-    # Group by cluster_id
-    by_cluster: dict[int, list[TaskSegment]] = {}
-    for seg in sorted_segs:
-        by_cluster.setdefault(seg.cluster_id, []).append(seg)
-
-    merged: list[TaskSegment] = []
-    for cluster_id, cluster_segs in by_cluster.items():
-        if len(cluster_segs) <= 1:
-            merged.extend(cluster_segs)
-            continue
-
-        # Try to merge consecutive segments within gap
-        current = cluster_segs[0]
-        for i in range(1, len(cluster_segs)):
-            next_seg = cluster_segs[i]
-
-            curr_end_epoch = _timestamp_to_epoch(current.end_time)
-            next_start_epoch = _timestamp_to_epoch(next_seg.start_time)
-            gap = next_start_epoch - curr_end_epoch if curr_end_epoch and next_start_epoch else float("inf")
-
-            if gap <= max_gap_seconds:
-                # Merge: combine frames
-                merged_frames = current.frames + next_seg.frames
-                current = TaskSegment(
-                    segment_id=_content_segment_id(merged_frames),
-                    cluster_id=cluster_id,
-                    frames=merged_frames,
-                    task_label=current.task_label,
-                    apps_involved=list(set(current.apps_involved + next_seg.apps_involved)),
-                    start_time=current.start_time,
-                    end_time=next_seg.end_time,
-                )
-            else:
-                merged.append(current)
-                current = next_seg
-
-        merged.append(current)
-
-    return merged
-
-
 # ---------------------------------------------------------------------------
 # TaskSegmenter
 # ---------------------------------------------------------------------------
@@ -821,10 +763,10 @@ class TaskSegmenter:
         # Step 3: Cluster by embedding similarity
         clusters = _cluster_frames(frames, self.config.similarity_threshold)
 
-        # Step 4: Split clusters into contiguous segments + noise filtering
-        all_segments: list[TaskSegment] = []
-        noise_segments: list[TaskSegment] = []
-
+        # Step 4: Split clusters into contiguous segments + noise filtering.
+        # A cluster's frames split wherever two consecutive frames are more
+        # than ``stitch_max_gap_seconds`` apart, so same-cluster segments are
+        # never within that gap of each other (nothing left to stitch).
         for cluster_id, frame_indices in clusters.items():
             cluster_frames = [frames[i] for i in frame_indices]
 
@@ -833,33 +775,17 @@ class TaskSegmenter:
             if noise_count == len(cluster_frames):
                 # Pure noise cluster
                 result.noise_frames_dropped += len(cluster_frames)
-                # Still create segments for stitching reference
-                segs = _split_into_contiguous_segments(
-                    cluster_frames, cluster_id,
-                    self.config.stitch_max_gap_seconds,
-                )
-                noise_segments.extend(segs)
                 continue
 
-            # Split into contiguous segments
             segs = _split_into_contiguous_segments(
                 cluster_frames, cluster_id,
                 self.config.stitch_max_gap_seconds,
             )
-            all_segments.extend(segs)
+            # Step 5: Group segments by cluster for SOP generation
+            result.segments.extend(segs)
+            result.clusters.setdefault(cluster_id, []).extend(segs)
 
-        # Step 5: Stitch interrupted workflows
-        stitched = _stitch_interrupted_workflows(
-            all_segments, noise_segments,
-            self.config.stitch_max_gap_seconds,
-        )
-
-        # Step 6: Group segments by cluster for SOP generation
-        result.segments = stitched
-        for seg in stitched:
-            result.clusters.setdefault(seg.cluster_id, []).append(seg)
-
-        # Step 7: Cluster labeling (with persistent cache when available)
+        # Step 6: Cluster labeling (with persistent cache when available)
         if self._llm_reasoner is not None:
             for cluster_id, cluster_segs in result.clusters.items():
                 # Collect all frames from this cluster
@@ -883,35 +809,6 @@ class TaskSegmenter:
         )
 
         return result
-
-    def get_sop_ready_clusters(
-        self, result: SegmentationResult,
-    ) -> list[tuple[str, list[list[dict]]]]:
-        """Extract clusters with ≥ min_demonstrations for SOP generation.
-
-        Returns a list of (task_label, demonstrations) tuples where each
-        demonstration is a timeline (list of frame dicts) suitable for
-        ``SOPGenerator.generate_from_passive()``.
-        """
-        ready: list[tuple[str, list[list[dict]]]] = []
-
-        for cluster_id, segments in result.clusters.items():
-            if len(segments) < self.config.min_demonstrations:
-                continue
-
-            # Find the best task label from the cluster
-            task_label = ""
-            for seg in segments:
-                if seg.task_label:
-                    task_label = seg.task_label
-                    break
-
-            # Convert segments to timelines
-            demonstrations = [seg.to_timeline() for seg in segments]
-
-            ready.append((task_label, demonstrations))
-
-        return ready
 
     def classify_interruptions(
         self,

@@ -314,9 +314,9 @@ class EvidenceNormalizer:
         alignments = []
         for demo in demos[1:]:
             try:
-                aligned = self._detector.align(reference, demo)
+                aligned = self._detector.semantic_align(reference, demo)
                 alignments.append(aligned)
-            except Exception:
+            except (ValueError, TypeError):
                 logger.debug(
                     "Alignment failed for demo pair; falling back to positional",
                     exc_info=True,
@@ -333,8 +333,8 @@ class EvidenceNormalizer:
         if self._detector is None:
             return None
         try:
-            return self._detector.align(existing_steps, new_steps)
-        except Exception:
+            return self._detector.semantic_align(existing_steps, new_steps)
+        except (ValueError, TypeError):
             logger.debug("Pairwise alignment failed", exc_info=True)
             return None
 
@@ -363,9 +363,10 @@ class EvidenceNormalizer:
     ) -> list[NormalizedStep]:
         """Alignment-based normalization using AlignedStep data.
 
-        Each AlignedStep carries ``ref_idx`` (index into reference demo)
-        and ``demo_idx`` (index into the compared demo), plus a
-        ``similarity`` score.  We collect values per reference position.
+        Each AlignedStep carries ``index_a`` (index into the reference
+        demo) and ``index_b`` (index into the compared demo); a gap on
+        either side leaves that index None.  We collect the compared
+        demo's step under every reference position it was paired with.
         """
         reference = demos[0]
         total_demos = len(demos)
@@ -378,8 +379,7 @@ class EvidenceNormalizer:
         for align_idx, aligned_pairs in enumerate(alignments):
             demo = demos[align_idx + 1]
             for ap in aligned_pairs:
-                ref_idx = getattr(ap, "ref_idx", None)
-                demo_idx = getattr(ap, "demo_idx", None)
+                ref_idx, demo_idx = ap.index_a, ap.index_b
                 if ref_idx is not None and demo_idx is not None:
                     if 0 <= demo_idx < len(demo):
                         position_map.setdefault(ref_idx, []).append(demo[demo_idx])
@@ -514,18 +514,16 @@ class EvidenceNormalizer:
         matched_existing: set[int] = set()
 
         for ap in alignment:
-            ref_idx = getattr(ap, "ref_idx", None)
-            demo_idx = getattr(ap, "demo_idx", None)
-            similarity = getattr(ap, "similarity", 0.0)
+            ref_idx, demo_idx, similarity = ap.index_a, ap.index_b, ap.similarity
 
-            if ref_idx is None or demo_idx is None:
-                continue
-            if demo_idx < 0 or demo_idx >= len(new_steps):
+            # Existing-only positions (gap in the new observation) are
+            # handled by the absence decay below.
+            if demo_idx is None or demo_idx < 0 or demo_idx >= len(new_steps):
                 continue
 
             new_step = new_steps[demo_idx]
 
-            if ref_idx >= 0 and ref_idx < len(merged):
+            if ref_idx is not None and 0 <= ref_idx < len(existing_steps):
                 matched_existing.add(ref_idx)
                 existing_step = merged[ref_idx]
 
@@ -559,7 +557,7 @@ class EvidenceNormalizer:
                     variant_step["observation_count"] = 1
                     merged.append(variant_step)
             else:
-                # ref_idx out of range — treat as insertion
+                # Gap in the existing steps — the new step is an insertion
                 variant_step = dict(new_step)
                 variant_step["_variant"] = True
                 variant_step["observation_count"] = 1

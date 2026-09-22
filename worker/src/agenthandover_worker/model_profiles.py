@@ -4,15 +4,14 @@ Each model family has different optimal parameters for annotation and SOP
 generation. This module provides a single source of truth so the pipeline
 automatically uses the right settings regardless of which model the user picks.
 
-VRAM tier detection recommends models based on available unified memory
-(Apple Silicon) or dedicated VRAM.
+The RAM-based model recommendation lives in the app's onboarding tier table
+(OnboardingView.swift); the worker only consumes the models it is configured with.
 """
 
 from __future__ import annotations
 
 import logging
-import subprocess
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +37,6 @@ class ModelProfile:
     ann_top_p: float = 0.95
     ann_presence_penalty: float = 0.0
     ann_think: bool | str = False  # False, True, "low", "medium", "high"
-    ann_image_before_text: bool = False  # Gemma wants image before text
 
     # SOP generation settings (reasoning, structured output)
     sop_system: str = ""
@@ -164,7 +162,6 @@ _PROFILES: dict[str, ModelProfile] = {
         ann_top_p=0.95,
         ann_presence_penalty=1.0,
         ann_think=False,
-        ann_image_before_text=True,
         sop_system=_GEMMA_SOP_SYSTEM,
         sop_temperature=0.3,
         sop_num_predict=6000,
@@ -196,7 +193,6 @@ _PROFILES: dict[str, ModelProfile] = {
         ann_top_p=0.95,
         ann_presence_penalty=1.0,
         ann_think=False,
-        ann_image_before_text=True,
         sop_system=_GEMMA_SOP_SYSTEM,
         sop_temperature=0.3,
         sop_num_predict=6000,
@@ -224,7 +220,6 @@ _PROFILES: dict[str, ModelProfile] = {
         ann_top_p=0.95,
         ann_presence_penalty=1.0,
         ann_think=False,
-        ann_image_before_text=True,
         sop_system=_GEMMA_SOP_SYSTEM,
         sop_temperature=0.3,
         sop_num_predict=6000,
@@ -252,7 +247,6 @@ _PROFILES: dict[str, ModelProfile] = {
         ann_top_p=0.95,
         ann_presence_penalty=1.0,
         ann_think=False,
-        ann_image_before_text=True,
         sop_system=_GEMMA_SOP_SYSTEM,
         sop_temperature=0.3,
         sop_num_predict=6000,
@@ -280,7 +274,6 @@ _PROFILES: dict[str, ModelProfile] = {
         ann_top_p=0.95,
         ann_presence_penalty=0.0,  # E2B overflows with penalty
         ann_think=False,
-        ann_image_before_text=True,
         sop_system=_GEMMA_SOP_SYSTEM,
         sop_temperature=0.3,
         sop_num_predict=6000,
@@ -307,7 +300,6 @@ _PROFILES: dict[str, ModelProfile] = {
         ann_top_p=0.95,
         ann_presence_penalty=1.0,
         ann_think=False,
-        ann_image_before_text=True,
         sop_system=_GEMMA_SOP_SYSTEM,
         sop_temperature=0.3,
         sop_num_predict=6000,
@@ -335,7 +327,6 @@ _PROFILES: dict[str, ModelProfile] = {
         ann_top_p=0.95,
         ann_presence_penalty=1.0,
         ann_think=False,
-        ann_image_before_text=True,
         sop_system=_GEMMA_SOP_SYSTEM,
         sop_temperature=0.3,
         sop_num_predict=6000,
@@ -366,7 +357,6 @@ _PROFILES: dict[str, ModelProfile] = {
         ann_top_p=0.95,
         ann_presence_penalty=1.0,
         ann_think=False,
-        ann_image_before_text=True,
         sop_system=_GEMMA_SOP_SYSTEM,
         sop_temperature=0.3,
         sop_num_predict=6000,
@@ -394,7 +384,6 @@ _PROFILES: dict[str, ModelProfile] = {
         ann_top_p=0.95,
         ann_presence_penalty=1.0,
         ann_think=False,
-        ann_image_before_text=True,
         sop_system=_GEMMA_SOP_SYSTEM,
         sop_temperature=0.3,
         sop_num_predict=6000,
@@ -446,114 +435,6 @@ def get_profile(model: str) -> ModelProfile:
     # Unknown model — return safe defaults
     logger.warning("No profile for model '%s', using generic defaults", model)
     return ModelProfile(model=model, family="unknown")
-
-
-# ---------------------------------------------------------------------------
-# VRAM tier detection and model recommendation
-# ---------------------------------------------------------------------------
-
-@dataclass
-class VRAMTier:
-    """A recommended model configuration for a VRAM range."""
-
-    name: str
-    min_ram_gb: int
-    annotation_model: str
-    sop_model: str
-    total_disk_gb: float
-    description: str
-
-
-# Aligned to Apple Silicon SKUs
-VRAM_TIERS: list[VRAMTier] = [
-    VRAMTier(
-        name="standard",
-        min_ram_gb=0,
-        annotation_model="qwen3.5:2b",
-        sop_model="qwen3.5:4b",
-        total_disk_gb=6.1,
-        description="Qwen 3.5 (2B + 4B) — works on 8GB machines",
-    ),
-    VRAMTier(
-        name="recommended",
-        min_ram_gb=16,
-        annotation_model="gemma4:12b-it-qat",
-        sop_model="gemma4:12b-it-qat",
-        total_disk_gb=7.2,
-        description="Gemma 4 12B QAT — 12B dense reasoning, lighter than E4B",
-    ),
-    VRAMTier(
-        name="performance",
-        min_ram_gb=24,
-        annotation_model="gemma4:12b-it-qat",
-        sop_model="gemma4:12b-it-qat",
-        total_disk_gb=7.2,
-        description="Gemma 4 12B QAT — 12B dense, with headroom for more frames",
-    ),
-    VRAMTier(
-        name="max_quality",
-        min_ram_gb=48,
-        annotation_model="gemma4:31b-it-qat",
-        sop_model="gemma4:31b-it-qat",
-        total_disk_gb=18.0,
-        description="Gemma 4 31B QAT — maximum quality, frontier intelligence",
-    ),
-    VRAMTier(
-        name="ultra",
-        min_ram_gb=96,
-        annotation_model="gemma4:31b-it-q8_0",
-        sop_model="gemma4:31b-it-q8_0",
-        total_disk_gb=34.0,
-        description="Gemma 4 31B Q8 — unquantized quality for M4 Ultra/Max",
-    ),
-]
-
-
-def detect_system_ram_gb() -> int:
-    """Detect total system RAM in GB (unified memory on Apple Silicon)."""
-    try:
-        output = subprocess.check_output(
-            ["sysctl", "-n", "hw.memsize"], text=True, timeout=5,
-        ).strip()
-        return int(output) // (1024 ** 3)
-    except Exception:
-        logger.debug("Failed to detect system RAM", exc_info=True)
-        return 0
-
-
-def recommend_tier(ram_gb: int | None = None) -> VRAMTier:
-    """Recommend a model tier based on available RAM.
-
-    If ram_gb is None, auto-detects from the system.
-    """
-    if ram_gb is None:
-        ram_gb = detect_system_ram_gb()
-
-    # Pick the highest tier that fits
-    best = VRAM_TIERS[0]
-    for tier in VRAM_TIERS:
-        if ram_gb >= tier.min_ram_gb:
-            best = tier
-
-    return best
-
-
-def log_recommendation() -> VRAMTier:
-    """Detect RAM, recommend tier, and log the recommendation."""
-    ram = detect_system_ram_gb()
-    tier = recommend_tier(ram)
-    logger.info(
-        "System RAM: %dGB — recommended tier: %s (%s)",
-        ram, tier.name, tier.description,
-    )
-    if tier.annotation_model != tier.sop_model:
-        logger.info(
-            "  Annotation: %s, SOP generation: %s",
-            tier.annotation_model, tier.sop_model,
-        )
-    else:
-        logger.info("  Model: %s (single model for both)", tier.annotation_model)
-    return tier
 
 
 # ---------------------------------------------------------------------------

@@ -927,28 +927,6 @@ class WorkerDB:
         )
         return self._rows_to_dicts(cur.fetchall())
 
-    def get_workflow_annotated_events(
-        self,
-        *,
-        hours: int = 4,
-    ) -> list[dict]:
-        """Return annotated events with is_workflow=true within time window.
-
-        Filters at the SQL level for efficiency — only returns events
-        where the annotation's task_context.is_workflow is true.
-        """
-        cur = self._conn.execute(
-            "SELECT * FROM events "
-            "WHERE annotation_status = 'completed' "
-            "  AND scene_annotation_json IS NOT NULL "
-            "  AND timestamp >= strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?) "
-            "  AND json_extract(scene_annotation_json, "
-            "    '$.task_context.is_workflow') = 1 "
-            "ORDER BY timestamp ASC",
-            (f"-{hours} hours",),
-        )
-        return self._rows_to_dicts(cur.fetchall())
-
     def _ensure_task_segments_table(
         self, write_conn: "sqlite3.Connection",
     ) -> None:
@@ -1094,37 +1072,6 @@ class WorkerDB:
             return False
         finally:
             write_conn.close()
-
-    def get_pending_segments(self) -> list[dict]:
-        """Return all segments where ``sop_generated = 0``.
-
-        Used by passive discovery to determine which segments still need
-        SOP generation, independent of transient in-memory cluster IDs.
-        """
-        import json as _json
-
-        db_path = self._get_writable_path()
-        if db_path:
-            init_conn = sqlite3.connect(db_path)
-            try:
-                init_conn.execute("PRAGMA busy_timeout = 5000;")
-                self._ensure_task_segments_table(init_conn)
-                init_conn.commit()
-            except sqlite3.Error:
-                pass
-            finally:
-                init_conn.close()
-
-        self._refresh_read_snapshot()
-        try:
-            cur = self._conn.execute(
-                "SELECT * FROM task_segments "
-                "WHERE sop_generated = 0 "
-                "ORDER BY start_time ASC",
-            )
-            return self._rows_to_dicts(cur.fetchall())
-        except sqlite3.OperationalError:
-            return []
 
     def get_sop_pending_clusters(self) -> list[dict]:
         """Return cluster IDs that have >= 2 segments without SOPs generated.

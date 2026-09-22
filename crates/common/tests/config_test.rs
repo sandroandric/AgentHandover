@@ -44,3 +44,22 @@ retention_days_raw = 7
     assert!(config.observer.capture_screenshots);
     assert!(config.privacy.secure_field_drop);
 }
+
+#[test]
+fn test_legacy_multi_monitor_mode_key_is_ignored() {
+    // Installed configs written before the key was removed still load.
+    let toml_str = r#"
+[observer]
+t_dwell_seconds = 4
+multi_monitor_mode = "focused_window"
+"#;
+    let config = AppConfig::from_toml_str(toml_str).unwrap();
+    assert_eq!(config.observer.t_dwell_seconds, 4);
+}
+
+#[test]
+fn test_config_example_parses() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config.example.toml");
+    let config = AppConfig::from_file(&path).unwrap();
+    assert_eq!(config.observer.t_dwell_seconds, 3);
+}
