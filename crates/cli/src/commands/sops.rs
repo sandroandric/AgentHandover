@@ -1,19 +1,15 @@
 //! CLI commands for listing, viewing, and managing SOPs.
 //!
-//! `approve`/`reject`/`retry` use trigger files that the worker picks up.
-//! `failed` writes a query trigger and polls for a result file.
+//! `approve`/`reject`/`promote`/`retry` queue requests in the worker's
+//! trigger spool.  `failed` queues a query and polls for a result file.
 
 use anyhow::{bail, Result};
 use colored::Colorize;
 use agenthandover_common::status::data_dir;
-use std::io::Write;
+use crate::trigger::write_trigger;
 use std::path::PathBuf;
 
-const APPROVE_TRIGGER_FILE: &str = "approve-trigger.json";
-const FAILED_TRIGGER_FILE: &str = "failed-query-trigger.json";
 const FAILED_RESULT_FILE: &str = "failed-query-result.json";
-const RETRY_TRIGGER_FILE: &str = "retry-trigger.json";
-const PROMOTE_TRIGGER_FILE: &str = "lifecycle-promote-trigger.json";
 
 fn sops_dir() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
@@ -46,23 +42,6 @@ fn entries_with_status(status: &str) -> Vec<serde_json::Value> {
         .filter(|s| s.get("status").and_then(|v| v.as_str()) == Some(status))
         .cloned()
         .collect()
-}
-
-/// Write a JSON trigger file atomically (tmp + fsync + rename), matching the
-/// pattern used by `export.rs`.
-fn write_trigger(filename: &str, payload: &serde_json::Value) -> Result<PathBuf> {
-    let state_dir = data_dir();
-    std::fs::create_dir_all(&state_dir)?;
-    let target = state_dir.join(filename);
-    let tmp = state_dir.join(format!(".{}.tmp", filename));
-
-    let json = serde_json::to_string_pretty(payload)?;
-    let mut file = std::fs::File::create(&tmp)?;
-    file.write_all(json.as_bytes())?;
-    file.sync_all()?;
-    std::fs::rename(&tmp, &target)?;
-
-    Ok(target)
 }
 
 pub fn list() -> Result<()> {
@@ -298,7 +277,7 @@ pub fn approve(slug_or_id: &str) -> Result<()> {
         "requested_at": chrono::Utc::now().to_rfc3339(),
     });
 
-    write_trigger(APPROVE_TRIGGER_FILE, &trigger)?;
+    write_trigger("approve", &trigger)?;
 
     println!("{} Approval queued for '{}'", "✓".green(), slug_or_id.bold());
     println!("The worker will export on its next cycle.");
@@ -313,7 +292,7 @@ pub fn reject(slug_or_id: &str) -> Result<()> {
         "requested_at": chrono::Utc::now().to_rfc3339(),
     });
 
-    write_trigger(APPROVE_TRIGGER_FILE, &trigger)?;
+    write_trigger("approve", &trigger)?;
 
     println!("{} Rejection queued for '{}'", "✓".green(), slug_or_id.bold());
 
@@ -338,7 +317,7 @@ pub fn promote(slug: &str, to_state: &str) -> Result<()> {
         "requested_at": chrono::Utc::now().to_rfc3339(),
     });
 
-    write_trigger(PROMOTE_TRIGGER_FILE, &trigger)?;
+    write_trigger("lifecycle-promote", &trigger)?;
 
     println!(
         "{} Lifecycle promotion queued: '{}' → {}",
@@ -357,10 +336,11 @@ pub fn failed() -> Result<()> {
         "requested_at": chrono::Utc::now().to_rfc3339(),
     });
 
-    write_trigger(FAILED_TRIGGER_FILE, &trigger)?;
-
+    // A stale result from an earlier run must not be shown as this one's.
     let state_dir = data_dir();
     let result_path = state_dir.join(FAILED_RESULT_FILE);
+    let _ = std::fs::remove_file(&result_path);
+    let trigger_path = write_trigger("failed-query", &trigger)?;
 
     // Poll for the result file with a 10-second timeout
     let start = std::time::Instant::now();
@@ -372,8 +352,6 @@ pub fn failed() -> Result<()> {
             let content = std::fs::read_to_string(&result_path)?;
             let parsed: serde_json::Value = serde_json::from_str(&content)?;
 
-            // Clean up trigger and result files
-            let _ = std::fs::remove_file(state_dir.join(FAILED_TRIGGER_FILE));
             let _ = std::fs::remove_file(&result_path);
 
             // Display results
@@ -416,8 +394,8 @@ pub fn failed() -> Result<()> {
         std::thread::sleep(std::time::Duration::from_millis(250));
     }
 
-    // Timeout — clean up trigger file
-    let _ = std::fs::remove_file(state_dir.join(FAILED_TRIGGER_FILE));
+    // Timeout — withdraw the request if the worker has not taken it
+    let _ = std::fs::remove_file(&trigger_path);
     bail!(
         "Timed out waiting for worker response. Is the worker running?\n\
          Check with: agenthandover status"
@@ -430,7 +408,7 @@ pub fn retry(failure_id: &str) -> Result<()> {
         "requested_at": chrono::Utc::now().to_rfc3339(),
     });
 
-    write_trigger(RETRY_TRIGGER_FILE, &trigger)?;
+    write_trigger("retry", &trigger)?;
 
     println!(
         "{} Retry queued for failure '{}'",

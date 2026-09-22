@@ -2,19 +2,16 @@
 //!
 //! `agenthandover export --format skill-md [--sop <slug>] [--output <dir>]`
 //!
-//! This triggers the worker to re-export existing SOPs by writing a trigger
-//! file that the worker picks up on its next cycle.
+//! This asks the worker to re-export existing SOPs through the trigger
+//! spool; the worker picks the request up on its next cycle.
 
 use anyhow::Result;
 use colored::Colorize;
-use agenthandover_common::status::data_dir;
-use std::io::Write;
-
-const EXPORT_TRIGGER_FILE: &str = "export-trigger.json";
+use crate::trigger::write_trigger;
 
 /// Run the export command.
 ///
-/// Writes a trigger file that the worker picks up on its next poll cycle
+/// Queues a request that the worker picks up on its next poll cycle
 /// to re-export SOPs in the specified format.
 pub fn run(format: &str, sop_slug: Option<&str>, output_dir: Option<&str>) -> Result<()> {
     let supported_formats = ["skill-md", "generic", "openclaw", "claude-skill"];
@@ -33,16 +30,7 @@ pub fn run(format: &str, sop_slug: Option<&str>, output_dir: Option<&str>) -> Re
         "requested_at": chrono::Utc::now().to_rfc3339(),
     });
 
-    let state_dir = data_dir();
-    std::fs::create_dir_all(&state_dir)?;
-    let target = state_dir.join(EXPORT_TRIGGER_FILE);
-    let tmp = state_dir.join(format!(".{}.tmp", EXPORT_TRIGGER_FILE));
-
-    let json = serde_json::to_string_pretty(&trigger)?;
-    let mut file = std::fs::File::create(&tmp)?;
-    file.write_all(json.as_bytes())?;
-    file.sync_all()?;
-    std::fs::rename(&tmp, &target)?;
+    write_trigger("export", &trigger)?;
 
     println!("{} Export requested", "✓".green());
     println!("  Format: {}", format.bold());

@@ -4,6 +4,7 @@ use clap::{Parser, Subcommand};
 mod commands;
 mod display;
 mod paths;
+mod trigger;
 
 #[derive(Parser)]
 #[command(name = "agenthandover", version, about = "AgentHandover CLI — manage the apprentice system")]
