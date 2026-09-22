@@ -170,7 +170,10 @@ def sop_to_procedure(sop_template: dict) -> dict:
             inp["description"] = var["description"]
         # A sensitive variable is a credential: renderers name it and tell
         # the agent to take the value from its credential store.
-        if var.get("sensitive") or var.get("type") == "password":
+        if (
+            var.get("sensitive") or var.get("credential") or var.get("is_credential")
+            or var.get("type") == "password"
+        ):
             inp["credential"] = True
         if "example" in var:
             inp["example"] = var["example"]

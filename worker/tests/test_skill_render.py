@@ -313,6 +313,12 @@ def test_credential_survives_the_sop_template_round_trip(tmp_path: Path):
     assert domain["validation"] == r"^[a-z0-9.-]+$"
     assert password["credential"] is True
 
+    # A template whose variables use the procedure spellings keeps the flag too.
+    for flag in ("credential", "is_credential"):
+        tpl = {"slug": "s", "title": "S", "steps": [],
+               "variables": [{"name": "token", "type": "text", flag: True}]}
+        assert sop_to_procedure(tpl)["inputs"][0]["credential"] is True
+
     path = SkillMdWriter(workspace_dir=tmp_path).write_sop(template)
     text = path.read_text(encoding="utf-8")
     assert "`namecheap_password` (credential) by reference (never in this file)" in text
