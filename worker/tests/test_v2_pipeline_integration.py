@@ -68,18 +68,13 @@ def _insert_event(
     return eid
 
 
-from daemon_db import DAEMON_SCHEMA
+from daemon_db import create_daemon_db
 
 
 @pytest.fixture()
 def v2_db_path(tmp_path: Path) -> Path:
     """Create a database with v2 schema (annotation columns)."""
-    db_file = tmp_path / "events.db"
-    conn = sqlite3.connect(str(db_file))
-    conn.execute("PRAGMA journal_mode=wal;")
-    conn.executescript(DAEMON_SCHEMA)
-    conn.close()
-    return db_file
+    return create_daemon_db(tmp_path / "events.db")
 
 
 @pytest.fixture()

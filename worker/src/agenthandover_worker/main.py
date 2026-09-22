@@ -762,6 +762,15 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "fields lost by older versions), print the count, and exit"
         ),
     )
+    parser.add_argument(
+        "--once",
+        action="store_true",
+        default=False,
+        help=(
+            "Run one full poll iteration and exit; worker-status.json is "
+            "kept as the record of that iteration"
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -4327,8 +4336,14 @@ def main(argv: list[str] | None = None) -> None:
         logger.info("Received %s — requesting shutdown", sig_name)
         shutdown_flag[0] = True
 
-    signal.signal(signal.SIGINT, _handle_signal)
-    signal.signal(signal.SIGTERM, _handle_signal)
+    previous_signal_handlers = {
+        signum: signal.signal(signum, _handle_signal)
+        for signum in (signal.SIGINT, signal.SIGTERM)
+    }
+
+    def _restore_signal_handlers() -> None:
+        for signum, handler in previous_signal_handlers.items():
+            signal.signal(signum, handler)
 
     # Write PID file
     pid_dir = _status_dir()
@@ -4369,6 +4384,7 @@ def main(argv: list[str] | None = None) -> None:
             pid_file.unlink(missing_ok=True)
         except Exception:
             pass
+        _restore_signal_handlers()
         sys.exit(1)
 
     if shutdown_flag[0]:
@@ -4376,6 +4392,7 @@ def main(argv: list[str] | None = None) -> None:
             pid_file.unlink(missing_ok=True)
         except Exception:
             pass
+        _restore_signal_handlers()
         return
 
     # Initialize knowledge base and Phase 2+ modules
@@ -5885,9 +5902,13 @@ def main(argv: list[str] | None = None) -> None:
                         "10 consecutive errors without successful processing, shutting down"
                     )
                     break
+                if args.once:
+                    break
                 time.sleep(5)
                 continue
 
+            if args.once:
+                break
             time.sleep(current_interval)
 
     # Stop query API server if running
@@ -5898,12 +5919,16 @@ def main(argv: list[str] | None = None) -> None:
         except Exception:
             pass
 
-    # Remove PID file and status file on clean shutdown
+    # Remove PID file and status file on clean shutdown.  A --once run
+    # keeps worker-status.json: it records that iteration, and readers
+    # treat it as not running because the PID is gone.
     try:
         pid_file.unlink(missing_ok=True)
     except Exception:
         pass
-    _remove_worker_status()
+    if not args.once:
+        _remove_worker_status()
+    _restore_signal_handlers()
 
     logger.info("Worker shut down cleanly")
 

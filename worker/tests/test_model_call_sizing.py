@@ -46,7 +46,7 @@ from agenthandover_worker.sop_generator import (
     SOPGeneratorConfig,
 )
 
-from daemon_db import DAEMON_SCHEMA
+from daemon_db import apply_daemon_migrations
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -388,8 +388,7 @@ class TestDeferral:
 def db_conn(tmp_path: Path):
     db_file = tmp_path / "events.db"
     conn = sqlite3.connect(str(db_file))
-    conn.executescript(DAEMON_SCHEMA)
-    conn.commit()
+    apply_daemon_migrations(conn)
     yield db_file, conn
     conn.close()
 
