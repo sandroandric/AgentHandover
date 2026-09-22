@@ -44,7 +44,9 @@ class FocusQuestion:
     question: str
     category: str  # "credentials", "strategy", "decision", "verification", "scope"
     context: str   # why this question matters
-    default: str   # suggested default if user skips
+    # The model's guess.  The app shows it as the answer field's
+    # placeholder; it is never recorded as the user's answer.
+    default: str
     # Step indexes (0-based) the question relates to.  When the user's answer
     # corrects a value (e.g. "the subreddit is r/ClaudeAI, not r/midclaw"),
     # merge_answers() rewrites these specific steps' text.  Empty list means
@@ -57,7 +59,9 @@ class FocusQAResult:
     """Questions and their answers."""
 
     questions: list[FocusQuestion]
-    answers: dict[int, str]  # question_index -> answer text
+    # question_index -> answer text.  A question with no entry (or an
+    # empty one) was not answered.
+    answers: dict[int, str]
 
 
 # ---------------------------------------------------------------------------
@@ -256,8 +260,6 @@ class FocusQuestioner:
                 continue
             if not category:
                 category = "general"
-            if not default:
-                default = "Not specified"
 
             # step_indexes lets the LLM tag a question to specific steps so
             # merge_answers can rewrite those steps in place.  Accept both
@@ -321,26 +323,33 @@ class FocusQuestioner:
         - ``scope`` (recurrence): writes the recurrence string verbatim.
         """
         proc = json.loads(json.dumps(procedure))  # deep copy
+        clarifications = proc.setdefault("agent_clarifications", [])
 
-        for idx, answer in qa_result.answers.items():
-            if idx < 0 or idx >= len(qa_result.questions):
-                continue
-
-            q = qa_result.questions[idx]
-            answer = answer.strip()
+        for idx, q in enumerate(qa_result.questions):
+            answer = str(qa_result.answers.get(idx) or "").strip()
             if not answer:
-                answer = q.default
+                # Skipped or left blank: the question stays open.  The
+                # model's guess (``q.default``) is never recorded as the
+                # user's answer.
+                clarifications.append({
+                    "category": q.category,
+                    "question": q.question,
+                    "answer": "",
+                    "status": "unanswered",
+                    "context": q.context,
+                })
+                continue
 
             cat = q.category.lower().replace(" ", "_")
 
             # Every answer is recorded in agent_clarifications. This is the
             # canonical home for Q&A — UI reads from here, audit reads from
             # here, downstream consumers read from here.
-            clarifications = proc.setdefault("agent_clarifications", [])
             clarifications.append({
                 "category": q.category,
                 "question": q.question,
                 "answer": answer,
+                "status": "answered",
                 "context": q.context,
             })
 
@@ -419,7 +428,7 @@ class FocusQuestioner:
             if idx < 0 or idx >= len(qa_result.questions):
                 continue
             q = qa_result.questions[idx]
-            ans = answer.strip() or q.default
+            ans = str(answer or "").strip()
             if not ans or len(ans) > 80:
                 continue
             cat = q.category.lower().replace(" ", "_")
@@ -572,7 +581,7 @@ def parse_qa_result_from_file(
             question=raw.get("question", ""),
             category=raw.get("category", "strategy"),
             context=raw.get("context", ""),
-            default=raw.get("default", "Not specified"),
+            default=raw.get("default", ""),
         ))
 
     answers: dict[int, str] = {}
@@ -583,10 +592,8 @@ def parse_qa_result_from_file(
                 answers[int(key)] = str(value)
             except (ValueError, TypeError):
                 continue
-    elif questions_data.get("status") == "skipped":
-        # Use defaults for all questions
-        for i, q in enumerate(questions):
-            answers[i] = q.default
+    # "skipped" leaves ``answers`` empty: merge_answers records every
+    # question as unanswered and never substitutes the model's guess.
 
     return FocusQAResult(questions=questions, answers=answers)
 

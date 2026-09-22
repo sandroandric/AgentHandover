@@ -164,15 +164,26 @@ def slug_of(proc: dict) -> str:
     return str(proc.get("id") or proc.get("slug") or "unknown")
 
 
+def _goal(proc: dict) -> str:
+    """The synthesised goal, or "" when there is none."""
+    goal = proc.get("goal")
+    return goal.strip() if isinstance(goal, str) else ""
+
+
 def description(proc: dict) -> str:
     """One sentence: goal, description, task description, when to use, title.
 
     ``description`` is the procedure's own summary (``sop_to_procedure``
     fills it from the task description; the app edits it), so it wins
-    over the raw ``task_description``.
+    over the raw ``task_description``.  A goal the synthesiser marked
+    unclear ("Unclear — recipient not visible ...") does not describe the
+    Skill, so the next field is used instead.
     """
+    goal = _goal(proc)
+    if goal.lower().startswith("unclear"):
+        goal = ""
     for value in (
-        proc.get("goal"), proc.get("description"), proc.get("task_description"),
+        goal, proc.get("description"), proc.get("task_description"),
         _overview(proc).get("goal"),
     ):
         if isinstance(value, str) and value.strip():
@@ -357,14 +368,17 @@ def body_sections(proc: dict) -> list[str]:
     sections: list[str | None] = []
 
     intro = [f"# {title}"]
+    goal = _goal(proc)
+    # The goal has its own section; the intro summarises from the other
+    # fields and repeats nothing the Goal section already says.
     summary = next(
         (
             v.strip()
             for v in (
-                proc.get("goal"), proc.get("description"),
-                proc.get("task_description"), _overview(proc).get("goal"),
+                proc.get("description"), proc.get("task_description"),
+                _overview(proc).get("goal"),
             )
-            if isinstance(v, str) and v.strip()
+            if isinstance(v, str) and v.strip() and v.strip() != goal
         ),
         "",
     )
@@ -374,6 +388,9 @@ def body_sections(proc: dict) -> list[str]:
     if outcome:
         intro += ["", f"Outcome: {outcome}"]
     sections.append("\n".join(intro))
+
+    # Goal: what the user is producing, ahead of how and when.
+    sections.append(_section("Goal", [goal] if goal else []))
 
     # Prerequisites
     prereqs: list[str] = []
@@ -413,8 +430,9 @@ def body_sections(proc: dict) -> list[str]:
         name = inp["name"]
         if _is_credential(inp):
             input_lines.append(
-                f"- `{name}` (credential): take it from your credential store at "
-                "run time; never write its value into files, messages or logs."
+                f"- `{name}` (credential) by reference (never in this file): take it "
+                "from your credential store at run time; never write its value into "
+                "files, messages or logs."
             )
             continue
         kind = str(inp.get("type") or "text")
@@ -482,8 +500,16 @@ def body_sections(proc: dict) -> list[str]:
     if isinstance(clar, dict):
         clar = [{"question": q, "answer": a} for q, a in clar.items()]
     for item in clar:
-        if isinstance(item, dict) and item.get("question") and item.get("answer"):
-            decisions.append(f"- The user answered \"{item['question']}\": {item['answer']}")
+        if not isinstance(item, dict) or not item.get("question"):
+            continue
+        answer = str(item.get("answer") or "").strip()
+        if answer and item.get("status") != "unanswered":
+            decisions.append(f"- The user answered \"{item['question']}\": {answer}")
+        else:
+            decisions.append(
+                f"- Open question the user did not answer: \"{item['question']}\" "
+                "Ask the user; do not guess."
+            )
     sections.append(_section("Decisions", decisions))
 
     # Guardrails

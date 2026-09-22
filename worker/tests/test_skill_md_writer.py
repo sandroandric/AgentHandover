@@ -378,7 +378,10 @@ class TestSkillMdWriterSemanticSteps:
         variables = [{"name": "api_token", "type": "text", "sensitive": True,
                       "example": "sk-live-123"}]
         content = self._content(variables=variables)
-        assert "- `api_token` (credential): take it from your credential store" in content
+        assert (
+            "- `api_token` (credential) by reference (never in this file): "
+            "take it from your credential store"
+        ) in content
         assert "sk-live-123" not in content
 
     def test_routing_ignores_source_string(self):

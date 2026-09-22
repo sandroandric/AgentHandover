@@ -271,8 +271,103 @@ def test_credentials_are_named_never_valued():
     proc = focus_procedure()
     proc["inputs"][-1]["example"] = "hunter2"
     text = "\n".join(body_sections(proc))
-    assert "- `namecheap_password` (credential): take it from your credential store" in text
+    assert (
+        "- `namecheap_password` (credential) by reference (never in this file): "
+        "take it from your credential store"
+    ) in text
     assert "hunter2" not in text
+
+
+@pytest.mark.parametrize("flag", ["credential", "is_credential"])
+def test_credential_input_is_by_reference_in_every_target(flag: str):
+    """Coverage audit #11: both spellings of the flag, every target."""
+    proc = focus_procedure()
+    proc["inputs"][-1] = {"name": "namecheap_password", "type": "text", flag: True}
+    for target in TARGETS:
+        packet = render_packet(proc, target=target)
+        assert "`namecheap_password` (credential) by reference (never in this file)" in packet
+        hint = frontmatter(proc, target).get("argument-hint", "")
+        assert "namecheap_password" not in hint, target
+
+
+def test_credential_survives_the_sop_template_round_trip(tmp_path: Path):
+    """Coverage audit #11: writers that take SOP templates (write_sop) keep
+    the credential flag, ``required``, ``choices``, ``validation`` and the goal."""
+    from agenthandover_worker.export_adapter import procedure_to_sop_template
+    from agenthandover_worker.skill_md_writer import SkillMdWriter
+
+    proc = focus_procedure()
+    proc["inputs"][0].update({
+        "required": False, "choices": ["example.com", "example.org"],
+        "validation": r"^[a-z0-9.-]+$",
+    })
+    template = procedure_to_sop_template(proc)
+    assert template["goal"] == proc["goal"]
+    assert template["variables"][-1]["sensitive"] is True
+
+    back = sop_to_procedure(template)
+    assert back["goal"] == proc["goal"]
+    domain, password = back["inputs"]
+    assert domain["required"] is False
+    assert domain["choices"] == ["example.com", "example.org"]
+    assert domain["validation"] == r"^[a-z0-9.-]+$"
+    assert password["credential"] is True
+
+    path = SkillMdWriter(workspace_dir=tmp_path).write_sop(template)
+    text = path.read_text(encoding="utf-8")
+    assert "`namecheap_password` (credential) by reference (never in this file)" in text
+    assert "- `domain_name` (text, optional)" in text
+    assert f"## Goal\n\n{proc['goal']}\n" in text
+
+
+# ---------------------------------------------------------------------------
+# Goal (coverage audit #97)
+# ---------------------------------------------------------------------------
+
+
+def test_goal_section_precedes_when_to_use_and_describes_the_skill():
+    proc = focus_procedure()
+    proc["goal"] = "Sends a daily digest of domain prices to the team channel."
+    packet = render_packet(proc, target="claude-skill")
+    assert f"\n## Goal\n\n{proc['goal']}\n" in packet
+    assert packet.index("## Goal") < packet.index("## When to use")
+    fm = frontmatter(proc, "claude-skill")
+    assert fm["description"] == proc["goal"]
+    assert fm["description"] != proc["title"]
+
+
+@pytest.mark.parametrize("goal", ["", "   ", "Unclear — recipient/cadence not visible in observations"])
+def test_frontmatter_falls_back_off_an_empty_or_unclear_goal(goal: str):
+    proc = focus_procedure()
+    proc["goal"] = goal
+    assert description(proc) == _first_sentence_of(proc["description"])
+    packet = render_packet(proc, target="claude-skill")
+    if goal.strip():
+        # The model said it could not tell: the packet says so too.
+        assert f"## Goal\n\n{goal}\n" in packet
+    else:
+        assert "## Goal" not in packet
+
+
+def _first_sentence_of(text: str) -> str:
+    from agenthandover_worker.skill_render import _first_sentence
+
+    return _first_sentence(text)
+
+
+def test_unanswered_question_is_an_open_question_never_an_assumption():
+    proc = focus_procedure()
+    proc["agent_clarifications"].append({
+        "category": "access", "question": "Is the user logged in?",
+        "answer": "", "status": "unanswered", "context": "",
+    })
+    text = render_body(proc)
+    assert (
+        "- Open question the user did not answer: \"Is the user logged in?\" "
+        "Ask the user; do not guess."
+    ) in text
+    assert "The user answered \"Is the user logged in?\"" not in text
+    assert "Assume" not in text
 
 
 def test_step_lines_route_on_shape_not_source():

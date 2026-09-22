@@ -2191,14 +2191,16 @@ def _check_focus_answers(
     procedure_dict = pending.get("procedure", {})
     title = sop_template.get("title", procedure_dict.get("title", "Untitled"))
 
-    # Parse and merge answers
+    # Parse and merge answers.  A skipped Q&A still merges: every
+    # question is recorded as unanswered rather than dropped.
     qa_result = parse_qa_result_from_file(questions_data)
-    if qa_result is not None and focus_questioner is not None and qa_result.answers:
+    if qa_result is not None and focus_questioner is not None and qa_result.questions:
         try:
             procedure_dict = focus_questioner.merge_answers(procedure_dict, qa_result)
             logger.info(
-                "Focus v2 '%s': merged %d answer(s) into procedure",
-                title, len(qa_result.answers),
+                "Focus v2 '%s': merged %d answer(s) into procedure (%d question(s))",
+                title, sum(1 for a in qa_result.answers.values() if a.strip()),
+                len(qa_result.questions),
             )
         except Exception:
             logger.debug(

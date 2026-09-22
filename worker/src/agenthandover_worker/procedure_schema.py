@@ -43,6 +43,8 @@ _REQUIRED_FIELDS = (
 
 # Optional v3 sections with their default factories
 _V3_SECTIONS = {
+    # What the user is producing, from behavioral synthesis; "" when unknown.
+    "goal": str,
     "inputs": list,
     "outputs": list,
     "environment": dict,
@@ -161,7 +163,7 @@ def sop_to_procedure(sop_template: dict) -> dict:
         inp: dict = {
             "name": var.get("name", ""),
             "type": var.get("type", "string"),
-            "required": True,
+            "required": bool(var.get("required", True)),
             "default": var.get("default"),
         }
         if "description" in var:
@@ -178,6 +180,8 @@ def sop_to_procedure(sop_template: dict) -> dict:
             inp["max"] = var["max"]
         if "choices" in var:
             inp["choices"] = var["choices"]
+        if "validation" in var:
+            inp["validation"] = var["validation"]
         inputs.append(inp)
 
     now_iso = datetime.now(timezone.utc).isoformat()
@@ -285,6 +289,8 @@ def sop_to_procedure(sop_template: dict) -> dict:
     }
 
     # Carry over optional v2 fields
+    if sop_template.get("goal"):
+        procedure["goal"] = sop_template["goal"]
     if sop_template.get("task_description"):
         procedure["task_description"] = sop_template["task_description"]
     if sop_template.get("execution_overview"):
