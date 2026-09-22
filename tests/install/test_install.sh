@@ -212,8 +212,9 @@ reply = json.dumps({
     "display_topology": [], "cursor_global_px": None,
 }).encode() + b"\n"
 socks = []
+os.makedirs(os.path.join(dd, "sockets"), mode=0o700, exist_ok=True)
 for name in ("observation.sock", "capture.sock"):
-    path = os.path.join(dd, name)
+    path = os.path.join(dd, "sockets", name)
     if os.path.exists(path):
         os.unlink(path)
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -257,7 +258,7 @@ echo "== doctor against the fresh prefix, app not running =="
 run_doctor "${P}" "${WORK}/doctor-noapp.log"
 check "doctor exits non-zero when the app is not running" test $? -ne 0
 DD="$(data_dir "${P}")"
-check "doctor names the observation socket" contains "${WORK}/doctor-noapp.log" "FAIL Observation server (${DD}/observation.sock)"
+check "doctor names the observation socket" contains "${WORK}/doctor-noapp.log" "FAIL Observation server (${DD}/sockets/observation.sock)"
 check "doctor explains the app is not running" contains "${WORK}/doctor-noapp.log" "AgentHandover.app is not running or its capture server failed to bind"
 check "doctor: daemon binary in the prefix" contains "${WORK}/doctor-noapp.log" "pass Daemon binary (${P}/lib/ah-observer)"
 check "doctor: venv healthy and worker version matches CLI" contains "${WORK}/doctor-noapp.log" "pass Python virtual environment (worker "

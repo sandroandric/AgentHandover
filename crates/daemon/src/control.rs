@@ -6,12 +6,17 @@
 //!
 //! ## Protocol
 //!
-//! - Client connects to `{status_dir}/control.sock`
+//! - Client connects to `{socket_dir}/control.sock` (a 0700 directory)
+//! - The server checks the peer (`crate::peer::PeerPolicy`: this user, the
+//!   menu bar app's executable, and its code signature when the daemon is
+//!   signed) and drops any other connection unanswered
 //! - Client sends one JSON command (newline-terminated)
 //! - Server responds with one JSON response (newline-terminated)
 //! - Server closes the connection after the response
 
 use std::path::{Path, PathBuf};
+
+use crate::peer::PeerPolicy;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -21,14 +26,16 @@ use tokio::net::UnixListener;
 use tokio::sync::watch;
 use tracing::{debug, error, info, warn};
 
-/// Socket filename within the status directory.
+/// Socket filename within the socket directory.
 const CONTROL_SOCKET_FILE: &str = "control.sock";
 
 /// All the handles the control server needs. Constructed in `main.rs` and
 /// passed to [`serve`].
 pub struct ControlContext {
-    /// Directory where `control.sock` will be created.
-    pub status_dir: PathBuf,
+    /// Directory where `control.sock` will be created (made 0700).
+    pub socket_dir: PathBuf,
+    /// Which peers may send commands.
+    pub peer_policy: PeerPolicy,
     /// Atomic capture-paused flag shared with the observer event loop.
     /// The control API sets this; the observer reads it each tick.
     pub capture_paused: Arc<AtomicBool>,
@@ -173,14 +180,14 @@ fn cleanup_socket(path: &Path) {
 /// for connections until the shutdown signal fires, then cleans up the socket
 /// file.
 pub async fn serve(ctx: ControlContext) {
-    let sock_path = ctx.status_dir.join(CONTROL_SOCKET_FILE);
+    let sock_path = ctx.socket_dir.join(CONTROL_SOCKET_FILE);
 
-    // Ensure the status directory exists.
-    if let Err(e) = std::fs::create_dir_all(&ctx.status_dir) {
+    // The socket directory must exist and be private to this user.
+    if let Err(e) = agenthandover_common::status::ensure_private_dir(&ctx.socket_dir) {
         error!(
-            path = %ctx.status_dir.display(),
+            path = %ctx.socket_dir.display(),
             error = %e,
-            "Failed to create status directory for control socket"
+            "Cannot use the socket directory for the control socket"
         );
         return;
     }
@@ -190,6 +197,10 @@ pub async fn serve(ctx: ControlContext) {
 
     let listener = match UnixListener::bind(&sock_path) {
         Ok(l) => {
+            use std::os::unix::fs::PermissionsExt;
+            if let Err(e) = std::fs::set_permissions(&sock_path, std::fs::Permissions::from_mode(0o600)) {
+                warn!(error = %e, "Failed to chmod the control socket");
+            }
             info!(path = %sock_path.display(), "Control socket listening");
             l
         }
@@ -209,9 +220,13 @@ pub async fn serve(ctx: ControlContext) {
         tokio::select! {
             accept_result = listener.accept() => {
                 match accept_result {
-                    Ok((stream, _addr)) => {
-                        handle_connection(stream, &ctx).await;
-                    }
+                    Ok((stream, _addr)) => match ctx.peer_policy.check(&stream) {
+                        Ok(()) => handle_connection(stream, &ctx).await,
+                        Err(reason) => {
+                            warn!(%reason, "Control socket refused a connection");
+                            drop(stream);
+                        }
+                    },
                     Err(e) => {
                         warn!(error = %e, "Control socket accept error");
                     }
@@ -239,14 +254,33 @@ mod tests {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixStream;
 
+    /// Lets this test binary (and nothing else) send commands.
+    fn test_binary_policy() -> PeerPolicy {
+        let me = std::env::current_exe().unwrap().canonicalize().unwrap();
+        PeerPolicy {
+            path_allowed: Box::new(move |p| p == me),
+            identifiers: vec![],
+            team_id: None,
+        }
+    }
+
     /// Helper: create a ControlContext with a socket in a temp directory.
     fn make_context(
         tmp_dir: &Path,
         capture_paused: Arc<AtomicBool>,
     ) -> (ControlContext, watch::Sender<bool>) {
+        make_context_with(tmp_dir, capture_paused, test_binary_policy())
+    }
+
+    fn make_context_with(
+        tmp_dir: &Path,
+        capture_paused: Arc<AtomicBool>,
+        peer_policy: PeerPolicy,
+    ) -> (ControlContext, watch::Sender<bool>) {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let ctx = ControlContext {
-            status_dir: tmp_dir.to_path_buf(),
+            socket_dir: tmp_dir.to_path_buf(),
+            peer_policy,
             capture_paused,
             shutdown_rx,
         };
@@ -363,6 +397,64 @@ mod tests {
 
         // Socket file should be removed after shutdown.
         assert!(!sock_path.exists());
+    }
+
+    #[tokio::test]
+    async fn test_foreign_peer_is_dropped_without_effect() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let flag = Arc::new(AtomicBool::new(false));
+        // Only the menu bar app may connect; this test binary is not it.
+        let (ctx, shutdown_tx) =
+            make_context_with(tmp.path(), Arc::clone(&flag), PeerPolicy::menu_bar_app());
+        let sock_path = tmp.path().join(CONTROL_SOCKET_FILE);
+
+        let server = tokio::spawn(serve(ctx));
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let stream = UnixStream::connect(&sock_path).await.unwrap();
+        let (reader, mut writer) = stream.into_split();
+        let _ = writer.write_all(b"{\"command\":\"pause_capture\"}\n").await;
+        let mut response = String::new();
+        let n = BufReader::new(reader).read_line(&mut response).await.unwrap_or(0);
+        assert_eq!(n, 0, "a foreign peer gets no answer: {response:?}");
+        assert!(!flag.load(Ordering::Acquire), "a foreign peer must not pause capture");
+
+        let _ = shutdown_tx.send(true);
+        let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn test_socket_directory_is_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path().join("sockets");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let (ctx, shutdown_tx) = make_context(&dir, Arc::new(AtomicBool::new(false)));
+
+        let server = tokio::spawn(serve(ctx));
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&dir), 0o700);
+        assert_eq!(mode(&dir.join(CONTROL_SOCKET_FILE)) & 0o077, 0);
+
+        let _ = shutdown_tx.send(true);
+        let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn test_symlinked_socket_directory_is_refused() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let real = tmp.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        let link = tmp.path().join("sockets");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let (ctx, _shutdown_tx) = make_context(&link, Arc::new(AtomicBool::new(false)));
+
+        // serve() returns at once instead of binding inside the symlink.
+        tokio::time::timeout(std::time::Duration::from_secs(1), serve(ctx)).await.unwrap();
+        assert!(!real.join(CONTROL_SOCKET_FILE).exists());
     }
 
     #[tokio::test]

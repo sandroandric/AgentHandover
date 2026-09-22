@@ -241,9 +241,9 @@ async fn main() -> Result<()> {
     let capture_paused = Arc::new(AtomicBool::new(false));
 
     // Spawn Unix domain socket control server
-    let control_status_dir = agenthandover_common::status::status_dir();
     let control_handle = tokio::spawn(agenthandover_daemon::control::serve(ControlContext {
-        status_dir: control_status_dir,
+        socket_dir: agenthandover_common::status::socket_dir(),
+        peer_policy: agenthandover_daemon::peer::PeerPolicy::menu_bar_app(),
         capture_paused: Arc::clone(&capture_paused),
         shutdown_rx: shutdown_tx.subscribe(),
     }));

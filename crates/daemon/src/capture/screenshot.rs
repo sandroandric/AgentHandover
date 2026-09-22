@@ -59,10 +59,7 @@ impl CaptureError {
     }
 }
 
-pub fn capture_socket_path() -> Option<PathBuf> {
-    let home = std::env::var("HOME").ok()?;
-    Some(PathBuf::from(home).join("Library/Application Support/agenthandover/capture.sock"))
-}
+pub use agenthandover_common::observation::capture_socket_path;
 
 /// The request line sent to the app.
 pub fn request_line(scale: f64, quality: u8) -> String {
@@ -178,13 +175,7 @@ pub fn decode_jpeg_to_bgra(jpeg: &[u8]) -> Result<(usize, usize, Vec<u8>), Captu
 /// JPEG decode run on the blocking pool, and the whole call is bounded by
 /// `CAPTURE_TIMEOUT` so a wedged app cannot stall the observer tick.
 pub async fn capture_frame(scale: f64, quality: u8) -> Result<CapturedFrame, CaptureError> {
-    let path = capture_socket_path().ok_or_else(|| {
-        CaptureError::Unavailable(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "HOME is not set",
-        ))
-    })?;
-    capture_frame_at(path, scale, quality, CAPTURE_TIMEOUT).await
+    capture_frame_at(capture_socket_path(), scale, quality, CAPTURE_TIMEOUT).await
 }
 
 /// `capture_frame` against an explicit socket path and bound.
