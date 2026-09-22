@@ -434,6 +434,19 @@ class TestTaskSegmenterSegment:
         assert result.segments[0].frame_count == 2
 
     @patch("agenthandover_worker.task_segmenter._compute_embeddings", side_effect=_mock_embeddings)
+    def test_embedding_texts_carry_clustering_prefix(self, mock_embed):
+        """nomic-embed-text gets its clustering task prefix on every frame text."""
+        events = [
+            _make_event("e1", "2026-03-04T10:00:00Z", what_doing="Filing expense report"),
+            _make_event("e2", "2026-03-04T10:01:00Z", what_doing="Submitting expense form"),
+        ]
+        TaskSegmenter().segment(events)
+        texts = mock_embed.call_args.args[0]
+        assert len(texts) == 2
+        assert all(t.startswith("clustering: ") for t in texts)
+        assert texts[0].startswith("clustering: Filing expense report")
+
+    @patch("agenthandover_worker.task_segmenter._compute_embeddings", side_effect=_mock_embeddings)
     def test_mixed_workflow_and_noise(self, mock_embed):
         events = [
             _make_event("e1", "2026-03-04T10:00:00Z",
