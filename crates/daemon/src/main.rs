@@ -9,7 +9,7 @@ use tracing_subscriber::EnvFilter;
 use tracing_appender::rolling;
 use sha2::{Digest, Sha256};
 
-use agenthandover_daemon::control::{ControlContext, DaemonState};
+use agenthandover_daemon::control::ControlContext;
 use agenthandover_daemon::ipc::native_messaging;
 use agenthandover_daemon::observer::event_loop::{
     ObserverConfig, ObserverMessage, run_observer_loop, run_storage_writer,
@@ -264,9 +264,6 @@ async fn main() -> Result<()> {
         });
     }
 
-    // Shared mutable daemon state for the control API
-    let shared_state = Arc::new(tokio::sync::Mutex::new(DaemonState::new()));
-
     // Atomic capture-paused flag shared between control API and observer loop.
     // The control API sets it; the observer reads it each tick.
     let capture_paused = Arc::new(AtomicBool::new(false));
@@ -275,9 +272,6 @@ async fn main() -> Result<()> {
     let control_status_dir = agenthandover_common::status::status_dir();
     let control_handle = tokio::spawn(agenthandover_daemon::control::serve(ControlContext {
         status_dir: control_status_dir,
-        start_time,
-        event_counter: Arc::clone(&event_counter),
-        state: Arc::clone(&shared_state),
         capture_paused: Arc::clone(&capture_paused),
         shutdown_rx: shutdown_tx.subscribe(),
     }));

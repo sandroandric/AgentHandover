@@ -2,85 +2,19 @@ import Foundation
 
 /// Client for the AgentHandoverDaemon control socket.
 ///
-/// Replaces file-based status polling with explicit RPC calls to the daemon's
-/// Unix domain socket. The daemon remains the authority for capture state,
-/// focus state, and Accessibility. Screen Recording is checked directly by
-/// the app.
+/// The daemon's socket accepts two commands, `pause_capture` and
+/// `resume_capture`, which the menu bar uses around focus recordings.
 @MainActor
 final class CaptureAgentClient {
 
     /// Path to the daemon's Unix domain socket.
     private var socketPath: String {
-        Self.controlSocketPath()
-    }
-
-    /// Whether the daemon is reachable over its control socket.
-    var isAvailable: Bool {
-        Self.socketResponsive()
-    }
-
-    nonisolated static func socketAvailable() -> Bool {
-        FileManager.default.fileExists(atPath: controlSocketPath())
-    }
-
-    /// Whether the daemon is accepting control RPCs.
-    ///
-    /// This is stronger than a raw file-exists check and avoids treating a
-    /// stale socket path as a live daemon during onboarding.
-    nonisolated static func socketResponsive() -> Bool {
-        guard socketAvailable() else { return false }
-        return sendSync(
-            socketPath: controlSocketPath(),
-            command: ["command": "get_status"]
-        ) != nil
-    }
-
-    nonisolated private static func controlSocketPath() -> String {
         FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Application Support/agenthandover/control.sock")
             .path
     }
 
     // MARK: - Commands
-
-    /// Get full daemon status: permissions, capture state, focus session.
-    func getStatus() async -> DaemonControlStatus? {
-        guard let response = await send(command: ["command": "get_status"]) else {
-            return nil
-        }
-        return DaemonControlStatus(
-            pid: response["pid"] as? Int ?? 0,
-            version: response["version"] as? String ?? "unknown",
-            uptimeSeconds: response["uptime_seconds"] as? Int ?? 0,
-            accessibilityPermitted: response["accessibility_permitted"] as? Bool ?? false,
-            screenRecordingPermitted: response["screen_recording_permitted"] as? Bool ?? false,
-            captureActive: response["capture_active"] as? Bool ?? false,
-            focusSession: response["focus_session"] as? [String: Any],
-            eventsToday: response["events_today"] as? Int ?? 0
-        )
-    }
-
-    /// Request accessibility permission (triggers macOS prompt).
-    func requestAccessibility() async -> Bool {
-        let response = await send(command: ["command": "request_accessibility"])
-        return response?["accessibility_permitted"] as? Bool ?? false
-    }
-
-    /// Start a focus recording session.
-    func startFocus(title: String, sessionId: String) async -> Bool {
-        let response = await send(command: [
-            "command": "start_focus",
-            "title": title,
-            "session_id": sessionId,
-        ])
-        return response?["ok"] as? Bool ?? false
-    }
-
-    /// Stop the current focus recording session.
-    func stopFocus() async -> Bool {
-        let response = await send(command: ["command": "stop_focus"])
-        return response?["ok"] as? Bool ?? false
-    }
 
     /// Pause passive capture.
     func pauseCapture() async -> Bool {
@@ -168,16 +102,4 @@ final class CaptureAgentClient {
 
         return json
     }
-}
-
-/// Parsed daemon status from the control socket.
-struct DaemonControlStatus {
-    let pid: Int
-    let version: String
-    let uptimeSeconds: Int
-    let accessibilityPermitted: Bool
-    let screenRecordingPermitted: Bool
-    let captureActive: Bool
-    let focusSession: [String: Any]?
-    let eventsToday: Int
 }

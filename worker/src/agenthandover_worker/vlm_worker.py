@@ -18,8 +18,6 @@ logger = logging.getLogger(__name__)
 
 class VLMBackend(str, Enum):
     """Supported VLM inference backends."""
-    MLX_VLM = "mlx-vlm"           # Apple Silicon optimized
-    LLAMA_CPP = "llama-cpp-python" # Cross-platform fallback
     OLLAMA = "ollama"              # Local Ollama server
     OPENAI_COMPAT = "openai-compat"  # OpenAI-compatible API
     ANTHROPIC = "anthropic"        # Anthropic Claude API
@@ -38,10 +36,6 @@ class VLMConfig:
     max_compute_minutes_per_day: float = 20.0
     max_image_size_bytes: int = 10 * 1024 * 1024  # 10MB
     timeout_seconds: float = 120.0
-    # llama-cpp-python specific
-    model_path: str | None = None          # Path to .gguf model file
-    clip_model_path: str | None = None     # Path to CLIP .gguf for multimodal
-    n_ctx: int = 2048                      # Context window size
     # openai-compat specific
     api_key: str | None = None             # API key (also reads env vars)
     base_url: str | None = None            # API base URL (None = standard OpenAI)
@@ -169,12 +163,6 @@ class VLMWorker:
     def _create_backend(self) -> VLMInferenceBackend:
         if self.config.backend == VLMBackend.MOCK:
             return MockVLMBackend()
-        elif self.config.backend == VLMBackend.MLX_VLM:
-            from agenthandover_worker.backends.mlx_vlm import MLXVLMBackend
-            return MLXVLMBackend(self.config)
-        elif self.config.backend == VLMBackend.LLAMA_CPP:
-            from agenthandover_worker.backends.llama_cpp import LlamaCppBackend
-            return LlamaCppBackend(self.config)
         elif self.config.backend == VLMBackend.OLLAMA:
             from agenthandover_worker.backends.ollama import OllamaBackend
             return OllamaBackend(self.config)

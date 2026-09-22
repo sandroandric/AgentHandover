@@ -13,11 +13,8 @@ from pathlib import Path
 
 import pytest
 
-from agenthandover_worker.account_detector import AccountDetector
-from agenthandover_worker.branch_extractor import BranchExtractor
 from agenthandover_worker.constraint_manager import ConstraintManager, TrustLevel
 from agenthandover_worker.daily_processor import DailyBatchProcessor
-from agenthandover_worker.decision_extractor import DecisionExtractor
 from agenthandover_worker.evidence_tracker import EvidenceTracker, ObservationEvidence
 from agenthandover_worker.knowledge_base import KnowledgeBase
 from agenthandover_worker.knowledge_export_adapter import KnowledgeBaseExportAdapter
@@ -183,21 +180,6 @@ class TestFullPipelineIntegration:
         assert len(patterns) >= 1
         assert patterns[0].pattern == "daily"
 
-    def test_branch_extraction(self, kb: KnowledgeBase) -> None:
-        """BranchExtractor finds divergence across demos."""
-        extractor = BranchExtractor(kb)
-
-        demos = [
-            [{"step_id": "s1", "action": "Open"}, {"step_id": "s2", "action": "Click A"}],
-            [{"step_id": "s1", "action": "Open"}, {"step_id": "s2", "action": "Click A"}],
-            [{"step_id": "s1", "action": "Open"}, {"step_id": "s2", "action": "Click B"}],
-        ]
-
-        branches = extractor.extract_branches("test", demos=demos)
-        assert len(branches) == 1
-        assert branches[0].step_id == "s2"
-        assert branches[0].type == "data_dependent"
-
     def test_constraint_manager(self, kb: KnowledgeBase) -> None:
         """ConstraintManager controls execution permissions."""
         manager = ConstraintManager(kb)
@@ -214,20 +196,6 @@ class TestFullPipelineIntegration:
         manager.set_trust_level("constrained", TrustLevel.AUTONOMOUS)
         allowed, reason = manager.check_execution_allowed("constrained")
         assert allowed is True
-
-    def test_decision_extraction(self, kb: KnowledgeBase) -> None:
-        """DecisionExtractor finds rules from varying observations."""
-        extractor = DecisionExtractor(kb)
-
-        observations = [
-            {"steps": [{"step_id": "s1", "action": "Open"}, {"step_id": "s2", "action": "Buy"}], "context": {}},
-            {"steps": [{"step_id": "s1", "action": "Open"}, {"step_id": "s2", "action": "Buy"}], "context": {}},
-            {"steps": [{"step_id": "s1", "action": "Open"}, {"step_id": "s2", "action": "Skip"}], "context": {}},
-        ]
-
-        decisions = extractor.extract_decisions("test", observations)
-        assert len(decisions) >= 1
-        assert decisions[0].applies_to_step == "s2"
 
     def test_outcome_tracking(self) -> None:
         """OutcomeTracker detects task outcomes."""
@@ -273,15 +241,6 @@ class TestFullPipelineIntegration:
         statuses = {r.slug: r.status for r in reports}
         assert statuses["current"] == "current"
         assert statuses["old"] == "needs_review"
-
-    def test_account_detector(self) -> None:
-        """AccountDetector identifies services from URLs."""
-        detector = AccountDetector()
-
-        result = detector.detect_from_url("https://dashboard.stripe.com/test/payments")
-        assert result is not None
-        assert result.service == "stripe"
-        assert result.environment == "test"
 
     def test_export_adapter(self, kb: KnowledgeBase) -> None:
         """KnowledgeBaseExportAdapter writes SOPs as v3 procedures."""

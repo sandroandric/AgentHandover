@@ -40,23 +40,9 @@ def check_vlm_available() -> dict[str, bool]:
     Returns a dict with keys for each backend, each True/False.
     """
     result: dict[str, bool] = {
-        "mlx_vlm": False,
-        "llama_cpp": False,
         "ollama": False,
         "openai_compat": False,
     }
-
-    try:
-        import mlx_vlm  # noqa: F401
-        result["mlx_vlm"] = True
-    except ImportError:
-        pass
-
-    try:
-        import llama_cpp  # noqa: F401
-        result["llama_cpp"] = True
-    except ImportError:
-        pass
 
     try:
         import ollama
@@ -309,11 +295,8 @@ def _toml_value(val: object) -> str:
     return f'"{val}"'
 
 
-def _recommend_extras(plat: str) -> str:
-    """Return the recommended pip extras group for the given platform."""
-    if plat == "apple_silicon":
-        return "vlm-apple"
-    return "vlm-cpu"
+# The local VLM backend is the Ollama Python client on every platform.
+_LOCAL_EXTRAS = "vlm-ollama"
 
 
 def prompt_install(plat: str, available: dict[str, bool]) -> bool:
@@ -322,14 +305,11 @@ def prompt_install(plat: str, available: dict[str, bool]) -> bool:
     Returns True if the user confirmed installation, False otherwise.
     In non-interactive mode (not a TTY), returns False.
     """
-    extras = _recommend_extras(plat)
+    extras = _LOCAL_EXTRAS
 
     # Check if already available (before TTY check so callers always get this info)
-    if plat == "apple_silicon" and available["mlx_vlm"]:
-        print("mlx-vlm is already installed. VLM is ready.")
-        return False
-    if plat != "apple_silicon" and available["llama_cpp"]:
-        print("llama-cpp-python is already installed. VLM is ready.")
+    if available.get("ollama"):
+        print("Ollama is already reachable. VLM is ready.")
         return False
 
     if not sys.stdin.isatty():
@@ -348,8 +328,7 @@ def prompt_install(plat: str, available: dict[str, bool]) -> bool:
     print("  of native apps by analyzing screenshots with AI.")
     print("  It is RECOMMENDED for the best experience.")
     print()
-    print("  Additional backends: pip install agenthandover-worker[vlm-ollama]")
-    print("                       pip install agenthandover-worker[vlm-openai]")
+    print("  Other backends: pip install agenthandover-worker[vlm-openai]")
     print()
 
     try:
@@ -415,8 +394,6 @@ def main(argv: list[str] | None = None) -> None:
 
     if args.check:
         print(f"Platform: {plat}")
-        print(f"mlx-vlm available: {available['mlx_vlm']}")
-        print(f"llama-cpp-python available: {available['llama_cpp']}")
         print(f"ollama available: {available['ollama']}")
         print(f"openai-compat available: {available['openai_compat']}")
         any_available = any(available.values())
@@ -432,7 +409,7 @@ def main(argv: list[str] | None = None) -> None:
             print("  Restart the worker to activate: agenthandover restart worker")
         return
 
-    extras = _recommend_extras(plat)
+    extras = _LOCAL_EXTRAS
 
     if args.dry_run:
         install_vlm(extras, dry_run=True)

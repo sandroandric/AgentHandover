@@ -12,7 +12,7 @@ import os
 import time
 from typing import TYPE_CHECKING, Any
 
-from agenthandover_worker.backends._json_parser import extract_json
+from agenthandover_worker.json_extract import extract_json
 from agenthandover_worker.backends._timeout import run_with_timeout
 from agenthandover_worker.vlm_worker import VLMInferenceBackend
 

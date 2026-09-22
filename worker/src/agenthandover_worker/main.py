@@ -23,7 +23,6 @@ from pathlib import Path
 from agenthandover_worker.clipboard_linker import ClipboardLinker
 from agenthandover_worker.confidence import ConfidenceScorer, is_native_app_context
 from agenthandover_worker.db import WorkerDB
-from agenthandover_worker.deep_scan import DeepScanner
 from agenthandover_worker.episode_builder import EpisodeBuilder
 from agenthandover_worker.exporter import IndexGenerator
 from agenthandover_worker.focus_processor import FocusProcessor
@@ -3789,161 +3788,6 @@ def _process_lifecycle_dismiss_trigger(
     _remove_trigger(trigger_path)
 
 
-def _process_execution_start_trigger(
-    status_dir: Path, execution_monitor, knowledge_base,
-) -> None:
-    """Handle execution-start.json trigger from agent."""
-    trigger_path = status_dir / "execution-start.json"
-    if not trigger_path.is_file():
-        return
-    try:
-        with open(trigger_path) as f:
-            data = json.load(f)
-        trigger_path.unlink(missing_ok=True)
-
-        slug = data.get("slug", "")
-        agent_id = data.get("agent_id", "unknown")
-        if not slug:
-            logger.warning("execution-start trigger missing slug")
-            return
-
-        execution_id = execution_monitor.start_execution(slug, agent_id)
-
-        result_path = status_dir / "execution-start-result.json"
-        _atomic_write_result(result_path, {
-            "execution_id": execution_id,
-            "slug": slug,
-            "status": "started",
-        })
-        logger.info("Started execution monitoring: %s for %s", execution_id, slug)
-    except Exception:
-        logger.debug("Error processing execution-start trigger", exc_info=True)
-
-
-def _process_execution_step_trigger(
-    status_dir: Path, execution_monitor,
-) -> None:
-    """Handle execution-step.json trigger from agent."""
-    trigger_path = status_dir / "execution-step.json"
-    if not trigger_path.is_file():
-        return
-    try:
-        with open(trigger_path) as f:
-            data = json.load(f)
-        trigger_path.unlink(missing_ok=True)
-
-        execution_id = data.get("execution_id", "")
-        step_id = data.get("step_id", "")
-        actual_action = data.get("actual_action", "")
-
-        if not execution_id or not step_id:
-            logger.warning("execution-step trigger missing execution_id or step_id")
-            return
-
-        execution_monitor.record_step(execution_id, step_id, actual_action)
-        logger.debug("Recorded execution step: %s/%s", execution_id, step_id)
-    except Exception:
-        logger.debug("Error processing execution-step trigger", exc_info=True)
-
-
-def _process_execution_complete_trigger(
-    status_dir: Path, execution_monitor, knowledge_base,
-) -> None:
-    """Handle execution-complete.json trigger from agent."""
-    trigger_path = status_dir / "execution-complete.json"
-    if not trigger_path.is_file():
-        return
-    try:
-        with open(trigger_path) as f:
-            data = json.load(f)
-        trigger_path.unlink(missing_ok=True)
-
-        execution_id = data.get("execution_id", "")
-        status = data.get("status", "completed")  # "completed" or "failed"
-        error = data.get("error")
-        outcomes = data.get("outcomes", [])
-
-        if not execution_id:
-            logger.warning("execution-complete trigger missing execution_id")
-            return
-
-        if status == "failed" and error:
-            record = execution_monitor.fail_execution(execution_id, error)
-        elif status == "aborted":
-            record = execution_monitor.abort_execution(execution_id)
-        else:
-            record = execution_monitor.complete_execution(execution_id, outcomes)
-
-        result_path = status_dir / "execution-complete-result.json"
-        _atomic_write_result(result_path, {
-            "execution_id": execution_id,
-            "status": record.status.value,
-            "completed_at": record.completed_at,
-        })
-
-        # --- Execution-learning feedback ---
-        # Feed execution outcome back into procedure quality.
-        try:
-            slug = data.get("slug", "")
-            if not slug:
-                # Try to get slug from the execution record
-                slug = record.procedure_slug
-            if slug:
-                proc = knowledge_base.get_procedure(slug)
-                if proc is not None:
-                    staleness = proc.setdefault("staleness", {})
-                    evidence = proc.setdefault("evidence", {})
-                    now_iso = datetime.now(timezone.utc).isoformat()
-
-                    if record.status.value == "completed":
-                        # Success: mark as freshly confirmed
-                        staleness["last_confirmed"] = now_iso
-                        # Increment observation count
-                        evidence["total_observations"] = evidence.get("total_observations", 0) + 1
-                        # Clear stale status if it was set
-                        if staleness.get("status") in ("needs_review", "stale"):
-                            staleness["status"] = "current"
-                            staleness["recommended_action"] = "none"
-
-                    elif record.status.value == "deviated":
-                        # Deviation: add drift signal
-                        drift_signals = staleness.setdefault("drift_signals", [])
-                        drift_signals.append({
-                            "type": "execution_deviation",
-                            "detail": f"Agent execution deviated: {len(record.deviations)} step(s)",
-                            "first_seen": now_iso,
-                        })
-                        # Add to contradictions
-                        contradictions = evidence.setdefault("contradictions", [])
-                        for dev in record.deviations:
-                            contradictions.append({
-                                "type": "execution_deviation",
-                                "detail": dev.get("detail", ""),
-                                "date": now_iso,
-                            })
-
-                    elif record.status.value == "failed":
-                        # Failure: add failure signal
-                        drift_signals = staleness.setdefault("drift_signals", [])
-                        drift_signals.append({
-                            "type": "execution_failure",
-                            "detail": f"Agent execution failed: {record.error or 'unknown'}",
-                            "first_seen": now_iso,
-                        })
-
-                    knowledge_base.save_procedure(proc)
-        except Exception:
-            logger.debug("Failed to update procedure from execution feedback", exc_info=True)
-
-        logger.info(
-            "Execution %s completed: %s", execution_id, record.status.value
-        )
-    except KeyError as exc:
-        logger.warning("execution-complete trigger error: %s", exc)
-    except Exception:
-        logger.debug("Error processing execution-complete trigger", exc_info=True)
-
-
 def _export_sop_templates(
     sop_templates: list[dict],
     *,
@@ -4174,20 +4018,6 @@ def _remove_trigger(trigger_path: Path) -> None:
         trigger_path.unlink(missing_ok=True)
     except Exception:
         logger.debug("Failed to remove export-trigger.json", exc_info=True)
-
-
-def _run_deep_scan(scanner: DeepScanner, artifacts: list[dict]) -> None:
-    """Background callback for Tier 2 deep scan."""
-    try:
-        scan_result = scanner.scan_artifacts(artifacts)
-        if scan_result.has_pii:
-            logger.warning(
-                "Deep scan found %d PII match(es) in %d artifact(s)",
-                scan_result.total_pii,
-                scan_result.artifacts_scanned,
-            )
-    except Exception:
-        logger.exception("Background deep scan failed")
 
 
 def _persist_vlm_jobs(db: "WorkerDB", vlm_queue: VLMFallbackQueue) -> None:
@@ -4481,7 +4311,6 @@ def main(argv: list[str] | None = None) -> None:
     from agenthandover_worker.profile_builder import ProfileBuilder
     from agenthandover_worker.pattern_detector import PatternDetector
     from agenthandover_worker.constraint_manager import ConstraintManager
-    from agenthandover_worker.decision_extractor import DecisionExtractor
     from agenthandover_worker.execution_monitor import ExecutionMonitor
     from agenthandover_worker.correction_detector import CorrectionDetector
     from agenthandover_worker.trust_advisor import TrustAdvisor
@@ -4492,7 +4321,6 @@ def main(argv: list[str] | None = None) -> None:
     from agenthandover_worker.lifecycle_manager import LifecycleManager
     from agenthandover_worker.procedure_curator import ProcedureCurator
     from agenthandover_worker.runtime_validator import RuntimeValidator
-    from agenthandover_worker.escalation_handler import EscalationHandler
     from agenthandover_worker.config_validator import ConfigValidator
     from agenthandover_worker.ops_telemetry import OpsTelemetry, PipelineMetrics
 
@@ -4589,15 +4417,11 @@ def main(argv: list[str] | None = None) -> None:
     if activity_classifier is not None:
         activity_classifier._llm_reasoner = llm_reasoner
 
-    decision_extractor = DecisionExtractor(knowledge_base, llm_reasoner=llm_reasoner)
-
     # Phase 4: Execution monitoring, correction detection, trust advisor
     runtime_validator = None
-    escalation_handler = None
     if feature_flags["runtime_validation"]:
         runtime_validator = RuntimeValidator(knowledge_base)
-        escalation_handler = EscalationHandler(kb=knowledge_base, lifecycle_manager=lifecycle_manager)
-    execution_monitor = ExecutionMonitor(knowledge_base, escalation_handler=escalation_handler)
+    execution_monitor = ExecutionMonitor(knowledge_base)
     correction_detector = CorrectionDetector(knowledge_base, llm_reasoner=llm_reasoner)
     trust_advisor = TrustAdvisor(knowledge_base)
     session_linker = SessionLinker(knowledge_base, llm_reasoner=llm_reasoner, vector_kb=vector_kb)
@@ -4691,7 +4515,7 @@ def main(argv: list[str] | None = None) -> None:
     pruner = NegativeDemoPruner()
     translator = SemanticTranslator()
     scorer = ConfidenceScorer()
-    # vlm_queue + llm_reasoner already created above (before decision_extractor)
+    # vlm_queue + llm_reasoner already created above
     index_generator = IndexGenerator()
     # Create export adapter based on config
     skill_md_writer = None
@@ -4778,24 +4602,8 @@ def main(argv: list[str] | None = None) -> None:
         if any(vlm_status.values()):
             logger.info("VLM backend(s) detected — attempting initialization")
             try:
-                # Check if the configured model name uses Ollama naming
-                # convention (e.g. "qwen3.5:2b") vs HuggingFace repo IDs
-                # (e.g. "mlx-community/llava-1.5-7b-4bit").  Ollama names
-                # contain ":" which is invalid for HuggingFace repo IDs,
-                # so we prefer the Ollama backend when that format is used.
-                config_model_hint = _read_vlm_config_field("model", "")
-                _model_is_ollama_style = ":" in config_model_hint
-
-                if _model_is_ollama_style and vlm_status["ollama"]:
+                if vlm_status["ollama"]:
                     backend_type = VLMBackend.OLLAMA
-                elif vlm_status["mlx_vlm"] and not _model_is_ollama_style:
-                    backend_type = VLMBackend.MLX_VLM
-                elif vlm_status["ollama"]:
-                    backend_type = VLMBackend.OLLAMA
-                elif vlm_status["mlx_vlm"]:
-                    backend_type = VLMBackend.MLX_VLM
-                elif vlm_status["llama_cpp"]:
-                    backend_type = VLMBackend.LLAMA_CPP
                 elif vlm_status.get("openai_compat"):
                     base_url = os.environ.get("AGENTHANDOVER_VLM_BASE_URL", "")
                     _local_prefixes = (
@@ -5078,14 +4886,10 @@ def main(argv: list[str] | None = None) -> None:
     sop_auto_approve = sop_config["auto_approve"]
     logger.info("SOP auto_approve: %s", sop_auto_approve)
 
-    # Initialize scheduler gate (GAP 5) and deep scanner (GAP 6)
+    # Initialize scheduler gate (GAP 5)
     # Read idle_jobs config from config.toml if available
     _idle_cfg = _read_idle_jobs_config()
     idle_gate = IdleJobGate(SchedulerConfig(**_idle_cfg))
-    deep_scanner = DeepScanner()
-
-    # Single-thread pool for background deep scan (non-blocking privacy check)
-    deep_scan_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="deep-scan")
 
     # Cumulative counters for status reporting
     started_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -5266,18 +5070,6 @@ def main(argv: list[str] | None = None) -> None:
                 # Refresh curation queue after any curation action so UI reflects changes
                 _write_curation_queue(procedure_curator, force=True)
 
-                # Execution feedback triggers
-                _exec_status_dir = _status_dir()
-                _process_execution_start_trigger(
-                    _exec_status_dir, execution_monitor, knowledge_base,
-                )
-                _process_execution_step_trigger(
-                    _exec_status_dir, execution_monitor,
-                )
-                _process_execution_complete_trigger(
-                    _exec_status_dir, execution_monitor, knowledge_base,
-                )
-
                 # Process any completed focus recording sessions first.
                 # Use v2 VLM pipeline when available (semantic SOPs from
                 # screen annotations), fall back to v1 (episode builder +
@@ -5424,33 +5216,6 @@ def main(argv: list[str] | None = None) -> None:
 
                     # Reset consecutive error counter after successful processing
                     consecutive_errors = 0
-
-                    # --- Heavy jobs gated behind idle window ---
-                    # VLM inference and deep privacy scans are CPU/GPU
-                    # intensive and deferred to the idle window
-                    # (default 01:00-05:00, AC power, low CPU).
-                    gate_result = idle_gate.check()
-                    if gate_result.can_run:
-                        # Run Tier 2 deep scan in background (non-blocking)
-                        text_artifacts = []
-                        for ev in unprocessed:
-                            window_json = ev.get("window_json")
-                            if window_json:
-                                text_artifacts.append({
-                                    "id": ev.get("id", "unknown"),
-                                    "text": window_json,
-                                })
-                            metadata_json = ev.get("metadata_json")
-                            if metadata_json:
-                                text_artifacts.append({
-                                    "id": ev.get("id", "unknown"),
-                                    "text": metadata_json,
-                                })
-
-                        if text_artifacts:
-                            deep_scan_pool.submit(
-                                _run_deep_scan, deep_scanner, text_artifacts
-                            )
 
                 # Process pending VLM jobs only in idle window
                 if pending_vlm and vlm_worker is not None:
@@ -5696,46 +5461,9 @@ def main(argv: list[str] | None = None) -> None:
                                 chains = pattern_detector.detect_chains()
                                 if chains:
                                     pattern_detector.update_chains(chains)
-                                # Decision extraction for procedures with 2+ observations
-                                try:
-                                    all_procs = knowledge_base.list_procedures()
-                                    total_decisions = 0
-                                    for proc in all_procs:
-                                        slug = proc.get("id", proc.get("slug", ""))
-                                        if not slug:
-                                            continue
-                                        ev = proc.get("evidence", {})
-                                        obs_count = ev.get("total_observations", 0)
-                                        if obs_count < 2:
-                                            continue
-                                        # Build observation dicts from evidence + steps
-                                        obs_records = ev.get("observations", [])
-                                        proc_steps = proc.get("steps", [])
-                                        if not proc_steps:
-                                            continue
-                                        observations = [
-                                            {"steps": proc_steps, "context": rec}
-                                            for rec in obs_records
-                                        ]
-                                        proc_evidence = proc.get("extracted_evidence")
-                                        dsets = decision_extractor.extract_decisions(
-                                            slug, observations,
-                                            evidence=proc_evidence,
-                                        )
-                                        if dsets:
-                                            decision_extractor.save_decisions(dsets)
-                                            total_decisions += len(dsets)
-                                    if total_decisions:
-                                        logger.info(
-                                            "Decision extraction: %d decision set(s) saved",
-                                            total_decisions,
-                                        )
-                                except Exception:
-                                    logger.debug(
-                                        "Decision extraction failed", exc_info=True
-                                    )
                                 # Correction-to-guardrail learning
                                 try:
+                                    all_procs = knowledge_base.list_procedures()
                                     guardrail_count = 0
                                     for proc in all_procs:
                                         _cs = proc.get("id", proc.get("slug", ""))
@@ -6079,9 +5807,6 @@ def main(argv: list[str] | None = None) -> None:
             logger.info("Query API server stopped")
         except Exception:
             pass
-
-    # Wait for any in-flight deep scan to finish before exit
-    deep_scan_pool.shutdown(wait=True)
 
     # Remove PID file and status file on clean shutdown
     try:

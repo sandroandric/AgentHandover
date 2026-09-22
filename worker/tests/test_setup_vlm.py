@@ -23,12 +23,7 @@ class TestCheckVLMAvailable:
     def test_returns_dict_with_expected_keys(self) -> None:
         result = check_vlm_available()
         assert isinstance(result, dict)
-        assert "mlx_vlm" in result
-        assert "llama_cpp" in result
-        assert "ollama" in result
-        assert "openai_compat" in result
-        assert isinstance(result["mlx_vlm"], bool)
-        assert isinstance(result["llama_cpp"], bool)
+        assert set(result) == {"ollama", "openai_compat"}
         assert isinstance(result["ollama"], bool)
         assert isinstance(result["openai_compat"], bool)
 
@@ -39,43 +34,31 @@ class TestPromptInstall:
         devnull = open("/dev/null")
         try:
             monkeypatch.setattr("sys.stdin", devnull)
-            result = prompt_install("apple_silicon", {"mlx_vlm": False, "llama_cpp": False})
+            result = prompt_install("apple_silicon", {"ollama": False, "openai_compat": False})
             assert result is False
         finally:
             devnull.close()
 
-    def test_already_installed_skips(self, capsys) -> None:
-        """If the recommended backend is already installed, skip prompt."""
+    def test_already_reachable_skips(self, capsys) -> None:
+        """If Ollama is already reachable, skip the install prompt."""
         result = prompt_install(
-            "apple_silicon", {"mlx_vlm": True, "llama_cpp": False}
+            "apple_silicon", {"ollama": True, "openai_compat": False}
         )
         assert result is False
         captured = capsys.readouterr()
-        assert "already installed" in captured.out
-
-    def test_non_apple_already_installed_skips(self, capsys) -> None:
-        result = prompt_install(
-            "linux", {"mlx_vlm": False, "llama_cpp": True}
-        )
-        assert result is False
-        captured = capsys.readouterr()
-        assert "already installed" in captured.out
+        assert "already reachable" in captured.out
 
 
 class TestInstallVLM:
     def test_dry_run_builds_correct_command(self, capsys) -> None:
-        cmd = install_vlm("vlm-apple", dry_run=True)
+        cmd = install_vlm("vlm-ollama", dry_run=True)
         assert cmd[0] == sys.executable
         assert cmd[1] == "-m"
         assert cmd[2] == "pip"
         assert cmd[3] == "install"
-        assert "agenthandover-worker[vlm-apple]" in cmd[4]
+        assert "agenthandover-worker[vlm-ollama]" in cmd[4]
         captured = capsys.readouterr()
         assert "Would run" in captured.out
-
-    def test_cpu_extras_dry_run(self, capsys) -> None:
-        cmd = install_vlm("vlm-cpu", dry_run=True)
-        assert "agenthandover-worker[vlm-cpu]" in cmd[4]
 
 
 class TestMain:
@@ -96,3 +79,4 @@ class TestMain:
         main(["--dry-run"])
         captured = capsys.readouterr()
         assert "Would run" in captured.out
+        assert "agenthandover-worker[vlm-ollama]" in captured.out

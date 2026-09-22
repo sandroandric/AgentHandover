@@ -100,9 +100,8 @@ _EXECUTIONS_FILE = "executions.json"
 class ExecutionMonitor:
     """Monitors agent execution of procedures and tracks outcomes."""
 
-    def __init__(self, knowledge_base, escalation_handler=None) -> None:
+    def __init__(self, knowledge_base) -> None:
         self._kb = knowledge_base
-        self._escalation = escalation_handler
         self._active_executions: dict[str, ExecutionRecord] = {}
         self._history: list[ExecutionRecord] = []
         self._load_history()
@@ -251,21 +250,6 @@ class ExecutionMonitor:
         if record.deviations:
             record.status = ExecutionStatus.DEVIATED
 
-        if self._escalation is not None and record.status == ExecutionStatus.DEVIATED:
-            try:
-                dev_detail = "; ".join(d.get("detail", "") for d in record.deviations[:3])
-                esc_result = self._escalation.handle_deviation(
-                    record.procedure_slug, execution_id, dev_detail,
-                )
-                record.metadata = record.metadata or {}
-                record.metadata["escalation"] = {
-                    "decision": esc_result.decision.value,
-                    "reason": esc_result.reason,
-                    "demoted": esc_result.demoted,
-                }
-            except Exception:
-                logger.debug("Escalation check failed", exc_info=True)
-
         self._finalize(execution_id, record)
         return record
 
@@ -281,21 +265,6 @@ class ExecutionMonitor:
         record.status = ExecutionStatus.FAILED
         record.completed_at = now
         record.error = error
-
-        # Escalation check
-        if self._escalation is not None:
-            try:
-                esc_result = self._escalation.handle_failure(
-                    record.procedure_slug, execution_id, error,
-                )
-                record.metadata = record.metadata or {}
-                record.metadata["escalation"] = {
-                    "decision": esc_result.decision.value,
-                    "reason": esc_result.reason,
-                    "demoted": esc_result.demoted,
-                }
-            except Exception:
-                logger.debug("Escalation check failed", exc_info=True)
 
         self._finalize(execution_id, record)
         return record
