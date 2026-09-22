@@ -768,6 +768,21 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def _next_poll_interval(
+    current: float, base: float, *, busy: bool, triggers_consumed: int,
+) -> float:
+    """Seconds to sleep before the next worker tick.
+
+    Work found or a consumed trigger (someone is using the app or CLI)
+    resets to *base*; an idle tick doubles, up to ``max(5, 4 * base)`` so
+    a request written after a long idle stretch is picked up within
+    seconds.
+    """
+    if busy or triggers_consumed:
+        return base
+    return min(current * 2, max(5.0, base * 4))
+
+
 def _status_dir() -> Path:
     """Return the standard data directory for status/PID files."""
     if _platform.system() == "Darwin":
@@ -4987,9 +5002,6 @@ def main(argv: list[str] | None = None) -> None:
                 )
 
         current_interval = args.poll_interval
-        # Idle backoff ceiling: low enough that an app or CLI request is
-        # picked up within a few seconds even after a long idle stretch.
-        max_interval = max(5.0, args.poll_interval * 4)
         consecutive_errors = 0
 
         # App and CLI requests arrive through the trigger spool; each kind
@@ -5153,17 +5165,17 @@ def main(argv: list[str] | None = None) -> None:
                         len(unprocessed),
                         len(pending_vlm),
                     )
-                    # Reset backoff when work is found
-                    current_interval = args.poll_interval
+                    current_interval = _next_poll_interval(
+                        current_interval, args.poll_interval,
+                        busy=True, triggers_consumed=triggers_consumed,
+                    )
                     # Reset idle log timer
                     last_idle_log_time = time.monotonic()
                 else:
                     logger.debug("Poll: nothing to do")
-                    # Exponential backoff when idle; a consumed trigger
-                    # means someone is interacting, so poll fast again.
-                    current_interval = (
-                        args.poll_interval if triggers_consumed
-                        else min(current_interval * 2, max_interval)
+                    current_interval = _next_poll_interval(
+                        current_interval, args.poll_interval,
+                        busy=False, triggers_consumed=triggers_consumed,
                     )
 
                     # Task 5: Periodic idle progress message

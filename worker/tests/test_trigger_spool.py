@@ -122,3 +122,27 @@ class TestMigrateLegacy:
             "lifecycle-promote", "merge", "drift-reviewed", "lifecycle-dismiss",
             "export",
         }
+
+
+class TestPollBackoff:
+    def test_idle_backoff_is_capped_at_four_times_the_poll_interval(self) -> None:
+        from agenthandover_worker.main import _next_poll_interval
+
+        interval = 2.0
+        for _ in range(10):
+            interval = _next_poll_interval(interval, 2.0, busy=False, triggers_consumed=0)
+        assert interval == 8.0
+
+    def test_ceiling_never_below_five_seconds(self) -> None:
+        from agenthandover_worker.main import _next_poll_interval
+
+        interval = 0.5
+        for _ in range(10):
+            interval = _next_poll_interval(interval, 0.5, busy=False, triggers_consumed=0)
+        assert interval == 5.0
+
+    def test_a_consumed_trigger_resets_the_interval(self) -> None:
+        from agenthandover_worker.main import _next_poll_interval
+
+        assert _next_poll_interval(8.0, 2.0, busy=False, triggers_consumed=1) == 2.0
+        assert _next_poll_interval(8.0, 2.0, busy=True, triggers_consumed=0) == 2.0
