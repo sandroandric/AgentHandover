@@ -117,8 +117,9 @@ def lint_sop(sop_template: dict, source: str | None = None) -> LintResult:
     if not sop_template.get("title"):
         issues.append(LintIssue("error", "title", "Missing or empty title"))
 
-    # 2. Missing or empty slug
-    if not sop_template.get("slug"):
+    # 2. Missing or empty identifier (``slug`` on a template, ``id`` on a
+    #    v3 procedure)
+    if not (sop_template.get("slug") or sop_template.get("id")):
         issues.append(LintIssue("error", "slug", "Missing or empty slug"))
 
     # 3. Missing or empty steps list

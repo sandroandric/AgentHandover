@@ -177,9 +177,13 @@ def sop_to_procedure(sop_template: dict) -> dict:
 
     now_iso = datetime.now(timezone.utc).isoformat()
 
+    identifier = sop_template.get("slug") or sop_template.get("id") or "unknown"
     procedure: dict = {
         "schema_version": PROCEDURE_SCHEMA_VERSION,
-        "id": sop_template.get("slug") or sop_template.get("id") or "unknown",
+        # Both identifiers: the KB and agents key on ``id``, the SOP-template
+        # consumers (linter, dedup, exporters) key on ``slug``.
+        "id": identifier,
+        "slug": identifier,
         "title": sop_template.get("title", "Untitled"),
         "short_title": sop_template.get("short_title", ""),
         "description": (

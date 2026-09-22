@@ -37,6 +37,15 @@ _VALID_TRANSITIONS: dict[ProcedureLifecycle, frozenset[ProcedureLifecycle]] = {
     ProcedureLifecycle.ARCHIVED: frozenset({ProcedureLifecycle.DRAFT}),
 }
 
+# The forward path a human approval walks, one valid transition at a time.
+_PROMOTION_CHAIN: tuple[ProcedureLifecycle, ...] = (
+    ProcedureLifecycle.OBSERVED,
+    ProcedureLifecycle.DRAFT,
+    ProcedureLifecycle.REVIEWED,
+    ProcedureLifecycle.VERIFIED,
+    ProcedureLifecycle.AGENT_READY,
+)
+
 # States eligible for auto-demotion to STALE when freshness drops
 _AUTO_STALE_STATES = frozenset({ProcedureLifecycle.DRAFT, ProcedureLifecycle.AGENT_READY})
 _MIN_FRESHNESS = 0.3
@@ -109,6 +118,52 @@ class LifecycleManager:
             slug, current.value, to_state.value, trigger, actor,
         )
         return True
+
+    def promote(
+        self, slug: str, to_state: ProcedureLifecycle,
+        trigger: str, actor: str = "human", reason: str = "",
+    ) -> list[ProcedureLifecycle]:
+        """Move *slug* to *to_state*, walking the promotion chain if needed.
+
+        A target further along ``OBSERVED -> DRAFT -> REVIEWED -> VERIFIED
+        -> AGENT_READY`` is reached one valid transition at a time, each
+        recorded in the history; from STALE or ARCHIVED the walk enters the
+        chain at the furthest state a valid transition reaches.  Any other
+        target is a single transition.  Returns the states entered (empty
+        when already there).  Raises ``InvalidTransitionError`` when no
+        valid step exists; steps already taken stay applied and recorded.
+        """
+        entered: list[ProcedureLifecycle] = []
+        if self._kb.get_procedure(slug) is None:
+            raise InvalidTransitionError(f"Procedure not found: {slug}")
+        current = self.get_state(slug)
+        if to_state == current:
+            return entered
+        if to_state not in _PROMOTION_CHAIN:
+            self.transition(slug, to_state, trigger=trigger, actor=actor, reason=reason)
+            return [to_state]
+
+        target_idx = _PROMOTION_CHAIN.index(to_state)
+        while current != to_state:
+            reachable = _VALID_TRANSITIONS.get(current, frozenset())
+            if to_state in reachable:
+                step = to_state
+            else:
+                ahead = [
+                    s for s in _PROMOTION_CHAIN[:target_idx]
+                    if s in reachable
+                    and (current not in _PROMOTION_CHAIN
+                         or _PROMOTION_CHAIN.index(s) > _PROMOTION_CHAIN.index(current))
+                ]
+                if not ahead:
+                    raise InvalidTransitionError(
+                        f"Cannot promote {slug} from {current.value} to {to_state.value}"
+                    )
+                step = ahead[-1]
+            self.transition(slug, step, trigger=trigger, actor=actor, reason=reason)
+            entered.append(step)
+            current = step
+        return entered
 
     def can_transition(self, slug: str, to_state: ProcedureLifecycle) -> bool:
         """Check if transition is valid without mutating."""
