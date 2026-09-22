@@ -277,11 +277,10 @@ def _is_noise_frame(frame: AnnotatedFrame) -> bool:
     Uses activity_type/learnability when available (Phase 1+),
     falls back to is_workflow for legacy events.
     """
-    if frame.activity_type:
-        return (
-            frame.activity_type in ("entertainment", "dead_time")
-            or frame.learnability == "ignore"
-        )
+    if frame.learnability == "ignore":
+        return True
+    if frame.activity_type and frame.activity_type != "unknown":
+        return frame.activity_type in ("entertainment", "dead_time")
     return not frame.is_workflow
 
 

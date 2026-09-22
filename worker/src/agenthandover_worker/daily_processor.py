@@ -116,13 +116,13 @@ def _extract_is_workflow(ann: dict) -> bool:
     """Extract workflow relevance from annotation.
 
     Uses activity_type if present (work/research/communication/setup = True),
-    falls back to is_workflow for backward compatibility.
+    falls back to is_workflow when it is absent or "unknown".
     """
     tc = ann.get("task_context")
     if isinstance(tc, dict):
         # Prefer activity_type if available
         activity_type = tc.get("activity_type", "")
-        if activity_type:
+        if activity_type and activity_type != "unknown":
             return activity_type in ("work", "research", "communication", "setup")
         # Fallback to is_workflow
         val = tc.get("is_workflow", False)

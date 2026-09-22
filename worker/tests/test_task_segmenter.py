@@ -19,6 +19,7 @@ from agenthandover_worker.task_segmenter import (
     TaskSegmenter,
     _cluster_frames,
     _compute_embeddings,
+    _is_noise_frame,
     _cosine_similarity,
     _make_segment,
     _split_into_contiguous_segments,
@@ -1010,3 +1011,25 @@ class TestStableClusterLabels:
         # call_count may be 1 (no new call) or at most 2 if hash differed
         for s in result.segments:
             assert s.task_label == "Expense Report Workflow"
+
+
+class TestIsNoiseFrame:
+    """The classifier's "unknown" defers to the annotator's is_workflow."""
+
+    @staticmethod
+    def _frame(activity_type: str, learnability: str, is_workflow: bool) -> AnnotatedFrame:
+        return AnnotatedFrame(
+            event_id="e1", timestamp="2026-03-04T10:00:00Z", annotation={},
+            is_workflow=is_workflow, activity_type=activity_type,
+            learnability=learnability,
+        )
+
+    def test_unknown_follows_is_workflow(self):
+        assert _is_noise_frame(self._frame("unknown", "context_only", True)) is False
+        assert _is_noise_frame(self._frame("unknown", "context_only", False)) is True
+
+    def test_classified_types(self):
+        assert _is_noise_frame(self._frame("entertainment", "ignore", True)) is True
+        assert _is_noise_frame(self._frame("work", "execution_relevant", False)) is False
+        assert _is_noise_frame(self._frame("work", "ignore", True)) is True
+        assert _is_noise_frame(self._frame("", "", False)) is True

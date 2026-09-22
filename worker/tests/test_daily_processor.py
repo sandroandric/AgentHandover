@@ -223,6 +223,12 @@ class TestExtractIsWorkflow:
     def test_missing(self) -> None:
         assert _extract_is_workflow({}) is False
 
+    def test_unknown_activity_type_defers_to_is_workflow(self) -> None:
+        ann = {"task_context": {"activity_type": "unknown", "is_workflow": True}}
+        assert _extract_is_workflow(ann) is True
+        ann = {"task_context": {"activity_type": "unknown", "is_workflow": False}}
+        assert _extract_is_workflow(ann) is False
+
 
 class TestMinutesBetween:
 
