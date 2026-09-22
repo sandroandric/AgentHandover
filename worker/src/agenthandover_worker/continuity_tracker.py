@@ -105,6 +105,10 @@ _GAP_RESTART = 86400       # > 24 h
 _GAP_PAUSED = 14400        # > 4 h  -> state = "paused"
 _GAP_COMPLETED = 86400     # > 24 h -> state = "completed"
 
+# Spans last seen longer ago than this are dropped from
+# continuity_spans.json (the six-week recurrence window).
+SPAN_RETENTION_DAYS = 42
+
 
 # ---------------------------------------------------------------------------
 # ContinuityTracker
@@ -142,12 +146,14 @@ class ContinuityTracker:
     ) -> list[ContinuitySpan]:
         """Build or extend a continuity graph from new segments.
 
-        For each segment (processed in chronological order by start_time):
+        For each segment (processed in chronological order by start_time)
+        that no span already contains:
 
         1. Compute a representative embedding (average of frame embeddings).
-        2. Compare against all active/paused/uncertain spans.
-        3. Pick the best-matching span (highest confidence).
-        4. If best confidence >= ``uncertain_threshold`` AND type != NEW_TASK:
+        2. Classify it against all active/paused/uncertain spans; a
+           NEW_TASK edge rules that span out as a candidate.
+        3. Pick the best-matching candidate (highest confidence).
+        4. If best confidence >= ``uncertain_threshold``:
            - CONTINUE / RESUME / RESTART: extend the existing span.
            - BRANCH: create a new span with ``parent_span_id`` pointing
              to the matched span.
@@ -155,7 +161,10 @@ class ContinuityTracker:
            was a close-but-insufficient candidate).
 
         After all segments are processed the method updates span states
-        based on elapsed time and optionally matches procedures.
+        based on elapsed time, drops spans last seen more than
+        ``SPAN_RETENTION_DAYS`` before the newest activity, and optionally
+        matches procedures.
+        Running it again over the same segments ingests nothing twice.
 
         Args:
             segments: New :class:`TaskSegment` objects to integrate.
@@ -170,15 +179,26 @@ class ContinuityTracker:
         else:
             spans = list(existing_spans)
 
+        # The passive-discovery loop re-segments an overlapping window many
+        # times a day; a segment already recorded in a span must neither
+        # extend that span again nor start a new one.
+        ingested = {sid for span in spans for sid in span.segments}
+
         # Process segments in chronological order
         sorted_segments = sorted(
             segments, key=lambda s: _timestamp_to_epoch(s.start_time)
         )
 
         for segment in sorted_segments:
+            if segment.segment_id in ingested:
+                continue
+            ingested.add(segment.segment_id)
+
             seg_embedding = self._compute_representative_embedding(segment)
 
-            # Find best matching span among eligible states
+            # Find best matching span among eligible states.  A NEW_TASK
+            # edge means "this span is not a candidate" (its confidence is
+            # an inverted score), so it never competes with real matches.
             best_edge: ContinuityEdge | None = None
             best_span: ContinuitySpan | None = None
 
@@ -186,8 +206,9 @@ class ContinuityTracker:
                 if span.state not in ("active", "paused", "uncertain"):
                     continue
 
-                # Temporarily attach the segment embedding for classification
                 edge = self.classify_relationship(segment, span)
+                if edge.continuity_type is ContinuityType.NEW_TASK:
+                    continue
 
                 if best_edge is None or edge.confidence > best_edge.confidence:
                     best_edge = edge
@@ -197,7 +218,6 @@ class ContinuityTracker:
                 best_edge is not None
                 and best_span is not None
                 and best_edge.confidence >= self._uncertain_threshold
-                and best_edge.continuity_type != ContinuityType.NEW_TASK
             ):
                 if best_edge.continuity_type == ContinuityType.BRANCH:
                     # Create a child span linked to the parent
@@ -218,25 +238,23 @@ class ContinuityTracker:
                     new_span.representative_embedding = list(seg_embedding)
 
                 # Mark as uncertain if there was a close candidate
-                if (
-                    best_edge is not None
-                    and best_edge.confidence > 0.0
-                    and best_edge.continuity_type != ContinuityType.NEW_TASK
-                ):
+                if best_edge is not None and best_edge.confidence > 0.0:
                     new_span.state = "uncertain"
 
                 spans.append(new_span)
 
-        # Post-processing: update states based on current time
+        # Post-processing: update states based on current time, and drop
+        # spans that fell out of the retention window.
         now_iso = datetime.now(timezone.utc).isoformat()
         self._update_span_states(spans, now_iso)
+        spans = self._prune_expired_spans(spans)
 
         # Match procedures if a matcher is available
         if self._matcher is not None:
             for span in spans:
                 if not span.matched_procedure_candidates:
                     try:
-                        candidates = self._matcher.match(span.goal_summary)
+                        candidates = self._matcher.match_span(span)
                         span.matched_procedure_candidates = candidates
                     except Exception:
                         logger.debug(
@@ -402,8 +420,10 @@ class ContinuityTracker:
         span.segments.append(segment.segment_id)
         span.edges.append(edge)
 
-        # Update last_seen
-        if segment.end_time:
+        # Update last_seen (never move it backwards)
+        if segment.end_time and _timestamp_to_epoch(segment.end_time) >= _timestamp_to_epoch(
+            span.last_seen,
+        ):
             span.last_seen = segment.end_time
 
         # Update total duration (add this segment's internal duration)
@@ -511,6 +531,27 @@ class ContinuityTracker:
             elif gap > _GAP_PAUSED and span.state == "active":
                 span.state = "paused"
 
+    @staticmethod
+    def _prune_expired_spans(
+        spans: list[ContinuitySpan],
+    ) -> list[ContinuitySpan]:
+        """Drop spans last seen more than ``SPAN_RETENTION_DAYS`` before
+        the most recent activity in any span.
+
+        The window is anchored on observed activity rather than the wall
+        clock, so time away from the machine does not erase history.
+        Spans with an unparseable ``last_seen`` are kept.
+        """
+        last_seen = [_timestamp_to_epoch(span.last_seen) for span in spans]
+        newest = max(last_seen, default=0.0)
+        if not newest:
+            return spans
+        cutoff = newest - SPAN_RETENTION_DAYS * 86400
+        return [
+            span for span, seen in zip(spans, last_seen)
+            if not seen or seen >= cutoff
+        ]
+
     # ------------------------------------------------------------------
     # Persistence
     # ------------------------------------------------------------------
@@ -568,11 +609,15 @@ class ContinuityTracker:
         logger.debug("Loaded %d continuity spans from %s", len(spans), path)
         return spans
 
-    def save_spans(self, spans: list[ContinuitySpan]) -> None:
+    def save_spans(self, spans: list[ContinuitySpan]) -> bool:
         """Persist continuity spans to disk using atomic write.
 
         Serializes all spans (including edges with enum values) to
-        ``{kb_root}/observations/continuity_spans.json``.
+        ``{kb_root}/observations/continuity_spans.json``.  When the spans
+        on disk are already identical nothing is written.
+
+        Returns:
+            True if the file was written.
         """
         serialized_spans = []
         for span in spans:
@@ -586,15 +631,27 @@ class ContinuityTracker:
                     edge_dict["continuity_type"] = ct.value
             serialized_spans.append(span_dict)
 
+        # Normalise through JSON (tuples -> lists) so it compares equal to
+        # what a previous save left on disk.
+        serialized_spans = json.loads(json.dumps(serialized_spans))
+        path = self._kb.root / "observations" / _CONTINUITY_FILE
+        if path.is_file():
+            try:
+                with open(path) as f:
+                    if json.load(f).get("spans") == serialized_spans:
+                        return False
+            except (json.JSONDecodeError, OSError, AttributeError):
+                pass  # unreadable or malformed: overwrite it
+
         data = {
             "spans": serialized_spans,
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
-        path = self._kb.root / "observations" / _CONTINUITY_FILE
         self._kb.atomic_write_json(path, data)
         logger.info(
             "Saved %d continuity spans to %s", len(spans), path,
         )
+        return True
 
     # ------------------------------------------------------------------
     # Private helpers
