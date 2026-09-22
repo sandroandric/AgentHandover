@@ -196,7 +196,8 @@ class TestGenerateQuestions:
         assert len(questions) == 1
         assert questions[0].question == "Valid question?"
 
-    def test_empty_default_gets_placeholder(self):
+    def test_empty_default_stays_empty(self):
+        """No invented guess: the app shows its own hint when there is none."""
         llm_response = {
             "questions": [
                 {"question": "What?", "category": "strategy", "context": "ctx", "default": ""},
@@ -206,7 +207,7 @@ class TestGenerateQuestions:
         questioner = FocusQuestioner(llm_reasoner=reasoner)
 
         questions = questioner.generate_questions(_make_procedure())
-        assert questions[0].default == "Not specified"
+        assert questions[0].default == ""
 
     def test_llm_called_with_correct_caller(self):
         llm_response = {"questions": []}
@@ -440,21 +441,41 @@ class TestMergeAnswers:
         questioner.merge_answers(proc, qa)
         assert proc.get("strategy", "") == original_strategy
 
-    def test_merge_empty_answer_uses_default(self):
+    def test_merge_empty_answer_is_unanswered_never_the_default(self):
         questions = [
             FocusQuestion(
                 question="Goal?",
                 category="strategy",
                 context="ctx",
                 default="Browse and engage",
-            )
+                step_indexes=[0],
+            ),
+            FocusQuestion(
+                question="Which subreddit?",
+                category="target",
+                context="ctx",
+                default="r/assumed",
+                step_indexes=[0],
+            ),
         ]
-        qa = self._make_qa(questions, {0: ""})
+        # Question 0 left blank, question 1 absent from the answers.
+        qa = self._make_qa(questions, {0: "  "})
         reasoner = _make_reasoner()
         questioner = FocusQuestioner(llm_reasoner=reasoner)
 
-        result = questioner.merge_answers(_make_procedure(), qa)
-        assert "Browse and engage" in result["strategy"]
+        proc = _make_procedure()
+        proc["strategy"] = ""
+        result = questioner.merge_answers(proc, qa)
+        assert result["strategy"] == ""
+        assert result["steps"] == proc["steps"]
+        assert result["agent_clarifications"] == [
+            {"category": "strategy", "question": "Goal?", "answer": "",
+             "status": "unanswered", "context": "ctx"},
+            {"category": "target", "question": "Which subreddit?", "answer": "",
+             "status": "unanswered", "context": "ctx"},
+        ]
+        assert "Browse and engage" not in json.dumps(result)
+        assert "r/assumed" not in json.dumps(result)
 
     def test_merge_out_of_range_index_ignored(self):
         questions = [
@@ -685,7 +706,7 @@ class TestParseQAResult:
         assert result.answers[0] == "Answer one"
         assert result.answers[1] == "Answer two"
 
-    def test_parse_skipped_uses_defaults(self):
+    def test_parse_skipped_records_no_answers(self):
         data = {
             "session_id": "sess-1",
             "slug": "test",
@@ -697,7 +718,15 @@ class TestParseQAResult:
 
         result = parse_qa_result_from_file(data)
         assert result is not None
-        assert result.answers[0] == "Default 1"
+        assert result.answers == {}
+        assert result.questions[0].default == "Default 1"  # kept as the guess only
+
+        merged = FocusQuestioner(llm_reasoner=_make_reasoner()).merge_answers(
+            _make_procedure(), result,
+        )
+        assert merged["agent_clarifications"][0]["status"] == "unanswered"
+        assert merged["agent_clarifications"][0]["answer"] == ""
+        assert "Default 1" not in json.dumps(merged)
 
     def test_parse_pending_returns_none(self):
         data = {

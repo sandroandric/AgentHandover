@@ -57,6 +57,12 @@ def procedure_to_sop_template(procedure: dict) -> dict:
             var["example"] = inp["example"]
         if inp.get("default") is not None:
             var["default"] = inp["default"]
+        for key in ("required", "choices", "validation"):
+            if key in inp:
+                var[key] = inp[key]
+        # sop_to_procedure maps ``sensitive`` back to ``credential``.
+        if inp.get("credential"):
+            var["sensitive"] = True
         variables.append(var)
 
     return {
@@ -64,6 +70,7 @@ def procedure_to_sop_template(procedure: dict) -> dict:
         "title": procedure.get("title", "Untitled"),
         "short_title": procedure.get("short_title", ""),
         "description": procedure.get("description", ""),
+        "goal": procedure.get("goal") or "",
         "tags": procedure.get("tags", []),
         "steps": steps,
         "variables": variables,
