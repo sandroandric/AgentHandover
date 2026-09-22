@@ -113,7 +113,7 @@ def _event_with_screenshot(tmp_path: Path, event_id: str = "evt-1", **extra) -> 
         "timestamp": "2026-09-22T10:00:00.000Z",
         "artifact_ids_json": '["shot"]',
         "metadata_json": json.dumps(metadata),
-        "window_json": json.dumps({"app_name": "Google Chrome", "title": "Inbox"}),
+        "window_json": json.dumps({"app_id": "pid:812:Google Chrome", "title": "Inbox"}),
         "annotation_status": "pending",
     }
     event.update(extra)
@@ -169,7 +169,7 @@ class TestAnnotationRequest:
         # prefix); the per-frame prompt holds only frame-specific text.
         assert body["system"] == annotation_system_prompt(profile.ann_system)
         assert "task_context" not in body["prompt"]
-        assert "WINDOW: Google Chrome — Inbox" in body["prompt"]
+        assert "WINDOW (authoritative; copy, do not infer):\napp: Google Chrome\ntitle: Inbox\n" in body["prompt"]
 
     @pytest.mark.parametrize("model", sorted(_PROFILES))
     def test_every_profile_uses_the_annotation_budget(self, model):
@@ -244,7 +244,7 @@ class TestAnnotationPrompt:
             for personal in ("sandro", "andric", "incentive.ae", "sandric"):
                 assert personal not in low
         assert "may be incomplete or misrecognised" in system
-        assert "prefer the WINDOW header for the app and URL" in system
+        assert "authoritative" in system and "do not infer them" in system
 
     def test_worst_case_prompt_stays_within_the_token_budget(self):
         """System + per-frame text with a full OCR block and three long
@@ -269,7 +269,9 @@ class TestAnnotationPrompt:
         ocr_text, record = sa._select_ocr_text(event)
         assert record and len(ocr_text) <= sa.OCR_PROMPT_MAX_CHARS
         prompt = build_annotation_prompt(
-            recent, ocr_text=ocr_text, window="Google Chrome — " + "t" * 400,
+            recent, ocr_text=ocr_text,
+            window={"app_id": "com.google.Chrome", "title": "t" * 400},
+            app_state={"properties": {"url": "https://mail.example.com/" + "u" * 400}},
             ocr_truncated=True,
         )
         total = len(annotation_system_prompt(get_profile("gemma4:12b-it-qat").ann_system)) + len(prompt)

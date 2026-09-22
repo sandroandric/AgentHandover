@@ -122,7 +122,7 @@ def _insert_focus_events(
                 event_id,
                 f"2026-03-03T10:00:{i:02d}Z",
                 '{"DwellSnapshot":{}}',
-                '{"app_bundle_id":"com.google.Chrome","title":"Example"}',
+                '{"app_id":"com.google.Chrome","title":"Example"}',
                 metadata,
                 ann_status,
                 ann_json,
@@ -1069,7 +1069,7 @@ class TestClipboardAttach:
                 "id": "snap-1-source",  # user is here when they press Cmd+C
                 "kind_json": json.dumps({"type": "DwellSnapshot"}),
                 "window_json": json.dumps({
-                    "app_name": "Comet",
+                    "app_id": "pid:501:Comet",
                     "title": "Hacker News",
                 }),
                 "metadata_json": "{}",
@@ -1089,7 +1089,7 @@ class TestClipboardAttach:
                 "id": "snap-2-after",  # user has switched to Gmail
                 "kind_json": json.dumps({"type": "DwellSnapshot"}),
                 "window_json": json.dumps({
-                    "app_name": "Comet",
+                    "app_id": "pid:501:Comet",
                     "title": "Gmail",
                 }),
                 "metadata_json": "{}",

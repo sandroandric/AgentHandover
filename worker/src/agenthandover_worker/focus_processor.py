@@ -15,6 +15,7 @@ import json
 import logging
 from pathlib import Path
 
+from agenthandover_worker.event_helpers import display_name, parse_json_field
 from agenthandover_worker.scene_annotator import SceneAnnotator
 from agenthandover_worker.frame_differ import FrameDiffer
 from agenthandover_worker.sop_generator import SOPGenerator, GeneratedSOP
@@ -262,29 +263,17 @@ class FocusProcessor:
 
     def _is_own_event(self, event: dict) -> bool:
         """Check whether an event originates from AgentHandover's own UI."""
-        window_json_raw = event.get("window_json", "")
-        if not window_json_raw:
+        window = parse_json_field(event, "window_json")
+        if not window:
             return False
 
-        try:
-            window = (
-                json.loads(window_json_raw)
-                if isinstance(window_json_raw, str)
-                else window_json_raw
-            )
-        except (json.JSONDecodeError, TypeError):
-            return False
-
-        if not isinstance(window, dict):
-            return False
-
-        app_name = str(window.get("app_name", "")).lower()
-        bundle_id = str(window.get("app_bundle_id", "")).lower()
+        # ``app_id`` is ``pid:<pid>:<owner name>`` or a bundle id.
+        app_id = str(window.get("app_id", "")).lower()
         title = str(window.get("title", "")).lower()
 
         # Check app name / bundle ID
         for pattern in self._OWN_APP_PATTERNS:
-            if pattern in app_name or pattern in bundle_id:
+            if pattern in app_id:
                 return True
 
         # Check window title
@@ -373,23 +362,9 @@ class FocusProcessor:
             source_location = ""
             for orig_idx, evt in non_clipboard:
                 if evt.get("id", "") == target_id:
-                    win_raw = evt.get("window_json", "")
-                    try:
-                        win = (
-                            json.loads(win_raw)
-                            if isinstance(win_raw, str)
-                            else win_raw
-                        )
-                        if isinstance(win, dict):
-                            source_app = str(
-                                win.get("app_name", "")
-                                or win.get("app_bundle_id", "")
-                            )
-                            source_location = str(
-                                win.get("title", "") or win.get("url", "")
-                            )
-                    except (json.JSONDecodeError, TypeError):
-                        pass
+                    win = parse_json_field(evt, "window_json")
+                    source_app = display_name(win.get("app_id"))
+                    source_location = str(win.get("title") or "")
                     break
             if source_app:
                 clip_meta["source_app"] = source_app

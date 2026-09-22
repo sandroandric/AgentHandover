@@ -9,6 +9,7 @@ raw event rows should import from here instead of reimplementing.
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timezone
 
 
@@ -134,3 +135,91 @@ def parse_timestamp(ts: str | int | float | None) -> datetime | None:
         return datetime.fromisoformat(cleaned)
     except (ValueError, TypeError):
         return None
+
+
+def parse_json_field(event: dict, key: str) -> dict:
+    """``event[key]`` as a dict (the column's JSON text parsed), or ``{}``."""
+    raw = event.get(key)
+    if isinstance(raw, dict):
+        return raw
+    if not raw:
+        return {}
+    try:
+        value = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+# Bundle id -> display name.  The first block mirrors the daemon's
+# AppleScript-queryable apps (``KNOWN_APPS`` in
+# ``crates/daemon/src/platform/applescript_bridge.rs``); the rest are common
+# apps whose bundle id reaches ``window_json.app_id`` (the Chrome extension
+# writes ``com.google.Chrome``) or ``metadata.app_state.app_id``.
+KNOWN_APPS: dict[str, str] = {
+    "com.apple.finder": "Finder",
+    "com.apple.mail": "Mail",
+    "com.apple.Notes": "Notes",
+    "com.apple.iCal": "Calendar",
+    "com.apple.MobileSMS": "Messages",
+    "com.apple.Safari": "Safari",
+    "com.apple.Preview": "Preview",
+    "com.apple.TextEdit": "TextEdit",
+    "com.apple.reminders": "Reminders",
+    "com.apple.AddressBook": "Contacts",
+    # Beyond the AppleScript set.
+    "com.google.Chrome": "Google Chrome",
+    "com.google.Chrome.canary": "Google Chrome Canary",
+    "company.thebrowser.Browser": "Arc",
+    "com.brave.Browser": "Brave Browser",
+    "com.microsoft.edgemac": "Microsoft Edge",
+    "org.mozilla.firefox": "Firefox",
+    "com.tinyspeck.slackmacgap": "Slack",
+    "com.microsoft.VSCode": "Visual Studio Code",
+    "com.apple.Terminal": "Terminal",
+    "com.googlecode.iterm2": "iTerm2",
+    "com.apple.dt.Xcode": "Xcode",
+    "com.apple.systempreferences": "System Settings",
+    "com.apple.iWork.Numbers": "Numbers",
+    "com.apple.iWork.Pages": "Pages",
+    "com.apple.iWork.Keynote": "Keynote",
+    "com.microsoft.Excel": "Microsoft Excel",
+    "com.microsoft.Word": "Microsoft Word",
+    "com.microsoft.Powerpoint": "Microsoft PowerPoint",
+    "com.microsoft.Outlook": "Microsoft Outlook",
+    "com.microsoft.teams2": "Microsoft Teams",
+    "us.zoom.xos": "zoom.us",
+    "notion.id": "Notion",
+    "com.figma.Desktop": "Figma",
+    "com.hnc.Discord": "Discord",
+    "com.spotify.client": "Spotify",
+}
+_KNOWN_APPS_LOWER = {k.lower(): v for k, v in KNOWN_APPS.items()}
+
+# A bundle id: three or more dot-separated components, no spaces.
+_BUNDLE_ID = re.compile(r"^[A-Za-z][\w-]*(\.[\w-]+){2,}$")
+
+
+def is_bundle_id(text: str) -> bool:
+    return bool(_BUNDLE_ID.match(str(text or "").strip()))
+
+
+def display_name(app_id: str | None) -> str:
+    """The human name of an app from the ids the daemon writes.
+
+    ``window_json.app_id`` is ``pid:<pid>:<owner name>`` for native windows
+    and a bundle id for Chrome extension events.  A known bundle id maps
+    through :data:`KNOWN_APPS`; an unknown one falls back to its last
+    component, so a bundle id never reaches a prompt or a rendered Skill as
+    the app's name.  Anything else (already a name) comes back unchanged.
+    """
+    text = str(app_id or "").strip()
+    if text.startswith("pid:"):
+        parts = text.split(":", 2)
+        return parts[2].strip() if len(parts) == 3 else ""
+    known = _KNOWN_APPS_LOWER.get(text.lower())
+    if known:
+        return known
+    if is_bundle_id(text):
+        return text.rsplit(".", 1)[-1]
+    return text
