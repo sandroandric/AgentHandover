@@ -129,12 +129,59 @@ def _hash(content: str) -> str:
     return hashlib.sha256(content.encode()).hexdigest()
 
 
+# Payload fields of each daemon ``EventKind`` variant
+# (crates/common/src/event.rs, ``#[serde(tag = "type")]``).
+_DAEMON_KIND_FIELDS: dict[str, dict] = {
+    "FocusChange": {},
+    "WindowTitleChange": {},
+    "ClickIntent": {"target_description": ""},
+    "DwellSnapshot": {},
+    "ScrollReadSnapshot": {},
+    "ClipboardChange": {
+        "content_types": ["text/plain"],
+        "byte_size": 0,
+        "high_entropy": False,
+        "content_hash": "",
+    },
+    "PasteDetected": {"matched_copy_hash": None},
+    "SecureFieldFocus": {},
+    "AppSwitch": {"from_app": "", "to_app": ""},
+}
+
+
+def _kind(name: str, **fields: object) -> str:
+    """Serialize an event kind the way the daemon stores ``kind_json``.
+
+    ``KeyPress`` is not a daemon kind; the negative-demo tests use it to
+    exercise the pruner's key-event path, so it is written with the same
+    internal tagging and no payload.
+    """
+    payload = dict(_DAEMON_KIND_FIELDS.get(name, {}))
+    unknown = set(fields) - set(payload)
+    assert not unknown, f"{name} has no daemon field(s) {sorted(unknown)}"
+    payload.update(fields)
+    return json.dumps({"type": name, **payload})
+
+
+# The daemon never emits PasteDetected today, and its payload carries
+# ``matched_copy_hash`` while ClipboardLinker matches a ``content_hash``
+# on the paste.  These tests are rewritten against the real PasteDetected
+# once WP-M2 lands; until then they must fail.
+_PASTE_NOT_EMITTED = pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "daemon does not emit PasteDetected yet and ClipboardLinker reads "
+        "content_hash instead of matched_copy_hash (WP-M2)"
+    ),
+)
+
+
 def _insert_event(
     conn: sqlite3.Connection,
     *,
     event_id: str | None = None,
     timestamp: str | None = None,
-    kind_json: str = '{"FocusChange":{}}',
+    kind_json: str = '{"type": "FocusChange"}',
     window_json: str | None = None,
     metadata_json: str = "{}",
     cursor_x: int | None = None,
@@ -207,6 +254,7 @@ class TestFullE2EPipeline:
     - No negative demo markers in this happy path
     """
 
+    @_PASTE_NOT_EMITTED
     def test_full_e2e_pipeline(
         self, tmp_db_path: Path, write_conn: sqlite3.Connection
     ) -> None:
@@ -218,7 +266,7 @@ class TestFullE2EPipeline:
             write_conn,
             event_id="ev-01-focus-github",
             timestamp=_ts(base),
-            kind_json=json.dumps({"FocusChange": {}}),
+            kind_json=_kind("FocusChange"),
             window_json=json.dumps({"app_id": "com.google.Chrome", "title": "PR #42 - GitHub"}),
             metadata_json=json.dumps({"url": "https://github.com/org/repo/pull/42"}),
         )
@@ -228,7 +276,7 @@ class TestFullE2EPipeline:
             write_conn,
             event_id="ev-02-dwell-pr",
             timestamp=_ts(base + timedelta(seconds=5)),
-            kind_json=json.dumps({"DwellSnapshot": {}}),
+            kind_json=_kind("DwellSnapshot"),
             window_json=json.dumps({"app_id": "com.google.Chrome", "title": "PR #42 - GitHub"}),
             metadata_json=json.dumps({
                 "url": "https://github.com/org/repo/pull/42",
@@ -241,7 +289,7 @@ class TestFullE2EPipeline:
             write_conn,
             event_id="ev-03-scroll-review",
             timestamp=_ts(base + timedelta(seconds=15)),
-            kind_json=json.dumps({"ScrollReadSnapshot": {}}),
+            kind_json=_kind("ScrollReadSnapshot"),
             window_json=json.dumps({"app_id": "com.google.Chrome", "title": "PR #42 - GitHub"}),
             metadata_json=json.dumps({
                 "url": "https://github.com/org/repo/pull/42",
@@ -254,7 +302,7 @@ class TestFullE2EPipeline:
             write_conn,
             event_id="ev-04-click-approve",
             timestamp=_ts(base + timedelta(seconds=30)),
-            kind_json=json.dumps({"ClickIntent": {}}),
+            kind_json=_kind("ClickIntent"),
             window_json=json.dumps({"app_id": "com.google.Chrome", "title": "PR #42 - GitHub"}),
             metadata_json=json.dumps({
                 "url": "https://github.com/org/repo/pull/42",
@@ -271,7 +319,7 @@ class TestFullE2EPipeline:
             write_conn,
             event_id="ev-05-switch-slack",
             timestamp=_ts(base + timedelta(seconds=45)),
-            kind_json=json.dumps({"AppSwitch": {}}),
+            kind_json=_kind("AppSwitch"),
             window_json=json.dumps({"app_id": "com.tinyspeck.slackmacgap", "title": "Slack - #team"}),
             metadata_json=json.dumps({}),
         )
@@ -281,13 +329,9 @@ class TestFullE2EPipeline:
             write_conn,
             event_id="ev-06-copy-url",
             timestamp=_ts(base + timedelta(seconds=60)),
-            kind_json=json.dumps({"ClipboardChange": {}}),
+            kind_json=_kind("ClipboardChange", content_hash=url_hash, byte_size=45),
             window_json=json.dumps({"app_id": "com.tinyspeck.slackmacgap", "title": "Slack - #team"}),
-            metadata_json=json.dumps({
-                "content_hash": url_hash,
-                "content_types": ["text/plain"],
-                "byte_size": 45,
-            }),
+            metadata_json=json.dumps({}),
         )
 
         # --- Step 7: User switches back to GitHub (AppSwitch) ---
@@ -295,7 +339,7 @@ class TestFullE2EPipeline:
             write_conn,
             event_id="ev-07-switch-github",
             timestamp=_ts(base + timedelta(seconds=75)),
-            kind_json=json.dumps({"AppSwitch": {}}),
+            kind_json=_kind("AppSwitch"),
             window_json=json.dumps({"app_id": "com.google.Chrome", "title": "PR #42 - GitHub"}),
             metadata_json=json.dumps({"url": "https://github.com/org/repo/pull/42"}),
         )
@@ -305,13 +349,9 @@ class TestFullE2EPipeline:
             write_conn,
             event_id="ev-08-paste-url",
             timestamp=_ts(base + timedelta(seconds=90)),
-            kind_json=json.dumps({"PasteDetected": {}}),
+            kind_json=_kind("PasteDetected", matched_copy_hash=url_hash),
             window_json=json.dumps({"app_id": "com.google.Chrome", "title": "PR #42 - GitHub"}),
-            metadata_json=json.dumps({
-                "url": "https://github.com/org/repo/pull/42",
-                "content_hash": url_hash,
-                "target_app": "com.google.Chrome",
-            }),
+            metadata_json=json.dumps({"url": "https://github.com/org/repo/pull/42"}),
         )
 
         # ===============================================================
@@ -337,7 +377,7 @@ class TestFullE2EPipeline:
 
         # Verify individual event fields are preserved through SQLite round-trip
         first_event = events[0]
-        assert first_event["kind_json"] == json.dumps({"FocusChange": {}})
+        assert json.loads(first_event["kind_json"]) == {"type": "FocusChange"}
         window = json.loads(first_event["window_json"])
         assert window["app_id"] == "com.google.Chrome"
         assert window["title"] == "PR #42 - GitHub"
@@ -448,7 +488,7 @@ class TestNegativeDemoDetection:
                 write_conn,
                 event_id=f"ev-type-{i:02d}",
                 timestamp=_ts(base + timedelta(seconds=i * 2)),
-                kind_json=json.dumps({"KeyPress": {}}),
+                kind_json=_kind("KeyPress"),
                 window_json=json.dumps({"app_id": app_id, "title": "Untitled.txt"}),
                 metadata_json=json.dumps({"key": chr(ord("a") + i)}),
             )
@@ -459,7 +499,7 @@ class TestNegativeDemoDetection:
             write_conn,
             event_id="ev-undo",
             timestamp=_ts(base + timedelta(seconds=10)),
-            kind_json=json.dumps({"KeyPress": {}}),
+            kind_json=_kind("KeyPress"),
             window_json=json.dumps({"app_id": app_id, "title": "Untitled.txt"}),
             metadata_json=json.dumps({"shortcut": "ctrl+z"}),
         )
@@ -471,7 +511,7 @@ class TestNegativeDemoDetection:
                 write_conn,
                 event_id=f"ev-after-{i:02d}",
                 timestamp=_ts(base + timedelta(seconds=15 + i * 2)),
-                kind_json=json.dumps({"FocusChange": {}}),
+                kind_json=_kind("FocusChange"),
                 window_json=json.dumps({"app_id": app_id, "title": "Untitled.txt"}),
                 metadata_json=json.dumps({"action": "normal_work"}),
             )
@@ -521,7 +561,7 @@ class TestNegativeDemoDetection:
             write_conn,
             event_id="ev-open-dialog",
             timestamp=_ts(base),
-            kind_json=json.dumps({"ClickIntent": {}}),
+            kind_json=_kind("ClickIntent"),
             window_json=json.dumps({"app_id": app_id, "title": "Open File"}),
             metadata_json=json.dumps({"element_text": "Open File"}),
         )
@@ -531,7 +571,7 @@ class TestNegativeDemoDetection:
             write_conn,
             event_id="ev-browse",
             timestamp=_ts(base + timedelta(seconds=3)),
-            kind_json=json.dumps({"FocusChange": {}}),
+            kind_json=_kind("FocusChange"),
             window_json=json.dumps({"app_id": app_id, "title": "Open File"}),
             metadata_json=json.dumps({"dialog": "file_picker"}),
         )
@@ -541,7 +581,7 @@ class TestNegativeDemoDetection:
             write_conn,
             event_id="ev-cancel",
             timestamp=_ts(base + timedelta(seconds=6)),
-            kind_json=json.dumps({"ClickIntent": {}}),
+            kind_json=_kind("ClickIntent"),
             window_json=json.dumps({"app_id": app_id, "title": "Open File"}),
             metadata_json=json.dumps({"element_text": "Cancel"}),
         )
@@ -588,7 +628,7 @@ class TestEpisodeSegmentation:
                 write_conn,
                 event_id=f"ev-long-{i:03d}",
                 timestamp=_ts(base + timedelta(minutes=i)),
-                kind_json=json.dumps({"FocusChange": {}}),
+                kind_json=_kind("FocusChange"),
                 window_json=json.dumps({"app_id": app_id, "title": "main.rs - VSCode"}),
                 metadata_json=json.dumps({}),
             )
@@ -655,7 +695,7 @@ class TestEpisodeSegmentation:
                 event_id=f"ev-hard-{i:04d}",
                 # All within ~3 minutes (sub-second intervals) to avoid soft cap
                 timestamp=_ts(base + timedelta(milliseconds=i * 500)),
-                kind_json=json.dumps({"KeyPress": {}}),
+                kind_json=_kind("KeyPress"),
                 window_json=json.dumps({"app_id": app_id, "title": "Quick Note"}),
                 metadata_json=json.dumps({"key": chr(ord("a") + (i % 26))}),
             )
@@ -714,7 +754,7 @@ class TestSecureFieldHandling:
             write_conn,
             event_id="ev-normal-01",
             timestamp=_ts(base),
-            kind_json=json.dumps({"FocusChange": {}}),
+            kind_json=_kind("FocusChange"),
             window_json=json.dumps({"app_id": app_id, "title": "Login - Bank"}),
             metadata_json=json.dumps({"url": login_url}),
         )
@@ -723,7 +763,7 @@ class TestSecureFieldHandling:
             write_conn,
             event_id="ev-click-username",
             timestamp=_ts(base + timedelta(seconds=2)),
-            kind_json=json.dumps({"ClickIntent": {}}),
+            kind_json=_kind("ClickIntent"),
             window_json=json.dumps({"app_id": app_id, "title": "Login - Bank"}),
             metadata_json=json.dumps({
                 "url": login_url,
@@ -736,7 +776,7 @@ class TestSecureFieldHandling:
             write_conn,
             event_id="ev-dwell-before",
             timestamp=_ts(base + timedelta(seconds=5)),
-            kind_json=json.dumps({"DwellSnapshot": {}}),
+            kind_json=_kind("DwellSnapshot"),
             window_json=json.dumps({"app_id": app_id, "title": "Login - Bank"}),
             metadata_json=json.dumps({"url": login_url}),
         )
@@ -746,9 +786,9 @@ class TestSecureFieldHandling:
             write_conn,
             event_id="ev-secure-enter",
             timestamp=_ts(base + timedelta(seconds=8)),
-            kind_json=json.dumps({"SecureFieldFocus": {"is_secure": True}}),
+            kind_json=_kind("SecureFieldFocus"),
             window_json=json.dumps({"app_id": app_id, "title": "Login - Bank"}),
-            metadata_json=json.dumps({"url": login_url, "is_secure": True}),
+            metadata_json=json.dumps({"url": login_url, "isSecure": True}),
         )
 
         # --- During secure field: only non-DOM, non-click events ---
@@ -758,7 +798,7 @@ class TestSecureFieldHandling:
             write_conn,
             event_id="ev-dwell-during-secure",
             timestamp=_ts(base + timedelta(seconds=12)),
-            kind_json=json.dumps({"DwellSnapshot": {}}),
+            kind_json=_kind("DwellSnapshot"),
             window_json=json.dumps({"app_id": app_id, "title": "Login - Bank"}),
             metadata_json=json.dumps({"url": login_url, "secure_mode": True}),
         )
@@ -768,9 +808,9 @@ class TestSecureFieldHandling:
             write_conn,
             event_id="ev-secure-exit",
             timestamp=_ts(base + timedelta(seconds=18)),
-            kind_json=json.dumps({"SecureFieldFocus": {"is_secure": False}}),
+            kind_json=_kind("SecureFieldFocus"),
             window_json=json.dumps({"app_id": app_id, "title": "Login - Bank"}),
-            metadata_json=json.dumps({"url": login_url, "is_secure": False}),
+            metadata_json=json.dumps({"url": login_url, "isSecure": False}),
         )
 
         # --- Normal events resume after secure field ---
@@ -778,7 +818,7 @@ class TestSecureFieldHandling:
             write_conn,
             event_id="ev-click-login",
             timestamp=_ts(base + timedelta(seconds=20)),
-            kind_json=json.dumps({"ClickIntent": {}}),
+            kind_json=_kind("ClickIntent"),
             window_json=json.dumps({"app_id": app_id, "title": "Login - Bank"}),
             metadata_json=json.dumps({
                 "url": login_url,
@@ -791,7 +831,7 @@ class TestSecureFieldHandling:
             write_conn,
             event_id="ev-normal-after",
             timestamp=_ts(base + timedelta(seconds=25)),
-            kind_json=json.dumps({"FocusChange": {}}),
+            kind_json=_kind("FocusChange"),
             window_json=json.dumps({"app_id": app_id, "title": "Dashboard - Bank"}),
             metadata_json=json.dumps({"url": "https://bank.example.com/dashboard"}),
         )
@@ -813,8 +853,7 @@ class TestSecureFieldHandling:
         for event in events:
             ts = event["timestamp"]
             if ts > secure_enter_ts and ts < secure_exit_ts:
-                kind = json.loads(event["kind_json"])
-                kind_name = next(iter(kind))
+                kind_name = json.loads(event["kind_json"])["type"]
                 # During secure field, there should be no ClickIntent events
                 assert kind_name != "ClickIntent", (
                     f"ClickIntent event found during secure field period: {event['id']}"
@@ -837,14 +876,12 @@ class TestSecureFieldHandling:
 
         # Verify secure field event data is preserved
         secure_enter = next(e for e in events if e["id"] == "ev-secure-enter")
-        kind = json.loads(secure_enter["kind_json"])
-        assert "SecureFieldFocus" in kind
-        assert kind["SecureFieldFocus"]["is_secure"] is True
+        assert json.loads(secure_enter["kind_json"]) == {"type": "SecureFieldFocus"}
+        assert json.loads(secure_enter["metadata_json"])["isSecure"] is True
 
         secure_exit = next(e for e in events if e["id"] == "ev-secure-exit")
-        kind = json.loads(secure_exit["kind_json"])
-        assert "SecureFieldFocus" in kind
-        assert kind["SecureFieldFocus"]["is_secure"] is False
+        assert json.loads(secure_exit["kind_json"]) == {"type": "SecureFieldFocus"}
+        assert json.loads(secure_exit["metadata_json"])["isSecure"] is False
 
         # ===============================================================
         # Episode builder processes secure field events normally
@@ -876,6 +913,7 @@ class TestMultipleClipboardLinks:
     - Correct copy-paste pairing by hash
     """
 
+    @_PASTE_NOT_EMITTED
     def test_multiple_clipboard_links(
         self, tmp_db_path: Path, write_conn: sqlite3.Connection
     ) -> None:
@@ -888,13 +926,9 @@ class TestMultipleClipboardLinks:
             write_conn,
             event_id="ev-copy-a",
             timestamp=_ts(base),
-            kind_json=json.dumps({"ClipboardChange": {}}),
+            kind_json=_kind("ClipboardChange", content_hash=hash_a, byte_size=35),
             window_json=json.dumps({"app_id": "com.apple.Terminal", "title": "Terminal"}),
-            metadata_json=json.dumps({
-                "content_hash": hash_a,
-                "content_types": ["text/plain"],
-                "byte_size": 35,
-            }),
+            metadata_json=json.dumps({}),
         )
 
         # --- Some normal events in between ---
@@ -902,7 +936,7 @@ class TestMultipleClipboardLinks:
             write_conn,
             event_id="ev-between-01",
             timestamp=_ts(base + timedelta(seconds=10)),
-            kind_json=json.dumps({"FocusChange": {}}),
+            kind_json=_kind("FocusChange"),
             window_json=json.dumps({"app_id": "com.apple.Safari", "title": "Safari"}),
             metadata_json=json.dumps({"url": "https://docs.example.com/api-reference"}),
         )
@@ -912,13 +946,9 @@ class TestMultipleClipboardLinks:
             write_conn,
             event_id="ev-copy-b",
             timestamp=_ts(base + timedelta(seconds=20)),
-            kind_json=json.dumps({"ClipboardChange": {}}),
+            kind_json=_kind("ClipboardChange", content_hash=hash_b, byte_size=42),
             window_json=json.dumps({"app_id": "com.apple.Safari", "title": "API Docs"}),
-            metadata_json=json.dumps({
-                "content_hash": hash_b,
-                "content_types": ["text/plain"],
-                "byte_size": 42,
-            }),
+            metadata_json=json.dumps({}),
         )
 
         # --- Switch to VSCode ---
@@ -926,7 +956,7 @@ class TestMultipleClipboardLinks:
             write_conn,
             event_id="ev-switch-vscode",
             timestamp=_ts(base + timedelta(seconds=30)),
-            kind_json=json.dumps({"AppSwitch": {}}),
+            kind_json=_kind("AppSwitch"),
             window_json=json.dumps({"app_id": "com.microsoft.VSCode", "title": "main.py"}),
             metadata_json=json.dumps({}),
         )
@@ -936,12 +966,9 @@ class TestMultipleClipboardLinks:
             write_conn,
             event_id="ev-paste-a",
             timestamp=_ts(base + timedelta(seconds=35)),
-            kind_json=json.dumps({"PasteDetected": {}}),
+            kind_json=_kind("PasteDetected", matched_copy_hash=hash_a),
             window_json=json.dumps({"app_id": "com.microsoft.VSCode", "title": "main.py"}),
-            metadata_json=json.dumps({
-                "content_hash": hash_a,
-                "target_app": "com.microsoft.VSCode",
-            }),
+            metadata_json=json.dumps({}),
         )
 
         # --- Switch to Slack ---
@@ -949,7 +976,7 @@ class TestMultipleClipboardLinks:
             write_conn,
             event_id="ev-switch-slack",
             timestamp=_ts(base + timedelta(seconds=45)),
-            kind_json=json.dumps({"AppSwitch": {}}),
+            kind_json=_kind("AppSwitch"),
             window_json=json.dumps({
                 "app_id": "com.tinyspeck.slackmacgap",
                 "title": "Slack - #dev",
@@ -962,15 +989,12 @@ class TestMultipleClipboardLinks:
             write_conn,
             event_id="ev-paste-b",
             timestamp=_ts(base + timedelta(seconds=50)),
-            kind_json=json.dumps({"PasteDetected": {}}),
+            kind_json=_kind("PasteDetected", matched_copy_hash=hash_b),
             window_json=json.dumps({
                 "app_id": "com.tinyspeck.slackmacgap",
                 "title": "Slack - #dev",
             }),
-            metadata_json=json.dumps({
-                "content_hash": hash_b,
-                "target_app": "com.tinyspeck.slackmacgap",
-            }),
+            metadata_json=json.dumps({}),
         )
 
         # ===============================================================
@@ -1008,6 +1032,7 @@ class TestMultipleClipboardLinks:
         # Copy at +20s, paste at +50s = 30 seconds
         assert abs(link_b.time_delta_seconds - 30.0) < 1.0
 
+    @_PASTE_NOT_EMITTED
     def test_overwritten_clipboard_links_most_recent_copy(
         self, tmp_db_path: Path, write_conn: sqlite3.Connection
     ) -> None:
@@ -1020,13 +1045,9 @@ class TestMultipleClipboardLinks:
             write_conn,
             event_id="ev-copy-old",
             timestamp=_ts(base),
-            kind_json=json.dumps({"ClipboardChange": {}}),
+            kind_json=_kind("ClipboardChange", content_hash=h, byte_size=16),
             window_json=json.dumps({"app_id": "com.app.A", "title": "App A"}),
-            metadata_json=json.dumps({
-                "content_hash": h,
-                "content_types": ["text/plain"],
-                "byte_size": 16,
-            }),
+            metadata_json=json.dumps({}),
         )
 
         # Second copy (same content, different app, later time)
@@ -1034,13 +1055,9 @@ class TestMultipleClipboardLinks:
             write_conn,
             event_id="ev-copy-new",
             timestamp=_ts(base + timedelta(minutes=5)),
-            kind_json=json.dumps({"ClipboardChange": {}}),
+            kind_json=_kind("ClipboardChange", content_hash=h, byte_size=16),
             window_json=json.dumps({"app_id": "com.app.B", "title": "App B"}),
-            metadata_json=json.dumps({
-                "content_hash": h,
-                "content_types": ["text/plain"],
-                "byte_size": 16,
-            }),
+            metadata_json=json.dumps({}),
         )
 
         # Paste
@@ -1048,12 +1065,9 @@ class TestMultipleClipboardLinks:
             write_conn,
             event_id="ev-paste",
             timestamp=_ts(base + timedelta(minutes=10)),
-            kind_json=json.dumps({"PasteDetected": {}}),
+            kind_json=_kind("PasteDetected", matched_copy_hash=h),
             window_json=json.dumps({"app_id": "com.app.C", "title": "App C"}),
-            metadata_json=json.dumps({
-                "content_hash": h,
-                "target_app": "com.app.C",
-            }),
+            metadata_json=json.dumps({}),
         )
 
         with WorkerDB(tmp_db_path) as db:
@@ -1081,6 +1095,7 @@ class TestCombinedPipeline:
     Scenario: A session with normal work, an undo, and a copy-paste operation.
     """
 
+    @_PASTE_NOT_EMITTED
     def test_all_components_compose(
         self, tmp_db_path: Path, write_conn: sqlite3.Connection
     ) -> None:
@@ -1094,7 +1109,7 @@ class TestCombinedPipeline:
             write_conn,
             event_id="ev-browse-01",
             timestamp=_ts(base),
-            kind_json=json.dumps({"FocusChange": {}}),
+            kind_json=_kind("FocusChange"),
             window_json=json.dumps({"app_id": app_id, "title": "Google Chrome"}),
             metadata_json=json.dumps({"url": "https://example.com"}),
         )
@@ -1103,7 +1118,7 @@ class TestCombinedPipeline:
             write_conn,
             event_id="ev-browse-02",
             timestamp=_ts(base + timedelta(seconds=3)),
-            kind_json=json.dumps({"DwellSnapshot": {}}),
+            kind_json=_kind("DwellSnapshot"),
             window_json=json.dumps({"app_id": app_id, "title": "Google Chrome"}),
             metadata_json=json.dumps({"url": "https://example.com"}),
         )
@@ -1114,7 +1129,7 @@ class TestCombinedPipeline:
             write_conn,
             event_id="ev-mistake",
             timestamp=_ts(base + timedelta(seconds=60)),
-            kind_json=json.dumps({"KeyPress": {}}),
+            kind_json=_kind("KeyPress"),
             window_json=json.dumps({"app_id": app_id, "title": "Google Chrome"}),
             metadata_json=json.dumps({"url": "https://example.com", "key": "x"}),
         )
@@ -1123,7 +1138,7 @@ class TestCombinedPipeline:
             write_conn,
             event_id="ev-undo",
             timestamp=_ts(base + timedelta(seconds=61)),
-            kind_json=json.dumps({"KeyPress": {}}),
+            kind_json=_kind("KeyPress"),
             window_json=json.dumps({"app_id": app_id, "title": "Google Chrome"}),
             metadata_json=json.dumps({"url": "https://example.com", "shortcut": "cmd+z"}),
         )
@@ -1133,14 +1148,9 @@ class TestCombinedPipeline:
             write_conn,
             event_id="ev-copy",
             timestamp=_ts(base + timedelta(seconds=80)),
-            kind_json=json.dumps({"ClipboardChange": {}}),
+            kind_json=_kind("ClipboardChange", content_hash=paste_hash, byte_size=11),
             window_json=json.dumps({"app_id": app_id, "title": "Google Chrome"}),
-            metadata_json=json.dumps({
-                "url": "https://example.com",
-                "content_hash": paste_hash,
-                "content_types": ["text/plain"],
-                "byte_size": 11,
-            }),
+            metadata_json=json.dumps({"url": "https://example.com"}),
         )
 
         # Paste operation
@@ -1148,13 +1158,9 @@ class TestCombinedPipeline:
             write_conn,
             event_id="ev-paste",
             timestamp=_ts(base + timedelta(seconds=90)),
-            kind_json=json.dumps({"PasteDetected": {}}),
+            kind_json=_kind("PasteDetected", matched_copy_hash=paste_hash),
             window_json=json.dumps({"app_id": app_id, "title": "Google Chrome"}),
-            metadata_json=json.dumps({
-                "url": "https://example.com",
-                "content_hash": paste_hash,
-                "target_app": app_id,
-            }),
+            metadata_json=json.dumps({"url": "https://example.com"}),
         )
 
         # Read from SQLite
@@ -1213,7 +1219,7 @@ class TestWorkerDBEdgeCases:
         eid = _insert_event(
             write_conn,
             event_id="ev-specific",
-            kind_json=json.dumps({"ClickIntent": {"x": 100, "y": 200}}),
+            kind_json=_kind("ClickIntent", target_description="Submit<button>"),
             window_json=json.dumps({"app_id": "com.test.App", "title": "Test"}),
             metadata_json=json.dumps({"selector": "button#submit"}),
             cursor_x=100,
@@ -1229,8 +1235,7 @@ class TestWorkerDBEdgeCases:
         assert event["cursor_y"] == 200
 
         kind = json.loads(event["kind_json"])
-        assert "ClickIntent" in kind
-        assert kind["ClickIntent"]["x"] == 100
+        assert kind == {"type": "ClickIntent", "target_description": "Submit<button>"}
 
         meta = json.loads(event["metadata_json"])
         assert meta["selector"] == "button#submit"

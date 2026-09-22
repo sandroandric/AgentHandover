@@ -68,8 +68,7 @@ def _insert_event(
     return eid
 
 
-# Import schema from conftest
-from conftest import DAEMON_SCHEMA
+from daemon_db import DAEMON_SCHEMA
 
 
 @pytest.fixture()

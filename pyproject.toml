@@ -14,3 +14,4 @@ pythonpath = ["worker/src", "worker/tests"]
 # importlib mode avoids the tests/__init__.py namespace collision between
 # worker/tests and the repo-root tests/ directories.
 addopts = "--import-mode=importlib"
+markers = ["eval: evaluation harness and scorecard tests"]
