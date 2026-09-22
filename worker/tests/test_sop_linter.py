@@ -306,3 +306,42 @@ class TestStringVariableDeclaration:
         # No undeclared variable error
         errs = [i for i in result.errors if "url" in i.message]
         assert len(errs) == 0
+
+
+class TestVLMSourcesRequireVerifyAndDescription:
+    """VLM-generated templates must carry verify + description per step;
+    mined (non-VLM) templates keep these as warnings (WP-P1, #149)."""
+
+    def _sop_missing(self, key: str) -> dict:
+        sop = _valid_sop()
+        for step in sop["steps"]:
+            step["description"] = "Why and how."
+        sop["steps"][1].pop(key)
+        return sop
+
+    @pytest.mark.parametrize("source", [
+        "focus_v2", "passive", "v2_focus_recording", "v2_passive_discovery",
+        "retry_focus", "retry_passive",
+    ])
+    @pytest.mark.parametrize("key", ["verify", "description"])
+    def test_missing_field_is_error_for_vlm_sources(self, source, key):
+        result = lint_sop(self._sop_missing(key), source=source)
+        assert result.valid is False
+        assert [e.field for e in result.errors] == [f"steps[1].{key}"]
+
+    @pytest.mark.parametrize("source", [None, "focus", "approval"])
+    @pytest.mark.parametrize("key", ["verify", "description"])
+    def test_missing_field_is_warning_for_other_sources(self, source, key):
+        result = lint_sop(self._sop_missing(key), source=source)
+        assert result.valid is True
+        assert f"steps[1].{key}" in [w.field for w in result.warnings]
+
+    def test_fields_in_parameters_count(self):
+        sop = self._sop_missing("verify")
+        sop["steps"][1]["parameters"]["verify"] = "Deploy output shows success"
+        assert lint_sop(sop, source="focus_v2").valid is True
+
+    def test_whitespace_only_verify_is_missing(self):
+        sop = self._sop_missing("verify")
+        sop["steps"][1]["verify"] = "   "
+        assert lint_sop(sop, source="focus_v2").valid is False

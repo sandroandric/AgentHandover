@@ -73,8 +73,11 @@ def _lint_and_log(sop_template: dict, label: str) -> bool:
     """Lint an SOP template, log any issues, return True if valid.
 
     Errors are logged at ERROR level, warnings at WARNING level.
+    ``label`` is also the lint source: VLM-generated labels (see
+    ``sop_linter.VLM_GENERATED_SOURCES``) make a step without verify or
+    description an error.
     """
-    result = lint_sop(sop_template)
+    result = lint_sop(sop_template, source=label)
     for issue in result.issues:
         if issue.severity == "error":
             logger.error(
@@ -92,6 +95,35 @@ def _lint_and_log(sop_template: dict, label: str) -> bool:
             sop_template.get("title", "?"), len(result.errors),
         )
     return result.valid
+
+
+def _generate_linted(generate, label: str, title: str) -> tuple:
+    """Run ``generate()`` and lint its SOP; regenerate once if lint fails.
+
+    ``generate`` returns a ``GeneratedSOP``.  Each call re-prompts the
+    model (sampled, so a second answer can differ).  Returns
+    ``(result, lint_error)``: ``lint_error`` is empty unless the SOP
+    still fails lint after the one regeneration, in which case it lists
+    the lint errors so the caller can record the failure for retry.
+    """
+    result = generate()
+    if result.success and result.sop and not _lint_and_log(result.sop, label):
+        logger.warning(
+            "SOP for '%s' failed validation [%s], regenerating once",
+            title, label,
+        )
+        result = generate()
+        if result.success and result.sop and not _lint_and_log(result.sop, label):
+            return result, _lint_error_text(result.sop, label)
+    return result, ""
+
+
+def _lint_error_text(sop_template: dict, label: str) -> str:
+    """One-line summary of an SOP's lint errors, for failure records."""
+    errors = lint_sop(sop_template, source=label).errors
+    return "SOP failed validation: " + "; ".join(
+        f"{e.field}: {e.message}" for e in errors
+    )
 
 
 def _export_via_adapter(
@@ -1869,36 +1901,21 @@ def _process_focus_sessions_v2(
         title, session_id, len(focus_events),
     )
 
-    # Run through v2 focus processor
-    result = focus_processor.process_session(
-        db, session_id, title, focus_events,
-        screenshots_dir=screenshots_dir,
+    # Run through v2 focus processor (lint included: an SOP that fails
+    # validation is regenerated once, then recorded as a failure)
+    result, lint_error = _generate_linted(
+        lambda: focus_processor.process_session(
+            db, session_id, title, focus_events,
+            screenshots_dir=screenshots_dir,
+        ),
+        "focus_v2",
+        title,
     )
 
     exported = 0
-    if result.success and result.sop:
+    if result.success and result.sop and not lint_error:
         sop_templates = [result.sop]
         slug = result.sop.get("slug", "")
-
-        # Lint / validate before save+export
-        if not _lint_and_log(result.sop, "focus_v2"):
-            # Save invalid SOP as draft for debugging, skip export
-            try:
-                db.save_generated_sop(
-                    slug=slug,
-                    title=title,
-                    source="focus",
-                    sop_template=result.sop,
-                    confidence=0.0,
-                    source_id=session_id,
-                    auto_approve=False,
-                )
-            except Exception:
-                logger.debug(
-                    "Failed to save invalid SOP draft to DB", exc_info=True,
-                )
-            _clear_focus_signal(signal_path)
-            return 0
 
         # --- Convert to v3 procedure and set user's title ---
         from agenthandover_worker.procedure_schema import sop_to_procedure
@@ -2168,7 +2185,7 @@ def _process_focus_sessions_v2(
             db.record_failed_generation(
                 source="focus",
                 source_id=session_id,
-                error=result.error or "Unknown error",
+                error=lint_error or result.error or "Unknown error",
                 title=title,
                 context={"event_count": len(focus_events)},
             )
@@ -2179,7 +2196,7 @@ def _process_focus_sessions_v2(
             )
         logger.warning(
             "Focus v2 session '%s' SOP generation failed: %s",
-            title, result.error,
+            title, lint_error or result.error,
         )
 
     # Clear signal file
@@ -2635,27 +2652,33 @@ def _process_passive_discovery(
             logger.debug("Failed to load prior evidence for '%s'", task_label[:60], exc_info=True)
 
         # Use enriched generation if variant data available
-        if _variant_results and hasattr(sop_generator, "generate_from_passive_enriched"):
-            result = sop_generator.generate_from_passive_enriched(
-                demonstrations,
-                task_label=task_label,
-                canonical_steps=_variant_results["normalized"].get("canonical_steps", []),
-                parameters=_variant_results["parameters"],
-                branches=_variant_results["normalized"].get("branches", []),
-                evidence_context=_prior_evidence,
-            )
-        else:
-            result = sop_generator.generate_from_passive(
+        def _generate_passive():
+            if _variant_results and hasattr(sop_generator, "generate_from_passive_enriched"):
+                return sop_generator.generate_from_passive_enriched(
+                    demonstrations,
+                    task_label=task_label,
+                    canonical_steps=_variant_results["normalized"].get("canonical_steps", []),
+                    parameters=_variant_results["parameters"],
+                    branches=_variant_results["normalized"].get("branches", []),
+                    evidence_context=_prior_evidence,
+                )
+            return sop_generator.generate_from_passive(
                 demonstrations, task_label=task_label,
             )
 
-        if not result.success or not result.sop:
+        # Lint included: an SOP that fails validation is regenerated once,
+        # then recorded as a failure like any other generation failure.
+        result, lint_error = _generate_linted(
+            _generate_passive, "passive", task_label,
+        )
+
+        if lint_error or not result.success or not result.sop:
             # Record failure for retry tracking
             try:
                 db.record_failed_generation(
                     source="passive",
                     source_id=str(cluster_id),
-                    error=result.error or "Unknown error",
+                    error=lint_error or result.error or "Unknown error",
                     title=task_label,
                     context={"segment_count": len(pending_segs)},
                 )
@@ -2666,7 +2689,7 @@ def _process_passive_discovery(
                 )
             logger.warning(
                 "Passive SOP generation failed for '%s': %s",
-                task_label[:60], result.error,
+                task_label[:60], lint_error or result.error,
             )
             continue
 
@@ -2677,25 +2700,6 @@ def _process_passive_discovery(
         if _prior_evidence:
             for tpl in sop_templates:
                 tpl["_extracted_evidence"] = _prior_evidence
-
-        # Lint / validate before save+export
-        if not _lint_and_log(result.sop, "passive"):
-            # Save invalid SOP as draft for debugging, skip export
-            try:
-                db.save_generated_sop(
-                    slug=slug,
-                    title=task_label,
-                    source="passive",
-                    sop_template=result.sop,
-                    confidence=0.0,
-                    source_id=str(cluster_id),
-                    auto_approve=False,
-                )
-            except Exception:
-                logger.debug(
-                    "Failed to save invalid SOP draft to DB", exc_info=True,
-                )
-            continue
 
         # Save generated SOP to DB for review tracking
         try:
@@ -2860,6 +2864,27 @@ def _process_passive_discovery(
     return total_exported
 
 
+def _record_retry_lint_failure(
+    db: "WorkerDB",
+    source: str,
+    source_id: str,
+    title: str,
+    sop_template: dict,
+    label: str,
+) -> None:
+    """Record a retried SOP that still fails lint as a new failure, so it
+    stays retryable (the retried record is marked retried afterwards)."""
+    try:
+        db.record_failed_generation(
+            source=source,
+            source_id=source_id,
+            error=_lint_error_text(sop_template, label),
+            title=title,
+        )
+    except Exception:
+        logger.debug("Failed to record retry lint failure", exc_info=True)
+
+
 def _process_retry_triggers(
     db: "WorkerDB",
     *,
@@ -2933,14 +2958,10 @@ def _process_retry_triggers(
 
                     # Lint before save+export
                     if not _lint_and_log(result.sop, "retry_focus"):
-                        try:
-                            db.save_generated_sop(
-                                slug=slug, title=title, source="focus",
-                                sop_template=result.sop, confidence=0.0,
-                                source_id=source_id, auto_approve=False,
-                            )
-                        except Exception:
-                            logger.debug("Failed to save invalid retry SOP draft", exc_info=True)
+                        _record_retry_lint_failure(
+                            db, "focus", source_id, title, result.sop,
+                            "retry_focus",
+                        )
                     else:
                         try:
                             db.save_generated_sop(
@@ -3030,14 +3051,10 @@ def _process_retry_triggers(
 
                         # Lint before save+export
                         if not _lint_and_log(result.sop, "retry_passive"):
-                            try:
-                                db.save_generated_sop(
-                                    slug=slug, title=title, source="passive",
-                                    sop_template=result.sop, confidence=0.0,
-                                    source_id=source_id, auto_approve=False,
-                                )
-                            except Exception:
-                                logger.debug("Failed to save invalid retry SOP draft", exc_info=True)
+                            _record_retry_lint_failure(
+                                db, "passive", source_id, title, result.sop,
+                                "retry_passive",
+                            )
                         else:
                             try:
                                 db.save_generated_sop(

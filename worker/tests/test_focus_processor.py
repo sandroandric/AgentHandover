@@ -23,6 +23,7 @@ from agenthandover_worker.sop_generator import (
     GeneratedSOP,
 )
 from agenthandover_worker.db import WorkerDB
+from fixtures.vlm_answers import generated_sop_template, load_answer
 
 
 # ---------------------------------------------------------------------------
@@ -706,11 +707,7 @@ class TestProcessFocusSessionsV2:
 
         mock_processor = MagicMock()
         mock_processor.process_session.return_value = GeneratedSOP(
-            sop={
-                "slug": "test-task",
-                "title": "Test Task v2",
-                "steps": [{"step": "action"}],
-            },
+            sop=generated_sop_template("check_domain_availability"),
             inference_time_seconds=50.0,
         )
 
@@ -777,6 +774,124 @@ class TestProcessFocusSessionsV2:
         assert result == 0
         # Signal should still be cleared to prevent infinite retry
         assert not signal_path.exists()
+
+
+# ---------------------------------------------------------------------------
+# An SOP without verify lines is regenerated, not shipped (WP-P1, #149)
+# ---------------------------------------------------------------------------
+
+def _answer_missing_verify() -> dict:
+    answer = load_answer("check_domain_availability")
+    answer["steps"][1]["verify"] = ""
+    return answer
+
+
+def _run_focus_v2(tmp_path, session_id, results):
+    """Run _process_focus_sessions_v2 with process_session returning
+    *results* in order.  Returns (exported, processor, db_path)."""
+    from agenthandover_worker.main import _process_focus_sessions_v2
+
+    (tmp_path / "focus-session.json").write_text(json.dumps({
+        "session_id": session_id,
+        "status": "stopped",
+        "title": "Check Domain Availability",
+    }))
+    db_path = _create_test_db(tmp_path)
+    _insert_focus_events(db_path, session_id, count=3, annotated=True)
+
+    processor = MagicMock()
+    processor.process_session.side_effect = results
+    writer = MagicMock()
+    writer.get_sops_dir.return_value = tmp_path / "sops"
+    with WorkerDB(db_path) as db:
+        with patch("agenthandover_worker.main._status_dir", return_value=tmp_path):
+            exported = _process_focus_sessions_v2(
+                db,
+                focus_processor=processor,
+                openclaw_writer=writer,
+                index_generator=MagicMock(),
+                screenshots_dir=str(tmp_path),
+            )
+    return exported, processor, db_path
+
+
+class TestFocusSOPValidationRegenerates:
+
+    def test_missing_verify_is_invalid_for_focus_source(self):
+        from agenthandover_worker.sop_linter import lint_sop
+        tpl = generated_sop_template(
+            "check_domain_availability", answer=_answer_missing_verify(),
+        )
+        assert lint_sop(tpl, source="focus_v2").valid is False
+        assert lint_sop(tpl, source=tpl["source"]).valid is False
+        # Mechanically mined (non-VLM) templates stay on warnings
+        assert lint_sop(tpl).valid is True
+
+    def test_missing_verify_triggers_exactly_one_regeneration(self, tmp_path):
+        bad = GeneratedSOP(sop=generated_sop_template(
+            "check_domain_availability", answer=_answer_missing_verify(),
+        ))
+        good = GeneratedSOP(sop=generated_sop_template("check_domain_availability"))
+        exported, processor, db_path = _run_focus_v2(
+            tmp_path, "sess-regen", [bad, good],
+        )
+        assert processor.process_session.call_count == 2
+        assert exported == 1
+        with WorkerDB(db_path) as db:
+            assert db.get_failed_generations() == []
+
+    def test_still_invalid_after_regeneration_is_recorded_for_retry(self, tmp_path):
+        def bad():
+            return GeneratedSOP(sop=generated_sop_template(
+                "check_domain_availability", answer=_answer_missing_verify(),
+            ))
+        exported, processor, db_path = _run_focus_v2(
+            tmp_path, "sess-bad", [bad(), bad()],
+        )
+        assert processor.process_session.call_count == 2
+        assert exported == 0
+        with WorkerDB(db_path) as db:
+            failures = db.get_failed_generations()
+            assert len(failures) == 1
+            assert failures[0]["source"] == "focus"
+            assert failures[0]["source_id"] == "sess-bad"
+            assert "steps[1].verify" in failures[0]["error"]
+            # Not shipped, not even as a draft
+            assert db.get_generated_sops() == []
+
+    def test_retry_trigger_reprompts_the_model(self, tmp_path):
+        from agenthandover_worker.main import _process_retry_triggers
+
+        session_id = "sess-retry"
+        db_path = _create_test_db(tmp_path)
+        _insert_focus_events(db_path, session_id, count=3, annotated=True)
+        processor = MagicMock()
+        processor.process_session.return_value = GeneratedSOP(
+            sop=generated_sop_template("check_domain_availability"),
+        )
+        writer = MagicMock()
+        writer.get_sops_dir.return_value = tmp_path / "sops"
+        with WorkerDB(db_path) as db:
+            failure_id = db.record_failed_generation(
+                source="focus", source_id=session_id,
+                error="SOP failed validation", title="Check Domain Availability",
+            )
+            (tmp_path / "retry-trigger.json").write_text(
+                json.dumps({"failure_id": failure_id}),
+            )
+            with patch("agenthandover_worker.main._status_dir", return_value=tmp_path):
+                _process_retry_triggers(
+                    db,
+                    focus_processor=processor,
+                    openclaw_writer=writer,
+                    index_generator=MagicMock(),
+                    screenshots_dir=str(tmp_path),
+                )
+            assert processor.process_session.call_count == 1
+            assert db.get_failed_generations() == []
+            assert [s["slug"] for s in db.get_generated_sops()] == [
+                "check-domain-availability",
+            ]
 
 
 # ---------------------------------------------------------------------------

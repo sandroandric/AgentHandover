@@ -821,9 +821,11 @@ class TestProcessPassiveDiscovery:
             # Mock SOP generator
             from agenthandover_worker.sop_generator import SOPGenerator, GeneratedSOP
             mock_sop_gen = MagicMock(spec=SOPGenerator)
+            from fixtures.vlm_answers import generated_sop_template
             mock_sop_gen.generate_from_passive.return_value = GeneratedSOP(
-                sop={"slug": "expense-report", "title": "Expense Report",
-                     "steps": [{"step": "open form"}], "variables": []},
+                sop=generated_sop_template(
+                    "check_domain_availability", mode="passive",
+                ),
                 inference_time_seconds=10.0,
             )
 
