@@ -66,12 +66,14 @@ def start_focus_run(
     cassette: Callable[..., Cassette],
     adapter: str = "openclaw",
     ollama_down_for: int = 0,
+    vlm: dict | None = None,
 ) -> FocusRun:
     """Models, cassette, fixture and signal in place; no tick run yet.
 
     ``ollama_down_for`` asks the cassette (``/__cassette/down``) to answer
-    that many API requests with HTTP 503 before the worker starts."""
-    tape = cassette(FOCUS_CASSETTE)
+    that many API requests with HTTP 503 before the worker starts; ``vlm``
+    adds ``[vlm]`` keys to the worker's config."""
+    tape = cassette(FOCUS_CASSETTE, vlm=vlm)
     if ollama_down_for:
         with urllib.request.urlopen(f"{tape.host}/__cassette/down?n={ollama_down_for}") as reply:
             assert json.load(reply)["down"] == ollama_down_for
