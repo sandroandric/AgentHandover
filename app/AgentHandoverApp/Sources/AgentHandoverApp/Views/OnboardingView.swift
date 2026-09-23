@@ -2359,15 +2359,10 @@ struct OnboardingView: View {
     private func startServicesAndRecord() {
         let title = firstRecordingTitle.trimmingCharacters(in: .whitespacesAndNewlines)
 
-        // Write focus signal BEFORE starting services (daemon picks it up on first loop)
-        let sessionId = UUID().uuidString
-        let signal: [String: Any] = [
-            "session_id": sessionId,
-            "title": title,
-            "started_at": ISO8601DateFormatter().string(from: Date()),
-            "status": "recording",
-        ]
-        writeFocusSignalFile(signal)
+        // Write focus signal BEFORE starting services (daemon picks it up on first loop).
+        // If it fails the recording won't start, but services still come up
+        // and the user can start a recording from the menu bar.
+        try? FocusSignal.start(title: title, in: FocusSignal.defaultDirectory)
 
         // Start services on background thread to avoid freezing the UI
         DispatchQueue.global(qos: .userInitiated).async {
@@ -2380,26 +2375,6 @@ struct OnboardingView: View {
                     serviceStartFailed = true
                 }
             }
-        }
-    }
-
-    private func writeFocusSignalFile(_ signal: [String: Any]) {
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        let dir = home.appendingPathComponent("Library/Application Support/agenthandover")
-        let target = dir.appendingPathComponent("focus-session.json")
-        let tmp = dir.appendingPathComponent(".focus-session.json.tmp")
-
-        do {
-            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-            let data = try JSONSerialization.data(withJSONObject: signal, options: .prettyPrinted)
-            try data.write(to: tmp, options: .atomic)
-            if FileManager.default.fileExists(atPath: target.path) {
-                try FileManager.default.removeItem(at: target)
-            }
-            try FileManager.default.moveItem(at: tmp, to: target)
-        } catch {
-            // Silently fail -- the recording won't start but services are already running.
-            // The user can start a recording from the menu bar.
         }
     }
 

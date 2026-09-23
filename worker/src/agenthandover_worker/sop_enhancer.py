@@ -2,7 +2,7 @@
 
 .. deprecated:: 0.2.0
     This module is part of the v1 pipeline (post-hoc LLM enhancement of
-    PrefixSpan-induced SOPs).  In the v2 pipeline, ``sop_generator.py``
+    the v1 focus fallback's template).  In the v2 pipeline, ``sop_generator.py``
     generates descriptions directly during SOP creation — no separate
     enhancement pass is needed.
 

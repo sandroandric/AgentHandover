@@ -101,7 +101,6 @@ pub struct WorkerStatus {
     pub last_pipeline_duration_ms: Option<u64>,
     pub consecutive_errors: u32,
     pub vlm_available: bool,
-    pub sop_inducer_available: bool,
     /// Number of VLM jobs currently pending in the queue.
     #[serde(default)]
     pub vlm_queue_pending: u64,

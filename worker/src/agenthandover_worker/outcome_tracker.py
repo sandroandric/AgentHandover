@@ -136,7 +136,10 @@ class OutcomeTracker:
         if not event_summaries:
             return []
 
-        context = "; ".join(event_summaries)
+        from agenthandover_worker.redaction import redact
+
+        # Screen-derived annotation text: redacted before the prompt.
+        context = redact("; ".join(event_summaries))
         prompt = (
             f"What did the user accomplish in this workflow? "
             f"What changed as a result? Events: {context}. "

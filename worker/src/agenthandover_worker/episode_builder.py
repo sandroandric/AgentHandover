@@ -6,7 +6,8 @@
     VLM-based pipeline, which uses semantic embeddings and VLM annotations
     to identify task boundaries instead of app/URL/timing heuristics.
 
-    The v1 pipeline (episode_builder → translator → sop_inducer →
+    The v1 pipeline (episode_builder → translator; for a focus recording
+    without v2 annotation, → sop_inducer.induce_from_focus_session →
     sop_enhancer) remains functional for backward compatibility but will
     not receive new features.  Use v2 (scene_annotator → frame_differ →
     task_segmenter → sop_generator) for new deployments.

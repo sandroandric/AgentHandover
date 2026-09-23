@@ -75,10 +75,6 @@ pub fn run() -> Result<()> {
                 let pipeline_ms = w
                     .get("last_pipeline_duration_ms")
                     .and_then(|v| v.as_u64());
-                let inducer = w
-                    .get("sop_inducer_available")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
                 let errors = w.get("consecutive_errors").and_then(|v| v.as_u64()).unwrap_or(0);
 
                 let hb_fresh = !heartbeat.is_empty() && !is_heartbeat_stale(heartbeat);
@@ -94,16 +90,12 @@ pub fn run() -> Result<()> {
                     if sops > 0 {
                         format!("{}", sops).green().bold()
                     } else {
-                        "0 (repeat workflows 2+ times)".dimmed().bold()
+                        "0".dimmed().bold()
                     }
                 );
                 if let Some(ms) = pipeline_ms {
                     println!("    Last pipeline:    {}ms", ms);
                 }
-                println!(
-                    "    SOP mining:       {}",
-                    if inducer { "ready".green() } else { "disabled".red() }
-                );
                 if errors > 0 {
                     println!("    Errors:           {}", format!("{}", errors).red());
                 }

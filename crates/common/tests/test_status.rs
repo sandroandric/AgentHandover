@@ -40,7 +40,6 @@ fn sample_worker_status() -> WorkerStatus {
         last_pipeline_duration_ms: Some(250),
         consecutive_errors: 0,
         vlm_available: true,
-        sop_inducer_available: false,
         vlm_queue_pending: 0,
         vlm_jobs_today: 0,
         vlm_dropped_today: 0,
@@ -82,7 +81,6 @@ fn worker_status_serialization_roundtrip() {
     assert_eq!(status.last_pipeline_duration_ms, deserialized.last_pipeline_duration_ms);
     assert_eq!(status.consecutive_errors, deserialized.consecutive_errors);
     assert_eq!(status.vlm_available, deserialized.vlm_available);
-    assert_eq!(status.sop_inducer_available, deserialized.sop_inducer_available);
 }
 
 #[test]
@@ -433,7 +431,8 @@ fn worker_status_without_vlm_mode_omits_field() {
 
 #[test]
 fn worker_status_deserialize_with_extra_vlm_fields() {
-    // Simulate a worker-status.json with vlm_mode/vlm_provider
+    // Simulate a worker-status.json with vlm_mode/vlm_provider, from a
+    // worker old enough to still write the removed sop_inducer_available.
     let json = r#"{
         "pid": 12345,
         "version": "0.1.0",

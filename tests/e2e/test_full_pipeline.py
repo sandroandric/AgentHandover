@@ -135,7 +135,6 @@ class TestStatusFileProtocol:
             "last_pipeline_duration_ms": 450,
             "consecutive_errors": 0,
             "vlm_available": False,
-            "sop_inducer_available": True,
         }
 
         status_file = tmp_path / "worker-status.json"
@@ -145,7 +144,7 @@ class TestStatusFileProtocol:
         required_fields = [
             "pid", "version", "started_at", "heartbeat",
             "events_processed_today", "sops_generated",
-            "consecutive_errors", "vlm_available", "sop_inducer_available",
+            "consecutive_errors", "vlm_available",
         ]
         for field in required_fields:
             assert field in loaded, f"Missing required field: {field}"
@@ -206,8 +205,6 @@ class TestWorkerPipeline:
         from agenthandover_worker.translator import SemanticTranslator
         from agenthandover_worker.confidence import ConfidenceScorer
         from agenthandover_worker.vlm_queue import VLMFallbackQueue
-        from agenthandover_worker.openclaw_writer import OpenClawWriter
-        from agenthandover_worker.exporter import IndexGenerator
         from agenthandover_worker.main import run_pipeline
 
         # Create synthetic events as dicts (matching what WorkerDB returns)
@@ -229,9 +226,6 @@ class TestWorkerPipeline:
                 "processed": 0,
             })
 
-        workspace = tmp_path / "workspace"
-        writer = OpenClawWriter(workspace_dir=workspace)
-
         summary = run_pipeline(
             events,
             episode_builder=EpisodeBuilder(),
@@ -240,8 +234,6 @@ class TestWorkerPipeline:
             translator=SemanticTranslator(),
             scorer=ConfidenceScorer(),
             vlm_queue=VLMFallbackQueue(),
-            openclaw_writer=writer,
-            index_generator=IndexGenerator(),
         )
 
         assert summary["events_in"] == 5

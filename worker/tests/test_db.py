@@ -283,132 +283,39 @@ class TestEmptyDatabase:
 
 
 # ------------------------------------------------------------------
-# 8. Episode store — persist translated episodes across pipeline cycles
+# 8. Legacy episode store (the removed v1 miner's input) is dropped
 # ------------------------------------------------------------------
 
 
-class TestEpisodeStore:
-    """Episode store persists and retrieves translated episode steps."""
-
-    def test_save_and_retrieve_episode(self, tmp_db_path: Path) -> None:
-        steps = [
-            {"step": "click", "target": "button", "confidence": 0.8},
-            {"step": "type", "target": "input", "confidence": 0.7},
-        ]
-
-        with WorkerDB(tmp_db_path) as db:
-            assert db.save_episode_steps("ep-1", "app:safari", steps)
-            stored = db.get_all_episode_steps()
-
-        assert len(stored) == 1
-        assert len(stored[0]) == 2
-        assert stored[0][0]["step"] == "click"
-        assert stored[0][1]["step"] == "type"
-
-    def test_multiple_episodes_accumulated(self, tmp_db_path: Path) -> None:
-        steps_a = [{"step": "click", "target": "a"}]
-        steps_b = [{"step": "navigate", "target": "b"}, {"step": "read", "target": "c"}]
-
-        with WorkerDB(tmp_db_path) as db:
-            db.save_episode_steps("ep-1", "app:a", steps_a)
-            db.save_episode_steps("ep-2", "app:b", steps_b)
-            stored = db.get_all_episode_steps()
-
-        assert len(stored) == 2
-
-    def test_replace_on_duplicate_episode_id(self, tmp_db_path: Path) -> None:
-        steps_v1 = [{"step": "click", "target": "old"}]
-        steps_v2 = [{"step": "click", "target": "new"}, {"step": "type", "target": "x"}]
-
-        with WorkerDB(tmp_db_path) as db:
-            db.save_episode_steps("ep-1", "app:a", steps_v1)
-            db.save_episode_steps("ep-1", "app:a", steps_v2)
-            stored = db.get_all_episode_steps()
-
-        assert len(stored) == 1
-        assert len(stored[0]) == 2
-        assert stored[0][0]["target"] == "new"
-
-    def test_empty_steps_skipped(self, tmp_db_path: Path) -> None:
-        with WorkerDB(tmp_db_path) as db:
-            assert db.save_episode_steps("ep-1", "app:a", [])
-            stored = db.get_all_episode_steps()
-
-        assert len(stored) == 0
-
-    def test_count_stored_episodes(self, tmp_db_path: Path) -> None:
-        with WorkerDB(tmp_db_path) as db:
-            assert db.count_stored_episodes() == 0
-            db.save_episode_steps("ep-1", "a", [{"step": "click"}])
-            db.save_episode_steps("ep-2", "b", [{"step": "type"}])
-            assert db.count_stored_episodes() == 2
-
-    def test_cleanup_old_episodes(
+class TestDropEpisodeStore:
+    def test_drops_the_legacy_table_and_its_rows(
         self, tmp_db_path: Path, write_conn: sqlite3.Connection
     ) -> None:
+        write_conn.execute(
+            "CREATE TABLE translated_episodes (episode_id TEXT PRIMARY KEY, "
+            "thread_id TEXT NOT NULL, steps_json TEXT NOT NULL, "
+            "step_count INTEGER NOT NULL, created_at TEXT NOT NULL)"
+        )
+        write_conn.execute(
+            "INSERT INTO translated_episodes VALUES "
+            "('ep-1', 'a', '[]', 0, '2026-09-01T00:00:00Z')"
+        )
+        write_conn.commit()
+
         with WorkerDB(tmp_db_path) as db:
-            db.save_episode_steps("ep-1", "a", [{"step": "click"}])
-            # Backdate the record to 30 days ago
-            write_conn.execute(
-                "UPDATE translated_episodes SET created_at = "
-                "strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-30 days') WHERE episode_id = 'ep-1'"
-            )
-            write_conn.commit()
-            # Cleanup with 14-day retention should remove it
-            deleted = db.cleanup_old_episodes(max_age_days=14)
-            assert deleted == 1
-            assert db.count_stored_episodes() == 0
+            db.drop_episode_store()
+            db.drop_episode_store()  # idempotent
 
-    def test_get_episode_steps_on_fresh_db(self, tmp_db_path: Path) -> None:
-        """Episode store works on a DB that has never had the table created."""
+        tables = {
+            row[0] for row in write_conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+        assert "translated_episodes" not in tables
+
+    def test_fresh_db_is_a_no_op(self, tmp_db_path: Path) -> None:
         with WorkerDB(tmp_db_path) as db:
-            stored = db.get_all_episode_steps()
-        assert stored == []
-
-    def test_iso_timestamp_window_excludes_old_episodes(
-        self, tmp_db_path: Path, write_conn: sqlite3.Connection
-    ) -> None:
-        """Regression: ISO timestamps (T separator) must compare correctly
-        against strftime cutoffs.  An episode created 5 hours ago must be
-        excluded by a 4-hour window query.
-
-        Previously, datetime('now', ...) produced 'YYYY-MM-DD HH:MM:SS'
-        (space separator), making ISO 'T' timestamps appear newer than
-        the cutoff due to ASCII ordering ('T' > ' ').
-        """
-        with WorkerDB(tmp_db_path) as db:
-            db.save_episode_steps("ep-old", "app:a", [{"step": "click"}])
-            # Backdate to 5 hours ago using ISO format
-            write_conn.execute(
-                "UPDATE translated_episodes SET created_at = "
-                "strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-5 hours') "
-                "WHERE episode_id = 'ep-old'"
-            )
-            write_conn.commit()
-            # Save a recent episode (defaults to now)
-            db.save_episode_steps("ep-new", "app:b", [{"step": "type"}])
-
-            # Query with max_age_days that covers ~4 hours (use fraction)
-            # We need a tighter window — use hours via a raw query to verify.
-            # get_all_episode_steps uses days, so use 0 days (only "now" matches)
-            # Instead, verify the 14-day default includes both, but direct
-            # SQL check proves the format is correct.
-
-            # Verify: a 14-day window returns both
-            all_eps = db.get_all_episode_steps(max_age_days=14)
-            assert len(all_eps) == 2
-
-            # Now backdate ep-old to 20 days ago — should be excluded by 14-day window
-            write_conn.execute(
-                "UPDATE translated_episodes SET created_at = "
-                "strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-20 days') "
-                "WHERE episode_id = 'ep-old'"
-            )
-            write_conn.commit()
-
-            filtered = db.get_all_episode_steps(max_age_days=14)
-            assert len(filtered) == 1
-            assert filtered[0][0]["step"] == "type"
+            db.drop_episode_store()
 
 
 # ------------------------------------------------------------------

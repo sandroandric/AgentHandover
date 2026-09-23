@@ -1,7 +1,7 @@
 """Idle-Time Scheduler — gate heavy pipeline jobs on system conditions.
 
 Implements sections 15 + 12.2 of the AgentHandover spec: runs the D/E/F
-pipeline (episode builder, semantic translator, SOP inducer) only when
+pipeline (episode builder, semantic translator) only when
 system conditions allow.
 
 Gate conditions (from config.example.toml [idle_jobs]):

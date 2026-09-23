@@ -717,14 +717,14 @@ class TestUpgradeScore:
         assert upgrade_score({}) == pytest.approx(0.15)
 
     def test_v1_and_v2_procedures_rank_on_the_same_scale(self):
-        """A pattern mined by the v1 inducer and a v2 generated SOP with the
-        same evidence (3 demonstrations, one variable, no scene annotations)
-        get the same confidence_avg, whatever the v1 translator's per-step
-        confidences were."""
+        """A v1 focus template and a v2 generated SOP with the same evidence
+        (one demonstration, no scene annotations) get the same
+        confidence_avg, whatever the v1 translator's per-step confidences
+        were."""
         from agenthandover_worker.confidence import compute_v2_confidence
         from agenthandover_worker.procedure_curator import upgrade_score
         from agenthandover_worker.procedure_schema import sop_to_procedure
-        from agenthandover_worker.sop_inducer import SOPInducer
+        from agenthandover_worker.sop_inducer import induce_from_focus_session
 
         steps = [
             {"step": "click", "target": "New invoice", "confidence": 0.97,
@@ -734,22 +734,14 @@ class TestUpgradeScore:
             {"step": "click", "target": "Send", "confidence": 0.98,
              "parameters": {"app": "Chrome"}},
         ]
-        episodes = []
-        for customer in ("Acme", "Globex", "Initech"):
-            ep = [dict(s, parameters=dict(s["parameters"])) for s in steps]
-            ep[1]["parameters"]["value"] = customer
-            episodes.append(ep)
-
-        mined = SOPInducer(min_support=0.5, min_pattern_length=3).induce(episodes)
-        assert mined, "the inducer found no pattern"
-        v1 = mined[0]
+        v1 = induce_from_focus_session([steps], "Send invoice")[0]
         assert v1["step_confidence_mean"] > 0.95  # the old v1 scale
         v2 = {
             "steps": v1["steps"],
             "variables": v1["variables"],
             "episode_count": v1["episode_count"],
         }
-        v2["confidence_avg"] = compute_v2_confidence(v2).total
+        v2["confidence_avg"] = compute_v2_confidence(v2, is_focus=True).total
 
         assert v1["confidence_avg"] == v2["confidence_avg"]
         assert v1["confidence_avg"] < v1["step_confidence_mean"]

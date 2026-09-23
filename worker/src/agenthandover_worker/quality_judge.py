@@ -17,6 +17,7 @@ import logging
 from dataclasses import dataclass, field
 
 from agenthandover_worker.llm_reasoning import LLMReasoner, ReasoningResult
+from agenthandover_worker.redaction import redact
 
 logger = logging.getLogger(__name__)
 
@@ -141,8 +142,12 @@ class QualityJudge:
         procedure: dict,
         target_state: str,
     ) -> str:
-        """Build the assessment prompt from procedure data."""
-        title = procedure.get("title", procedure.get("id", "Untitled"))
+        """Build the assessment prompt from procedure data.
+
+        The title and steps come from the screen; they are redacted before
+        they reach the prompt.
+        """
+        title = redact(str(procedure.get("title", procedure.get("id", "Untitled"))))
         steps = procedure.get("steps", [])
         evidence = procedure.get("evidence", {})
         episode_count = procedure.get("episode_count", 0) or evidence.get("total_observations", 0)
@@ -154,7 +159,7 @@ class QualityJudge:
             action = step.get("action", step.get("step", ""))
             app = step.get("app", "")
             step_lines.append(f"  {i}. [{app}] {action}")
-        steps_text = "\n".join(step_lines) if step_lines else "  (no steps)"
+        steps_text = redact("\n".join(step_lines)) if step_lines else "  (no steps)"
 
         # Summarise evidence
         observation_count = len(evidence.get("observations", []))

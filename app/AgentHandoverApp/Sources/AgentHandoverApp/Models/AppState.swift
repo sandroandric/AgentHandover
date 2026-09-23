@@ -78,11 +78,11 @@ struct ExtensionHeartbeatFile: Codable {
 }
 
 /// Decoded focus-session.json
-struct FocusSessionSignalFile: Codable {
+struct FocusSessionSignalFile: Codable, Equatable {
     let session_id: String
     let title: String
     let started_at: String
-    let status: String
+    var status: String
 }
 
 /// A single question from focus-questions.json
@@ -120,7 +120,6 @@ struct WorkerStatusFile: Codable {
     let last_pipeline_duration_ms: UInt64?
     let consecutive_errors: UInt32
     let vlm_available: Bool
-    let sop_inducer_available: Bool
     let vlm_queue_pending: UInt64?
     let vlm_jobs_today: UInt64?
     let vlm_dropped_today: UInt64?
@@ -161,11 +160,8 @@ final class AppState: ObservableObject {
     @Published var sopAgentReadyCount: Int = 0
 
     // Focus Recording
-    @Published var focusSessionActive = false
-    @Published var focusSessionProcessing = false  // stopped, awaiting worker
-    @Published var focusSessionTitle: String = ""
-    @Published var focusSessionId: String?
-    @Published var focusSessionStartedAt: String?
+    /// Mirrors focus-session.json, whoever wrote it (app or CLI).
+    @Published private(set) var focusState: FocusRecordState = .idle
 
     // Focus Q&A
     @Published var focusQuestionsAvailable = false
@@ -220,7 +216,7 @@ final class AppState: ObservableObject {
     private var startupTimer: Timer?
     private var supervisorObserver: NSObjectProtocol?
     private var captureStallObserver: NSObjectProtocol?
-    private let statusDir: URL
+    let statusDir: URL
 
     init() {
         let home = FileManager.default.homeDirectoryForCurrentUser
@@ -335,23 +331,12 @@ final class AppState: ObservableObject {
         extensionConnected = false
     }
 
-    private func readFocusSession() {
-        let path = statusDir.appendingPathComponent("focus-session.json")
-        guard let data = try? Data(contentsOf: path),
-              let signal = try? JSONDecoder().decode(FocusSessionSignalFile.self, from: data) else {
-            focusSessionActive = false
-            focusSessionProcessing = false
-            focusSessionTitle = ""
-            focusSessionId = nil
-            focusSessionStartedAt = nil
-            return
-        }
-
-        focusSessionActive = signal.status == "recording"
-        focusSessionProcessing = signal.status == "stopped"
-        focusSessionTitle = signal.title
-        focusSessionId = signal.session_id
-        focusSessionStartedAt = signal.started_at
+    /// Re-reads focus-session.json. Called on every status refresh and each
+    /// second while the popover is open, so a session started or stopped
+    /// from the CLI shows up without waiting for the 30 s poll.
+    func readFocusSession() {
+        let state = FocusRecordState(signal: FocusSignal.read(in: statusDir))
+        if state != focusState { focusState = state }
     }
 
     private func readFocusQuestions() {

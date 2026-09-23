@@ -87,7 +87,6 @@ class TestWriteWorkerStatus:
                 last_pipeline_duration_ms=450,
                 consecutive_errors=0,
                 vlm_available=True,
-                sop_inducer_available=True,
             )
         status_file = tmp_path / "worker-status.json"
         assert status_file.exists()
@@ -100,7 +99,7 @@ class TestWriteWorkerStatus:
         assert data["last_pipeline_duration_ms"] == 450
         assert data["consecutive_errors"] == 0
         assert data["vlm_available"] is True
-        assert data["sop_inducer_available"] is True
+        assert "sop_inducer_available" not in data  # the v1 miner is gone
         assert "heartbeat" in data
 
     def test_overwrites_previous_status(self, tmp_path: Path) -> None:
@@ -112,7 +111,6 @@ class TestWriteWorkerStatus:
                 last_pipeline_duration_ms=None,
                 consecutive_errors=0,
                 vlm_available=False,
-                sop_inducer_available=False,
             )
             _write_worker_status(
                 started_at="2026-02-18T10:00:00Z",
@@ -121,7 +119,6 @@ class TestWriteWorkerStatus:
                 last_pipeline_duration_ms=300,
                 consecutive_errors=1,
                 vlm_available=True,
-                sop_inducer_available=True,
             )
         data = json.loads((tmp_path / "worker-status.json").read_text())
         assert data["events_processed_today"] == 50
@@ -138,7 +135,6 @@ class TestWriteWorkerStatus:
                 last_pipeline_duration_ms=None,
                 consecutive_errors=0,
                 vlm_available=False,
-                sop_inducer_available=False,
             )
         data = json.loads((tmp_path / "worker-status.json").read_text())
         assert data["last_pipeline_duration_ms"] is None
@@ -153,7 +149,6 @@ class TestWriteWorkerStatus:
                 last_pipeline_duration_ms=None,
                 consecutive_errors=0,
                 vlm_available=False,
-                sop_inducer_available=False,
             )
         assert (nested / "worker-status.json").exists()
 

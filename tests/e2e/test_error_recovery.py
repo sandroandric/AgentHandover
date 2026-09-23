@@ -169,7 +169,6 @@ class TestMissingPermissions:
             "last_pipeline_duration_ms": 100,
             "consecutive_errors": 0,
             "vlm_available": False,
-            "sop_inducer_available": False,
         }
 
         # Worker should still process events, just without VLM enhancement

@@ -382,8 +382,14 @@ class CorrectionDetector:
                 continue
 
             from agenthandover_worker.llm_reasoning import sanitize_user_data
-            originals = [sanitize_user_data(c.original_output) for c in group if c.original_output]
-            corrected = [sanitize_user_data(c.corrected_output) for c in group]
+            from agenthandover_worker.redaction import redact
+
+            # Redacted before truncation, so a cut never splits a secret.
+            originals = [
+                sanitize_user_data(redact(c.original_output))
+                for c in group if c.original_output
+            ]
+            corrected = [sanitize_user_data(redact(c.corrected_output)) for c in group]
 
             prompt = (
                 f"The user corrected this procedure step {len(group)} times. "

@@ -29,6 +29,7 @@ from agenthandover_worker.sop_dedup import (
     _url_to_domain,
     compute_fingerprint,
     fingerprint_similarity,
+    normalize_verb,
     title_tokens,
 )
 
@@ -38,39 +39,6 @@ if TYPE_CHECKING:
     from agenthandover_worker.task_segmenter import TaskSegment
 
 logger = logging.getLogger(__name__)
-
-
-# ---------------------------------------------------------------------------
-# Verb normalization map (mirrors sop_dedup._extract_action_verbs local map)
-# ---------------------------------------------------------------------------
-
-_VERB_MAP: dict[str, str] = {
-    "navigate": "open",
-    "go": "open",
-    "visit": "open",
-    "browse": "open",
-    "launch": "open",
-    "type": "enter",
-    "input": "enter",
-    "fill": "enter",
-    "write": "enter",
-    "press": "click",
-    "tap": "click",
-    "hit": "click",
-    "submit": "click",
-    "check": "verify",
-    "confirm": "verify",
-    "validate": "verify",
-    "inspect": "review",
-    "examine": "review",
-    "look": "review",
-    "read": "review",
-    "choose": "select",
-    "pick": "select",
-    "filter": "select",
-    "wait": "wait",
-    "pause": "wait",
-}
 
 
 # ---------------------------------------------------------------------------
@@ -204,7 +172,7 @@ class ProcedureMatcher:
                 words = frame.what_doing.strip().split()
                 if words:
                     first_word = words[0].lower()
-                    canonical = _VERB_MAP.get(first_word, first_word)
+                    canonical = normalize_verb(first_word)
                     action_verbs.add(canonical)
 
         return {
@@ -239,7 +207,7 @@ class ProcedureMatcher:
             words = span.goal_summary.strip().split()
             if words:
                 first_word = words[0].lower()
-                canonical = _VERB_MAP.get(first_word, first_word)
+                canonical = normalize_verb(first_word)
                 action_verbs.add(canonical)
 
         return {
@@ -265,7 +233,7 @@ class ProcedureMatcher:
         words = boundary.intent.strip().split()
         if words:
             first_word = words[0].lower()
-            action_verbs.add(_VERB_MAP.get(first_word, first_word))
+            action_verbs.add(normalize_verb(first_word))
 
         return {
             "apps": sorted(apps),

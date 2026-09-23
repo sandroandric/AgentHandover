@@ -20,11 +20,11 @@ import pytest
 
 
 class TestFocusSessionInduction:
-    """Test SOPInducer.induce_from_focus_session()."""
+    """Test sop_inducer.induce_from_focus_session()."""
 
     def _make_inducer(self):
-        from agenthandover_worker.sop_inducer import SOPInducer
-        return SOPInducer()
+        from agenthandover_worker import sop_inducer
+        return sop_inducer
 
     def _make_steps(self, n: int = 5) -> list[dict]:
         """Create n sample semantic step dicts."""

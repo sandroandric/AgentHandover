@@ -403,7 +403,6 @@ def test_eval_count_reaches_worker_status(tmp_path):
             last_pipeline_duration_ms=None,
             consecutive_errors=0,
             vlm_available=True,
-            sop_inducer_available=False,
         )
     status = json.loads((tmp_path / "worker-status.json").read_text())
     calls = status["model_calls"]["gemma4:e2b"]
@@ -461,7 +460,6 @@ def test_compute_reaches_worker_status(tmp_path):
             last_pipeline_duration_ms=None,
             consecutive_errors=0,
             vlm_available=True,
-            sop_inducer_available=False,
         )
     COMPUTE.reset()
     compute = json.loads((tmp_path / "worker-status.json").read_text())["compute"]

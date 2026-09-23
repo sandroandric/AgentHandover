@@ -230,6 +230,29 @@ class TestActionVerbs:
         verbs = _extract_action_verbs(sop)
         assert verbs == set()
 
+    @pytest.mark.parametrize(("word", "same_as"), [
+        ("Reviewing", "Review"),
+        ("Updating", "update"),
+        ("Opening", "open"),
+        ("Joining", "join"),
+        ("Navigating", "open"),   # gerund of a synonym: navigate -> open
+        ("typing", "enter"),
+        ("Reading", "review"),
+        ("running", "run"),        # doubled consonant undone
+        ("filling", "enter"),      # ...but not a double l
+        ("closing", "close"),
+    ])
+    def test_gerunds_meet_their_imperative(self, word, same_as):
+        from agenthandover_worker.sop_dedup import normalize_verb
+
+        assert normalize_verb(word) == normalize_verb(same_as)
+
+    def test_distinct_verbs_stay_distinct(self):
+        from agenthandover_worker.sop_dedup import normalize_verb
+
+        forms = {normalize_verb(w) for w in ("open", "close", "update", "delete", "send", "sing")}
+        assert len(forms) == 6
+
 
 # ------------------------------------------------------------------
 # Tests: Fingerprint computation

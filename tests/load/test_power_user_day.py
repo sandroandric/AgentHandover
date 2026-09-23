@@ -789,13 +789,9 @@ class TestPerformanceValidation:
         from agenthandover_worker.translator import SemanticTranslator
         from agenthandover_worker.confidence import ConfidenceScorer
         from agenthandover_worker.vlm_queue import VLMFallbackQueue
-        from agenthandover_worker.openclaw_writer import OpenClawWriter
-        from agenthandover_worker.exporter import IndexGenerator
         from agenthandover_worker.main import run_pipeline
 
         events = generate_power_user_day(1000)
-        workspace = tmp_path / "workspace"
-        writer = OpenClawWriter(workspace_dir=workspace)
 
         start = time.monotonic()
         summary = run_pipeline(
@@ -806,8 +802,6 @@ class TestPerformanceValidation:
             translator=SemanticTranslator(),
             scorer=ConfidenceScorer(),
             vlm_queue=VLMFallbackQueue(),
-            openclaw_writer=writer,
-            index_generator=IndexGenerator(),
         )
         elapsed = time.monotonic() - start
 
