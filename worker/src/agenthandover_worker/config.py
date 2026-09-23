@@ -79,7 +79,7 @@ class VlmConfig:
     annotation_max_frames_per_day: int = 1500
     annotation_max_compute_minutes_per_day: float = 60.0
     # The same per rolling hour, so one busy hour cannot spend the day:
-    # frames annotated (cache hits included) and Ollama compute of every
+    # frames sent to the model (cache hits free) and Ollama compute of every
     # passive model call (annotation, frame diffs, passive discovery).
     annotation_max_frames_per_hour: int = 60
     annotation_max_compute_minutes_per_hour: float = 10.0

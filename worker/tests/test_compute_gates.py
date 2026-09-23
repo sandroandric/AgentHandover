@@ -189,20 +189,55 @@ class TestHourlyGate:
 
     T0 = datetime(2026, 9, 23, 10, 0)
 
-    def test_frames_close_the_hour_and_reopen_as_it_rolls(self):
+    def test_model_calls_close_the_hour_and_reopen_as_it_rolls(self):
         budget = AnnotationBudget(
             max_frames=1500, max_compute_seconds=3600, max_frames_per_hour=3,
         )
         for minute in (0, 10, 20):
             budget.roll(self.T0 + timedelta(minutes=minute))
             assert budget.pause_reason() is None
-            budget.charge_frame(model_call=minute == 0)  # two cache hits
+            budget.charge_frame(model_call=True)
         assert budget.pause_reason() == "annotation_hourly_budget_exhausted"
-        assert (budget.frames, budget.hour()) == (1, (3, 0.0))
+        assert (budget.frames, budget.hour()) == (3, (3, 0.0))
         # An hour after the first frame, one slot is free again.
         budget.roll(self.T0 + timedelta(minutes=60, seconds=1))
         assert budget.hour() == (2, 0.0)
         assert budget.pause_reason() is None
+
+    def test_cache_hits_are_free_in_the_hour_and_shown_in_the_status(self):
+        """WP-F6: the hourly frame cap counts model calls only."""
+        budget = AnnotationBudget(
+            max_frames=1500, max_compute_seconds=3600, max_frames_per_hour=2,
+        )
+        budget.roll(self.T0)
+        budget.charge_frame(model_call=True)
+        for _ in range(50):
+            budget.charge_frame(model_call=False)
+        assert budget.pause_reason() is None
+        assert (budget.frames, budget.hour(), budget.hour_cache_hits()) == (
+            1, (1, 0.0), 50,
+        )
+        status = budget.status()
+        assert (status["hour_frames"], status["hour_cache_hits"]) == (1, 50)
+        budget.charge_frame(model_call=True)
+        assert budget.pause_reason() == "annotation_hourly_budget_exhausted"
+        # Hits leave the hour like any other charge.
+        budget.roll(self.T0 + timedelta(minutes=60, seconds=1))
+        assert (budget.hour(), budget.hour_cache_hits()) == ((0, 0.0), 0)
+
+    def test_state_saved_before_f6_still_loads(self):
+        """Three-element entries (no hit count) load as model calls."""
+        budget = AnnotationBudget(max_frames=1500, max_compute_seconds=3600)
+        budget.load(json.dumps({
+            "date": "2026-09-23", "frames": 1, "compute_seconds": 2.0,
+            "recent": [[self.T0.timestamp(), 1, 0.0], [self.T0.timestamp(), 0, 2.0]],
+        }))
+        budget.roll(self.T0 + timedelta(minutes=1))
+        assert (budget.hour(), budget.hour_cache_hits()) == ((1, 2.0), 0)
+        restored = AnnotationBudget(max_frames=1500, max_compute_seconds=3600)
+        restored.load(budget.to_json())
+        restored.roll(self.T0 + timedelta(minutes=1))
+        assert restored.recent == budget.recent
 
     def test_compute_closes_the_hour_and_the_day_wins_over_the_hour(self):
         budget = AnnotationBudget(
@@ -235,18 +270,19 @@ class TestHourlyGate:
     def test_passive_annotation_stops_at_the_hourly_gate_with_rows_pending(
         self, events_db, tmp_path,
     ):
-        """Every annotated frame counts in the hour, a cache hit too; the
-        rest stays pending with its JPEG."""
+        """The hour counts frames sent to the model; cache hits pass free
+        until the third model call closes it, and the rest stays pending
+        with its JPEG."""
         now = datetime.now(timezone.utc)
         shots = tmp_path / "shots"
         shots.mkdir()
-        for i in range(5):
+        for i in range(7):
             img = shots / f"h{i}.jpg"
             img.write_bytes(b"\xff\xd8\xff")
             _insert(events_db, f"h{i}", now - timedelta(minutes=10 - i),
                     {"screenshot_path": str(img)})
         annotator = SceneAnnotator(AnnotationConfig(model="hour-gate-model:1b"))
-        cached = iter([False, True, True])
+        cached = iter([False, True, True, False, False])
 
         def annotate(event, **kwargs):
             return AnnotationResult(
@@ -261,13 +297,15 @@ class TestHourlyGate:
         with WorkerDB(events_db) as db, \
                 patch.object(annotator, "ready", return_value=True), \
                 patch.object(annotator, "annotate_event", side_effect=annotate):
-            stats = wm._process_annotations(db, annotator, shots, budget=budget)
-        assert stats["annotated"] == 3 and stats["budget_exhausted"] is True
+            stats = wm._process_annotations(
+                db, annotator, shots, batch_size=10, budget=budget,
+            )
+        assert stats["annotated"] == 5 and stats["budget_exhausted"] is True
         assert budget.pause_reason() == "annotation_hourly_budget_exhausted"
-        assert budget.frames == 1  # the day counts model calls only
+        assert (budget.frames, budget.hour()[0], budget.hour_cache_hits()) == (3, 3, 2)
         statuses = _statuses(events_db)
-        assert [statuses[f"h{i}"] for i in (3, 4)] == ["pending", "pending"]
-        assert (shots / "h3.jpg").exists() and (shots / "h4.jpg").exists()
+        assert [statuses[f"h{i}"] for i in (5, 6)] == ["pending", "pending"]
+        assert (shots / "h5.jpg").exists() and (shots / "h6.jpg").exists()
 
     def test_charged_to_charges_every_model_in_the_block(self):
         budget = AnnotationBudget(max_frames=10, max_compute_seconds=3600)
