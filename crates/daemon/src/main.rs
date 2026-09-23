@@ -483,6 +483,7 @@ async fn main() -> Result<()> {
                                 artifact_ids: vec![],
                                 metadata: serde_json::json!({}),
                                 display_ids_spanned: None,
+                                focused_element: None,
                             };
                             match fwd_tx.try_send(ObserverMessage::Event { event }) {
                                 Ok(()) => {}

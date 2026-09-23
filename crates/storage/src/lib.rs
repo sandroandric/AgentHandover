@@ -99,6 +99,11 @@ impl EventStore {
                     .execute_batch(include_str!("migrations/v004_drop_old_dom_trees.sql"))?;
             }
 
+            if current_version < 5 {
+                self.conn
+                    .execute_batch(include_str!("migrations/v005_add_focused_element.sql"))?;
+            }
+
             self.conn
                 .pragma_update(None, "user_version", schema::CURRENT_SCHEMA_VERSION)?;
         }
@@ -134,14 +139,19 @@ impl EventStore {
         let display_ids_spanned_json = event
             .display_ids_spanned
             .as_ref()
-            .map(|ids| serde_json::to_string(ids))
+            .map(serde_json::to_string)
+            .transpose()?;
+        let focused_element_json = event
+            .focused_element
+            .as_ref()
+            .map(serde_json::to_string)
             .transpose()?;
 
         self.conn.execute(
             "INSERT INTO events (id, timestamp, kind_json, window_json, display_topology_json, \
              primary_display_id, cursor_x, cursor_y, ui_scale, artifact_ids_json, metadata_json, \
-             display_ids_spanned_json) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+             display_ids_spanned_json, focused_element_json) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 event.id.to_string(),
                 event.timestamp.to_rfc3339(),
@@ -149,7 +159,7 @@ impl EventStore {
                 event
                     .window
                     .as_ref()
-                    .map(|w| serde_json::to_string(w))
+                    .map(serde_json::to_string)
                     .transpose()?,
                 serde_json::to_string(&event.display_topology)?,
                 event.primary_display_id,
@@ -159,6 +169,7 @@ impl EventStore {
                 serde_json::to_string(&event.artifact_ids)?,
                 event.metadata.to_string(),
                 display_ids_spanned_json,
+                focused_element_json,
             ],
         )?;
         Ok(())
@@ -167,187 +178,110 @@ impl EventStore {
     pub fn get_event(&self, id: Uuid) -> Result<Option<Event>> {
         use rusqlite::OptionalExtension;
 
-        let mut stmt = self.conn.prepare(
-            "SELECT id, timestamp, kind_json, window_json, display_topology_json, \
-             primary_display_id, cursor_x, cursor_y, ui_scale, artifact_ids_json, metadata_json, \
-             display_ids_spanned_json \
-             FROM events WHERE id = ?1",
-        )?;
-
-        let result = stmt
-            .query_row(params![id.to_string()], |row| {
-                let id_str: String = row.get(0)?;
-                let ts_str: String = row.get(1)?;
-                let kind_json: String = row.get(2)?;
-                let window_json: Option<String> = row.get(3)?;
-                let display_json: String = row.get(4)?;
-                let primary_display: String = row.get(5)?;
-                let cursor_x: Option<i32> = row.get(6)?;
-                let cursor_y: Option<i32> = row.get(7)?;
-                let ui_scale: Option<f64> = row.get(8)?;
-                let artifact_ids_json: String = row.get(9)?;
-                let metadata_json: String = row.get(10)?;
-                let display_ids_spanned_json: Option<String> = row.get(11)?;
-
-                Ok((
-                    id_str,
-                    ts_str,
-                    kind_json,
-                    window_json,
-                    display_json,
-                    primary_display,
-                    cursor_x,
-                    cursor_y,
-                    ui_scale,
-                    artifact_ids_json,
-                    metadata_json,
-                    display_ids_spanned_json,
-                ))
-            })
-            .optional();
-
-        match result {
-            Ok(Some((
-                id_str,
-                ts_str,
-                kind_json,
-                window_json,
-                display_json,
-                primary_display,
-                cursor_x,
-                cursor_y,
-                ui_scale,
-                artifact_ids_json,
-                metadata_json,
-                display_ids_spanned_json,
-            ))) => {
-                let event = Self::row_to_event(
-                    id_str,
-                    ts_str,
-                    kind_json,
-                    window_json,
-                    display_json,
-                    primary_display,
-                    cursor_x,
-                    cursor_y,
-                    ui_scale,
-                    artifact_ids_json,
-                    metadata_json,
-                    display_ids_spanned_json,
-                )?;
-                Ok(Some(event))
-            }
-            Ok(None) => Ok(None),
-            Err(e) => Err(anyhow::anyhow!(e)),
-        }
+        let mut stmt = self
+            .conn
+            .prepare(&format!("SELECT {EVENT_COLUMNS} FROM events WHERE id = ?1"))?;
+        let row = stmt
+            .query_row(params![id.to_string()], EventRow::read)
+            .optional()?;
+        row.map(EventRow::into_event).transpose()
     }
 
     pub fn get_unprocessed_events(&self, limit: u32) -> Result<Vec<Event>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, timestamp, kind_json, window_json, display_topology_json, \
-             primary_display_id, cursor_x, cursor_y, ui_scale, artifact_ids_json, metadata_json, \
-             display_ids_spanned_json \
-             FROM events WHERE processed = 0 ORDER BY timestamp ASC LIMIT ?1",
-        )?;
-
-        let rows = stmt.query_map(params![limit], |row| {
-            let id_str: String = row.get(0)?;
-            let ts_str: String = row.get(1)?;
-            let kind_json: String = row.get(2)?;
-            let window_json: Option<String> = row.get(3)?;
-            let display_json: String = row.get(4)?;
-            let primary_display: String = row.get(5)?;
-            let cursor_x: Option<i32> = row.get(6)?;
-            let cursor_y: Option<i32> = row.get(7)?;
-            let ui_scale: Option<f64> = row.get(8)?;
-            let artifact_ids_json: String = row.get(9)?;
-            let metadata_json: String = row.get(10)?;
-            let display_ids_spanned_json: Option<String> = row.get(11)?;
-            Ok((
-                id_str,
-                ts_str,
-                kind_json,
-                window_json,
-                display_json,
-                primary_display,
-                cursor_x,
-                cursor_y,
-                ui_scale,
-                artifact_ids_json,
-                metadata_json,
-                display_ids_spanned_json,
-            ))
-        })?;
-
-        let mut events = Vec::new();
-        for row in rows {
-            let (
-                id_str,
-                ts_str,
-                kind_json,
-                window_json,
-                display_json,
-                primary_display,
-                cursor_x,
-                cursor_y,
-                ui_scale,
-                artifact_ids_json,
-                metadata_json,
-                display_ids_spanned_json,
-            ) = row?;
-            let event = Self::row_to_event(
-                id_str,
-                ts_str,
-                kind_json,
-                window_json,
-                display_json,
-                primary_display,
-                cursor_x,
-                cursor_y,
-                ui_scale,
-                artifact_ids_json,
-                metadata_json,
-                display_ids_spanned_json,
-            )?;
-            events.push(event);
-        }
-        Ok(events)
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {EVENT_COLUMNS} FROM events WHERE processed = 0 \
+             ORDER BY timestamp ASC LIMIT ?1"
+        ))?;
+        let rows = stmt.query_map(params![limit], EventRow::read)?;
+        rows.map(|row| row?.into_event()).collect()
     }
 
-    /// Convert a raw row tuple into an Event struct.
-    fn row_to_event(
-        id_str: String,
-        ts_str: String,
-        kind_json: String,
-        window_json: Option<String>,
-        display_json: String,
-        primary_display: String,
-        cursor_x: Option<i32>,
-        cursor_y: Option<i32>,
-        ui_scale: Option<f64>,
-        artifact_ids_json: String,
-        metadata_json: String,
-        display_ids_spanned_json: Option<String>,
-    ) -> Result<Event> {
+    /// True when a `ClipboardChange` with `content_hash` was recorded at or
+    /// after `since`: the copy a paste of that content came from.
+    pub fn has_copy_since(
+        &self,
+        content_hash: &str,
+        since: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool> {
+        let found: i64 = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM events \
+             WHERE json_extract(kind_json, '$.type') = 'ClipboardChange' \
+               AND json_extract(kind_json, '$.content_hash') = ?1 \
+               AND julianday(timestamp) >= julianday(?2))",
+            params![content_hash, since.to_rfc3339()],
+            |row| row.get(0),
+        )?;
+        Ok(found != 0)
+    }
+}
+
+/// The columns [`EventRow::read`] reads, in its order.
+const EVENT_COLUMNS: &str = "id, timestamp, kind_json, window_json, display_topology_json, \
+     primary_display_id, cursor_x, cursor_y, ui_scale, artifact_ids_json, metadata_json, \
+     display_ids_spanned_json, focused_element_json";
+
+/// One `events` row as stored, before its JSON columns are parsed.
+struct EventRow {
+    id: String,
+    timestamp: String,
+    kind_json: String,
+    window_json: Option<String>,
+    display_json: String,
+    primary_display: String,
+    cursor_x: Option<i32>,
+    cursor_y: Option<i32>,
+    ui_scale: Option<f64>,
+    artifact_ids_json: String,
+    metadata_json: String,
+    display_ids_spanned_json: Option<String>,
+    focused_element_json: Option<String>,
+}
+
+impl EventRow {
+    fn read(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
+        Ok(Self {
+            id: row.get(0)?,
+            timestamp: row.get(1)?,
+            kind_json: row.get(2)?,
+            window_json: row.get(3)?,
+            display_json: row.get(4)?,
+            primary_display: row.get(5)?,
+            cursor_x: row.get(6)?,
+            cursor_y: row.get(7)?,
+            ui_scale: row.get(8)?,
+            artifact_ids_json: row.get(9)?,
+            metadata_json: row.get(10)?,
+            display_ids_spanned_json: row.get(11)?,
+            focused_element_json: row.get(12)?,
+        })
+    }
+
+    fn into_event(self) -> Result<Event> {
         Ok(Event {
-            id: Uuid::parse_str(&id_str)?,
-            timestamp: chrono::DateTime::parse_from_rfc3339(&ts_str)
+            id: Uuid::parse_str(&self.id)?,
+            timestamp: chrono::DateTime::parse_from_rfc3339(&self.timestamp)
                 .map_err(|e| anyhow::anyhow!(e))?
                 .with_timezone(&chrono::Utc),
-            kind: serde_json::from_str(&kind_json)?,
-            window: window_json
+            kind: serde_json::from_str(&self.kind_json)?,
+            window: self
+                .window_json
                 .map(|j| serde_json::from_str(&j))
                 .transpose()?,
-            display_topology: serde_json::from_str(&display_json)?,
-            primary_display_id: primary_display,
-            cursor_global_px: match (cursor_x, cursor_y) {
+            display_topology: serde_json::from_str(&self.display_json)?,
+            primary_display_id: self.primary_display,
+            cursor_global_px: match (self.cursor_x, self.cursor_y) {
                 (Some(x), Some(y)) => Some(CursorPosition { x, y }),
                 _ => None,
             },
-            ui_scale,
-            artifact_ids: serde_json::from_str(&artifact_ids_json)?,
-            metadata: serde_json::from_str(&metadata_json)?,
-            display_ids_spanned: display_ids_spanned_json
+            ui_scale: self.ui_scale,
+            artifact_ids: serde_json::from_str(&self.artifact_ids_json)?,
+            metadata: serde_json::from_str(&self.metadata_json)?,
+            display_ids_spanned: self
+                .display_ids_spanned_json
+                .map(|j| serde_json::from_str(&j))
+                .transpose()?,
+            focused_element: self
+                .focused_element_json
                 .map(|j| serde_json::from_str(&j))
                 .transpose()?,
         })

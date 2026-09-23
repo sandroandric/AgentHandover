@@ -55,6 +55,7 @@ DAEMON_COLUMNS = (
     "artifact_ids_json",
     "metadata_json",
     "display_ids_spanned_json",
+    "focused_element_json",
 )
 
 _ISO_SECONDS = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(.*)$")

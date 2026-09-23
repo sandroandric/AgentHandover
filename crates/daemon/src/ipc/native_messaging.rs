@@ -544,6 +544,7 @@ fn convert_to_event(msg: &ExtensionMessage) -> Option<Event> {
         artifact_ids: vec![],
         metadata,
         display_ids_spanned: None,
+        focused_element: None,
     })
 }
 

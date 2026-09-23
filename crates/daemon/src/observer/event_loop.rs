@@ -738,6 +738,7 @@ fn make_event(
         artifact_ids: vec![],
         metadata: serde_json::json!({}),
         display_ids_spanned,
+        focused_element: None,
     }
 }
 
@@ -891,6 +892,7 @@ mod tests {
             artifact_ids: vec![],
             metadata: serde_json::json!({}),
             display_ids_spanned: None,
+            focused_element: None,
         }
     }
 
@@ -994,6 +996,7 @@ mod tests {
             artifact_ids: vec![],
             metadata: serde_json::json!({}),
             display_ids_spanned: None,
+            focused_element: None,
         };
 
         // Should not panic with no window

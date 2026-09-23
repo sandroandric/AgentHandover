@@ -23,6 +23,7 @@ fn make_test_event() -> Event {
         artifact_ids: vec![],
         metadata: serde_json::json!({}),
         display_ids_spanned: None,
+        focused_element: None,
     }
 }
 
