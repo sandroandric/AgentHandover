@@ -163,8 +163,11 @@ def _call_sites(tmp_path: Path) -> list[tuple[str, callable, str]]:
         ),
         (
             "segmenter embeddings",
-            lambda: task_segmenter._compute_embeddings(["a", "b"]),
-            '{"model": "all-minilm:l6-v2", "input": ["a", "b"]}',
+            lambda: task_segmenter._compute_embeddings(
+                ["a", "b"], model="nomic-embed-text",
+            ),
+            '{"model": "nomic-embed-text", "input": '
+            '["clustering: a", "clustering: b"]}',
         ),
     ]
 
@@ -189,8 +192,9 @@ def test_vector_kb_batches_and_keeps_the_body(tmp_path):
         vectors = kb.compute_embeddings(["a", "b", "c"])
     assert vectors == [[1.0], [2.0], [3.0]]
     assert [data for _, _, data, _ in opener.sent] == [
-        b'{"model": "nomic-embed-text", "input": ["a", "b"]}',
-        b'{"model": "nomic-embed-text", "input": ["c"]}',
+        b'{"model": "nomic-embed-text", "input": '
+        b'["search_document: a", "search_document: b"]}',
+        b'{"model": "nomic-embed-text", "input": ["search_document: c"]}',
     ]
     assert opener.sent[0][3] == kb.config.timeout_seconds
 
@@ -323,7 +327,7 @@ def test_a_reply_that_is_not_an_object_is_a_bad_response(body):
 def test_embed_errors_share_the_classes():
     with patch("urllib.request.urlopen", _Urlopen(_http_error(404))):
         with pytest.raises(OllamaUnavailable):
-            task_segmenter._compute_embeddings(["a"])
+            task_segmenter._compute_embeddings(["a"], model="nomic-embed-text")
 
 
 # ---------------------------------------------------------------------------

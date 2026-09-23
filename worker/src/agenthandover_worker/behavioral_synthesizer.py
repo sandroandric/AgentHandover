@@ -24,6 +24,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from agenthandover_worker.json_extract import extract_json
+from agenthandover_worker.model_profiles import STANDARD_TIER
 from agenthandover_worker.ollama import OllamaClient
 
 logger = logging.getLogger(__name__)
@@ -243,7 +244,7 @@ def _parse_json_response(raw: str) -> dict | None:
 class SynthesizerConfig:
     """Configuration for the behavioral synthesizer."""
 
-    model: str = "qwen3.5:4b"
+    model: str = STANDARD_TIER.sop_model  # main() passes the configured model
     ollama_host: str = "http://localhost:11434"
     # Output budget including any thinking tokens (plan: synthesis <= 3k).
     num_predict: int = 3000
@@ -774,8 +775,9 @@ class BehavioralSynthesizer:
         Each timeline is a list of frame dicts.  This formatter extracts
         the rich fields populated by the focus_processor's
         ``_build_pre_analysis_obs`` (action, app, location, email_addresses,
-        urls, typed_text, visible_values, plus copy/paste content_preview
-        when present) and renders them as a numbered evidence list the
+        urls, typed_text, active_element, modal, visible_items,
+        screen_text, plus copy/paste content_preview when present) and
+        renders them as a numbered evidence list the
         synthesizer prompt can quote from.
 
         Without this, the prompt asks the model to write a concrete goal
@@ -818,35 +820,32 @@ class BehavioralSynthesizer:
                 emails = frame.get("email_addresses") or []
                 if emails:
                     parts.append(f"emails={list(emails)[:6]}")
-                names = frame.get("names") or []
-                if names:
-                    parts.append(f"names={list(names)[:6]}")
                 urls = frame.get("urls") or []
                 if urls:
                     parts.append(f"urls={list(urls)[:4]}")
                 typed = frame.get("typed_text") or ""
                 if typed:
                     parts.append(f'typed="{typed[:140]}"')
-                selected = frame.get("selected_text") or ""
-                if selected:
-                    parts.append(f'selected="{selected[:140]}"')
                 # active_element is a STRONG signal for what the user is
                 # currently focused on (e.g. "Send button" tells the
                 # model the user just sent the email)
                 active = frame.get("active_element") or ""
                 if active:
                     parts.append(f'focus="{active[:120]}"')
-                values = frame.get("visible_values") or []
-                if values:
-                    parts.append(f"values={list(values)[:12]}")
-                headings = frame.get("headings") or []
-                if headings:
-                    parts.append(f"headings={list(headings)[:6]}")
-                # Compose-specific structured fields (recipient, subject,
-                # body) — these are the highest-signal verbatim text
-                compose = frame.get("compose")
-                if isinstance(compose, dict) and compose:
-                    parts.append(f"compose={compose}")
+                modal = frame.get("modal") or ""
+                if modal:
+                    parts.append(f'modal="{modal[:120]}"')
+                items = frame.get("visible_items") or []
+                if items:
+                    parts.append(f"items={list(items)[:6]}")
+                # The screen's own text (subject lines, message bodies,
+                # recipient chips), one line.
+                screen = " | ".join(
+                    line.strip() for line in str(frame.get("screen_text") or "").splitlines()
+                    if line.strip()
+                )
+                if screen:
+                    parts.append(f'screen="{screen[:240]}"')
                 # Copy/paste content_preview (set by focus_processor
                 # when a clipboard event is attached to the frame)
                 clip = frame.get("clipboard_preview") or ""

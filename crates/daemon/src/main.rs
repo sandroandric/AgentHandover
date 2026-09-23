@@ -153,10 +153,9 @@ async fn main() -> Result<()> {
 
     // Convert AppConfig -> ObserverConfig
     let config = ObserverConfig {
-        t_dwell_seconds: app_config.observer.t_dwell_seconds,
-        t_scroll_read_seconds: app_config.observer.t_scroll_read_seconds,
         capture_screenshots: app_config.observer.capture_screenshots,
         screenshot_max_per_minute: app_config.observer.screenshot_max_per_minute,
+        focus_screenshot_max_per_minute: app_config.observer.focus_screenshot_max_per_minute,
         poll_interval: std::time::Duration::from_millis(500),
         db_path: {
             // Use the same standard path the worker expects so both
@@ -173,6 +172,7 @@ async fn main() -> Result<()> {
         screenshot_format: app_config.observer.screenshot_format.clone(),
         screenshot_quality: app_config.observer.screenshot_quality,
         screenshot_scale: app_config.observer.screenshot_scale,
+        zones: app_config.privacy.zones.clone(),
         screenshots_dir: {
             // Screenshots dir lives alongside the database
             let data_dir = if cfg!(target_os = "macos") {
@@ -184,6 +184,9 @@ async fn main() -> Result<()> {
             std::fs::create_dir_all(&dir).ok();
             dir
         },
+        capture_input_values: app_config.privacy.capture_input_values,
+        // Sockets and the state dir: the standard locations.
+        ..ObserverConfig::default()
     };
 
     // Channel for observer -> storage communication
@@ -271,6 +274,7 @@ async fn main() -> Result<()> {
             while let Some(event) = nm_event_rx.recv().await {
                 // Track last NM message timestamp for extension-connected detection
                 nm_ts.store(chrono::Utc::now().timestamp_millis(), Ordering::Relaxed);
+                note_browser_transition(&event);
                 match forwarder_tx.try_send(ObserverMessage::Event { event }) {
                     Ok(()) => {}
                     Err(mpsc::error::TrySendError::Full(_)) => {
@@ -443,11 +447,16 @@ async fn main() -> Result<()> {
         }
     });
 
+    // Set by the clipboard forwarder, consumed by the observer: a clipboard
+    // change is a capture transition.
+    let clipboard_changed = Arc::new(AtomicBool::new(false));
+
     // Spawn clipboard monitor (macOS only)
     #[cfg(target_os = "macos")]
     let clipboard_handle = {
         use agenthandover_daemon::platform::clipboard_monitor;
         let clip_tx = tx.clone();
+        let clip_changed = Arc::clone(&clipboard_changed);
         let clip_shutdown_rx = shutdown_tx.subscribe();
         // Clipboard text is stored only when the user opted in.
         let clip_preview_max_chars = app_config
@@ -460,11 +469,10 @@ async fn main() -> Result<()> {
             // Spawn the forwarder that converts ClipboardMessage -> ObserverMessage
             let fwd_tx = clip_tx;
             let forwarder = tokio::spawn(async move {
-                let mut hash_tracker = clipboard_monitor::ClipboardHashTracker::new();
                 while let Some(msg) = clip_event_rx.recv().await {
                     match msg {
                         clipboard_monitor::ClipboardMessage::Change(change) => {
-                            hash_tracker.record(change.content_hash.clone());
+                            clip_changed.store(true, Ordering::Release);
                             let event = agenthandover_common::event::Event {
                                 id: uuid::Uuid::new_v4(),
                                 timestamp: change.timestamp,
@@ -483,6 +491,7 @@ async fn main() -> Result<()> {
                                 artifact_ids: vec![],
                                 metadata: serde_json::json!({}),
                                 display_ids_spanned: None,
+                                focused_element: None,
                             };
                             match fwd_tx.try_send(ObserverMessage::Event { event }) {
                                 Ok(()) => {}
@@ -504,6 +513,15 @@ async fn main() -> Result<()> {
             forwarder.abort();
         })
     };
+
+    // Ingest the opt-in shell hook's log (`agenthandover setup --shell`).
+    let shell_handle = tokio::spawn(agenthandover_daemon::shell::run_shell_ingest(
+        agenthandover_common::status::data_dir(),
+        tx.clone(),
+        shutdown_tx.subscribe(),
+        Arc::clone(&capture_paused),
+        app_config.privacy.zones.clone(),
+    ));
 
     // Create artifact store for screenshot capture.
     // Key is derived from machine-specific data so each installation gets
@@ -527,13 +545,22 @@ async fn main() -> Result<()> {
     };
 
     // Run observer loop (blocks until shutdown)
-    let observer_result = run_observer_loop(config, tx, shutdown_rx, artifact_store, capture_paused).await;
+    let observer_result = run_observer_loop(
+        config,
+        tx,
+        shutdown_rx,
+        artifact_store,
+        capture_paused,
+        clipboard_changed,
+    )
+    .await;
 
     // Abort background tasks
     native_handle.abort();
     health_handle.abort();
     maint_handle.abort();
     control_handle.abort();
+    shell_handle.abort();
     #[cfg(target_os = "macos")]
     clipboard_handle.abort();
 
@@ -638,6 +665,7 @@ async fn run_native_messaging_bridge() -> Result<()> {
 
     let forwarder_tx = tx;
     let forwarder_tab_id = Arc::clone(&last_active_tab_id);
+    let paste_db_path = db_path.clone();
     let forwarder_handle = tokio::spawn(async move {
         let mut message_count: u64 = 0;
         let mut last_heartbeat_write = std::time::Instant::now();
@@ -649,6 +677,9 @@ async fn run_native_messaging_bridge() -> Result<()> {
             if let Some(tab_id) = event.metadata.get("tabId").and_then(|v| v.as_i64()) {
                 forwarder_tab_id.store(tab_id, Ordering::Relaxed);
             }
+
+            // Tell the observer to capture the page the user just acted on.
+            note_browser_transition(&event);
 
             // Write extension heartbeat every 5 seconds (throttled)
             if last_heartbeat_write.elapsed() >= std::time::Duration::from_secs(5) {
@@ -665,6 +696,19 @@ async fn run_native_messaging_bridge() -> Result<()> {
                     warn!("Failed to write extension heartbeat: {}", e);
                 }
                 last_heartbeat_write = std::time::Instant::now();
+            }
+
+            // A paste is matched to its copy (pasteboard hash vs stored
+            // ClipboardChange) off this loop: matching may wait for the
+            // copy's row to land.
+            if matches!(event.kind, agenthandover_common::event::EventKind::PasteDetected { .. }) {
+                let (paste_tx, db) = (forwarder_tx.clone(), paste_db_path.clone());
+                tokio::spawn(async move {
+                    let event =
+                        agenthandover_daemon::capture::paste::resolve_paste(event, &db).await;
+                    let _ = paste_tx.send(ObserverMessage::Event { event }).await;
+                });
+                continue;
             }
 
             match forwarder_tx.try_send(ObserverMessage::Event { event }) {
@@ -780,6 +824,29 @@ async fn run_native_messaging_bridge() -> Result<()> {
 
     info!("NM bridge exiting");
     Ok(())
+}
+
+/// Hand a browser click, navigation or form submit to the observer through
+/// the transition file (the bridge is Chrome's process, not the observer's).
+fn note_browser_transition(event: &agenthandover_common::event::Event) {
+    use agenthandover_common::browser_transition::{write_browser_transition, BrowserTransition};
+
+    let Some(kind) = native_messaging::browser_transition_kind(&event.kind) else {
+        return;
+    };
+    // The page URL (already origin + path) lets the observer check
+    // `[privacy.zones] blocked_urls` before it captures the page.
+    let url = event
+        .metadata
+        .get("url")
+        .and_then(|v| v.as_str())
+        .filter(|u| *u != "unknown")
+        .map(str::to_string);
+    let transition = BrowserTransition { kind, at: chrono::Utc::now(), url };
+    let dir = agenthandover_common::status::data_dir();
+    if let Err(e) = write_browser_transition(&dir, &transition) {
+        warn!("Failed to write browser transition: {}", e);
+    }
 }
 
 /// Load AppConfig from the standard config file location, falling back to

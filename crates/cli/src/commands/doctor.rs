@@ -6,6 +6,7 @@ use agenthandover_common::observation::{
     capture_socket_path, observation_socket_path, snapshot_at,
 };
 
+use agenthandover_common::tiers;
 use crate::paths;
 
 /// Detect which install channel produced this AgentHandover installation.
@@ -234,11 +235,8 @@ pub fn run() -> Result<()> {
 
     // Check 16: Required models pulled
     //
-    // v0.2.0 introduced RAM-based model tiers (Qwen 3.5 for 8GB, Gemma 4
-    // for 16GB+). The previous version of this check hardcoded
-    // `qwen3.5:2b` + `qwen3.5:4b` which is wrong for anyone on a 16GB+
-    // Mac — they'd have Gemma 4 installed and doctor would report both
-    // qwen models as missing. False failures.
+    // The models depend on the RAM tier (tiers.json), so a hard-coded
+    // list reports false failures on every other tier.
     //
     // Correct approach: read the user's config.toml to find their
     // ACTUALLY configured annotation_model + sop_model + embedding
@@ -260,22 +258,28 @@ pub fn run() -> Result<()> {
                 "vlm.mode = remote (using cloud API)",
             );
         } else {
-            let annotation_model = read_config_string_field(&config_str, "vlm", "annotation_model")
-                .unwrap_or_else(|| "qwen3.5:2b".to_string());
-            let sop_model = read_config_string_field(&config_str, "vlm", "sop_model")
-                .unwrap_or_else(|| "qwen3.5:4b".to_string());
+            // Missing model keys come from the config's tier, else the
+            // RAM tier, exactly as the worker resolves them.
+            let (_, annotation_model, sop_model) = tiers::resolve_models(
+                read_config_string_field(&config_str, "vlm", "tier").as_deref(),
+                read_config_string_field(&config_str, "vlm", "annotation_model").as_deref(),
+                read_config_string_field(&config_str, "vlm", "sop_model").as_deref(),
+            );
             let embedding_model = read_config_string_field(&config_str, "embedding", "model")
-                .unwrap_or_else(|| "nomic-embed-text".to_string());
+                .unwrap_or_else(|| tiers::table().embedding_model.clone());
 
-            let models_output = std::process::Command::new("ollama")
-                .arg("list")
+            // Ask the service over HTTP, like the check above: the `ollama`
+            // CLI is not on the PATH of a GUI-launched or non-interactive
+            // process (no /opt/homebrew/bin), so `ollama list` reported
+            // installed models as missing.
+            let installed = std::process::Command::new("curl")
+                .args(["-s", "--max-time", "5", "http://localhost:11434/api/tags"])
                 .output()
-                .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+                .map(|o| ollama_tag_names(&String::from_utf8_lossy(&o.stdout)))
                 .unwrap_or_default();
 
-            // Gemma 4 is a single-model tier where annotation_model ==
-            // sop_model; deduplicate so we don't report the same model
-            // twice with different purposes.
+            // The standard tier runs one model for both jobs; deduplicate
+            // so we don't report the same model twice.
             let mut models_to_check: Vec<(String, &str)> = Vec::new();
             if !annotation_model.is_empty() {
                 models_to_check.push((annotation_model.clone(), "scene annotation"));
@@ -288,7 +292,7 @@ pub fn run() -> Result<()> {
             }
 
             for (model, purpose) in &models_to_check {
-                if models_output.contains(model.as_str()) {
+                if model_installed(&installed, model) {
                     check_pass(&mut counts, &format!("Model {} ({})", model, purpose));
                 } else {
                     check_fail(&mut counts, &format!("Model {} ({})", model, purpose));
@@ -470,84 +474,105 @@ fn check_skip(counts: &mut CheckCounts, name: &str, reason: &str) {
     println!("  {} {} ({})", "SKIP".yellow(), name, reason);
 }
 
-/// Advisory heartbeat freshness check for a service status file.
-///
-/// Reads `~/Library/Application Support/agenthandover/<filename>`, parses the
-/// `heartbeat` ISO-8601 timestamp, and prints a WARNING if it is older than 60
-/// seconds.  If the file doesn't exist (first install, service never started),
-/// prints an INFO note.  This check never affects the overall doctor result.
+/// Advisory heartbeat freshness check for a service status file
+/// (`~/Library/Application Support/agenthandover/<filename>`).  Never
+/// affects the overall doctor result.
 fn check_heartbeat_freshness(service_name: &str, status_filename: &str) {
     let label = format!("{} heartbeat", service_name);
-
-    let status_dir = agenthandover_common::status::status_dir();
-    let path = status_dir.join(status_filename);
-
-    if !path.exists() {
-        println!(
-            "  {} {} ({})",
-            "info".dimmed(),
-            label,
-            "No status file yet (service may not have started)"
-        );
-        return;
-    }
-
+    let path = agenthandover_common::status::status_dir().join(status_filename);
     let content = match std::fs::read_to_string(&path) {
-        Ok(c) => c,
+        Ok(c) => Some(c),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(_) => {
-            println!("  {} {} ({})", "info".dimmed(), label, "Cannot read status file");
+            println!("  {} {} (Cannot read status file)", "info".dimmed(), label);
             return;
         }
     };
-
-    let parsed: serde_json::Value = match serde_json::from_str(&content) {
-        Ok(v) => v,
-        Err(_) => {
-            println!("  {} {} ({})", "info".dimmed(), label, "Invalid JSON in status file");
-            return;
-        }
+    let (level, detail) = heartbeat_verdict(
+        content.as_deref(),
+        Utc::now(),
+        agenthandover_common::pid::is_process_running,
+    );
+    let tag = match level {
+        HeartbeatLevel::Pass => "pass".green(),
+        HeartbeatLevel::Info => "info".dimmed(),
+        HeartbeatLevel::Warn => "WARN".yellow(),
     };
+    println!("  {} {} ({})", tag, label, detail);
+}
 
-    let heartbeat_str = match parsed.get("heartbeat").and_then(|v| v.as_str()) {
-        Some(s) => s.to_string(),
-        None => {
-            println!(
-                "  {} {} ({})",
-                "info".dimmed(),
-                label,
-                "No heartbeat field in status file"
-            );
-            return;
-        }
+#[derive(Debug, PartialEq)]
+enum HeartbeatLevel {
+    Pass,
+    Info,
+    Warn,
+}
+
+/// Classifies a status file's heartbeat.  `content` is None when the file
+/// does not exist.  A status file whose `pid` is not a live process is left
+/// over from an earlier run (an upgrade, a crash, a stop): the service is
+/// not running, and the age of that file's heartbeat means nothing.
+fn heartbeat_verdict(
+    content: Option<&str>,
+    now: chrono::DateTime<Utc>,
+    pid_alive: impl Fn(u32) -> bool,
+) -> (HeartbeatLevel, String) {
+    let info = |m: &str| (HeartbeatLevel::Info, m.to_string());
+    let Some(content) = content else {
+        return info("No status file yet (service may not have started)");
     };
-
-    let heartbeat = match chrono::DateTime::parse_from_rfc3339(&heartbeat_str) {
-        Ok(dt) => dt.with_timezone(&Utc),
-        Err(_) => {
-            println!(
-                "  {} {} ({})",
-                "info".dimmed(),
-                label,
-                "Cannot parse heartbeat timestamp"
-            );
-            return;
-        }
+    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(content) else {
+        return info("Invalid JSON in status file");
     };
-
-    let age_secs = Utc::now()
-        .signed_duration_since(heartbeat)
-        .num_seconds();
-
-    if age_secs <= 60 {
-        println!("  {} {} ({}s ago)", "pass".green(), label, age_secs);
-    } else {
-        println!(
-            "  {} {} (last heartbeat {}s ago — service may be hung)",
-            "WARN".yellow(),
-            label,
-            age_secs
-        );
+    let pid = parsed
+        .get("pid")
+        .and_then(|v| v.as_u64())
+        .and_then(|p| u32::try_from(p).ok());
+    if !pid.map(&pid_alive).unwrap_or(false) {
+        return info("not running");
     }
+    let Some(heartbeat_str) = parsed.get("heartbeat").and_then(|v| v.as_str()) else {
+        return info("No heartbeat field in status file");
+    };
+    let Ok(heartbeat) = chrono::DateTime::parse_from_rfc3339(heartbeat_str) else {
+        return info("Cannot parse heartbeat timestamp");
+    };
+    let age_secs = now
+        .signed_duration_since(heartbeat.with_timezone(&Utc))
+        .num_seconds();
+    if age_secs <= 60 {
+        (HeartbeatLevel::Pass, format!("{}s ago", age_secs))
+    } else {
+        (
+            HeartbeatLevel::Warn,
+            format!("last heartbeat {}s ago — service may be hung", age_secs),
+        )
+    }
+}
+
+/// Names of the models in an Ollama `GET /api/tags` response.
+fn ollama_tag_names(tags_json: &str) -> Vec<String> {
+    serde_json::from_str::<serde_json::Value>(tags_json)
+        .ok()
+        .and_then(|v| v.get("models").and_then(|m| m.as_array()).cloned())
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|m| m.get("name").and_then(|n| n.as_str()).map(str::to_string))
+        .collect()
+}
+
+/// Whether `wanted` is among `installed`, where `name` and `name:latest`
+/// are the same model (Ollama's default tag).
+fn model_installed(installed: &[String], wanted: &str) -> bool {
+    fn canonical(name: &str) -> String {
+        if name.contains(':') {
+            name.to_string()
+        } else {
+            format!("{}:latest", name)
+        }
+    }
+    let wanted = canonical(wanted.trim());
+    installed.iter().any(|n| canonical(n) == wanted)
 }
 
 // Path resolution functions (find_homebrew_libexec, find_venv_python,
@@ -749,5 +774,74 @@ mod tests {
     #[test]
     fn venv_version_empty_output_fails() {
         assert!(venv_version_verdict("", "0.4.0").is_err());
+    }
+
+    const TAGS: &str = r#"{"models":[
+        {"name":"qwen3.5:4b","model":"qwen3.5:4b","size":1},
+        {"name":"nomic-embed-text:latest","model":"nomic-embed-text:latest","size":2},
+        {"name":"gemma4:12b-it-qat","size":3}
+    ]}"#;
+
+    #[test]
+    fn models_come_from_api_tags() {
+        let installed = ollama_tag_names(TAGS);
+        assert_eq!(
+            installed,
+            vec!["qwen3.5:4b", "nomic-embed-text:latest", "gemma4:12b-it-qat"]
+        );
+        assert!(model_installed(&installed, "qwen3.5:4b"));
+        assert!(model_installed(&installed, "gemma4:12b-it-qat"));
+        // `name` and `name:latest` are the same model, in both directions.
+        assert!(model_installed(&installed, "nomic-embed-text"));
+        assert!(model_installed(&["nomic-embed-text".into()], "nomic-embed-text:latest"));
+        // A different tag or a name prefix is not a match.
+        assert!(!model_installed(&installed, "qwen3.5:2b"));
+        assert!(!model_installed(&installed, "qwen3.5"));
+        assert!(!model_installed(&["qwen3.5:4b-extra".into()], "qwen3.5:4b"));
+    }
+
+    #[test]
+    fn unreachable_or_garbled_tags_mean_no_models() {
+        assert!(ollama_tag_names("").is_empty());
+        assert!(ollama_tag_names("<html>").is_empty());
+        assert!(ollama_tag_names(r#"{"error":"x"}"#).is_empty());
+    }
+
+    fn now() -> chrono::DateTime<Utc> {
+        chrono::DateTime::parse_from_rfc3339("2026-09-23T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc)
+    }
+
+    #[test]
+    fn stale_status_file_of_a_dead_process_reads_not_running() {
+        // A 177-day-old status file left by the previous install.
+        let old = r#"{"pid": 4242, "heartbeat": "2026-03-30T12:00:00Z"}"#;
+        assert_eq!(
+            heartbeat_verdict(Some(old), now(), |_| false),
+            (HeartbeatLevel::Info, "not running".to_string())
+        );
+    }
+
+    #[test]
+    fn live_process_heartbeat_age_is_reported() {
+        let fresh = r#"{"pid": 4242, "heartbeat": "2026-09-23T11:59:50Z"}"#;
+        assert_eq!(
+            heartbeat_verdict(Some(fresh), now(), |p| p == 4242),
+            (HeartbeatLevel::Pass, "10s ago".to_string())
+        );
+        let hung = r#"{"pid": 4242, "heartbeat": "2026-09-23T11:50:00Z"}"#;
+        let (level, detail) = heartbeat_verdict(Some(hung), now(), |_| true);
+        assert_eq!(level, HeartbeatLevel::Warn);
+        assert!(detail.contains("600s ago"), "{detail}");
+    }
+
+    #[test]
+    fn missing_file_and_missing_pid() {
+        assert_eq!(heartbeat_verdict(None, now(), |_| true).0, HeartbeatLevel::Info);
+        assert_eq!(
+            heartbeat_verdict(Some(r#"{"heartbeat": "2026-09-23T11:59:50Z"}"#), now(), |_| true),
+            (HeartbeatLevel::Info, "not running".to_string())
+        );
     }
 }

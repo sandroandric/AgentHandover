@@ -19,13 +19,11 @@ import sqlite3
 
 import pytest
 
-from journeys.conftest import JOURNEY_MODELS
 
 TICKS = 4
 
 
 def _run(events_db, worker, clock, temp_home, cassette):
-    temp_home.configure(vlm=JOURNEY_MODELS)
     tape = cassette("passive_privacy")
     fixture = events_db("passive_privacy", rebase_to=clock.now())
     journey = worker(fixture)

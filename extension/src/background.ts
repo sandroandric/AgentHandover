@@ -2,17 +2,26 @@
  * AgentHandover Observer — Background Service Worker (MV3)
  *
  * Responsibilities:
- *   1. Log service worker lifecycle events (install, activate).
+ *   1. Keep the native messaging connection to the local daemon alive
+ *      across service-worker restarts.
  *   2. Listen for messages from content scripts and relay them onward.
- *   3. Manage the native messaging connection to the local daemon.
+ *   3. Report navigations of the active tab (`tabs.onUpdated`, no DOM) and
+ *      switches to another tab or window, so the daemon knows the page.
  *
  * This service worker is the single coordination point between the
  * per-tab content scripts and the local daemon process.
+ *
+ * Lifecycle: Chrome stops an idle MV3 worker after ~30 s and starts it
+ * again, re-evaluating this module, for the next event (a message, a tab
+ * update, an alarm). `install`/`activate` fire only once per version, so
+ * the connection is opened at module top level (every wake), on
+ * `runtime.onStartup`/`onInstalled`, whenever an event is forwarded while
+ * disconnected, and by a one-minute alarm. A `setTimeout` retry does not
+ * survive the worker being stopped; an alarm does.
  */
 
 import {
   connectNativeHost,
-  disconnectNativeHost,
   sendToNative,
   onNativeMessage,
   onNativeDisconnect,
@@ -20,27 +29,6 @@ import {
   clearReconnectBuffer,
   type NativeInboundMessage,
 } from './native-messaging';
-
-// ---------------------------------------------------------------------------
-// Service worker lifecycle
-// ---------------------------------------------------------------------------
-
-self.addEventListener('install', () => {
-  console.log('[AgentHandover:bg] Service worker installed');
-});
-
-self.addEventListener('activate', () => {
-  console.log('[AgentHandover:bg] Service worker activated');
-  initNativeConnection();
-});
-
-// ---------------------------------------------------------------------------
-// Native messaging bootstrap
-// ---------------------------------------------------------------------------
-
-let reconnectAttempts = 0;
-const MAX_RECONNECT_DELAY = 300_000; // 5 minutes
-const MAX_RECONNECT_ATTEMPTS = 100;
 
 // ---------------------------------------------------------------------------
 // Disconnect queue — buffers messages while the daemon is unreachable
@@ -55,6 +43,9 @@ interface QueuedMessage {
 const MAX_DISCONNECT_QUEUE = 100;
 const disconnectQueue: QueuedMessage[] = [];
 
+/** Name of the alarm that reconnects a dropped native connection. */
+export const RECONNECT_ALARM = 'ah-reconnect';
+
 // Unsubscribe handles for native messaging listeners — prevents listener
 // accumulation across reconnect cycles (each initNativeConnection call
 // registers new callbacks; old ones must be cleaned up first).
@@ -62,12 +53,11 @@ let unsubMessage: (() => void) | null = null;
 let unsubDisconnect: (() => void) | null = null;
 
 /**
- * Establish a connection to the daemon.  If the connection drops (e.g. daemon
- * restarts) we schedule a reconnect with exponential backoff and jitter.
+ * Connect to the daemon if not connected, then flush what was queued while
+ * disconnected.  Safe to call on every wake and every event.
  */
 function initNativeConnection(): void {
   if (isConnected()) {
-    console.log('[AgentHandover:bg] Native connection already active');
     return;
   }
 
@@ -79,49 +69,106 @@ function initNativeConnection(): void {
 
   try {
     connectNativeHost();
-
-    // Reset reconnect counter on successful connection
-    reconnectAttempts = 0;
-
-    unsubMessage = onNativeMessage((message: NativeInboundMessage) => {
-      console.log('[AgentHandover:bg] Daemon message:', message.type);
-      handleDaemonMessage(message);
-    });
-
-    unsubDisconnect = onNativeDisconnect(() => {
-      reconnectAttempts++;
-      if (reconnectAttempts > MAX_RECONNECT_ATTEMPTS) {
-        console.error('[AgentHandover:bg] Max reconnect attempts reached. Giving up.');
-        return;
-      }
-      const delay = Math.min(5_000 * Math.pow(1.5, reconnectAttempts - 1), MAX_RECONNECT_DELAY);
-      const jitter = delay * 0.1 * Math.random();
-      console.warn(
-        `[AgentHandover:bg] Lost daemon connection — reconnect attempt ${reconnectAttempts} in ${Math.round(delay + jitter)}ms`,
-      );
-      setTimeout(() => {
-        initNativeConnection();
-        // Clear the buffer (do NOT replay — daemon cannot deduplicate across
-        // reconnects, so replaying causes duplicate browser events).
-        if (isConnected()) {
-          clearReconnectBuffer();
-          drainDisconnectQueue();
-        }
-      }, delay + jitter);
-    });
   } catch (err) {
-    console.error('[AgentHandover:bg] Failed to connect to daemon:', err);
-    reconnectAttempts++;
-    if (reconnectAttempts > MAX_RECONNECT_ATTEMPTS) {
-      console.error('[AgentHandover:bg] Max reconnect attempts reached. Giving up.');
-      return;
-    }
-    const delay = Math.min(5_000 * Math.pow(1.5, reconnectAttempts - 1), MAX_RECONNECT_DELAY);
-    const jitter = delay * 0.1 * Math.random();
-    console.log(`[AgentHandover:bg] Retrying in ${Math.round(delay + jitter)}ms`);
-    setTimeout(initNativeConnection, delay + jitter);
+    console.error('[AgentHandover:bg] Failed to connect to daemon (the reconnect alarm retries):', err);
+    return;
   }
+
+  unsubMessage = onNativeMessage((message: NativeInboundMessage) => {
+    console.log('[AgentHandover:bg] Daemon message:', message.type);
+    handleDaemonMessage(message);
+  });
+  unsubDisconnect = onNativeDisconnect(() => {
+    console.warn('[AgentHandover:bg] Lost daemon connection — the next event or the reconnect alarm reconnects');
+  });
+
+  // Clear the resend buffer (do NOT replay — the daemon cannot deduplicate
+  // across reconnects, so replaying causes duplicate browser events), then
+  // forward what was queued while disconnected.
+  clearReconnectBuffer();
+  drainDisconnectQueue();
 }
+
+/** Create the reconnect alarm unless it already exists (alarms outlive the worker). */
+function ensureReconnectAlarm(): void {
+  chrome.alarms.get(RECONNECT_ALARM, (existing) => {
+    if (!existing) {
+      chrome.alarms.create(RECONNECT_ALARM, { periodInMinutes: 1 });
+    }
+  });
+}
+
+chrome.runtime.onStartup.addListener(() => {
+  initNativeConnection();
+});
+
+chrome.runtime.onInstalled.addListener(() => {
+  ensureReconnectAlarm();
+  initNativeConnection();
+});
+
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === RECONNECT_ALARM && !isConnected()) {
+    initNativeConnection();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Navigation of the active tab
+// ---------------------------------------------------------------------------
+
+/** Last URL reported per tab, so each navigation is reported once. */
+const lastNavigatedUrl = new Map<number, string>();
+
+/**
+ * Report a navigation when the active tab finishes loading a new URL (a
+ * full load reports `status: 'complete'`; a history push reports the new
+ * `url`).  Title-only updates are not navigations.  URL and title come from
+ * the tab (host permission), never from the page's DOM.
+ */
+chrome.tabs.onUpdated.addListener(
+  (tabId: number, changeInfo: chrome.tabs.TabChangeInfo, tab: chrome.tabs.Tab) => {
+    if (changeInfo.url === undefined && changeInfo.status !== 'complete') return;
+    if (!tab.active || tab.status !== 'complete' || !tab.url) return;
+    if (lastNavigatedUrl.get(tabId) === tab.url) return;
+    lastNavigatedUrl.set(tabId, tab.url);
+    forwardToDaemon(
+      { type: 'navigation_change', payload: { title: tab.title ?? '' } },
+      tabId,
+      tab.url,
+    );
+  },
+);
+
+chrome.tabs.onRemoved.addListener((tabId: number) => {
+  lastNavigatedUrl.delete(tabId);
+});
+
+/**
+ * A tab switch (or a switch between browser windows) changes the page on
+ * screen without a navigation.  Report it the same way, so the daemon
+ * always knows the page it is about to capture and can check it against
+ * `[privacy.zones] blocked_urls` first.
+ */
+function reportActiveTab(tab: chrome.tabs.Tab | undefined): void {
+  if (!tab || tab.id === undefined || !tab.url) return;
+  lastNavigatedUrl.set(tab.id, tab.url);
+  forwardToDaemon(
+    // `activated`: the page was already loaded; the user switched to it.
+    { type: 'navigation_change', payload: { title: tab.title ?? '', activated: true } },
+    tab.id,
+    tab.url,
+  );
+}
+
+chrome.tabs.onActivated.addListener((info: chrome.tabs.TabActiveInfo) => {
+  chrome.tabs.get(info.tabId, (tab) => reportActiveTab(tab));
+});
+
+chrome.windows.onFocusChanged.addListener((windowId: number) => {
+  if (windowId === chrome.windows.WINDOW_ID_NONE) return;
+  chrome.tabs.query({ active: true, windowId }, (tabs) => reportActiveTab(tabs[0]));
+});
 
 // ---------------------------------------------------------------------------
 // Message handling: content script -> background
@@ -157,6 +204,8 @@ chrome.runtime.onMessage.addListener(
       case 'dwell_snapshot':
       case 'scroll_snapshot':
       case 'secure_field_status':
+      case 'paste':
+      case 'form_submit':
         forwardToDaemon(message, tabId, url);
         sendResponse({ ok: true });
         break;
@@ -183,7 +232,10 @@ interface ContentScriptMessage {
     | 'click_intent'
     | 'dwell_snapshot'
     | 'scroll_snapshot'
-    | 'secure_field_status';
+    | 'secure_field_status'
+    | 'paste'
+    | 'form_submit'
+    | 'navigation_change';
   payload?: Record<string, unknown>;
 }
 
@@ -200,6 +252,7 @@ interface BackgroundResponse {
 function handleContentReady(tabId: number, url: string): void {
   console.log('[AgentHandover:bg] Content script ready in tab', tabId, '—', url);
 
+  initNativeConnection();
   if (isConnected()) {
     sendToNative('content_ready', { tabId, url });
   }
@@ -207,7 +260,7 @@ function handleContentReady(tabId: number, url: string): void {
 
 /**
  * Drain the disconnect queue by re-forwarding each queued message.
- * Called after a successful reconnect + resend of the native sent buffer.
+ * Called after a successful (re)connect.
  */
 function drainDisconnectQueue(): void {
   if (disconnectQueue.length === 0) return;
@@ -226,6 +279,11 @@ function forwardToDaemon(
   tabId: number,
   url: string,
 ): void {
+  // The worker may have been restarted, or the port dropped, since the last
+  // event: reconnect before deciding to queue.
+  if (!isConnected()) {
+    initNativeConnection();
+  }
   if (!isConnected()) {
     if (disconnectQueue.length >= MAX_DISCONNECT_QUEUE) {
       console.warn('[AgentHandover:bg] Disconnect queue full — dropping oldest to enqueue', message.type);
@@ -283,3 +341,10 @@ function handleDaemonMessage(message: NativeInboundMessage): void {
       console.log('[AgentHandover:bg] Unhandled daemon message type:', message.type);
   }
 }
+
+// ---------------------------------------------------------------------------
+// Bootstrap — runs on every service-worker start
+// ---------------------------------------------------------------------------
+
+ensureReconnectAlarm();
+initNativeConnection();

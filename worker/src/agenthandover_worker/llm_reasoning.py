@@ -27,6 +27,7 @@ from datetime import datetime, timezone
 from typing import Any, TYPE_CHECKING
 
 from agenthandover_worker.json_extract import clean_model_text, extract_json
+from agenthandover_worker.model_profiles import STANDARD_TIER
 from agenthandover_worker.ollama import OllamaClient
 
 if TYPE_CHECKING:
@@ -67,7 +68,7 @@ def sanitize_user_data(text: str, max_length: int = _MAX_USER_DATA_LENGTH) -> st
 class ReasoningConfig:
     """Configuration for the LLM reasoner."""
 
-    model: str = "qwen3.5:4b"
+    model: str = STANDARD_TIER.sop_model  # main() passes the configured model
     ollama_host: str = "http://localhost:11434"
     num_predict: int = 4000
     timeout: float = 1800.0

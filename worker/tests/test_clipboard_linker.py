@@ -33,24 +33,25 @@ def _make_clipboard_event(
     extra_kind_fields: dict | None = None,
 ) -> dict:
     """Build a ClipboardChange or PasteDetected event dict in the daemon's
-    actual format.
+    actual format (``crates/common/src/event.rs``).
 
-    The daemon serializes the entire clipboard payload into ``kind_json``
-    as ``{"type": <kind>, "content_hash": ..., "byte_size": ..., ...}``.
+    The daemon serializes the payload into ``kind_json``:
+    ``{"type": "ClipboardChange", "content_hash": ..., "byte_size": ...}``
+    and ``{"type": "PasteDetected", "matched_copy_hash": ...}``.
     ``metadata_json`` holds unrelated fields (focus_session_id etc.) and
     must NOT be used for clipboard fields — doing so was the historical
     bug caught 2026-04-10 where fixtures and production code were both
     reading the wrong field and agreed with each other.
     """
     eid = event_id or str(uuid.uuid4())
-    kind_payload: dict = {"type": kind, "content_hash": content_hash}
+    kind_payload: dict = {"type": kind}
     if kind == "ClipboardChange":
         kind_payload["content_types"] = ["public.utf8-plain-text"]
         kind_payload["byte_size"] = 42
         kind_payload["high_entropy"] = False
+        kind_payload["content_hash"] = content_hash
     elif kind == "PasteDetected":
-        kind_payload["target_app"] = "com.apple.TextEdit"
-        kind_payload["byte_size"] = 42
+        kind_payload["matched_copy_hash"] = content_hash
     if extra_kind_fields:
         kind_payload.update(extra_kind_fields)
 

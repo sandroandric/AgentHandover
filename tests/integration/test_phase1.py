@@ -94,19 +94,6 @@ def _kind(name: str, **fields: object) -> str:
     return json.dumps({"type": name, **payload})
 
 
-# The daemon never emits PasteDetected today, and its payload carries
-# ``matched_copy_hash`` while ClipboardLinker matches a ``content_hash``
-# on the paste.  These tests are rewritten against the real PasteDetected
-# once WP-M2 lands; until then they must fail.
-_PASTE_NOT_EMITTED = pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "daemon does not emit PasteDetected yet and ClipboardLinker reads "
-        "content_hash instead of matched_copy_hash (WP-M2)"
-    ),
-)
-
-
 def _insert_event(
     conn: sqlite3.Connection,
     *,
@@ -180,7 +167,6 @@ class TestFullE2EPipeline:
     - No negative demo markers in this happy path
     """
 
-    @_PASTE_NOT_EMITTED
     def test_full_e2e_pipeline(
         self, tmp_db_path: Path, write_conn: sqlite3.Connection
     ) -> None:
@@ -840,7 +826,6 @@ class TestMultipleClipboardLinks:
     - Correct copy-paste pairing by hash
     """
 
-    @_PASTE_NOT_EMITTED
     def test_multiple_clipboard_links(
         self, tmp_db_path: Path, write_conn: sqlite3.Connection
     ) -> None:
@@ -959,7 +944,6 @@ class TestMultipleClipboardLinks:
         # Copy at +20s, paste at +50s = 30 seconds
         assert abs(link_b.time_delta_seconds - 30.0) < 1.0
 
-    @_PASTE_NOT_EMITTED
     def test_overwritten_clipboard_links_most_recent_copy(
         self, tmp_db_path: Path, write_conn: sqlite3.Connection
     ) -> None:
@@ -1022,7 +1006,6 @@ class TestCombinedPipeline:
     Scenario: A session with normal work, an undo, and a copy-paste operation.
     """
 
-    @_PASTE_NOT_EMITTED
     def test_all_components_compose(
         self, tmp_db_path: Path, write_conn: sqlite3.Connection
     ) -> None:

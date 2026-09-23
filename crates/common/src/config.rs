@@ -36,7 +36,12 @@ pub struct ObserverConfig {
     pub t_dwell_seconds: u64,
     pub t_scroll_read_seconds: u64,
     pub capture_screenshots: bool,
+    /// Ceiling on frames kept per minute outside focus recordings.
     pub screenshot_max_per_minute: u32,
+    /// Ceiling on frames kept per minute during a focus recording, counted
+    /// separately so passive capture can never leave a recording blind.
+    #[serde(default = "default_focus_screenshot_max_per_minute")]
+    pub focus_screenshot_max_per_minute: u32,
     /// Screenshot format: "jpeg" (default, half-res) or "png" (full-res).
     #[serde(default = "default_screenshot_format")]
     pub screenshot_format: String,
@@ -46,7 +51,10 @@ pub struct ObserverConfig {
     /// Screenshot scale factor (default: 0.5 = half resolution).
     #[serde(default = "default_screenshot_scale")]
     pub screenshot_scale: f64,
-    /// dHash perceptual hash threshold (hamming distance). Lower = stricter dedup.
+    /// Frame change threshold: a frame is new when at least this many of
+    /// the 192 blocks of its block-mean signature moved by more than the
+    /// dead zone since the last kept frame (see `capture::dhash`). Higher =
+    /// fewer frames kept.
     #[serde(default = "default_dhash_threshold")]
     pub dhash_threshold: u32,
 }
@@ -114,18 +122,20 @@ pub struct VlmConfig {
 
     // --- v2 scene annotation pipeline fields ---
 
-    /// Model for per-frame annotation (default: "qwen3.5:2b").
+    /// The RAM tier onboarding or `agenthandover setup` chose (`tiers.rs`).
+    #[serde(default)]
+    pub tier: Option<String>,
+
+    /// Model for per-frame annotation (default: the RAM tier's, see
+    /// `tiers.rs`; the worker's loader also honours `tier`).
     #[serde(default = "default_annotation_model")]
     pub annotation_model: String,
-    /// Model for SOP generation (default: "qwen3.5:4b").
+    /// Model for SOP generation (default: the RAM tier's).
     #[serde(default = "default_sop_model")]
     pub sop_model: String,
     /// Enable continuous scene annotation pipeline.
     #[serde(default = "default_annotation_enabled")]
     pub annotation_enabled: bool,
-    /// Skip annotation after N consecutive non-workflow same-app frames.
-    #[serde(default = "default_stale_skip_count")]
-    pub stale_skip_count: u32,
     /// Max age (seconds) for sliding window context frames (default: 600 = 10 min).
     #[serde(default = "default_sliding_window_max_age_sec")]
     pub sliding_window_max_age_sec: u64,
@@ -134,13 +144,13 @@ pub struct VlmConfig {
 fn default_screenshot_format() -> String { "jpeg".to_string() }
 fn default_screenshot_quality() -> u8 { 70 }
 fn default_screenshot_scale() -> f64 { 0.5 }
-fn default_dhash_threshold() -> u32 { 10 }
+fn default_dhash_threshold() -> u32 { 1 }
+fn default_focus_screenshot_max_per_minute() -> u32 { 40 }
 
 fn default_vlm_mode() -> String { "local".to_string() }
-fn default_annotation_model() -> String { "qwen3.5:2b".to_string() }
-fn default_sop_model() -> String { "qwen3.5:4b".to_string() }
+fn default_annotation_model() -> String { crate::tiers::recommended_tier().annotation_model.clone() }
+fn default_sop_model() -> String { crate::tiers::recommended_tier().sop_model.clone() }
 fn default_annotation_enabled() -> bool { true }
-fn default_stale_skip_count() -> u32 { 3 }
 fn default_sliding_window_max_age_sec() -> u64 { 600 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -230,6 +240,7 @@ impl Default for ObserverConfig {
             t_scroll_read_seconds: 8,
             capture_screenshots: true,
             screenshot_max_per_minute: 20,
+            focus_screenshot_max_per_minute: default_focus_screenshot_max_per_minute(),
             screenshot_format: default_screenshot_format(),
             screenshot_quality: default_screenshot_quality(),
             screenshot_scale: default_screenshot_scale(),
@@ -297,10 +308,10 @@ impl Default for VlmConfig {
             provider: None,
             model: None,
             api_key_env: None,
+            tier: None,
             annotation_model: default_annotation_model(),
             sop_model: default_sop_model(),
             annotation_enabled: default_annotation_enabled(),
-            stale_skip_count: default_stale_skip_count(),
             sliding_window_max_age_sec: default_sliding_window_max_age_sec(),
         }
     }
@@ -447,9 +458,13 @@ impl Default for ConstraintsConfig {
     }
 }
 
+/// `[privacy.zones]`, enforced by the daemon before capture
+/// (`observer::privacy_zones`) and by the worker on stored events. App
+/// patterns are case-insensitive globs matched against the app name and the
+/// window title; URL patterns against the browser's page URL.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PrivacyZonesConfig {
-    /// Apps observed at full fidelity (bundle IDs or names).
+    /// Apps observed at full fidelity (overrides `blocked`, defaults included).
     #[serde(default)]
     pub full_observation: Vec<String>,
     /// Apps where only metadata is captured.

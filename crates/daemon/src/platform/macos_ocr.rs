@@ -29,11 +29,23 @@ struct OcrCResult {
 }
 
 extern "C" {
-    fn perform_ocr_safe(pixels: *const u8, width: usize, height: usize) -> OcrCResult;
+    fn perform_ocr_safe(pixels: *const u8, width: usize, height: usize, fast: i32) -> OcrCResult;
     fn free_ocr_result(result: *mut OcrCResult);
 }
 
 // ── Public Rust types ──────────────────────────────────────────────────
+
+/// Vision recognition level. Both use the user's preferred languages
+/// (System Settings > Language & Region) that Vision supports, then en-US.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OcrLevel {
+    /// `VNRequestTextRecognitionLevelFast`, no language correction: cheap,
+    /// used to decide whether a frame's text changed.
+    Fast,
+    /// `VNRequestTextRecognitionLevelAccurate` with language correction:
+    /// the text stored with a kept frame.
+    Accurate,
+}
 
 /// A single recognized text element from OCR.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -56,7 +68,12 @@ pub struct OcrResult {
 ///
 /// Returns `Some(OcrResult)` on success, `None` on failure.
 /// The pixel data must be in BGRA format (as decoded by `capture::screenshot`).
-pub fn recognize_text(pixels: &[u8], width: usize, height: usize) -> Option<OcrResult> {
+pub fn recognize_text(
+    pixels: &[u8],
+    width: usize,
+    height: usize,
+    level: OcrLevel,
+) -> Option<OcrResult> {
     if pixels.is_empty() || width == 0 || height == 0 {
         return None;
     }
@@ -82,7 +99,8 @@ pub fn recognize_text(pixels: &[u8], width: usize, height: usize) -> Option<OcrR
 
     // Call into the ObjC helper. All Vision framework work + exception
     // handling happens in ObjC, so no foreign exceptions reach Rust.
-    let mut c_result = unsafe { perform_ocr_safe(pixels.as_ptr(), width, height) };
+    let fast = i32::from(level == OcrLevel::Fast);
+    let mut c_result = unsafe { perform_ocr_safe(pixels.as_ptr(), width, height, fast) };
 
     if c_result.success == 0 {
         unsafe { free_ocr_result(&mut c_result) };
@@ -153,18 +171,25 @@ pub fn recognize_text(pixels: &[u8], width: usize, height: usize) -> Option<OcrR
 /// daemon.  If Vision ever hangs indefinitely (undocumented bug, not observed),
 /// one blocking worker gets stuck — the daemon keeps running.  That tradeoff
 /// is correct for a local observation daemon.
+///
+/// The pixels are handed back with the result so a frame can be read at
+/// the fast level and then, if kept, at the accurate level without a copy.
 pub async fn recognize_text_async(
     pixels: Vec<u8>,
     width: usize,
     height: usize,
-) -> Option<OcrResult> {
-    let task = tokio::task::spawn_blocking(move || recognize_text(&pixels, width, height));
+    level: OcrLevel,
+) -> (Vec<u8>, Option<OcrResult>) {
+    let task = tokio::task::spawn_blocking(move || {
+        let result = recognize_text(&pixels, width, height, level);
+        (pixels, result)
+    });
 
     match task.await {
-        Ok(result) => result,
+        Ok(done) => done,
         Err(e) => {
             warn!(error = %e, "OCR task panicked");
-            None
+            (Vec::new(), None)
         }
     }
 }
@@ -195,7 +220,7 @@ mod tests {
     #[test]
     #[serial(macos_ffi)]
     fn test_empty_pixels_returns_none() {
-        let result = recognize_text(&[], 0, 0);
+        let result = recognize_text(&[], 0, 0, OcrLevel::Accurate);
         assert!(result.is_none());
     }
 
@@ -204,7 +229,7 @@ mod tests {
     fn test_small_image_returns_none() {
         // 1x1 BGRA pixel — below the 10x10 minimum for Vision framework
         let pixels = vec![0u8; 4];
-        let result = recognize_text(&pixels, 1, 1);
+        let result = recognize_text(&pixels, 1, 1, OcrLevel::Accurate);
         assert!(result.is_none(), "Images smaller than 10x10 should return None");
     }
 
@@ -213,7 +238,7 @@ mod tests {
     fn test_9x9_below_minimum() {
         // 9x9 BGRA — just below the 10x10 minimum
         let pixels = vec![0u8; 9 * 9 * 4];
-        let result = recognize_text(&pixels, 9, 9);
+        let result = recognize_text(&pixels, 9, 9, OcrLevel::Accurate);
         assert!(result.is_none(), "9x9 should be below minimum threshold");
     }
 
@@ -222,7 +247,7 @@ mod tests {
     fn test_undersized_buffer_returns_none() {
         // Claims 100x100 but only provides 4 bytes
         let pixels = vec![0u8; 4];
-        let result = recognize_text(&pixels, 100, 100);
+        let result = recognize_text(&pixels, 100, 100, OcrLevel::Accurate);
         assert!(result.is_none());
     }
 
@@ -230,7 +255,21 @@ mod tests {
     #[serial(macos_ffi)]
     async fn test_async_respects_timeout() {
         // Empty pixels should return quickly with None
-        let result = recognize_text_async(vec![], 0, 0).await;
+        let (_, result) = recognize_text_async(vec![], 0, 0, OcrLevel::Accurate).await;
         assert!(result.is_none());
+    }
+
+    /// Both levels run Vision end to end (languages from the system locale)
+    /// on a blank frame: success, no text, pixels handed back intact.
+    #[tokio::test]
+    #[serial(macos_ffi)]
+    async fn test_both_levels_succeed_on_blank_frame() {
+        for level in [OcrLevel::Fast, OcrLevel::Accurate] {
+            let pixels = vec![255u8; 200 * 100 * 4];
+            let (back, result) = recognize_text_async(pixels, 200, 100, level).await;
+            assert_eq!(back.len(), 200 * 100 * 4);
+            let result = result.expect("Vision should succeed on a blank frame");
+            assert!(result.elements.is_empty(), "{level:?}");
+        }
     }
 }

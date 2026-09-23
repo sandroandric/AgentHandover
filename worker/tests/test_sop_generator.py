@@ -208,15 +208,14 @@ class TestFormatTimelineEntry:
         )
         assert "14:30:45" in text
 
-    def test_visible_content(self):
+    def test_legacy_visible_content_becomes_screen_text(self):
         text = _format_timeline_entry(
             0,
             _make_annotation(headings=["Dashboard"], labels=["Save", "Cancel"]),
             None,
             "2026-03-03T10:00:00Z",
         )
-        assert "Headings: Dashboard" in text
-        assert "Labels: Save, Cancel" in text
+        assert 'Screen text: "Dashboard | Save | Cancel | John Doe | john@example.com"' in text
 
     def test_empty_annotation(self):
         """Empty annotation should not crash."""

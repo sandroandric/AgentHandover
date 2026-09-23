@@ -8,7 +8,6 @@ against ground truth).  All heavy numeric work is delegated to
 
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -23,8 +22,6 @@ from eval.metrics import (
     noise_drop_accuracy,
     precision_recall_f1,
 )
-
-logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -610,8 +607,11 @@ class Scorer:
     ) -> ScenarioScore:
         """Run all applicable evaluation dimensions for a scenario.
 
-        Checks which ground-truth sections exist in the scenario,
-        executes the corresponding runner methods, and scores them.
+        Checks which ground-truth sections exist in the scenario, converts
+        each from the fixture format (the ``*_truth`` functions below),
+        executes the corresponding runner method and scores it.  A runner
+        or scorer error propagates: a dimension that cannot be measured
+        fails the scenario instead of vanishing from the scorecard.
 
         Args:
             scenario: A ``ReplayScenario``.
@@ -627,158 +627,135 @@ class Scorer:
         # Set up KB once (shared by readiness, export parity, recurrence)
         kb = runner.setup_kb(tmp_path / "kb")
 
-        # 1. Classification — GT key: "classification"
-        #    Fixture format: [{"event_id", "is_workflow"?, "activity_type"?}]
-        #    Scorer expects: [{"event_id", "is_workflow": bool}]
         if "classification" in gt:
-            try:
-                pred = runner.run_classification()
-                gt_cls = gt["classification"]
+            score.classification = self.score_classification(
+                runner.run_classification(), classification_truth(gt["classification"]),
+            )
+            if any(item.get("activity_type") for item in gt["classification"]):
+                score.classification.update(self.score_activity_type_classification(
+                    runner.run_activity_classification(), gt["classification"],
+                ))
 
-                # --- Binary is_workflow metrics ---
-                gt_binary = []
-                for item in gt_cls:
-                    is_wf = item.get("is_workflow")
-                    if is_wf is None:
-                        # Derive from activity_type
-                        at = item.get("activity_type", "")
-                        is_wf = at in ("work", "research", "communication", "setup")
-                    gt_binary.append({"event_id": item["event_id"], "is_workflow": is_wf})
-                score.classification = self.score_classification(pred, gt_binary)
-
-                # --- Multiclass activity_type metrics ---
-                if any(item.get("activity_type") for item in gt_cls):
-                    act_pred = runner.run_activity_classification()
-                    act_metrics = self.score_activity_type_classification(
-                        act_pred, gt_cls,
-                    )
-                    score.classification.update(act_metrics)
-            except Exception as exc:
-                logger.warning(
-                    "Classification scoring failed for %s: %s",
-                    scenario.scenario_id, exc,
-                )
-
-        # 2. Segmentation — GT key: "segments"
-        #    Fixture format: [{"segment_id", "event_ids", "cluster_family"}]
-        #    Scorer expects: [{"event_id", "family": int, "is_noise": bool}]
         if "segments" in gt:
-            try:
-                seg_result = runner.run_segmentation()
-                # Convert fixture segments to per-event format
-                family_names: dict[str, int] = {}
-                seg_gt: list[dict] = []
-                for seg in gt["segments"]:
-                    family = seg.get("cluster_family", "unknown")
-                    if family not in family_names:
-                        family_names[family] = len(family_names)
-                    fam_id = family_names[family]
-                    is_noise = seg.get("is_noise", False)
-                    for eid in seg.get("event_ids", []):
-                        seg_gt.append({
-                            "event_id": eid,
-                            "family": fam_id,
-                            "is_noise": is_noise,
-                        })
-                score.segmentation = self.score_segmentation(seg_result, seg_gt)
-            except Exception as exc:
-                logger.warning(
-                    "Segmentation scoring failed for %s: %s",
-                    scenario.scenario_id, exc,
-                )
+            score.segmentation = self.score_segmentation(
+                runner.run_segmentation(),
+                segmentation_truth(gt["segments"], scenario.events),
+            )
 
-        # 3. Task boundaries — GT key: "task_boundaries"
         if "task_boundaries" in gt:
-            try:
-                boundaries = runner.run_task_boundaries(
-                    tmp_path / "boundaries"
-                )
-                score.task_boundaries = self.score_task_boundaries(
-                    boundaries, gt["task_boundaries"]
-                )
-            except Exception as exc:
-                logger.warning(
-                    "Task boundary scoring failed for %s: %s",
-                    scenario.scenario_id, exc,
-                )
+            score.task_boundaries = self.score_task_boundaries(
+                runner.run_task_boundaries(tmp_path / "boundaries"),
+                boundary_truth(gt["task_boundaries"], scenario.events),
+            )
 
-        # 4. Dedup — GT key: "dedup_families"
-        #    Fixture: [{"member_slugs": [...], "should_merge": bool}]
-        #    Scorer: [{"slug_a", "slug_b", "should_merge"}]
         if "dedup_families" in gt:
-            try:
-                from itertools import combinations
-                merges = runner.run_dedup(tmp_path / "dedup")
-                dedup_gt: list[dict] = []
-                for family in gt["dedup_families"]:
-                    slugs = family.get("member_slugs", [])
-                    sm = family.get("should_merge", False)
-                    for a, b in combinations(slugs, 2):
-                        dedup_gt.append({"slug_a": a, "slug_b": b, "should_merge": sm})
-                score.dedup = self.score_dedup(merges, dedup_gt)
-            except Exception as exc:
-                logger.warning(
-                    "Dedup scoring failed for %s: %s",
-                    scenario.scenario_id, exc,
-                )
+            score.dedup = self.score_dedup(
+                runner.run_dedup(tmp_path / "dedup"), dedup_truth(gt["dedup_families"]),
+            )
 
-        # 5. Readiness — GT key: "procedure_readiness"
-        #    Fixture: [{"procedure_id", "expected_can_execute", "expected_can_draft"}]
-        #    Scorer: [{"slug", "can_execute", "can_draft"}]
         if "procedure_readiness" in gt:
-            try:
-                pf = runner.run_readiness(kb)
-                readiness_gt: list[dict] = []
-                for item in gt["procedure_readiness"]:
-                    readiness_gt.append({
-                        "slug": item.get("slug", item.get("procedure_id", "")),
-                        "can_execute": item.get("expected_can_execute", False),
-                        "can_draft": item.get("expected_can_draft", False),
-                    })
-                score.readiness = self.score_readiness(pf, readiness_gt)
-            except Exception as exc:
-                logger.warning(
-                    "Readiness scoring failed for %s: %s",
-                    scenario.scenario_id, exc,
-                )
+            score.readiness = self.score_readiness(
+                runner.run_readiness(kb), readiness_truth(gt["procedure_readiness"]),
+            )
 
-        # 6. Export parity — run if procedures exist (no explicit GT key needed)
+        # Export parity runs whenever the scenario has procedures.
         if scenario.procedures:
-            try:
-                parity = runner.run_export_parity(
-                    kb, tmp_path / "export_parity"
-                )
-                score.export_parity = self.score_export_parity(parity)
-            except Exception as exc:
-                logger.warning(
-                    "Export parity scoring failed for %s: %s",
-                    scenario.scenario_id, exc,
-                )
+            score.export_parity = self.score_export_parity(
+                runner.run_export_parity(kb, tmp_path / "export_parity"),
+            )
 
-        # 7. Recurrence — GT key: "recurrence"
         if "recurrence" in gt:
-            try:
-                patterns = runner.run_recurrence(kb)
-                score.recurrence = self.score_recurrence(
-                    patterns, gt["recurrence"]
-                )
-            except Exception as exc:
-                logger.warning(
-                    "Recurrence scoring failed for %s: %s",
-                    scenario.scenario_id, exc,
-                )
+            score.recurrence = self.score_recurrence(
+                runner.run_recurrence(kb), gt["recurrence"],
+            )
 
-        # 8. Continuity — GT key: "continuity"
         if "continuity" in gt:
-            try:
-                cont_result = runner.run_continuity(tmp_path / "continuity")
-                score.continuity = self.score_continuity(
-                    cont_result, gt["continuity"].get("expected_spans", [])
-                )
-            except Exception as exc:
-                logger.warning(
-                    "Continuity scoring failed for %s: %s",
-                    scenario.scenario_id, exc,
-                )
+            score.continuity = self.score_continuity(
+                runner.run_continuity(tmp_path / "continuity"),
+                gt["continuity"].get("expected_spans", []),
+            )
 
         return score
+
+
+# ---------------------------------------------------------------------------
+# Ground truth: fixture format -> scorer format
+# ---------------------------------------------------------------------------
+
+
+def classification_truth(items: list[dict]) -> list[dict]:
+    """``[{"event_id", "is_workflow": bool}]`` from fixture items, which say
+    ``label`` (``"work"`` / ``"noise"``), ``is_workflow``, or only an
+    ``activity_type``, in that order of precedence."""
+    out = []
+    for item in items:
+        if "label" in item:
+            is_wf = item["label"] == "work"
+        elif item.get("is_workflow") is not None:
+            is_wf = bool(item["is_workflow"])
+        else:
+            is_wf = item.get("activity_type", "") in ("work", "research", "communication", "setup")
+        out.append({"event_id": item["event_id"], "is_workflow": is_wf})
+    return out
+
+
+def segmentation_truth(segments: list[dict], events: list[dict]) -> list[dict]:
+    """``[{"event_id", "family": int, "is_noise": bool}]`` for every event of
+    the scenario: an event in no ground-truth segment is noise."""
+    family_ids: dict[str, int] = {}
+    family_of: dict[str, int] = {}
+    noise: set[str] = set()
+    for seg in segments:
+        family = seg.get("cluster_family", seg.get("segment_id", "unknown"))
+        fam_id = family_ids.setdefault(family, len(family_ids))
+        for eid in seg.get("event_ids", []):
+            family_of[eid] = fam_id
+            if seg.get("is_noise"):
+                noise.add(eid)
+    return [
+        {
+            "event_id": ev["id"],
+            "family": family_of.get(ev["id"], -1),
+            "is_noise": ev["id"] in noise or ev["id"] not in family_of,
+        }
+        for ev in events
+    ]
+
+
+def boundary_truth(boundaries: list[dict], events: list[dict]) -> list[dict]:
+    """``[{"event_ids"}]``, one per true task.  The fixture marks each
+    boundary as a cut between ``after_event_id`` and the next task; the
+    tasks are the runs of time-ordered events between cuts."""
+    cuts = {b["after_event_id"] for b in boundaries if b.get("after_event_id")}
+    tasks: list[dict] = []
+    current: list[str] = []
+    for ev in sorted(events, key=lambda e: e.get("timestamp", "")):
+        current.append(ev["id"])
+        if ev["id"] in cuts:
+            tasks.append({"event_ids": current})
+            current = []
+    if current:
+        tasks.append({"event_ids": current})
+    return tasks
+
+
+def dedup_truth(families: list[dict]) -> list[dict]:
+    """``[{"slug_a", "slug_b", "should_merge"}]``: every pair in a family."""
+    from itertools import combinations
+    return [
+        {"slug_a": a, "slug_b": b, "should_merge": fam.get("should_merge", False)}
+        for fam in families
+        for a, b in combinations(fam.get("member_slugs", []), 2)
+    ]
+
+
+def readiness_truth(items: list[dict]) -> list[dict]:
+    """``[{"slug", "can_execute", "can_draft"}]``."""
+    return [
+        {
+            "slug": item.get("slug", item.get("procedure_id", "")),
+            "can_execute": item.get("expected_can_execute", False),
+            "can_draft": item.get("expected_can_draft", False),
+        }
+        for item in items
+    ]

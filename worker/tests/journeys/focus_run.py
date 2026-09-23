@@ -19,7 +19,7 @@ from typing import Callable
 
 from agenthandover_worker import trigger_spool
 from journeys.cassette import Cassette
-from journeys.conftest import JOURNEY_MODELS, TempHome
+from journeys.conftest import TempHome
 from journeys.driver import Clock, JourneyWorker
 from journeys.fixture_loader import LoadedFixture
 
@@ -67,7 +67,6 @@ def start_focus_run(
 
     ``ollama_down_for`` asks the cassette (``/__cassette/down``) to answer
     that many API requests with HTTP 503 before the worker starts."""
-    temp_home.configure(vlm=JOURNEY_MODELS)
     tape = cassette(FOCUS_CASSETTE)
     if ollama_down_for:
         with urllib.request.urlopen(f"{tape.host}/__cassette/down?n={ollama_down_for}") as reply:

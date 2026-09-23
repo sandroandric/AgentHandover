@@ -85,10 +85,14 @@ def test_fixture_loads_through_real_migrations(name: str, events_db, temp_home) 
     try:
         assert conn.execute("PRAGMA user_version").fetchone()[0] == schema_version()
         assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
-        # The daemon's defaults apply to every loaded row.
+        # The daemon's defaults apply to every loaded row, except the
+        # annotator's columns for the rows the fixture annotates.
         assert conn.execute(
-            "SELECT COUNT(*) FROM events WHERE processed <> 0 OR annotation_status <> 'pending'"
+            "SELECT COUNT(*) FROM events WHERE processed <> 0"
         ).fetchone()[0] == 0
+        assert conn.execute(
+            "SELECT COUNT(*) FROM events WHERE annotation_status <> 'pending'"
+        ).fetchone()[0] == manifest.get("annotated_rows", 0)
     finally:
         conn.close()
 

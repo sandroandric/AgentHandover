@@ -16,7 +16,6 @@ from dataclasses import dataclass, field
 
 import pytest
 
-from journeys.conftest import JOURNEY_MODELS
 
 MAX_ANNOTATED = 60
 MAX_MODEL_SECONDS = 600
@@ -47,7 +46,6 @@ def _statuses(db_path) -> dict:
 
 
 def _run(events_db, worker, clock, temp_home, cassette) -> ComputeRun:
-    temp_home.configure(vlm=JOURNEY_MODELS)
     tape = cassette("passive_volatile_hour")
     fixture = events_db("passive_volatile_hour", rebase_to=clock.now())
     run = ComputeRun(fixture=fixture, worker=worker(fixture), tape=tape)

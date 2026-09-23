@@ -223,3 +223,59 @@ def display_name(app_id: str | None) -> str:
     if is_bundle_id(text):
         return text.rsplit(".", 1)[-1]
     return text
+
+
+# ---------------------------------------------------------------------------
+# Focused element (``focused_element_json``, written by the daemon from the
+# app's Accessibility read; see ``FocusedElement`` in
+# ``crates/common/src/event.rs``)
+# ---------------------------------------------------------------------------
+
+_FIELD_TEXT_MAX = 120
+
+
+def _clean(text: object) -> str:
+    return " ".join(str(text or "").split())[:_FIELD_TEXT_MAX]
+
+
+def focused_field(event: dict) -> dict | None:
+    """The focused element of *event* as a field: ``role`` (``cell``,
+    ``text field``, ...), ``label`` (the cell's column header, else the
+    element's own title or description, else the nearest labelled
+    ancestor's), ``value`` (present only when the daemon captured input
+    values), ``context`` (the labelled ancestors, outermost first) and
+    ``document``.  None when the event carries no focused element."""
+    element = parse_json_field(event, "focused_element_json")
+    role = str(element.get("role") or "")
+    if not role:
+        return None
+    ancestors = [a for a in element.get("ancestors") or [] if isinstance(a, dict)]
+    ancestor_labels = [
+        label for a in ancestors if (label := _clean(a.get("title") or a.get("description")))
+    ]
+    label = _clean(
+        element.get("column_header") or element.get("title") or element.get("description")
+    ) or (ancestor_labels[0] if ancestor_labels else "")
+    readable_role = re.sub(r"(?<!^)(?=[A-Z])", " ", role.removeprefix("AX")).lower()
+    field = {
+        "role": readable_role,
+        "label": label,
+        "value": _clean(element.get("value")),
+        "context": [c for c in reversed(ancestor_labels) if c != label][:4],
+        "document": str(element.get("document") or ""),
+    }
+    return {k: v for k, v in field.items() if v}
+
+
+def describe_focused_field(field: dict | None) -> str:
+    """One line for a prompt: ``cell "Amount" = "1,250.00" (in Sheet1 > Row 2)``."""
+    if not field:
+        return ""
+    text = field.get("role", "element")
+    if field.get("label"):
+        text += f' "{field["label"]}"'
+    if field.get("value"):
+        text += f' = "{field["value"]}"'
+    if field.get("context"):
+        text += f" (in {' > '.join(field['context'])})"
+    return text

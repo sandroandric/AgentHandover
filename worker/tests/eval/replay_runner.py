@@ -16,7 +16,6 @@ from datetime import datetime, timedelta, timezone
 from itertools import combinations
 from pathlib import Path
 from typing import Any
-from unittest.mock import patch
 
 logger = logging.getLogger(__name__)
 
@@ -110,10 +109,9 @@ class ReplayScenario:
         # scenario_id: prefer explicit field, fall back to filename stem
         scenario_id = data.get("scenario_id", path.stem)
 
-        # daily_summaries may be nested under ground_truth in some fixtures
+        # Inputs only: a summary the pipeline is scored on is never loaded
+        # from ground_truth, or the scenario would score its own answer.
         daily_summaries = data.get("daily_summaries", [])
-        if not daily_summaries:
-            daily_summaries = data.get("ground_truth", {}).get("daily_summaries", [])
 
         return cls(
             scenario_id=scenario_id,
@@ -155,15 +153,18 @@ class ReplayScenario:
 # ---------------------------------------------------------------------------
 
 class ReplayRunner:
-    """Execute pipeline stages against a ``ReplayScenario`` without VLM calls.
+    """Execute pipeline stages against a ``ReplayScenario``.
 
     Each ``run_*`` method exercises one evaluation dimension (classification,
     segmentation, task boundaries, dedup, readiness, export parity,
-    recurrence) using pre-stored fixture data and mock embeddings.
+    recurrence) through the production code with its production defaults.
+    Embeddings are real ``nomic-embed-text`` vectors from the Ollama at
+    *ollama_host* (in tests, the ``eval_replay`` cassette).
     """
 
-    def __init__(self, scenario: ReplayScenario) -> None:
+    def __init__(self, scenario: ReplayScenario, ollama_host: str | None = None) -> None:
         self._scenario = scenario
+        self._ollama_host = ollama_host
 
     # ------------------------------------------------------------------
     # Knowledge-base setup
@@ -307,58 +308,19 @@ class ReplayRunner:
     # ------------------------------------------------------------------
 
     def run_segmentation(self) -> Any:
-        """Run ``TaskSegmenter.segment()`` with mock embeddings.
-
-        Events in fixtures store ``scene_annotation_json`` as a dict;
-        ``AnnotatedFrame.from_event()`` accepts both dict and JSON string
-        forms.  To be safe we JSON-encode dict-valued annotation fields
-        before passing them to the segmenter.
-
-        The embedding mock intercepts ``_compute_embeddings()`` and
-        returns the ``embedding`` vectors pre-stored in each event.
+        """Run ``TaskSegmenter.segment()`` as passive discovery does, with
+        the production config and real embeddings (``clustering:``-prefixed
+        ``nomic-embed-text`` from the Ollama at ``ollama_host``).
 
         Returns:
             A ``SegmentationResult`` from the task segmenter.
         """
-        from agenthandover_worker.task_segmenter import (
-            TaskSegmenter,
-            SegmentationResult,
-        )
+        from agenthandover_worker.task_segmenter import SegmenterConfig, TaskSegmenter
 
-        # Build events with JSON-string fields (as the DB would store them)
-        prepared_events = self._prepare_events_for_segmenter()
-
-        # Collect pre-stored embeddings in event order (only for events
-        # that have annotations, since those are the ones that produce
-        # AnnotatedFrames and therefore request embeddings).
-        ordered_embeddings = self._collect_ordered_embeddings()
-
-        def _mock_compute_embeddings(
-            texts: list[str], *, model: str = "", host: str = "",
-            timeout: float = 30.0,
-        ) -> list[list[float]]:
-            """Return pre-stored embeddings aligned to *texts*.
-
-            The segmenter requests embeddings in the same order as it
-            creates AnnotatedFrames (i.e. event order, skipping events
-            without valid annotations).  We return the stored embeddings
-            1:1 by position.
-            """
-            result: list[list[float]] = []
-            for i in range(len(texts)):
-                if i < len(ordered_embeddings):
-                    result.append(ordered_embeddings[i])
-                else:
-                    result.append([])
-            return result
-
-        segmenter = TaskSegmenter()
-
-        with patch(
-            "agenthandover_worker.task_segmenter._compute_embeddings",
-            side_effect=_mock_compute_embeddings,
-        ):
-            return segmenter.segment(prepared_events)
+        config = SegmenterConfig()
+        if self._ollama_host is not None:
+            config = SegmenterConfig(ollama_host=self._ollama_host)
+        return TaskSegmenter(config=config).segment(self._prepare_events_for_segmenter())
 
     # ------------------------------------------------------------------
     # 3. Task boundaries
@@ -562,30 +524,32 @@ class ReplayRunner:
     # ------------------------------------------------------------------
 
     def run_recurrence(self, kb: Any) -> list[dict]:
-        """Detect recurrence patterns from daily summaries stored in the KB.
+        """Detect recurrence patterns the way the daily batch does.
 
-        If the scenario includes daily summaries, saves them to the KB
-        (if not already saved by ``setup_kb()``) and runs
-        ``PatternDetector.detect_recurrence()``.
+        Each day's events go through ``DailyBatchProcessor.process_day``
+        with the production ``ProcedureMatcher`` over the scenario's
+        procedures, so which procedure a task matches is the matcher's
+        answer; then ``PatternDetector.detect_recurrence()`` runs with its
+        production ``min_observations``.
 
         Args:
-            kb: A ``KnowledgeBase`` instance with daily summaries loaded.
+            kb: A ``KnowledgeBase`` instance (from ``setup_kb()``).
 
         Returns:
             List of pattern dicts (serialized ``RecurrencePattern`` objects).
         """
+        from agenthandover_worker.daily_processor import DailyBatchProcessor
         from agenthandover_worker.pattern_detector import PatternDetector
+        from agenthandover_worker.procedure_matcher import ProcedureMatcher
 
-        if not self._scenario.daily_summaries:
-            return []
+        processor = DailyBatchProcessor(knowledge_base=kb, matcher=ProcedureMatcher(kb=kb))
+        by_date: dict[str, list[dict]] = {}
+        for event in self._prepare_events_for_daily_processor():
+            by_date.setdefault(str(event.get("timestamp", ""))[:10], []).append(event)
+        for date in sorted(d for d in by_date if d):
+            processor.process_day(date, by_date[date])
 
-        # Ensure summaries are in the KB (idempotent)
-        for summary in self._scenario.daily_summaries:
-            date = summary.get("date", "unknown")
-            kb.save_daily_summary(date, summary)
-
-        detector = PatternDetector(kb, min_observations=2)
-        patterns = detector.detect_recurrence()
+        patterns = PatternDetector(kb).detect_recurrence()
 
         return [
             {
@@ -605,7 +569,7 @@ class ReplayRunner:
     # ------------------------------------------------------------------
 
     def run_continuity(self, tmp_path: Path) -> list[dict]:
-        """Run segmentation + continuity tracking with mock embeddings.
+        """Run segmentation (real embeddings) + continuity tracking.
 
         Calls ``run_segmentation()`` to produce segments, then builds a
         continuity graph via ``ContinuityTracker.build_graph()``.  For
@@ -693,33 +657,3 @@ class ReplayRunner:
         We JSON-encode dict-valued fields for consistency.
         """
         return self._prepare_events_for_segmenter()
-
-    def _collect_ordered_embeddings(self) -> list[list[float]]:
-        """Collect pre-stored embeddings from events that have annotations.
-
-        The segmenter creates ``AnnotatedFrame`` objects only for events
-        with a valid ``scene_annotation_json``.  Embeddings are requested
-        in that same order, so we collect them by iterating events and
-        skipping those without annotations.
-        """
-        embeddings: list[list[float]] = []
-        for event in self._scenario.events:
-            ann = event.get("scene_annotation_json")
-            if ann is None:
-                continue
-
-            # Verify the annotation is parseable
-            if isinstance(ann, str):
-                try:
-                    parsed = json.loads(ann)
-                except (json.JSONDecodeError, TypeError):
-                    continue
-                if not isinstance(parsed, dict):
-                    continue
-            elif not isinstance(ann, dict):
-                continue
-
-            emb = event.get("embedding", [])
-            embeddings.append(emb if isinstance(emb, list) else [])
-
-        return embeddings

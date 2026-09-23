@@ -1,0 +1,41 @@
+{
+  "name": "passive_3weeks",
+  "description": "Three weeks (Mon-Fri, weekends off) of annotated passive frames: a daily Stripe payout reconciliation, a Monday expense report, one-off work tasks and browsing noise.",
+  "source": {
+    "kind": "generated",
+    "by": "worker/tests/journeys/record/generate_passive.py",
+    "note": "Frames carry the scene annotator's output (annotations.jsonl.gz); labels.json is the ground truth."
+  },
+  "schema_version": 4,
+  "timezone": "UTC",
+  "recorded_start": "2026-08-31T08:40:00.876931+00:00",
+  "recorded_end": "2026-09-18T16:18:03.805917+00:00",
+  "planted_routines": [
+    {
+      "slug": "stripe-payout-reconciliation",
+      "cadence": "daily",
+      "local_weekday": null,
+      "instances": 15
+    },
+    {
+      "slug": "weekly-expense-report",
+      "cadence": "weekly",
+      "local_weekday": 0,
+      "instances": 3
+    }
+  ],
+  "annotated_rows": 231,
+  "row_counts": {
+    "events": 382,
+    "by_kind": {
+      "ClickIntent": 151,
+      "DwellSnapshot": 231
+    },
+    "chrome_extension": 151,
+    "clipboard_with_preview": 0,
+    "dom_snapshots": 0,
+    "focus_tagged": 0,
+    "with_ocr_text": 0,
+    "with_screenshot": 231
+  }
+}

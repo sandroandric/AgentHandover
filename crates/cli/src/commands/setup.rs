@@ -6,7 +6,7 @@
 
 use anyhow::Result;
 use colored::Colorize;
-use agenthandover_common::{config::AppConfig, pid, status};
+use agenthandover_common::{config::AppConfig, pid, status, tiers};
 
 use crate::paths;
 
@@ -47,13 +47,7 @@ fn detect_install_channel() -> &'static str {
 
 /// Load config.toml from the standard OS location; falls back to defaults.
 fn load_config() -> Result<AppConfig> {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    let path = if cfg!(target_os = "macos") {
-        std::path::PathBuf::from(&home)
-            .join("Library/Application Support/agenthandover/config.toml")
-    } else {
-        std::path::PathBuf::from(&home).join(".config/agenthandover/config.toml")
-    };
+    let path = config_file();
     if path.exists() {
         Ok(AppConfig::from_file(&path)?)
     } else {
@@ -65,7 +59,12 @@ fn load_config() -> Result<AppConfig> {
 ///
 /// `check_only`: just report status, don't modify anything.
 /// `extension_only` / `vlm_only`: run only that step.
-pub fn run(check_only: bool, extension_only: bool, vlm_only: bool) -> Result<()> {
+pub fn run(
+    check_only: bool,
+    extension_only: bool,
+    vlm_only: bool,
+    tier: Option<&str>,
+) -> Result<()> {
     println!("{}", "AgentHandover Setup".bold());
     println!("{}", "=".repeat(50));
     println!();
@@ -75,7 +74,7 @@ pub fn run(check_only: bool, extension_only: bool, vlm_only: bool) -> Result<()>
         return Ok(());
     }
     if vlm_only {
-        step_vlm(check_only)?;
+        step_vlm(check_only, tier)?;
         return Ok(());
     }
 
@@ -92,7 +91,7 @@ pub fn run(check_only: bool, extension_only: bool, vlm_only: bool) -> Result<()>
 
     step_chrome_extension(check_only)?;
     println!();
-    step_vlm(check_only)?;
+    step_vlm(check_only, tier)?;
     println!();
 
     if warnings.is_empty() {
@@ -562,156 +561,253 @@ fn copy_to_clipboard(text: &str) -> bool {
 // Step 4: VLM Setup (Optional)
 // =============================================================================
 
-fn step_vlm(check_only: bool) -> Result<()> {
+fn step_vlm(check_only: bool, tier_arg: Option<&str>) -> Result<()> {
     println!("{}", "Step 4: VLM Setup (Optional)".bold());
 
-    // Check if VLM is already available from worker status
+    // Report what the running worker says, if it is up.
     if let Ok(worker) = status::read_status_file::<status::WorkerStatus>("worker-status.json") {
         if worker.vlm_available {
-            // Show mode details if available
-            let mode_label = worker
-                .vlm_mode
-                .as_deref()
-                .unwrap_or("local");
-            let provider_label = worker
-                .vlm_provider
-                .as_deref()
-                .unwrap_or("auto-detect");
             println!(
                 "  {} VLM {} ({}/{})",
                 "✓".green(),
                 "available".green(),
-                mode_label,
-                provider_label,
+                worker.vlm_mode.as_deref().unwrap_or("local"),
+                worker.vlm_provider.as_deref().unwrap_or("auto-detect"),
             );
-            return Ok(());
         }
     }
 
-    // Check config for remote mode
-    if let Ok(config) = load_config() {
-        if config.vlm.mode == "remote" {
-            let provider = config.vlm.provider.as_deref().unwrap_or("unknown");
-            let model = config.vlm.model.as_deref().unwrap_or("(default)");
-            println!(
-                "  {} VLM configured as {} ({}/{})",
-                "✓".green(),
-                "remote".cyan(),
-                provider,
-                model,
-            );
-            // Check if the API key env var is set
-            if let Some(ref env_var) = config.vlm.api_key_env {
-                if std::env::var(env_var).is_ok() {
-                    println!(
-                        "  {} API key ({}) {}",
-                        "✓".green(),
-                        env_var,
-                        "is set".green()
-                    );
-                } else {
-                    println!(
-                        "  {} API key ({}) {}",
-                        "✗".red(),
-                        env_var,
-                        "NOT set — export it in your shell profile".red()
-                    );
-                }
-            }
-            return Ok(());
-        }
-    }
-
-    // Check if Ollama is installed (local mode)
-    let ollama_path = find_ollama();
-    match ollama_path {
-        Some(ref path) => {
-            println!("  {} Ollama installed at: {}", "✓".green(), path.display());
-
-            // Check if a model is already pulled
-            if has_ollama_model(path) {
+    let config = load_config()?;
+    if config.vlm.mode == "remote" && tier_arg.is_none() {
+        let provider = config.vlm.provider.as_deref().unwrap_or("unknown");
+        let model = config.vlm.model.as_deref().unwrap_or("(default)");
+        println!(
+            "  {} VLM configured as {} ({}/{})",
+            "✓".green(),
+            "remote".cyan(),
+            provider,
+            model,
+        );
+        if let Some(ref env_var) = config.vlm.api_key_env {
+            if std::env::var(env_var).is_ok() {
+                println!("  {} API key ({}) {}", "✓".green(), env_var, "is set".green());
+            } else {
                 println!(
-                    "  {} Ollama model available",
-                    "✓".green()
+                    "  {} API key ({}) {}",
+                    "✗".red(),
+                    env_var,
+                    "NOT set — export it in your shell profile".red()
+                );
+            }
+        }
+        return Ok(());
+    }
+
+    // Local mode: the models of the chosen tier (the one tier table,
+    // tiers.json), pulled with Ollama; the choice is written to [vlm] in
+    // the same bytes onboarding writes.
+    let table = tiers::table();
+    let tier = match tier_arg {
+        Some(id) => table.get(id).ok_or_else(|| {
+            let ids: Vec<&str> = table.tiers.iter().map(|t| t.id.as_str()).collect();
+            anyhow::anyhow!("unknown tier '{}'; choose one of: {}", id, ids.join(", "))
+        })?,
+        None => tiers::resolve_models(config.vlm.tier.as_deref(), None, None).0,
+    };
+    let models = table.models(tier);
+    println!(
+        "  {} Tier: {} ({}; {} GB RAM detected)",
+        "•".cyan(),
+        tier.label.bold(),
+        tier.subtitle,
+        tiers::machine_ram_gb(),
+    );
+
+    let Some(path) = find_ollama() else {
+        println!(
+            "  {} Ollama {}",
+            "~".yellow(),
+            "not installed (VLM features disabled)".yellow()
+        );
+        if !check_only {
+            println!("    To enable VLM features, install Ollama:");
+            println!("      • Download: {}", "https://ollama.com/download/mac".cyan());
+            println!(
+                "    Then run {} again.",
+                "agenthandover setup --vlm".cyan()
+            );
+        }
+        return Ok(());
+    };
+    println!("  {} Ollama installed at: {}", "✓".green(), path.display());
+
+    let Some(installed) = ollama_models(&path) else {
+        println!(
+            "  {} Ollama is not running: open the Ollama app, then run {} again.",
+            "✗".red(),
+            "agenthandover setup --vlm".cyan()
+        );
+        return Ok(());
+    };
+    let missing: Vec<&str> = models
+        .iter()
+        .copied()
+        .filter(|m| !installed.iter().any(|i| i == m))
+        .collect();
+
+    if missing.is_empty() {
+        println!("  {} Models present: {}", "✓".green(), models.join(", "));
+        if !check_only {
+            persist_tier(tier)?;
+        }
+        return Ok(());
+    }
+    println!("  {} Models to pull: {}", "~".yellow(), missing.join(", "));
+    if check_only {
+        println!("    Run {} to pull them.", "agenthandover setup --vlm".cyan());
+        return Ok(());
+    }
+
+    let needs_new_ollama = missing.iter().any(|m| m.starts_with("gemma4"));
+    let minimum = &table.minimum_ollama_version_for_gemma4;
+    if needs_new_ollama {
+        match ollama_version(&path) {
+            Some(v) if !version_at_least(&v, minimum) => {
+                println!(
+                    "  {} Gemma 4 QAT models need Ollama {}+; you have {}. Update the app at {}.",
+                    "✗".red(),
+                    minimum,
+                    v,
+                    "https://ollama.com/download".cyan()
                 );
                 return Ok(());
             }
-
-            println!(
-                "  {} No VLM model pulled yet",
-                "~".yellow()
-            );
-
-            if check_only {
-                println!("    Run {} to pull a model.", "agenthandover setup --vlm".cyan());
-                return Ok(());
-            }
-
-            println!(
-                "    Pulling recommended model ({})...",
-                "llava:7b".bold()
-            );
-            println!(
-                "    {}",
-                "This may take a few minutes on first download.".dimmed()
-            );
-
-            let pull_result = std::process::Command::new(path)
-                .args(["pull", "llava:7b"])
-                .stdout(std::process::Stdio::inherit())
-                .stderr(std::process::Stdio::inherit())
-                .status();
-
-            match pull_result {
-                Ok(exit) if exit.success() => {
-                    println!(
-                        "\n  {} Model {} pulled successfully!",
-                        "✓".green(),
-                        "llava:7b".bold()
-                    );
-                    println!(
-                        "    Restart the worker to activate: {}",
-                        "agenthandover restart worker".cyan()
-                    );
-                }
-                Ok(exit) => {
-                    println!(
-                        "\n  {} Model pull failed (exit code: {:?})",
-                        "✗".red(),
-                        exit.code()
-                    );
-                    println!("    Make sure Ollama is running: ollama serve");
-                }
-                Err(e) => {
-                    println!("\n  {} Failed to run ollama: {}", "✗".red(), e);
-                }
-            }
-        }
-        None => {
-            println!(
-                "  {} Ollama {}",
-                "~".yellow(),
-                "not installed (VLM features disabled)".yellow()
-            );
-            if !check_only {
-                println!("    To enable VLM features, install Ollama:");
-                println!(
-                    "      • Download: {}",
-                    "https://ollama.com/download/mac".cyan()
-                );
-                println!(
-                    "      • Or: {}",
-                    "brew install ollama".cyan()
-                );
-                println!(
-                    "    Then run {} again.",
-                    "agenthandover setup --vlm".cyan()
-                );
-            }
+            _ => {}
         }
     }
 
+    // Persist the choice before pulling, as onboarding does, so an
+    // interrupted pull leaves the config naming the models being pulled.
+    persist_tier(tier)?;
+    for model in &missing {
+        println!("    Pulling {}...", model.bold());
+        match std::process::Command::new(&path)
+            .args(["pull", model])
+            .stdout(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::inherit())
+            .status()
+        {
+            Ok(exit) if exit.success() => {
+                println!("  {} Model {} pulled", "✓".green(), model.bold());
+            }
+            Ok(exit) => {
+                println!(
+                    "\n  {} Pull of {} failed (exit code: {:?}); make sure the Ollama app is open.",
+                    "✗".red(),
+                    model,
+                    exit.code()
+                );
+                return Ok(());
+            }
+            Err(e) => {
+                println!("\n  {} Failed to run ollama: {}", "✗".red(), e);
+                return Ok(());
+            }
+        }
+    }
+    println!(
+        "    Restart the worker to use them: {}",
+        "agenthandover restart worker".cyan()
+    );
     Ok(())
+}
+
+/// Where `config.toml` lives (it may not exist yet).
+fn config_file() -> std::path::PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+    if cfg!(target_os = "macos") {
+        std::path::PathBuf::from(&home)
+            .join("Library/Application Support/agenthandover/config.toml")
+    } else {
+        std::path::PathBuf::from(&home).join(".config/agenthandover/config.toml")
+    }
+}
+
+/// Write `tier`'s managed `[vlm]` keys into config.toml (atomically).
+fn persist_tier(tier: &tiers::Tier) -> Result<()> {
+    let path = config_file();
+    let current = std::fs::read_to_string(&path).unwrap_or_default();
+    let updated = tiers::apply_vlm_block(&current, tier);
+    if updated != current {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let tmp = path.with_extension("toml.tmp");
+        std::fs::write(&tmp, updated)?;
+        std::fs::rename(&tmp, &path)?;
+    }
+    println!("  {} Saved tier {} to {}", "✓".green(), tier.id, path.display());
+    Ok(())
+}
+
+/// `ollama list`'s model names (`:latest` dropped); None if it failed.
+fn ollama_models(ollama_path: &std::path::Path) -> Option<Vec<String>> {
+    let output = std::process::Command::new(ollama_path).arg("list").output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(parse_ollama_list(&String::from_utf8_lossy(&output.stdout)))
+}
+
+fn parse_ollama_list(stdout: &str) -> Vec<String> {
+    stdout
+        .lines()
+        .skip(1) // header
+        .filter_map(|line| line.split_whitespace().next())
+        .map(|name| name.strip_suffix(":latest").unwrap_or(name).to_string())
+        .collect()
+}
+
+/// `ollama --version` → "0.34.2".
+fn ollama_version(ollama_path: &std::path::Path) -> Option<String> {
+    let output = std::process::Command::new(ollama_path).arg("--version").output().ok()?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    text.split_whitespace()
+        .rev()
+        .find(|w| w.chars().next().is_some_and(|c| c.is_ascii_digit()))
+        .map(str::to_string)
+}
+
+/// `version` ("0.34.2-rc1") >= `minimum` ("0.34.0").
+fn version_at_least(version: &str, minimum: &str) -> bool {
+    let parse = |s: &str| -> Option<Vec<u64>> {
+        s.split('-').next()?.split('.').map(|p| p.parse().ok()).collect()
+    };
+    match (parse(version), parse(minimum)) {
+        (Some(have), Some(need)) => have >= need,
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod vlm_tests {
+    use super::*;
+
+    #[test]
+    fn parses_ollama_list() {
+        let out = "NAME                 ID      SIZE   MODIFIED\n\
+                   qwen3.5:4b           2a65    3.4 GB 1 day ago\n\
+                   nomic-embed-text:latest 0a10 274 MB 2 days ago\n";
+        assert_eq!(parse_ollama_list(out), ["qwen3.5:4b", "nomic-embed-text"]);
+    }
+
+    #[test]
+    fn compares_versions() {
+        assert!(version_at_least("0.34.2", "0.34.0"));
+        assert!(version_at_least("0.34.0-rc1", "0.34.0"));
+        assert!(!version_at_least("0.30.6", "0.34.0"));
+        assert!(!version_at_least("dev", "0.34.0"));
+    }
 }
 
 fn find_ollama() -> Option<std::path::PathBuf> {
@@ -738,21 +834,4 @@ fn find_ollama() -> Option<std::path::PathBuf> {
         }
     }
     None
-}
-
-fn has_ollama_model(ollama_path: &std::path::Path) -> bool {
-    // Run `ollama list` and check if any model is available
-    if let Ok(output) = std::process::Command::new(ollama_path)
-        .arg("list")
-        .output()
-    {
-        if output.status.success() {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            // Output has a header line, then model lines
-            // If there are more than 1 lines (header + at least one model), we have models
-            let lines: Vec<&str> = stdout.lines().collect();
-            return lines.len() > 1;
-        }
-    }
-    false
 }

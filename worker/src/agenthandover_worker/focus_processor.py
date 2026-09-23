@@ -1,8 +1,11 @@
 """Focus session processor for the v2 VLM annotation pipeline.
 
 Orchestrates the end-to-end processing of a completed focus recording
-session:  ensures all events are annotated → ensures frame diffs exist →
-collects the annotated timeline → generates a semantic SOP.
+session:  picks keyframes → annotates the SOP's keyframes → ensures frame
+diffs exist → collects the annotated timeline → generates a semantic SOP.
+The session's other keyframes are annotated after its Skill is written
+(:meth:`FocusProcessor.annotate_remaining`); frames that are not keyframes
+are never sent to the model.
 
 This replaces the v1 focus processing path (episode_builder → translator
 → scorer → sop_inducer.induce_from_focus_session) when v2 annotation is
@@ -13,12 +16,18 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import timedelta
 from pathlib import Path
 
 from agenthandover_worker.dom import url_host
-from agenthandover_worker.event_helpers import display_name, parse_json_field, parse_timestamp
-from agenthandover_worker.scene_annotator import SceneAnnotator
+from agenthandover_worker.event_helpers import (
+    display_name,
+    focused_field,
+    parse_json_field,
+    parse_timestamp,
+)
+from agenthandover_worker.scene_annotator import SceneAnnotator, as_compact, page_for_event
 from agenthandover_worker.frame_differ import FrameDiffer
 from agenthandover_worker.sop_generator import SOPGenerator, GeneratedSOP
 
@@ -29,6 +38,95 @@ _ANNOTATION_DONE = ("completed", "skipped", "missing_screenshot")
 
 # How far (seconds) a DOM snapshot or click may lie from a frame to join it.
 _DOM_TOLERANCE_SEC = 5.0
+
+# Frames of one session that are ever annotated, and the subset annotated
+# before the SOP is generated (the SOP prompt's frame cap,
+# ``SOPGeneratorConfig.max_timeline_frames``).
+FOCUS_KEYFRAMES = 60
+SOP_KEYFRAMES = 20
+
+_WORD_RE = re.compile(r"\w+", re.UNICODE)
+
+
+def _frame_place(event: dict) -> tuple[str, str, str]:
+    """(app, window title, URL): a dwell is a run of frames sharing it."""
+    window = parse_json_field(event, "window_json")
+    metadata = parse_json_field(event, "metadata_json")
+    return (
+        str(window.get("app_id") or ""),
+        str(window.get("title") or ""),
+        str(metadata.get("url") or ""),
+    )
+
+
+def _ocr_words(event: dict) -> frozenset[str]:
+    """The lowercased words of the daemon's OCR for a frame."""
+    ocr = parse_json_field(event, "metadata_json").get("ocr")
+    if not isinstance(ocr, dict):
+        return frozenset()
+    text = ocr.get("full_text")
+    if not isinstance(text, str) or not text:
+        elements = ocr.get("elements")
+        text = " ".join(
+            str(el.get("text", "")) for el in elements if isinstance(el, dict)
+        ) if isinstance(elements, list) else ""
+    return frozenset(_WORD_RE.findall(text.lower()))
+
+
+def select_keyframes(
+    frames: list[dict],
+    k: int = FOCUS_KEYFRAMES,
+    *,
+    click_times: list | tuple = (),
+    clipboard_ids: frozenset[str] | set[str] = frozenset(),
+) -> list[dict]:
+    """The *k* most informative frames of a session, in time order.
+
+    Needs no model: every signal comes from the rows.  The first and last
+    frame of every dwell (a run of frames with the same app, title and URL,
+    so every title or URL change) rank first, the session's first and last
+    frame above all; then frames next to a copy (*clipboard_ids*), frames
+    within ``_DOM_TOLERANCE_SEC`` of a click (*click_times*, datetimes),
+    frames whose OCR text changed most from the previous frame, and frames
+    after a long pause.  When there are more dwell boundaries than *k*,
+    those other signals decide among them.  Rows without a screenshot
+    (app switches, title changes) cannot be annotated and rank last.
+    """
+    if len(frames) <= k:
+        return list(frames)
+    n = len(frames)
+    places = [_frame_place(f) for f in frames]
+    words = [_ocr_words(f) for f in frames]
+    times = [parse_timestamp(f.get("timestamp")) for f in frames]
+    slack = timedelta(seconds=_DOM_TOLERANCE_SEC)
+
+    scores: list[float] = []
+    for i, frame in enumerate(frames):
+        score = 1000.0 if i in (0, n - 1) else 0.0
+        if not parse_json_field(frame, "metadata_json").get("screenshot_path"):
+            score -= 10_000.0
+        if (
+            i in (0, n - 1)
+            or places[i - 1] != places[i]
+            or places[i + 1] != places[i]
+        ):
+            score += 100.0
+        if frame.get("id") in clipboard_ids:
+            score += 10.0
+        when = times[i]
+        if when is not None and any(abs(c - when) <= slack for c in click_times):
+            score += 8.0
+        if i > 0:
+            union = words[i - 1] | words[i]
+            if union:
+                score += 5.0 * (1.0 - len(words[i - 1] & words[i]) / len(union))
+            if when is not None and times[i - 1] is not None:
+                gap = (when - times[i - 1]).total_seconds()
+                score += 3.0 * min(max(gap, 0.0) / 30.0, 1.0)
+        scores.append(score)
+
+    top = sorted(range(n), key=lambda i: (-scores[i], i))[:k]
+    return [frames[i] for i in sorted(top)]
 
 
 class FocusProcessor:
@@ -51,6 +149,9 @@ class FocusProcessor:
         self.differ = differ
         self.sop_generator = sop_generator
         self._last_rich_observations: list[list[dict]] = []
+        # Keyframes of the last session that wait for annotate_remaining().
+        self._remaining: list[dict] = []
+        self._remaining_dir: str | Path = ""
 
     def process_session(
         self,
@@ -64,8 +165,9 @@ class FocusProcessor:
         """Process a completed focus session end-to-end.
 
         Steps:
-          1. Ensure all events have scene annotations (run VLM if needed)
-          2. Ensure all annotated events have frame diffs
+          1. Pick the session's keyframes (:func:`select_keyframes`), mark
+             the other frames skipped, and annotate the SOP's keyframes
+          2. Ensure the annotated SOP keyframes have frame diffs
           3. Collect the full annotated timeline
           4. Generate a semantic SOP via the SOP generator
 
@@ -99,17 +201,36 @@ class FocusProcessor:
         # Step 0b: Attach clipboard context to adjacent screenshots
         events = self._attach_clipboard_context(events)
 
-        # Step 1: Ensure all events are annotated.  During the transport
-        # backoff, don't hit Ollama at all; the session waits.
+        # Step 0c: Keyframes.  Only these are ever annotated, the SOP's
+        # own first; the rest wait until the Skill is written.
+        click_times = self._click_times(db, events)
+        clipboard_ids = frozenset(self._clipboard_map)
+        keyframes = select_keyframes(
+            events, FOCUS_KEYFRAMES,
+            click_times=click_times, clipboard_ids=clipboard_ids,
+        )
+        all_frames = events
+        events = select_keyframes(
+            keyframes, SOP_KEYFRAMES,
+            click_times=click_times, clipboard_ids=clipboard_ids,
+        )
+        sop_ids = {e.get("id") for e in events}
+        self._remaining = [e for e in keyframes if e.get("id") not in sop_ids]
+        self._remaining_dir = screenshots_dir
+
+        # Step 1: Ensure the SOP keyframes are annotated.  During the transport
+        # backoff, don't hit Ollama at all; the session waits untouched.
         needs_annotation = any(
             e.get("annotation_status", "pending") not in _ANNOTATION_DONE
             for e in events
         )
         if needs_annotation and not self.annotator.ready():
+            self._remaining = []
             return GeneratedSOP(
                 sop={}, success=False, deferred=True,
                 error="Annotation deferred: Ollama unavailable",
             )
+        self._drop_frames(db, all_frames, keyframes, screenshots_dir)
         ann_stats = self._ensure_annotations(db, events, screenshots_dir)
         logger.info(
             "Focus v2 annotation: %d annotated, %d skipped, %d failed, %d deferred",
@@ -166,21 +287,16 @@ class FocusProcessor:
         """Build one observation dict from a timeline frame for the
         behavioral synthesizer.
 
-        Pulls EVERY structured field Gemma fills in, so the synthesizer
-        can see verbatim text (emails, URLs, typed content, names, the
-        Send button being focused) rather than just 'user is doing X'.
-
-        Historical bug (caught 2026-04-10): only 4 fields were extracted,
-        dropping ``names``, ``ui_state.active_element``, ``visible_content
-        .values`` (where compose body content lives), and the explicit
-        ``compose`` block — all of which carry the recipient/subject/body
-        text the synthesizer needs to write a concrete goal.
+        Carries every field of the compact annotation plus the frame's
+        screen text, so the synthesizer can quote verbatim text (emails,
+        URLs, typed content, the focused control, the picked list entry,
+        subject lines and message bodies on screen) rather than just
+        'user is doing X'.
         """
-        ann = frame.get("annotation", {}) or {}
-        tc = ann.get("task_context", {}) or {}
-        kt = ann.get("key_text", {}) or {}
-        vc = ann.get("visible_content", {}) or {}
-        ui = ann.get("ui_state", {}) or {}
+        ann = as_compact(frame.get("annotation"))
+        tc = ann.get("task_context") or {}
+        kt = ann.get("key_text") or {}
+        ui = ann.get("ui_state") or {}
 
         obs: dict = {
             "action": tc.get("what_doing", ""),
@@ -190,47 +306,40 @@ class FocusProcessor:
         }
 
         # Verbatim grounding — helps the synthesizer write concrete goals
-        email_addrs = kt.get("email_addresses") or []
-        if email_addrs:
-            obs["email_addresses"] = email_addrs
+        emails = kt.get("emails") or []
+        if emails:
+            obs["email_addresses"] = emails
         urls = kt.get("urls") or []
         if urls:
             obs["urls"] = urls
-        names = kt.get("names") or []
-        if names:
-            obs["names"] = names[:10]
         typed = kt.get("typed_text") or ""
         if typed:
             obs["typed_text"] = typed[:400]
-        selected = kt.get("selected_text") or ""
-        if selected:
-            obs["selected_text"] = selected[:400]
 
         # UI state — "active_element=Send button" tells the synthesizer
         # the user is about to send something, even when typed_text is
-        # empty (Gemma often leaves typed_text blank if the cursor isn't
-        # visibly blinking in the screenshot).
+        # empty.
         active_element = ui.get("active_element") or ""
         if active_element:
             obs["active_element"] = active_element[:200]
+        modal = ui.get("modal") or ""
+        if modal:
+            obs["modal"] = modal[:200]
 
-        # All visible text — Gemma flattens compose-window content into
-        # visible_content.values mixed with background UI text.  We pass
-        # it through with a higher cap so the synthesizer can quote
-        # actual subject lines, body text, recipient chips, etc.
-        values = vc.get("values") or []
-        if values:
-            obs["visible_values"] = values[:25]
-        headings = vc.get("headings") or []
-        if headings:
-            obs["headings"] = headings[:8]
+        items = [
+            f"{item.get('label')}{' (chosen)' if item.get('chosen') else ''}"
+            for item in ann.get("visible_items") or []
+            if isinstance(item, dict) and item.get("label")
+        ]
+        if items:
+            obs["visible_items"] = items
 
-        # Compose-specific structured fields (filled in when the
-        # annotation prompt explicitly asks for them — sharper prompt
-        # added 2026-04-10).
-        compose = ann.get("compose")
-        if isinstance(compose, dict) and compose:
-            obs["compose"] = compose
+        # The screen's own text (the salient OCR lines the annotation
+        # prompt carried), where subject lines, message bodies and
+        # recipient chips live.
+        screen_text = ann.get("_screen_text") or ""
+        if screen_text:
+            obs["screen_text"] = screen_text[:600]
 
         return obs
 
@@ -462,6 +571,76 @@ class FocusProcessor:
         return meta
 
     # ------------------------------------------------------------------
+    # Step 0c: Keyframes
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _click_times(db: object, events: list[dict]) -> list:
+        """When the session's Chrome clicks happened (datetimes)."""
+        times = [
+            when for e in events
+            if (when := parse_timestamp(e.get("timestamp"))) is not None
+        ]
+        if not times:
+            return []
+        slack = timedelta(seconds=_DOM_TOLERANCE_SEC)
+        clicks = db.get_click_intents(  # type: ignore[union-attr]
+            (min(times) - slack).isoformat(), (max(times) + slack).isoformat(),
+        )
+        return [
+            when for c in clicks
+            if (when := parse_timestamp(c.get("timestamp"))) is not None
+        ]
+
+    def _drop_frames(
+        self,
+        db: object,
+        events: list[dict],
+        keyframes: list[dict],
+        screenshots_dir: str | Path,
+    ) -> None:
+        """Mark pending frames that are not keyframes as skipped and delete
+        their JPEGs: they are never sent to the model."""
+        keep = {e.get("id") for e in keyframes}
+        dropped = 0
+        for event in events:
+            if event.get("id") in keep:
+                continue
+            if event.get("annotation_status", "pending") in _ANNOTATION_DONE:
+                continue
+            db.save_annotation(  # type: ignore[union-attr]
+                event.get("id", ""), "", status="skipped",
+            )
+            self.annotator.discard_screenshot(event, screenshots_dir)
+            event["annotation_status"] = "skipped"
+            dropped += 1
+        if dropped:
+            logger.info(
+                "Focus v2: %d keyframe(s) of %d frames; %d skipped",
+                len(keyframes), len(events), dropped,
+            )
+
+    def annotate_remaining(self, db: object) -> dict:
+        """Annotate the last session's keyframes that the SOP did not need.
+
+        Called once the session's Skill is written (or its generation has
+        failed), so they never delay it.  Frames Ollama cannot take now
+        stay pending with their screenshots.
+        """
+        rest, self._remaining = self._remaining, []
+        if not rest or not self.annotator.ready():
+            return {
+                "annotated": 0, "skipped": 0, "failed": 0,
+                "already_done": 0, "deferred": len(rest),
+            }
+        stats = self._ensure_annotations(db, rest, self._remaining_dir)
+        logger.info(
+            "Focus v2: %d remaining keyframe(s) annotated after the Skill",
+            stats["annotated"],
+        )
+        return stats
+
+    # ------------------------------------------------------------------
     # Step 1: Annotation
     # ------------------------------------------------------------------
 
@@ -498,13 +677,11 @@ class FocusProcessor:
                 max_age_seconds=self.annotator.config.sliding_window_max_age_sec,
             )
 
-            # For focus sessions, disable stale-frame skipping —
-            # every frame matters in a single-demonstration recording.
             result = self.annotator.annotate_event(
                 event,
                 recent_annotations=recent,
                 artifact_dir=str(screenshots_dir),
-                skip_stale_check=True,
+                page=page_for_event(db, event),
             )
 
             if result.status == "completed" and result.annotation:
@@ -671,9 +848,12 @@ class FocusProcessor:
                 "app": annotation.get("app", ""),
                 "event_id": event_id,
                 "clipboard_context": clipboard_ctx,
+                "focused_field": focused_field(fresh),
+                "shell_commands": [],
             })
 
         self._attach_clicks(db, timeline)
+        self._attach_shell_commands(db, timeline)
 
         # Safety net: the first frame in a focus session must never carry a
         # diff — it is the clean starting point of the SOP.  Any diff stored
@@ -683,6 +863,35 @@ class FocusProcessor:
             timeline[0]["diff"] = None
 
         return timeline
+
+    @staticmethod
+    def _attach_shell_commands(db: object, timeline: list[dict]) -> None:
+        """Give each frame the shell commands run since the previous frame.
+
+        ``ShellCommand`` events carry no ``focus_session_id`` (the daemon
+        ingests the hook's log in batches), so they are found by time: from
+        the session's first frame (less the DOM tolerance, for a command
+        typed just before the first capture) to its last frame.  A command
+        belongs to the first frame at or after it, the screen that shows
+        its result.
+        """
+        timed = [
+            (when, frame) for frame in timeline
+            if (when := parse_timestamp(frame.get("timestamp"))) is not None
+        ]
+        if not timed:
+            return
+        slack = timedelta(seconds=_DOM_TOLERANCE_SEC)
+        commands = db.get_shell_commands(  # type: ignore[union-attr]
+            (timed[0][0] - slack).isoformat(), timed[-1][0].isoformat(),
+        )
+        for command in commands:
+            when = parse_timestamp(command.get("timestamp"))
+            if when is None:
+                continue
+            owner = next((frame for t, frame in timed if t >= when), None)
+            if owner is not None:
+                owner["shell_commands"].append(command)
 
     @staticmethod
     def _attach_clicks(db: object, timeline: list[dict]) -> None:

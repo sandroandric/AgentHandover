@@ -13,6 +13,10 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from agenthandover_worker.vector_kb import (
+    CLUSTERING_PREFIX,
+    DOCUMENT_PREFIX,
+    QUERY_PREFIX,
+    ImageEmbedder,
     VectorKB,
     VectorKBConfig,
     VectorSearchResult,
@@ -57,13 +61,16 @@ def _fake_embed_response(texts: list[str], dim: int = 4) -> bytes:
 
 @pytest.fixture
 def kb(tmp_db: Path, config: VectorKBConfig) -> VectorKB:
-    """VectorKB with mocked Ollama that returns deterministic embeddings."""
+    """VectorKB with mocked Ollama that returns deterministic embeddings.
+
+    The vectors depend on the text only; ``vkb.embed_calls`` records each
+    call's ``(model, prefix, texts)``.
+    """
     vkb = VectorKB(tmp_db, config)
+    vkb.embed_calls = []
 
-    # Patch compute_embeddings to avoid real Ollama calls
-    original_compute = vkb.compute_embeddings
-
-    def mock_compute(texts, *, model=None):
+    def mock_compute(texts, *, prefix=DOCUMENT_PREFIX):
+        vkb.embed_calls.append((vkb.config.embedding_model, prefix, list(texts)))
         embeddings = []
         for t in texts:
             h = hash(t) & 0xFFFFFFFF
@@ -347,6 +354,21 @@ class TestMaintenance:
         assert purged == 1
         assert kb.count() == 0
 
+    def test_purge_drops_vectors_from_another_model(self, kb: VectorKB):
+        kb.upsert("annotation", "e1", "task one")
+        kb.upsert(
+            "visual", "e2", "image:e2", embedding=[0.1, 0.2, 0.3, 0.4],
+            prefix="", model=ImageEmbedder.MODEL_NAME,
+        )
+        kb.config.embedding_model = "new-model"
+        kb.upsert("annotation", "e3", "task three")
+
+        assert kb.purge_stale() == 1
+        kept = {
+            row[0] for row in kb._conn.execute("SELECT source_id FROM vector_store")
+        }
+        assert kept == {"e2", "e3"}
+
     def test_reset_cycle_budget(self, kb: VectorKB):
         kb._cycle_embed_count = 100
         kb.reset_cycle_budget()
@@ -365,3 +387,303 @@ class TestLifecycle:
         # Connection should be closed — verify by trying to use it
         with pytest.raises(Exception):
             vkb.count()
+
+
+# ---------------------------------------------------------------------------
+# Unit vectors, the row cap, and search at scale
+# ---------------------------------------------------------------------------
+
+def _random_unit(rng, dim: int) -> list[float]:
+    vec = [rng.gauss(0.0, 1.0) for _ in range(dim)]
+    norm = math.sqrt(sum(x * x for x in vec))
+    return [x / norm for x in vec]
+
+
+def _fill(kb: VectorKB, rows: int, dim: int, *, distinct: int, seed: int = 7) -> list[list[float]]:
+    """Insert *rows* vectors cycling through *distinct* random unit vectors,
+    written the way ``_store`` writes them.  Returns the distinct vectors."""
+    import random
+
+    from agenthandover_worker.vector_kb import _quantize
+
+    rng = random.Random(seed)
+    base = [_random_unit(rng, dim) for _ in range(distinct)]
+    packed = [(_encode_embedding(v), *_quantize(v)) for v in base]
+    kb._conn.executemany(
+        "INSERT INTO vector_store "
+        "(id, source_type, source_id, embedding, model, dim, text_hash, qvec, qscale) "
+        "VALUES (?, 'annotation', ?, ?, 'test-model', ?, 'h', ?, ?)",
+        (
+            (f"id{i}", f"e{i}", packed[i % distinct][0], dim,
+             packed[i % distinct][1], packed[i % distinct][2])
+            for i in range(rows)
+        ),
+    )
+    kb._conn.commit()
+    return base
+
+
+class TestUnitVectorsAndCap:
+
+    def test_upsert_stores_a_unit_vector(self, kb: VectorKB):
+        kb.upsert("annotation", "e1", "t", embedding=[3.0, 4.0, 0.0, 0.0])
+        blob, dim = kb._conn.execute(
+            "SELECT embedding, dim FROM vector_store"
+        ).fetchone()
+        assert list(_decode_embedding(blob, dim)) == pytest.approx([0.6, 0.8, 0.0, 0.0])
+
+    def test_old_rows_are_normalised_on_open(self, tmp_db: Path, config: VectorKBConfig):
+        conn = sqlite3.connect(tmp_db)
+        conn.execute(
+            "CREATE TABLE vector_store (id TEXT PRIMARY KEY, source_type TEXT NOT NULL,"
+            " source_id TEXT NOT NULL, embedding BLOB NOT NULL, model TEXT NOT NULL,"
+            " dim INTEGER NOT NULL, text_hash TEXT NOT NULL,"
+            " created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),"
+            " updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')))"
+        )
+        conn.execute(
+            "INSERT INTO vector_store (id, source_type, source_id, embedding, model, dim, text_hash)"
+            " VALUES ('v', 'procedure', 'p', ?, 'test-model', 4, 'h')",
+            (_encode_embedding([0.0, 2.0, 0.0, 0.0]),),
+        )
+        conn.commit()
+        conn.close()
+        with VectorKB(tmp_db, config) as vkb:
+            hits = vkb.search_by_vector([0.0, 1.0, 0.0, 0.0])
+            assert hits[0].source_id == "p"
+            assert hits[0].score == pytest.approx(1.0)
+
+    def test_cap_holds_after_an_over_filling_upsert(self, tmp_db: Path):
+        kb = VectorKB(tmp_db, VectorKBConfig(embedding_model="test-model", max_rows=5))
+        _fill(kb, 5, 4, distinct=5)
+        kb._conn.execute(
+            "UPDATE vector_store SET updated_at = "
+            "strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-1 day')"
+        )
+        kb._conn.commit()
+        stored = kb.upsert_batch(
+            [("procedure", f"p{i}", f"text {i}") for i in range(3)],
+            embeddings=[[1.0, 0.0, 0.0, float(i)] for i in range(3)],
+        )
+        assert stored == 3
+        assert kb.count() == 5
+        # The three new rows survive; the two oldest were evicted.
+        assert kb.count("procedure") == 3
+        kb.close()
+
+    def test_purge_stale_defaults_to_configured_retention(self, tmp_db: Path):
+        kb = VectorKB(tmp_db, VectorKBConfig(embedding_model="test-model", retention_days=7))
+        kb.upsert("annotation", "old", "t", embedding=[1.0, 0.0])
+        kb.upsert("annotation", "new", "t", embedding=[0.0, 1.0])
+        kb._conn.execute(
+            "UPDATE vector_store SET updated_at = "
+            "strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-8 days') WHERE source_id = 'old'"
+        )
+        kb._conn.commit()
+        assert kb.purge_stale() == 1
+        assert [h.source_id for h in kb.search_by_vector([1.0, 1.0])] == ["new"]
+        kb.close()
+
+    def test_search_sees_rows_written_by_another_connection(self, tmp_db: Path, config):
+        kb = VectorKB(tmp_db, config)
+        kb.upsert("annotation", "a", "t", embedding=[1.0, 0.0, 0.0, 0.0])
+        assert [h.source_id for h in kb.search_by_vector([1.0, 0.0, 0.0, 0.0])] == ["a"]
+        other = VectorKB(tmp_db, config)
+        other.upsert("annotation", "b", "t", embedding=[0.0, 1.0, 0.0, 0.0])
+        other.delete_by_source("annotation", "a")
+        other.close()
+        assert [h.source_id for h in kb.search_by_vector([0.0, 1.0, 0.0, 0.0])] == ["b"]
+        kb.close()
+
+
+class TestSearchAtScale:
+
+    def test_matches_exact_ranking(self, tmp_db: Path):
+        import random
+
+        kb = VectorKB(tmp_db, VectorKBConfig(embedding_model="test-model"))
+        base = _fill(kb, 2000, 64, distinct=2000, seed=3)
+        rng = random.Random(11)
+        for _ in range(5):
+            query = _random_unit(rng, 64)
+            exact = sorted(
+                ((sum(a * b for a, b in zip(query, v)), f"e{i}") for i, v in enumerate(base)),
+                reverse=True,
+            )[:10]
+            hits = kb.search_by_vector(query, top_k=10)
+            assert [h.source_id for h in hits] == [sid for _, sid in exact]
+            for hit, (score, _sid) in zip(hits, exact):
+                assert hit.score == pytest.approx(score, abs=1e-4)
+        kb.close()
+
+    def test_fifty_thousand_vectors_under_250_ms(self, tmp_db: Path):
+        import random
+        import time
+
+        kb = VectorKB(tmp_db, VectorKBConfig(embedding_model="test-model", max_rows=60_000))
+        _fill(kb, 50_000, 768, distinct=500)
+        query = _random_unit(random.Random(5), 768)
+        kb.search_by_vector(query, top_k=10)  # builds the in-memory index once
+        began = time.perf_counter()
+        hits = kb.search_by_vector(query, top_k=10)
+        elapsed = time.perf_counter() - began
+        assert len(hits) == 10
+        assert elapsed < 0.25, f"search took {elapsed * 1000:.0f} ms"
+        kb.close()
+
+
+# ---------------------------------------------------------------------------
+# Embedding model and task prefix (WP-C6)
+# ---------------------------------------------------------------------------
+
+class TestModelAndPrefix:
+
+    def test_model_change_re_embeds_the_row(self, kb: VectorKB):
+        """Embed one row, change the configured model: the row is embedded
+        again by the new model instead of being skipped as unchanged."""
+        assert kb.upsert("procedure", "p1", "file the expense report") is True
+        assert kb.upsert("procedure", "p1", "file the expense report") is False
+        assert len(kb.embed_calls) == 1
+
+        kb.config.embedding_model = "nomic-embed-text-v2"
+        assert kb.upsert("procedure", "p1", "file the expense report") is True
+        assert kb.embed_calls[-1] == (
+            "nomic-embed-text-v2", DOCUMENT_PREFIX, ["file the expense report"],
+        )
+        row = kb._conn.execute(
+            "SELECT model, prefix FROM vector_store WHERE id = ?",
+            (_vector_id("procedure", "p1"),),
+        ).fetchone()
+        assert tuple(row) == ("nomic-embed-text-v2", DOCUMENT_PREFIX)
+
+    def test_prefix_change_re_embeds_the_row(self, kb: VectorKB):
+        items = [("annotation", "e1", "reading hacker news")]
+        assert kb.upsert_batch(items, prefix=CLUSTERING_PREFIX) == 1
+        assert kb.upsert_batch(items, prefix=CLUSTERING_PREFIX) == 0
+        assert kb.upsert_batch(items) == 1
+        assert [c[1] for c in kb.embed_calls] == [CLUSTERING_PREFIX, DOCUMENT_PREFIX]
+
+    def test_documents_and_queries_use_their_prefixes(self, kb: VectorKB):
+        kb.upsert("procedure", "p1", "task one")
+        kb.search("task one")
+        assert [c[1] for c in kb.embed_calls] == [DOCUMENT_PREFIX, QUERY_PREFIX]
+
+    def test_rows_from_before_prefixes_are_migrated_and_re_embedded(
+        self, tmp_db: Path, config: VectorKBConfig,
+    ):
+        conn = sqlite3.connect(tmp_db)
+        conn.execute(
+            "CREATE TABLE vector_store (id TEXT PRIMARY KEY, source_type TEXT NOT NULL,"
+            " source_id TEXT NOT NULL, embedding BLOB NOT NULL, model TEXT NOT NULL,"
+            " dim INTEGER NOT NULL, text_hash TEXT NOT NULL,"
+            " created_at TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT '')"
+        )
+        conn.execute(
+            "INSERT INTO vector_store (id, source_type, source_id, embedding, model,"
+            " dim, text_hash) VALUES (?, 'procedure', 'p1', ?, ?, 4, ?)",
+            (_vector_id("procedure", "p1"), _encode_embedding([0.5] * 4),
+             config.embedding_model, _text_hash("task one")),
+        )
+        conn.commit()
+        conn.close()
+
+        vkb = VectorKB(tmp_db, config)
+        try:
+            with patch.object(vkb, "compute_embeddings", return_value=[[0.1] * 4]) as embed:
+                assert vkb.upsert("procedure", "p1", "task one") is True
+                embed.assert_called_once_with(["task one"], prefix=DOCUMENT_PREFIX)
+        finally:
+            vkb.close()
+
+    def test_get_current_matches_what_upsert_stores(self, kb: VectorKB):
+        """get_current tests the same (text hash, model, prefix) that
+        upsert skips on; the hashed text is the unprefixed text."""
+        items = [("annotation", "e1", "reading hacker news")]
+        assert kb.upsert_batch(items, prefix=CLUSTERING_PREFIX) == 1
+        vec = kb.get_current(
+            "annotation", "e1", "reading hacker news", prefix=CLUSTERING_PREFIX,
+        )
+        assert vec is not None and len(vec) == 4
+        # Another prefix, another text or another model is not current.
+        assert kb.get_current("annotation", "e1", "reading hacker news") is None
+        assert kb.get_current(
+            "annotation", "e1", CLUSTERING_PREFIX + "reading hacker news",
+            prefix=CLUSTERING_PREFIX,
+        ) is None
+        kb.config.embedding_model = "nomic-embed-text-v2"
+        assert kb.get_current(
+            "annotation", "e1", "reading hacker news", prefix=CLUSTERING_PREFIX,
+        ) is None
+
+    def test_vectors_from_before_the_prefix_column_are_stale(
+        self, tmp_db: Path, config: VectorKBConfig,
+    ):
+        """A vector stored before prefixes were recorded is never reused:
+        neither a plain row nor a segmenter row whose hashed text carried
+        the ``clustering:`` prefix inline (the pre-WP-C6 format)."""
+        conn = sqlite3.connect(tmp_db)
+        conn.execute(
+            "CREATE TABLE vector_store (id TEXT PRIMARY KEY, source_type TEXT NOT NULL,"
+            " source_id TEXT NOT NULL, embedding BLOB NOT NULL, model TEXT NOT NULL,"
+            " dim INTEGER NOT NULL, text_hash TEXT NOT NULL,"
+            " created_at TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT '',"
+            " qvec BLOB, qscale REAL)"
+        )
+        for sid, hashed in (
+            ("plain", "reading hacker news"),
+            ("inline", CLUSTERING_PREFIX + "reading hacker news"),
+        ):
+            conn.execute(
+                "INSERT INTO vector_store (id, source_type, source_id, embedding, model,"
+                " dim, text_hash) VALUES (?, 'annotation', ?, ?, ?, 4, ?)",
+                (_vector_id("annotation", sid), sid, _encode_embedding([0.5] * 4),
+                 config.embedding_model, _text_hash(hashed)),
+            )
+        conn.commit()
+        conn.close()
+
+        vkb = VectorKB(tmp_db, config)
+        try:
+            for sid in ("plain", "inline"):
+                for prefix in (DOCUMENT_PREFIX, CLUSTERING_PREFIX):
+                    assert vkb.get_current(
+                        "annotation", sid, "reading hacker news", prefix=prefix,
+                    ) is None
+            with patch.object(
+                vkb, "compute_embeddings", return_value=[[0.1] * 4, [0.2] * 4],
+            ) as embed:
+                stored = vkb.upsert_batch(
+                    [("annotation", "plain", "reading hacker news"),
+                     ("annotation", "inline", "reading hacker news")],
+                    prefix=CLUSTERING_PREFIX,
+                )
+            assert stored == 2
+            embed.assert_called_once()
+            assert vkb.get_current(
+                "annotation", "inline", "reading hacker news", prefix=CLUSTERING_PREFIX,
+            ) is not None
+        finally:
+            vkb.close()
+
+    def test_purge_by_model_resets_the_search_index(self, kb: VectorKB):
+        kb.upsert("procedure", "p1", "task one")
+        kb.upsert("visual", "e1", "image:e1", embedding=[1.0, 0.0, 0.0, 0.0],
+                  prefix="", model=ImageEmbedder.MODEL_NAME)
+        kb.search_by_vector([1.0, 0.0, 0.0, 0.0])  # builds the index
+        kb.config.embedding_model = "nomic-embed-text-v2"
+        assert kb.purge_stale() == 1
+        assert kb.count("procedure") == 0 and kb.count("visual") == 1
+        assert [h.source_id for h in kb.search_by_vector([1.0, 0.0, 0.0, 0.0])] == ["e1"]
+
+    def test_compute_embeddings_sends_the_prefix(self, tmp_db: Path, config: VectorKBConfig):
+        vkb = VectorKB(tmp_db, config)
+        try:
+            with patch("agenthandover_worker.vector_kb.OllamaClient") as client:
+                client.return_value.embed.return_value = [[0.0] * 4]
+                vkb.compute_embeddings(["x"], prefix=QUERY_PREFIX)
+            client.return_value.embed.assert_called_once_with(
+                "test-model", ["x"], prefix=QUERY_PREFIX,
+                batch_size=config.batch_size, timeout=config.timeout_seconds,
+            )
+        finally:
+            vkb.close()

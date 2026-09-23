@@ -11,8 +11,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "VS Code", "title": "VS Code - routes.py"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.90, 0.00, 0.10, 0.00]
+      "metadata_json": {}
     },
     {
       "id": "evt-002",
@@ -24,8 +23,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "VS Code", "title": "VS Code - routes.py"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.91, 0.00, 0.09, 0.00]
+      "metadata_json": {}
     },
     {
       "id": "evt-003",
@@ -37,8 +35,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "VS Code", "title": "VS Code - models.py"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.89, 0.01, 0.10, 0.00]
+      "metadata_json": {}
     },
     {
       "id": "evt-004",
@@ -50,8 +47,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "VS Code", "title": "VS Code - models.py"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.90, 0.00, 0.10, 0.00]
+      "metadata_json": {}
     },
     {
       "id": "evt-005",
@@ -63,8 +59,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Chrome", "title": "Netflix - The Office S03E07"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.00, 0.10, 0.00, 0.90]
+      "metadata_json": {}
     },
     {
       "id": "evt-006",
@@ -76,8 +71,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Chrome", "title": "Netflix - The Office S03E07"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.00, 0.08, 0.02, 0.90]
+      "metadata_json": {}
     },
     {
       "id": "evt-007",
@@ -89,8 +83,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Chrome", "title": "Netflix - The Office S03E07"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.02, 0.08, 0.00, 0.90]
+      "metadata_json": {}
     },
     {
       "id": "evt-008",
@@ -102,8 +95,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "VS Code", "title": "VS Code - routes.py"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.90, 0.00, 0.10, 0.00]
+      "metadata_json": {}
     },
     {
       "id": "evt-009",
@@ -115,8 +107,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "VS Code", "title": "VS Code - test_routes.py"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.89, 0.01, 0.10, 0.00]
+      "metadata_json": {}
     },
     {
       "id": "evt-010",
@@ -128,8 +119,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "VS Code", "title": "VS Code - Terminal - pytest"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.91, 0.00, 0.09, 0.00]
+      "metadata_json": {}
     },
     {
       "id": "evt-011",
@@ -141,8 +131,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "VS Code", "title": "VS Code - Git: Stage Changes"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.90, 0.00, 0.10, 0.00]
+      "metadata_json": {}
     },
     {
       "id": "evt-012",
@@ -154,8 +143,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Chrome", "title": "YouTube - Lo-fi Beats to Code To"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.05, 0.10, 0.00, 0.85]
+      "metadata_json": {}
     },
     {
       "id": "evt-013",
@@ -167,8 +155,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Chrome", "title": "YouTube - Lo-fi Beats to Code To"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.05, 0.08, 0.02, 0.85]
+      "metadata_json": {}
     },
     {
       "id": "evt-014",
@@ -180,8 +167,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Chrome", "title": "YouTube - Lo-fi Beats to Code To"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.04, 0.10, 0.01, 0.85]
+      "metadata_json": {}
     },
     {
       "id": "evt-015",
@@ -193,8 +179,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "VS Code", "title": "VS Code - errors.py"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.90, 0.00, 0.10, 0.00]
+      "metadata_json": {}
     },
     {
       "id": "evt-016",
@@ -206,8 +191,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "VS Code", "title": "VS Code - errors.py"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.91, 0.00, 0.09, 0.00]
+      "metadata_json": {}
     },
     {
       "id": "evt-017",
@@ -219,8 +203,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "VS Code", "title": "VS Code - test_errors.py"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.89, 0.01, 0.10, 0.00]
+      "metadata_json": {}
     },
     {
       "id": "evt-018",
@@ -232,8 +215,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "VS Code", "title": "VS Code - Terminal - All tests passed"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.90, 0.00, 0.10, 0.00]
+      "metadata_json": {}
     }
   ],
   "ground_truth": {

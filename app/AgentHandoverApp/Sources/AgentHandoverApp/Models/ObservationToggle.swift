@@ -2,7 +2,7 @@ import Foundation
 
 /// Starts and stops the services off the main thread.
 ///
-/// `ServiceController.startAll()` / `stopAll()` spawn processes, talk to
+/// `ServiceController.startAll()` / `stopCapture()` spawn processes, talk to
 /// launchd and wait for the daemon, which takes up to a few seconds. Run
 /// on the main thread (as the menu bar buttons used to) that beachballs
 /// the menu. This runs them on a background queue, exposes the in-flight
@@ -32,7 +32,7 @@ final class ObservationToggle: ObservableObject {
 
     init(
         startServices: @escaping () -> Bool = { ServiceController.startAll() },
-        stopServices: @escaping () -> Void = { ServiceController.stopAll() }
+        stopServices: @escaping () -> Void = { ServiceController.stopCapture() }
     ) {
         self.startServices = startServices
         self.stopServices = stopServices

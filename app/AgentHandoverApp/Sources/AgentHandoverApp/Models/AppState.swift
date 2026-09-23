@@ -7,23 +7,50 @@ enum ServiceHealth: String {
     case warning   // Running but with issues (permissions, stale heartbeat)
     case down      // One or both services not running
     case stopped   // User intentionally stopped services
+    case starting  // Started, waiting for both services to report
 
     var color: Color {
         switch self {
-        case .healthy: return .green
-        case .warning: return .yellow
-        case .down:    return .red
-        case .stopped: return .gray
+        case .healthy:  return .green
+        case .warning:  return .yellow
+        case .down:     return .red
+        case .stopped:  return .gray
+        case .starting: return .orange
         }
     }
 
     var label: String {
         switch self {
-        case .healthy: return "Healthy"
-        case .warning: return "Warning"
-        case .down:    return "Down"
-        case .stopped: return "Stopped"
+        case .healthy:  return "Healthy"
+        case .warning:  return "Warning"
+        case .down:     return "Down"
+        case .stopped:  return "Stopped"
+        case .starting: return "Starting"
         }
+    }
+
+    /// How long after a start the menu may say "Starting…" before a
+    /// service that still has not reported counts as down.
+    static let startGracePeriod: TimeInterval = 60
+
+    /// Health from the service state. `startedAt` is when the user (or a
+    /// launch) last started the services; until both report, or the grace
+    /// period ends, that is `.starting`, never a red "Offline".
+    static func derive(
+        userStopped: Bool,
+        startedAt: Date?,
+        now: Date,
+        daemonRunning: Bool,
+        workerRunning: Bool,
+        hasIssues: Bool
+    ) -> ServiceHealth {
+        if userStopped { return .stopped }
+        if let startedAt, now.timeIntervalSince(startedAt) < startGracePeriod,
+           !(daemonRunning && workerRunning) {
+            return .starting
+        }
+        if !daemonRunning && !workerRunning { return .down }
+        return hasIssues || !daemonRunning || !workerRunning ? .warning : .healthy
     }
 }
 
@@ -156,6 +183,7 @@ final class AppState: ObservableObject {
             }
             return "briefcase.fill"                    // Idle, not active
         case .stopped: return "briefcase.fill"         // Idle, not active
+        case .starting: return "binoculars"            // Coming up
         }
     }
 
@@ -187,6 +215,9 @@ final class AppState: ObservableObject {
     // MARK: - Polling
 
     private var pollTimer: Timer?
+    /// Set by `servicesStarting()`, cleared once health leaves `.starting`.
+    private var startedAt: Date?
+    private var startupTimer: Timer?
     private var supervisorObserver: NSObjectProtocol?
     private var captureStallObserver: NSObjectProtocol?
     private let statusDir: URL
@@ -419,20 +450,41 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// The user (or a launch) just started the services: show "Starting…"
+    /// and re-read their status every second until both report.
+    func servicesStarting() {
+        startedAt = Date()
+        updateHealth()
+        startupTimer?.invalidate()
+        startupTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] timer in
+            Task { @MainActor [weak self] in
+                guard let self, self.startedAt != nil else {
+                    timer.invalidate()
+                    return
+                }
+                self.refreshStatus()
+            }
+        }
+    }
+
     private func updateHealth() {
-        let newHealth: ServiceHealth
-        if userStopped {
-            newHealth = .stopped
-        } else if !daemonRunning && !workerRunning {
-            newHealth = .down
-        } else {
-            let hasWarnings = !accessibilityGranted
+        let now = Date()
+        let newHealth = ServiceHealth.derive(
+            userStopped: userStopped,
+            startedAt: startedAt,
+            now: now,
+            daemonRunning: daemonRunning,
+            workerRunning: workerRunning,
+            hasIssues: !accessibilityGranted
                 || !screenRecordingGranted
                 || (workerStatus?.consecutive_errors ?? 0) > 0
-                || !daemonRunning || !workerRunning
                 || vlmBacklogged
                 || captureStallStatus != nil
-            newHealth = hasWarnings ? .warning : .healthy
+        )
+        if newHealth != .starting, startedAt != nil {
+            startedAt = nil
+            startupTimer?.invalidate()
+            startupTimer = nil
         }
         if health != newHealth { health = newHealth }
     }

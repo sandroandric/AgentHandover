@@ -1,8 +1,11 @@
 use anyhow::Result;
-use chrono::Utc;
+use chrono::{Local, Utc};
+use agenthandover_common::browser_transition::{BrowserTransitionKind, BrowserTransitionWatch};
+use agenthandover_common::config::PrivacyZonesConfig;
 use agenthandover_common::event::*;
 use agenthandover_common::redaction::Redactor;
 use agenthandover_storage::artifact_store::ArtifactStore;
+#[cfg(target_os = "macos")]
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -12,6 +15,14 @@ use tokio::sync::mpsc;
 use tokio::time;
 use tracing::{info, debug, warn, error};
 use uuid::Uuid;
+
+use super::capture_policy::{ocr_words, CapturePolicy, CaptureTrigger, FrameDecision};
+use super::privacy_zones::{PrivacyZones, Zone};
+use crate::observation::{
+    focused_element_at_async, snapshot_at_async, ObservationSnapshot, SleepRecord, WarnLimiter,
+    SNAPSHOT_TIMEOUT,
+};
+use crate::capture::dhash;
 
 /// Messages sent from the observer to the storage writer.
 ///
@@ -25,14 +36,16 @@ pub enum ObserverMessage {
 
 /// Configuration for the observer event loop.
 pub struct ObserverConfig {
-    pub t_dwell_seconds: u64,
-    pub t_scroll_read_seconds: u64,
     pub capture_screenshots: bool,
+    /// Ceiling on frames kept per minute outside focus recordings.
     pub screenshot_max_per_minute: u32,
+    /// Ceiling on frames kept per minute during a focus recording (its own
+    /// counter, so passive capture never leaves a recording blind).
+    pub focus_screenshot_max_per_minute: u32,
     pub poll_interval: Duration,
     pub db_path: PathBuf,
-    /// dHash perceptual hash threshold for screenshot change detection.
-    /// Lower = stricter dedup (fewer screenshots stored).
+    /// Changed blocks (of the frame's block-mean signature) needed to keep
+    /// a frame; see `capture::dhash`. Higher = fewer frames kept.
     pub dhash_threshold: u32,
     /// Screenshot format: "jpeg" or "png".
     pub screenshot_format: String,
@@ -42,22 +55,38 @@ pub struct ObserverConfig {
     pub screenshot_scale: f64,
     /// Directory for plain JPEG screenshots (VLM annotation pipeline).
     pub screenshots_dir: PathBuf,
+    /// `[privacy.zones]`: evaluated every tick before any capture request.
+    pub zones: PrivacyZonesConfig,
+    /// The app's observation socket (window, permissions, secure field).
+    pub observation_socket: PathBuf,
+    /// The app's capture socket (frames).
+    pub capture_socket: PathBuf,
+    /// Data dir holding the focus-recording signal and the browser
+    /// transition file.
+    pub state_dir: PathBuf,
+    /// `[privacy] capture_input_values`: whether the focused element's
+    /// `AXValue` is read (never for a secure field).
+    pub capture_input_values: bool,
 }
 
 impl Default for ObserverConfig {
     fn default() -> Self {
         Self {
-            t_dwell_seconds: 3,
-            t_scroll_read_seconds: 8,
             capture_screenshots: true,
             screenshot_max_per_minute: 20,
+            focus_screenshot_max_per_minute: 40,
             poll_interval: Duration::from_millis(500),
             db_path: PathBuf::from("agenthandover.db"),
-            dhash_threshold: 10,
+            dhash_threshold: 1,
             screenshot_format: "jpeg".to_string(),
             screenshot_quality: 70,
             screenshot_scale: 0.5,
             screenshots_dir: PathBuf::from("/tmp/agenthandover-screenshots"),
+            zones: PrivacyZonesConfig::default(),
+            observation_socket: agenthandover_common::observation::observation_socket_path(),
+            capture_socket: agenthandover_common::observation::capture_socket_path(),
+            state_dir: agenthandover_common::status::data_dir(),
+            capture_input_values: false,
         }
     }
 }
@@ -65,48 +94,59 @@ impl Default for ObserverConfig {
 /// The observer event loop — runs as an async task.
 /// Polls OS state at regular intervals and emits events.
 ///
+/// Screenshots are event-driven (see `capture_policy`): the shutter fires on
+/// an app switch, a window-title change, a browser navigation, form submit
+/// or click (handed over by the native-messaging bridge through
+/// `browser_transition`), a mouse click, a clipboard change
+/// (`clipboard_changed`, set by the clipboard monitor), every 2 s during a
+/// focus recording, and otherwise as a heartbeat once a minute.
+///
+/// Privacy comes first each tick: a tick whose observation snapshot failed
+/// records nothing (the secure-field check cannot run), a focused secure
+/// field records nothing, and `[privacy.zones]` is evaluated for the focused
+/// window (app, title, and the browser's page URL) before the shutter: a
+/// blocked window gets no frame, no OCR and no title, a metadata-only window
+/// gets its app-switch and title events but no frame.
+///
 /// When `capture_paused` is `true` AND there is no active focus recording
-/// session, the loop skips all event capture (DwellSnapshot, AppSwitch,
-/// WindowTitleChange, etc.).  Focus recordings always run regardless of
-/// the pause flag so the user can record a session while normally paused.
+/// session, the loop skips all event capture (AppSwitch, WindowTitleChange,
+/// frames). Focus recordings always run regardless of the pause flag so the
+/// user can record a session while normally paused.
 pub async fn run_observer_loop(
     config: ObserverConfig,
     tx: mpsc::Sender<ObserverMessage>,
     mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
     artifact_store: Option<Arc<ArtifactStore>>,
     capture_paused: Arc<AtomicBool>,
+    clipboard_changed: Arc<AtomicBool>,
 ) -> Result<()> {
     info!("Observer event loop starting");
 
-    let mut dwell = super::dwell::DwellTracker::new(
-        Duration::from_secs(config.t_dwell_seconds),
-        Duration::from_secs(config.t_scroll_read_seconds),
-    );
-
     let mut last_window_title: Option<String> = None;
     let mut last_app_id: Option<String> = None;
-    let mut screenshot_count_this_minute: u32 = 0;
-    let mut last_minute_reset = Utc::now();
-    let mut last_dhash: u64 = 0;
+    let mut last_sleep: Option<SleepRecord> = None;
+    let mut policy = CapturePolicy::new(
+        config.screenshot_max_per_minute,
+        config.focus_screenshot_max_per_minute,
+        config.dhash_threshold,
+        Instant::now(),
+    );
+    let mut last_tick = Instant::now();
+    let zones = PrivacyZones::new(&config.zones);
+    let snapshot_warnings = WarnLimiter::new();
+    // The browser's current page (origin + path), from the extension's
+    // navigations, tab switches, clicks and form submits.
+    let mut browser_url: Option<String> = None;
 
-    // Idle detector: uses CGEventSourceSecondsSinceLastEventType to detect
-    // keyboard/mouse/trackpad activity. We use this to reset the dwell tracker
-    // when the user is actively interacting, so DwellSnapshots fire after each
-    // idle period (not just once after the first AppSwitch).
+    // Mouse clicks are read from the HID system's "seconds since last
+    // mouse-down" (no event tap, nothing intercepted).
     #[cfg(target_os = "macos")]
     let idle_detector = crate::platform::IdleDetector::new();
-    // Track whether we last saw the user as active, to avoid spamming on_manipulation_input
-    #[cfg(target_os = "macos")]
-    let mut user_was_active = true;
 
-    // Focus recording: capture screenshots aggressively (every ~2s with dHash dedup)
-    // instead of waiting for 3s idle dwell threshold.
-    let focus_capture_interval = Duration::from_secs(2);
-    let mut last_focus_capture = Instant::now();
-
-    // Focus recording session tracking
-    let state_dir = agenthandover_common::status::data_dir();
+    // Focus recording session tracking; browser transitions share the dir.
+    let state_dir = config.state_dir.clone();
     let mut active_focus_session_id: Option<String> = None;
+    let mut browser_watch = BrowserTransitionWatch::since(Utc::now());
 
     // AppleScript throttle: at most once per 2 seconds per app
     #[cfg(target_os = "macos")]
@@ -124,6 +164,9 @@ pub async fn run_observer_loop(
                     info!("Observer loop received shutdown signal");
                     break;
                 }
+
+                let tick_elapsed = last_tick.elapsed();
+                last_tick = Instant::now();
 
                 // Check for focus recording session signal (cheap stat() call)
                 match agenthandover_common::focus_session::read_focus_signal(&state_dir) {
@@ -155,6 +198,15 @@ pub async fn run_observer_loop(
                     }
                 }
 
+                // Transitions from other tasks and processes, consumed every
+                // tick so one that happened while paused never fires later.
+                let clipboard_transition = clipboard_changed.swap(false, Ordering::AcqRel);
+                let browser_transition = browser_watch.poll(&state_dir);
+                if let Some(url) = browser_transition.as_ref().and_then(|t| t.url.clone()) {
+                    browser_url = Some(url);
+                }
+                let browser_transition = browser_transition.map(|t| t.kind);
+
                 // If capture is paused and no active focus recording, skip
                 // all event capture this tick. Focus recordings always run
                 // regardless of pause state (the user explicitly pressed Record).
@@ -164,70 +216,82 @@ pub async fn run_observer_loop(
                     continue;
                 }
 
-                // Reset screenshot counter every minute
-                let now = Utc::now();
-                if (now - last_minute_reset).num_seconds() >= 60 {
-                    screenshot_count_this_minute = 0;
-                    last_minute_reset = now;
-
-                    // Evict stale AppleScript throttle entries to bound map size
-                    #[cfg(target_os = "macos")]
-                    {
-                        let stale_cutoff = Duration::from_secs(30);
-                        applescript_last_query.retain(|_, ts| ts.elapsed() < stale_cutoff);
-                    }
-                }
-
                 // 1. Pull app-owned observation state. The app is the sole
                 // TCC principal for Accessibility and Screen Recording.
-                let observation = crate::observation::snapshot_async().await;
+                // Without a snapshot the secure-field check cannot run, so
+                // the tick is unsafe: capture nothing, and leave the last
+                // app/title as they were so no transition is fabricated.
+                // (The failure is warned, rate-limited, by the client.)
+                let Ok(observation) = snapshot_at_async(
+                    &config.observation_socket,
+                    SNAPSHOT_TIMEOUT,
+                    &snapshot_warnings,
+                )
+                .await
+                else {
+                    continue;
+                };
 
                 // 2. Check for secure field — if focused, skip all capture.
-                if observation
-                    .as_ref()
-                    .map(|snapshot| {
-                        snapshot.accessibility_granted && snapshot.secure_field_focused
-                    })
-                    .unwrap_or(false)
-                {
+                let Some(zone) = privacy_zone(&zones, &observation, browser_url.as_deref()) else {
                     debug!("Secure field focused — skipping capture");
                     continue;
-                }
+                };
 
                 // 3. Observation metadata comes from the app-owned socket.
-                let display_topology = observation
-                    .as_ref()
-                    .map(|snapshot| snapshot.display_topology.clone())
-                    .unwrap_or_default();
+                let display_topology = observation.display_topology.clone();
 
                 let primary_display_id = display_topology
                     .first()
                     .map(|d| d.display_id.clone())
                     .unwrap_or_else(|| "unknown".to_string());
 
-                let window = observation
-                    .as_ref()
-                    .and_then(|snapshot| {
-                        if snapshot.accessibility_granted {
-                            snapshot.focused_window.clone()
-                        } else {
-                            None
-                        }
-                    });
+                let observed_window = if observation.accessibility_granted {
+                    observation.focused_window.clone()
+                } else {
+                    None
+                };
+                let cursor_global_px = if observation.accessibility_granted {
+                    observation.cursor_global_px.clone()
+                } else {
+                    None
+                };
 
-                let cursor_global_px = observation
-                    .as_ref()
-                    .and_then(|snapshot| {
-                        if snapshot.accessibility_granted {
-                            snapshot.cursor_global_px.clone()
-                        } else {
-                            None
-                        }
-                    });
+                // The privacy zone (above) is known before anything is
+                // recorded. A blocked window's title is withheld from every
+                // event; only the app switch into it is recorded.
+                let window = observed_window.clone().map(|mut w| {
+                    if zone == Zone::Blocked {
+                        w.title.clear();
+                    }
+                    w
+                });
 
-                // 4. Check for focus/title changes
-                let current_title = window.as_ref().map(|w| w.title.clone());
-                let current_app = window.as_ref().map(|w| w.app_id.clone());
+                // 3b. A sleep the app saw since the last tick is a boundary:
+                // no episode or task segment may span it.
+                if let Some(sleep) = new_sleep(&last_sleep, &observation) {
+                    let mut event = make_event(
+                        EventKind::SystemSleep {
+                            slept_at: sleep.slept_at,
+                            woke_at: sleep.woke_at,
+                        },
+                        &None,
+                        &display_topology,
+                        &primary_display_id,
+                        None,
+                    );
+                    // Ordered before anything captured after the wake.
+                    event.timestamp = sleep.woke_at;
+                    tag_focus_session(&mut event, &active_focus_session_id);
+                    let _ = tx.send(ObserverMessage::Event { event }).await;
+                    info!(slept_at = %sleep.slept_at, woke_at = %sleep.woke_at, "System sleep boundary");
+                    last_sleep = Some(sleep);
+                }
+
+                // 4. Collect this tick's transitions, cheapest first.
+                let mut transitions: Vec<CaptureTrigger> = Vec::new();
+                let current_title = observed_window.as_ref().map(|w| w.title.clone());
+                let current_app = observed_window.as_ref().map(|w| w.app_id.clone());
 
                 // App switch detection
                 if current_app != last_app_id {
@@ -246,25 +310,17 @@ pub async fn run_observer_loop(
                         // Query AppleScript state for known native apps
                         #[cfg(target_os = "macos")]
                         {
-                            let should_query = if let Some(last) = applescript_last_query.get(to.as_str()) {
-                                last.elapsed() >= applescript_throttle
-                            } else {
-                                true
-                            };
+                            // App state (page URL, document, message) is
+                            // content: never read for a zoned window.
+                            let should_query = zone == Zone::Full
+                                && applescript_last_query
+                                    .get(to.as_str())
+                                    .is_none_or(|last| last.elapsed() >= applescript_throttle);
 
                             if should_query {
-                                // Try by bundle ID first, then by app name (async, off executor)
-                                let app_name_to_query: Option<String> = if crate::platform::applescript::is_supported_bundle_id(to) {
-                                    crate::platform::applescript::app_name_for_bundle_id(to)
-                                        .map(|n| n.to_string())
-                                } else {
-                                    let short_name = to.rsplit('.').next().unwrap_or(to);
-                                    if crate::platform::applescript::is_supported_app(short_name) {
-                                        Some(short_name.to_string())
-                                    } else {
-                                        None
-                                    }
-                                };
+                                let app_name_to_query =
+                                    crate::platform::applescript::app_name_for_app_id(to)
+                                        .map(str::to_string);
                                 let app_state = if let Some(name) = app_name_to_query {
                                     crate::platform::applescript::query_app_state_async(name).await
                                 } else {
@@ -276,20 +332,23 @@ pub async fn run_observer_loop(
                                         event.metadata["app_state"] = state_json;
                                     }
                                 }
+                                // Bound the map: forget apps not queried recently.
+                                applescript_last_query
+                                    .retain(|_, ts| ts.elapsed() < Duration::from_secs(30));
                                 applescript_last_query.insert(to.clone(), Instant::now());
                             }
                         }
 
                         tag_focus_session(&mut event, &active_focus_session_id);
                         let _ = tx.send(ObserverMessage::Event { event }).await;
-                        dwell.on_manipulation_input();
+                        transitions.push(CaptureTrigger::AppSwitch);
                     }
                     last_app_id = current_app.clone();
                 }
 
-                // Title change detection
+                // Title change detection (not recorded for a blocked window)
                 if current_title != last_window_title {
-                    if last_window_title.is_some() {
+                    if last_window_title.is_some() && zone != Zone::Blocked {
                         let mut event = make_event(
                             EventKind::WindowTitleChange,
                             &window,
@@ -299,230 +358,90 @@ pub async fn run_observer_loop(
                         );
                         tag_focus_session(&mut event, &active_focus_session_id);
                         let _ = tx.send(ObserverMessage::Event { event }).await;
+                        transitions.push(CaptureTrigger::TitleChange);
                     }
                     last_window_title = current_title;
                 }
 
-                // 5. Detect user activity via HID idle time and reset dwell tracker
-                // This ensures DwellSnapshots fire after EVERY idle period, not just
-                // after an AppSwitch. Without this, dwell_fired stays true forever
-                // when the user stays in one app.
+                // A mouse button went down since the previous tick.
                 #[cfg(target_os = "macos")]
-                {
-                    let idle_secs = idle_detector.seconds_since_last_input();
-                    let is_active = idle_secs < config.t_dwell_seconds as f64;
-                    if is_active && !user_was_active {
-                        // User just became active again after being idle
-                        // Reset dwell tracker so next idle period can fire
-                        dwell.on_manipulation_input();
-                    }
-                    user_was_active = is_active;
+                if idle_detector.seconds_since_last_click() < tick_elapsed.as_secs_f64() {
+                    transitions.push(CaptureTrigger::Click);
+                }
+                #[cfg(not(target_os = "macos"))]
+                let _ = tick_elapsed;
+
+                if clipboard_transition {
+                    transitions.push(CaptureTrigger::Clipboard);
+                }
+                if let Some(kind) = browser_transition {
+                    transitions.push(match kind {
+                        BrowserTransitionKind::Navigation => CaptureTrigger::Navigation,
+                        BrowserTransitionKind::FormSubmit => CaptureTrigger::FormSubmit,
+                        BrowserTransitionKind::Click => CaptureTrigger::Click,
+                    });
                 }
 
-                // 5b. Focus recording: aggressive capture every ~2s regardless of dwell state.
-                // Must run BEFORE dwell detection because dwell's dHash-skip `continue`
-                // would bypass this block entirely.
-                // During focus, we use dHash threshold 0 to capture EVERY frame
-                // (the user explicitly chose to record — every frame matters).
-                if active_focus_session_id.is_some()
-                    && last_focus_capture.elapsed() >= focus_capture_interval
-                    && config.capture_screenshots
-                    && screenshot_count_this_minute < config.screenshot_max_per_minute
-                {
-                    if artifact_store.is_some() {
-                        // dHash threshold = 0 means always capture (bypass dedup)
-                        let result = capture_screenshot(
-                            last_dhash,
-                            0, // Focus mode: capture every frame
-                            &config.screenshots_dir,
-                            config.screenshot_scale,
-                            config.screenshot_quality,
-                        ).await;
+                // 5. At most one frame per tick, only when something happened
+                // (or the heartbeat / focus interval is due) and budget remains.
+                // A blocked or metadata-only window never reaches the shutter.
+                if zone != Zone::Full {
+                    debug!(zone = zone.as_str(), "Privacy zone: no frame");
+                    continue;
+                }
+                if !config.capture_screenshots || artifact_store.is_none() {
+                    continue;
+                }
+                let focus_recording = active_focus_session_id.is_some();
+                let Some(trigger) =
+                    policy.shutter_trigger(&transitions, focus_recording, Instant::now())
+                else {
+                    continue;
+                };
+                let gate = PrivacyGate {
+                    zones: &zones,
+                    warnings: &snapshot_warnings,
+                    browser_url: browser_url.as_deref(),
+                };
+                let Some(kept) =
+                    capture_kept_frame(&mut policy, trigger, focus_recording, &config, &gate).await
+                else {
+                    continue;
+                };
 
-                        last_focus_capture = Instant::now();
-                        last_dhash = result.dhash;
-
-                        if result.skipped_dhash {
-                            // With threshold=0, this should never happen, but handle gracefully
-                            debug!("Focus capture: screen unchanged (dHash=0), skipping");
-                        } else {
-                            last_dhash = result.dhash;
-
-                            let mut event = make_event(
-                                EventKind::DwellSnapshot,
-                                &window,
-                                &display_topology,
-                                &primary_display_id,
-                                cursor_global_px.clone(),
-                            );
-
-                            if result.raw_pixels.is_some() {
-                                screenshot_count_this_minute += 1;
-                            }
-
-                            if let Some(ref path) = result.screenshot_path {
-                                event.metadata["screenshot_path"] = serde_json::Value::String(
-                                    path.to_string_lossy().to_string(),
-                                );
-                            }
-
-                            // Run OCR on focus capture
-                            #[cfg(target_os = "macos")]
-                            if let Some((w, h, pixels)) = result.raw_pixels {
-                                if let Some(ocr_result) = crate::platform::ocr::recognize_text_async(pixels, w, h).await {
-                                    if let Ok(ocr_json) = serde_json::to_value(&ocr_result) {
-                                        event.metadata["ocr"] = ocr_json;
-                                    }
-                                }
-                            }
-
-                            event.metadata["focus_capture"] = serde_json::Value::Bool(true);
-                            tag_focus_session(&mut event, &active_focus_session_id);
-                            debug!("Focus capture: DwellSnapshot with screenshot");
-                            let _ = tx.send(ObserverMessage::Event { event }).await;
-                        }
+                let mut event = make_event(
+                    EventKind::DwellSnapshot,
+                    &window,
+                    &display_topology,
+                    &primary_display_id,
+                    cursor_global_px.clone(),
+                );
+                // Every kept frame (a click, app switch, focus-recording
+                // tick, ...) carries what had focus when it was taken.
+                event.focused_element =
+                    focused_element_for(&observation, &config, &snapshot_warnings).await;
+                if let Some(path) = kept.screenshot_path {
+                    event.metadata["screenshot_path"] =
+                        serde_json::Value::String(path.to_string_lossy().to_string());
+                }
+                if let Some(ocr) = kept.ocr {
+                    event.metadata["ocr"] = ocr;
+                }
+                // The page the frame shows, so the worker's zone check (the
+                // second line) sees the URL too.
+                if let (Some(url), Some(w)) = (&browser_url, &window) {
+                    let app = super::privacy_zones::strip_pid_prefix(&w.app_id).to_lowercase();
+                    if super::privacy_zones::is_browser(&app) {
+                        event.metadata["url"] = serde_json::Value::String(url.clone());
                     }
                 }
-
-                // 6. Dwell/scroll-read detection (passive mode)
-                dwell.tick();
-
-                if dwell.is_dwelling() {
-                    let mut captured_result: Option<ScreenshotResult> = None;
-                    let mut should_skip_dhash = false;
-
-                    // Capture screenshot on dwell if enabled and under rate limit
-                    if config.capture_screenshots
-                        && screenshot_count_this_minute < config.screenshot_max_per_minute
-                    {
-                        if artifact_store.is_some() {
-                            let result = capture_screenshot(
-                                last_dhash,
-                                config.dhash_threshold,
-                                &config.screenshots_dir,
-                                config.screenshot_scale,
-                                config.screenshot_quality,
-                            ).await;
-
-                            if result.skipped_dhash {
-                                // Screen hasn't changed enough — skip entire event
-                                should_skip_dhash = true;
-                                last_dhash = result.dhash;
-                            } else {
-                                last_dhash = result.dhash;
-                                captured_result = Some(result);
-                            }
-                        }
-                    }
-
-                    if should_skip_dhash {
-                        debug!("Screen unchanged (dHash), skipping DwellSnapshot");
-                        continue;
-                    }
-
-                    let mut event = make_event(
-                        EventKind::DwellSnapshot,
-                        &window,
-                        &display_topology,
-                        &primary_display_id,
-                        cursor_global_px.clone(),
-                    );
-
-                    if let Some(result) = captured_result {
-                        if result.raw_pixels.is_some() {
-                            screenshot_count_this_minute += 1;
-                        }
-
-                        // Store screenshot path for VLM annotation pipeline
-                        if let Some(ref path) = result.screenshot_path {
-                            event.metadata["screenshot_path"] = serde_json::Value::String(
-                                path.to_string_lossy().to_string(),
-                            );
-                        }
-
-                        // Run OCR on captured screenshot pixels (async, off executor)
-                        #[cfg(target_os = "macos")]
-                        if let Some((w, h, pixels)) = result.raw_pixels {
-                            if let Some(ocr_result) = crate::platform::ocr::recognize_text_async(pixels, w, h).await {
-                                if let Ok(ocr_json) = serde_json::to_value(&ocr_result) {
-                                    event.metadata["ocr"] = ocr_json;
-                                }
-                            }
-                        }
-                    }
-
-                    tag_focus_session(&mut event, &active_focus_session_id);
-                    let _ = tx.send(ObserverMessage::Event { event }).await;
+                event.metadata["capture_trigger"] = serde_json::Value::String(trigger.as_str().to_string());
+                if focus_recording {
+                    event.metadata["focus_capture"] = serde_json::Value::Bool(true);
                 }
-
-                if dwell.is_scroll_reading() {
-                    let mut captured_result: Option<ScreenshotResult> = None;
-                    let mut should_skip_dhash = false;
-
-                    // Capture screenshot on scroll-read if enabled and under rate limit
-                    if config.capture_screenshots
-                        && screenshot_count_this_minute < config.screenshot_max_per_minute
-                    {
-                        if artifact_store.is_some() {
-                            let result = capture_screenshot(
-                                last_dhash,
-                                config.dhash_threshold,
-                                &config.screenshots_dir,
-                                config.screenshot_scale,
-                                config.screenshot_quality,
-                            ).await;
-
-                            if result.skipped_dhash {
-                                should_skip_dhash = true;
-                                last_dhash = result.dhash;
-                            } else {
-                                last_dhash = result.dhash;
-                                captured_result = Some(result);
-                            }
-                        }
-                    }
-
-                    if should_skip_dhash {
-                        debug!("Screen unchanged (dHash), skipping ScrollReadSnapshot");
-                        continue;
-                    }
-
-                    let mut event = make_event(
-                        EventKind::ScrollReadSnapshot,
-                        &window,
-                        &display_topology,
-                        &primary_display_id,
-                        cursor_global_px.clone(),
-                    );
-
-                    if let Some(result) = captured_result {
-                        if result.raw_pixels.is_some() {
-                            screenshot_count_this_minute += 1;
-                        }
-
-                        // Store screenshot path for VLM annotation pipeline
-                        if let Some(ref path) = result.screenshot_path {
-                            event.metadata["screenshot_path"] = serde_json::Value::String(
-                                path.to_string_lossy().to_string(),
-                            );
-                        }
-
-                        // Run OCR on captured screenshot pixels (async, off executor)
-                        #[cfg(target_os = "macos")]
-                        if let Some((w, h, pixels)) = result.raw_pixels {
-                            if let Some(ocr_result) = crate::platform::ocr::recognize_text_async(pixels, w, h).await {
-                                if let Ok(ocr_json) = serde_json::to_value(&ocr_result) {
-                                    event.metadata["ocr"] = ocr_json;
-                                }
-                            }
-                        }
-                    }
-
-                    tag_focus_session(&mut event, &active_focus_session_id);
-                    let _ = tx.send(ObserverMessage::Event { event }).await;
-                }
-
-                // (Focus capture runs in step 5b above, before dwell detection)
+                tag_focus_session(&mut event, &active_focus_session_id);
+                debug!(trigger = trigger.as_str(), "Frame kept");
+                let _ = tx.send(ObserverMessage::Event { event }).await;
             }
             _ = shutdown_rx.changed() => {
                 info!("Observer loop: shutdown signal received, stopping");
@@ -586,72 +505,121 @@ pub async fn run_storage_writer(
     Ok(())
 }
 
-/// Result of screenshot capture: the VLM JPEG path and raw pixel data for OCR.
-struct ScreenshotResult {
-    /// Raw BGRA pixels + dimensions, available for OCR processing.
-    /// `Some` exactly when a new frame was captured.
-    raw_pixels: Option<(usize, usize, Vec<u8>)>,
-    /// Path to the plain JPEG screenshot for VLM annotation pipeline.
+/// A frame that passed the gate: its JPEG on disk (for the VLM annotation
+/// pipeline) and its accurate OCR.
+struct KeptFrame {
     screenshot_path: Option<PathBuf>,
-    /// Perceptual hash (dHash) of this screenshot.
-    dhash: u64,
-    /// True if this screenshot was skipped due to dHash similarity threshold.
-    skipped_dhash: bool,
+    ocr: Option<serde_json::Value>,
 }
 
-/// Capture a frame, check dHash for change detection, and write the app's
-/// JPEG as-is for the VLM annotation pipeline (the only on-disk copy of the frame).
-///
-/// If the screenshot is too similar to the previous one (hamming distance < threshold),
-/// returns a result with `skipped_dhash = true` — the caller should skip the event.
+/// The zone of the snapshot's focused window, or `None` when a secure
+/// (password) field is focused and nothing may be recorded.
+fn privacy_zone(
+    zones: &PrivacyZones,
+    observation: &crate::observation::ObservationSnapshot,
+    browser_url: Option<&str>,
+) -> Option<Zone> {
+    if !observation.accessibility_granted {
+        return Some(Zone::Full);
+    }
+    if observation.secure_field_focused {
+        return None;
+    }
+    Some(observation.focused_window.as_ref().map_or(Zone::Full, |w| {
+        zones.zone(&w.app_id, &w.title, browser_url, Local::now().time())
+    }))
+}
+
+/// What a captured frame is checked against once it is in hand.
+struct PrivacyGate<'a> {
+    zones: &'a PrivacyZones,
+    warnings: &'a WarnLimiter,
+    browser_url: Option<&'a str>,
+}
+
+impl PrivacyGate<'_> {
+    /// Whether the window on screen *now* may still be recorded: the user
+    /// can switch to a blocked window, or focus a password field, while
+    /// the frame is being taken. A failed snapshot is a no.
+    async fn still_allows(&self, config: &ObserverConfig) -> bool {
+        let Ok(now) = snapshot_at_async(&config.observation_socket, SNAPSHOT_TIMEOUT, self.warnings).await
+        else {
+            return false;
+        };
+        privacy_zone(self.zones, &now, self.browser_url) == Some(Zone::Full)
+    }
+}
+
+/// Capture one frame for `trigger` and run it through the policy, cheapest
+/// check first: the privacy zone of the window on screen once the frame is
+/// in hand (it may have changed during the capture), the block-mean
+/// signature against the last kept frame, then
+/// (heartbeats only) fast OCR against the last kept frame's words, then, for
+/// a frame that is kept, accurate OCR and the JPEG write. Nothing reaches
+/// disk for a dropped frame. `None` when the capture failed or the frame
+/// was dropped.
+async fn capture_kept_frame(
+    policy: &mut CapturePolicy,
+    trigger: CaptureTrigger,
+    focus_recording: bool,
+    config: &ObserverConfig,
+    gate: &PrivacyGate<'_>,
+) -> Option<KeptFrame> {
+    let (width, height, bgra, jpeg) =
+        grab_frame(&config.capture_socket, config.screenshot_scale, config.screenshot_quality).await?;
+    if !gate.still_allows(config).await {
+        debug!("The window changed to a private one during the capture, dropping the frame");
+        return None;
+    }
+    let signature = dhash::compute_signature(&bgra, width, height)?;
+
+    let mut pixels = bgra;
+    match policy.frame_decision(trigger, focus_recording, &signature) {
+        FrameDecision::Unchanged => {
+            debug!(trigger = trigger.as_str(), "Screen unchanged since the last kept frame, dropping");
+            return None;
+        }
+        FrameDecision::CheckText => {
+            let (back, fast) = ocr_frame(pixels, width, height, OcrPass::Fast).await;
+            pixels = back;
+            // Without OCR there is no text to compare: the pixels changed, keep it.
+            if let Some((text, _)) = fast {
+                if !policy.text_changed(&ocr_words(&text)) {
+                    debug!("Heartbeat frame shows the same text as the last kept frame, dropping");
+                    return None;
+                }
+            }
+        }
+        FrameDecision::Keep => {}
+    }
+
+    let (_, accurate) = ocr_frame(pixels, width, height, OcrPass::Accurate).await;
+    let screenshot_path = write_vlm_jpeg(&jpeg, &config.screenshots_dir);
+    let (words, ocr) = match accurate {
+        Some((text, json)) => (Some(ocr_words(&text)), Some(json)),
+        None => (None, None),
+    };
+    policy.record_kept(signature, words, focus_recording);
+    Some(KeptFrame { screenshot_path, ocr })
+}
+
+/// Capture one frame from the app's capture socket: `(width, height, BGRA
+/// pixels, JPEG bytes)`. Transient socket errors are retried twice.
 #[cfg(target_os = "macos")]
-async fn capture_screenshot(
-    last_dhash: u64,
-    dhash_threshold: u32,
-    screenshots_dir: &Path,
-    screenshot_scale: f64,
-    screenshot_quality: u8,
-) -> ScreenshotResult {
+async fn grab_frame(socket: &Path, scale: f64, quality: u8) -> Option<(usize, usize, Vec<u8>, Vec<u8>)> {
+    use crate::capture::screenshot::{capture_frame_at, CAPTURE_TIMEOUT};
     const MAX_RETRIES: u32 = 2;
 
     for attempt in 0..=MAX_RETRIES {
-        match crate::capture::screenshot::capture_frame(screenshot_scale, screenshot_quality).await {
+        match capture_frame_at(socket.to_path_buf(), scale, quality, CAPTURE_TIMEOUT).await {
             Ok(frame) => {
-                // Compute perceptual hash for change detection
-                let dhash =
-                    crate::capture::dhash::compute_dhash(&frame.bgra, frame.width, frame.height);
-                let distance = crate::capture::dhash::hamming_distance(dhash, last_dhash);
-
-                if distance < dhash_threshold {
-                    debug!(
-                        dhash = dhash,
-                        distance = distance,
-                        threshold = dhash_threshold,
-                        "Screenshot similar to previous, skipping"
-                    );
-                    return ScreenshotResult {
-                        raw_pixels: None,
-                        screenshot_path: None,
-                        dhash,
-                        skipped_dhash: true,
-                    };
-                }
-
                 debug!(
-                    dhash_distance = distance,
                     width = frame.width,
                     height = frame.height,
                     jpeg_bytes = frame.jpeg.len(),
                     "Screenshot captured"
                 );
-                let screenshot_path = write_vlm_jpeg(&frame.jpeg, screenshots_dir);
-
-                return ScreenshotResult {
-                    raw_pixels: Some((frame.width, frame.height, frame.bgra)),
-                    screenshot_path,
-                    dhash,
-                    skipped_dhash: false,
-                };
+                return Some((frame.width, frame.height, frame.bgra, frame.jpeg));
             }
             Err(e) if e.is_retryable() && attempt < MAX_RETRIES => {
                 warn!(attempt = attempt + 1, error = %e, "Screenshot capture failed, retrying");
@@ -663,28 +631,53 @@ async fn capture_screenshot(
             }
         }
     }
-    ScreenshotResult {
-        raw_pixels: None,
-        screenshot_path: None,
-        dhash: 0,
-        skipped_dhash: false,
-    }
+    None
 }
 
 #[cfg(not(target_os = "macos"))]
-async fn capture_screenshot(
-    _last_dhash: u64,
-    _dhash_threshold: u32,
-    _screenshots_dir: &Path,
-    _screenshot_scale: f64,
-    _screenshot_quality: u8,
-) -> ScreenshotResult {
-    ScreenshotResult {
-        raw_pixels: None,
-        screenshot_path: None,
-        dhash: 0,
-        skipped_dhash: false,
-    }
+async fn grab_frame(_socket: &Path, _scale: f64, _quality: u8) -> Option<(usize, usize, Vec<u8>, Vec<u8>)> {
+    None
+}
+
+/// Which OCR pass to run on a frame.
+#[derive(Clone, Copy)]
+enum OcrPass {
+    /// Vision's fast level, to decide whether a heartbeat frame's text changed.
+    Fast,
+    /// Vision's accurate level, for a frame that is kept.
+    Accurate,
+}
+
+/// Run OCR on a frame. Returns the pixels back plus `(full text, result as
+/// JSON)` on success.
+#[cfg(target_os = "macos")]
+async fn ocr_frame(
+    pixels: Vec<u8>,
+    width: usize,
+    height: usize,
+    pass: OcrPass,
+) -> (Vec<u8>, Option<(String, serde_json::Value)>) {
+    use crate::platform::ocr::{recognize_text_async, OcrLevel};
+    let level = match pass {
+        OcrPass::Fast => OcrLevel::Fast,
+        OcrPass::Accurate => OcrLevel::Accurate,
+    };
+    let (pixels, result) = recognize_text_async(pixels, width, height, level).await;
+    let result = result.and_then(|r| {
+        let json = serde_json::to_value(&r).ok()?;
+        Some((r.full_text, json))
+    });
+    (pixels, result)
+}
+
+#[cfg(not(target_os = "macos"))]
+async fn ocr_frame(
+    pixels: Vec<u8>,
+    _width: usize,
+    _height: usize,
+    _pass: OcrPass,
+) -> (Vec<u8>, Option<(String, serde_json::Value)>) {
+    (pixels, None)
 }
 
 /// Write the app-encoded JPEG for the VLM annotation pipeline (no re-encode).
@@ -692,7 +685,6 @@ async fn capture_screenshot(
 /// The Python worker's scene annotator reads these directly via the `screenshot_path`
 /// stored in event metadata. The worker deletes each file once it has been
 /// annotated; daily maintenance deletes any left older than `vlm.job_ttl_days`.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn write_vlm_jpeg(jpeg: &[u8], screenshots_dir: &Path) -> Option<PathBuf> {
     if let Err(e) = std::fs::create_dir_all(screenshots_dir) {
         warn!(error = %e, dir = %screenshots_dir.display(), "Failed to create screenshots directory");
@@ -738,6 +730,7 @@ fn make_event(
         artifact_ids: vec![],
         metadata: serde_json::json!({}),
         display_ids_spanned,
+        focused_element: None,
     }
 }
 
@@ -804,6 +797,35 @@ fn detect_spanning_displays(
     }
 }
 
+/// The sleep in `observation` when it is not the one `last` already
+/// reported.
+fn new_sleep(last: &Option<SleepRecord>, observation: &ObservationSnapshot) -> Option<SleepRecord> {
+    let sleep = observation.last_sleep.clone()?;
+    (last.as_ref() != Some(&sleep)).then_some(sleep)
+}
+
+/// The focused element for a kept frame, read by the app over the
+/// configured observation socket; None when the app has no Accessibility
+/// grant or did not answer (warned through `warnings`).
+async fn focused_element_for(
+    observation: &ObservationSnapshot,
+    config: &ObserverConfig,
+    warnings: &WarnLimiter,
+) -> Option<FocusedElement> {
+    if !observation.accessibility_granted {
+        return None;
+    }
+    focused_element_at_async(
+        &config.observation_socket,
+        config.capture_input_values,
+        SNAPSHOT_TIMEOUT,
+        warnings,
+    )
+    .await
+    .ok()
+    .flatten()
+}
+
 /// Tag an event with the active focus session ID, if any.
 fn tag_focus_session(event: &mut Event, focus_session_id: &Option<String>) {
     if let Some(ref session_id) = focus_session_id {
@@ -833,12 +855,48 @@ fn redact_event(event: &mut Event, redactor: &Redactor) {
                 *hash = redactor.redact(hash);
             }
         }
-        _ => {}
+        EventKind::ShellCommand { cwd, command } => {
+            *cwd = redactor.redact(cwd);
+            *command = redactor.redact(command);
+        }
+        EventKind::NavigationChange { url, title } => {
+            *url = redactor.redact(url);
+            *title = redactor.redact(title);
+        }
+        EventKind::FormSubmit { url, form_anchor } => {
+            *url = redactor.redact(url);
+            *form_anchor = redact_json_value(form_anchor, redactor);
+        }
+        EventKind::FocusChange
+        | EventKind::WindowTitleChange
+        | EventKind::DwellSnapshot
+        | EventKind::ScrollReadSnapshot
+        | EventKind::SecureFieldFocus
+        | EventKind::SystemSleep { .. } => {}
     }
 
     // Redact window title
     if let Some(ref mut win) = event.window {
         win.title = redactor.redact(&win.title);
+    }
+
+    // Redact every text the focused element carries
+    if let Some(ref mut element) = event.focused_element {
+        let redact = |text: &mut Option<String>| {
+            if let Some(t) = text {
+                *t = redactor.redact(t);
+            }
+        };
+        redact(&mut element.title);
+        redact(&mut element.description);
+        redact(&mut element.value);
+        redact(&mut element.column_header);
+        redact(&mut element.document);
+        redact(&mut element.url);
+        for ancestor in &mut element.ancestors {
+            redact(&mut ancestor.title);
+            redact(&mut ancestor.description);
+        }
     }
 
     // Redact metadata_json string values recursively
@@ -891,7 +949,97 @@ mod tests {
             artifact_ids: vec![],
             metadata: serde_json::json!({}),
             display_ids_spanned: None,
+            focused_element: None,
         }
+    }
+
+    #[test]
+    fn test_redact_event_focused_element_texts() {
+        let redactor = Redactor::new();
+        let mut event = make_test_event_with_kind(EventKind::DwellSnapshot);
+        event.focused_element = Some(FocusedElement {
+            role: "AXTextField".into(),
+            title: Some("Token".into()),
+            value: Some("ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijkl".into()),
+            ancestors: vec![AxAncestor {
+                role: "AXGroup".into(),
+                description: Some("password: hunter2".into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+
+        redact_event(&mut event, &redactor);
+
+        let element = event.focused_element.unwrap();
+        assert_eq!(element.title.as_deref(), Some("Token"));
+        assert_eq!(element.value.as_deref(), Some("[REDACTED_GITHUB_TOKEN]"));
+        assert!(!element.ancestors[0].description.as_ref().unwrap().contains("hunter2"));
+    }
+
+    #[test]
+    fn test_redact_event_shell_command() {
+        let redactor = Redactor::new();
+        let mut event = make_test_event_with_kind(EventKind::ShellCommand {
+            cwd: "/Users/me/app".into(),
+            command: "curl -u me:ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijkl https://api.example.com/x".into(),
+        });
+        redact_event(&mut event, &redactor);
+        match event.kind {
+            EventKind::ShellCommand { cwd, command } => {
+                assert_eq!(cwd, "/Users/me/app");
+                assert!(!command.contains("ghp_ABCDEFGHIJ"), "{command}");
+                assert!(command.starts_with("curl -u me:"), "the rest of the command stays: {command}");
+            }
+            other => panic!("kind changed: {other:?}"),
+        }
+    }
+
+    fn snapshot_with_sleep(sleep: Option<SleepRecord>) -> ObservationSnapshot {
+        let mut snapshot: ObservationSnapshot = serde_json::from_value(serde_json::json!({
+            "accessibility_granted": true,
+            "screen_recording_granted": true,
+            "secure_field_focused": false,
+            "focused_window": null,
+            "display_topology": [],
+            "cursor_global_px": null,
+        }))
+        .unwrap();
+        snapshot.last_sleep = sleep;
+        snapshot
+    }
+
+    #[test]
+    fn test_new_sleep_reports_each_sleep_once() {
+        let at = |h: u32| chrono::TimeZone::with_ymd_and_hms(&Utc, 2026, 9, 21, h, 0, 0).unwrap();
+        let first = SleepRecord { slept_at: at(1), woke_at: at(7) };
+        let second = SleepRecord { slept_at: at(12), woke_at: at(13) };
+
+        assert_eq!(new_sleep(&None, &snapshot_with_sleep(None)), None, "never slept");
+        assert_eq!(new_sleep(&None, &snapshot_with_sleep(Some(first.clone()))), Some(first.clone()));
+        assert_eq!(
+            new_sleep(&Some(first.clone()), &snapshot_with_sleep(Some(first.clone()))),
+            None,
+            "already reported"
+        );
+        assert_eq!(
+            new_sleep(&Some(first), &snapshot_with_sleep(Some(second.clone()))),
+            Some(second)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_no_focused_element_without_accessibility() {
+        let mut snapshot = snapshot_with_sleep(None);
+        snapshot.accessibility_granted = false;
+        // The socket is never consulted without the grant.
+        let config = ObserverConfig {
+            observation_socket: PathBuf::from("/nonexistent/observation.sock"),
+            capture_input_values: true,
+            ..ObserverConfig::default()
+        };
+        let warnings = WarnLimiter::new();
+        assert!(focused_element_for(&snapshot, &config, &warnings).await.is_none());
     }
 
     #[test]
@@ -980,6 +1128,29 @@ mod tests {
     }
 
     #[test]
+    fn test_redact_event_navigation_and_form_submit() {
+        let redactor = Redactor::new();
+        let secret = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijkl";
+
+        let mut nav = make_test_event_with_kind(EventKind::NavigationChange {
+            url: format!("https://example.com/{secret}"),
+            title: format!("Token {secret}"),
+        });
+        redact_event(&mut nav, &redactor);
+        let EventKind::NavigationChange { url, title } = &nav.kind else { panic!() };
+        assert!(!url.contains("ghp_") && !title.contains("ghp_"));
+
+        let mut submit = make_test_event_with_kind(EventKind::FormSubmit {
+            url: "https://example.com/login".into(),
+            form_anchor: serde_json::json!({"ariaLabel": format!("key {secret}"), "tag": "form"}),
+        });
+        redact_event(&mut submit, &redactor);
+        let EventKind::FormSubmit { form_anchor, .. } = &submit.kind else { panic!() };
+        assert!(!form_anchor["ariaLabel"].as_str().unwrap().contains("ghp_"));
+        assert_eq!(form_anchor["tag"], "form");
+    }
+
+    #[test]
     fn test_redact_event_no_window_no_panic() {
         let redactor = Redactor::new();
         let mut event = Event {
@@ -994,6 +1165,7 @@ mod tests {
             artifact_ids: vec![],
             metadata: serde_json::json!({}),
             display_ids_spanned: None,
+            focused_element: None,
         };
 
         // Should not panic with no window

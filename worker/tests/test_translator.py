@@ -499,6 +499,8 @@ class TestAllEventKindsMapped:
             "WindowTitleChange": "navigate",
             "KeyPress": "type",
             "SecureFieldFocus": "secure_focus",
+            "ShellCommand": "run_command",
+            "SystemSleep": "system_sleep",
         }
 
         translator = SemanticTranslator()
@@ -515,3 +517,29 @@ class TestAllEventKindsMapped:
         translator = SemanticTranslator()
         result = translator.translate_event(event)
         assert result.intent == "unknown"
+
+
+# ------------------------------------------------------------------
+# Browser transition kinds (WP-C4)
+# ------------------------------------------------------------------
+
+
+class TestBrowserTransitionKinds:
+    def test_navigation_and_form_submit_intents(self) -> None:
+        """The daemon's NavigationChange / FormSubmit kinds (flat serde
+        layout) translate to the navigate and submit intents."""
+        translator = SemanticTranslator()
+        nav = _make_event(kind="NavigationChange")
+        nav["kind_json"] = json.dumps(
+            {"type": "NavigationChange", "url": "https://mail.example.com/inbox", "title": "Inbox"}
+        )
+        submit = _make_event(kind="FormSubmit")
+        submit["kind_json"] = json.dumps(
+            {
+                "type": "FormSubmit",
+                "url": "https://shop.example.com/checkout",
+                "form_anchor": {"tag": "form", "name": "checkout"},
+            }
+        )
+        assert translator.translate_event(nav).intent == "navigate"
+        assert translator.translate_event(submit).intent == "submit"

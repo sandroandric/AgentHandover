@@ -7,6 +7,11 @@ templates are converted to procedures first, so both entry points
 produce the same packet.
 
 Implements the ``SOPExportAdapter`` ABC.
+
+Every path written into the skills root is recorded in the export manifest
+(:data:`EXPORT_MANIFEST` in the data dir), so ``agenthandover uninstall
+--purge-data`` removes exactly what AgentHandover exported and never a
+Skill the user wrote (``crates/cli/src/commands/uninstall.rs``).
 """
 
 from __future__ import annotations
@@ -20,9 +25,46 @@ import yaml
 from agenthandover_worker import __version__
 from agenthandover_worker.export_adapter import SOPExportAdapter
 from agenthandover_worker.exporter import AtomicWriter
+from agenthandover_worker.paths import data_dir
 from agenthandover_worker.procedure_schema import sop_to_procedure
 from agenthandover_worker.skill_render import slugify
 from agenthandover_worker.skill_render import description as skill_description, render_packet
+
+
+# In the data dir: {"paths": [absolute paths exported into a skills root]}.
+EXPORT_MANIFEST = "exported-skills.json"
+
+
+def _read_manifest() -> list[str]:
+    try:
+        paths = json.loads((data_dir() / EXPORT_MANIFEST).read_text(encoding="utf-8"))["paths"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return []
+    return [p for p in paths if isinstance(p, str)] if isinstance(paths, list) else []
+
+
+def _write_manifest(paths: list[str]) -> None:
+    AtomicWriter.write(
+        data_dir() / EXPORT_MANIFEST,
+        json.dumps({"paths": sorted(set(paths))}, indent=2),
+    )
+
+
+def record_export(path: Path) -> None:
+    """Add *path* (a Skill directory or a file in the skills root) to the
+    export manifest."""
+    entry = str(Path(path).absolute())
+    paths = _read_manifest()
+    if entry not in paths:
+        _write_manifest([*paths, entry])
+
+
+def forget_export(path: Path) -> None:
+    """Drop *path* from the export manifest (it was removed)."""
+    entry = str(Path(path).absolute())
+    paths = _read_manifest()
+    if entry in paths:
+        _write_manifest([p for p in paths if p != entry])
 
 
 class ClaudeSkillWriter(SOPExportAdapter):
@@ -58,6 +100,7 @@ class ClaudeSkillWriter(SOPExportAdapter):
         skill_dir.mkdir(parents=True, exist_ok=True)
         path = skill_dir / "SKILL.md"
         AtomicWriter.write(path, render_packet(procedure, target="claude-skill"))
+        record_export(skill_dir)
         return path
 
     def write_all_sops(self, sop_templates: list[dict]) -> list[Path]:
@@ -70,6 +113,7 @@ class ClaudeSkillWriter(SOPExportAdapter):
             index_path = self._skills_root / "AGENTHANDOVER-INDEX.md"
             if index_path.exists():
                 index_path.unlink()
+            forget_export(index_path)
 
         return paths
 
@@ -83,6 +127,7 @@ class ClaudeSkillWriter(SOPExportAdapter):
             **data,
         }
         AtomicWriter.write(filepath, json.dumps(enriched, indent=2, default=str))
+        record_export(filepath)
         return filepath
 
     def get_sops_dir(self) -> Path:
@@ -164,6 +209,7 @@ class ClaudeSkillWriter(SOPExportAdapter):
         index_path = self._skills_root / "AGENTHANDOVER-INDEX.md"
         self._skills_root.mkdir(parents=True, exist_ok=True)
         AtomicWriter.write(index_path, "\n".join(lines))
+        record_export(index_path)
         return index_path
 
     # ------------------------------------------------------------------

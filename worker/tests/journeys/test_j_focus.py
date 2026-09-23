@@ -13,8 +13,10 @@ import statistics
 
 import pytest
 
+from agenthandover_worker.frame_differ import DIFF_SYSTEM_PROMPT
+from agenthandover_worker.model_profiles import get_profile
+from agenthandover_worker.scene_annotator import annotation_system_prompt
 from agenthandover_worker.skill_render import render_packet
-from journeys.conftest import JOURNEY_MODELS
 from journeys.focus_run import start_focus_run, tick_until_skill
 from journeys.packet import assert_matches_golden, parse_packet
 
@@ -63,36 +65,41 @@ def test_focus_packet_matches_the_reviewed_golden(
     assert_matches_golden("focus_dailynews.claude-skill.md", render_packet(proc, target="claude-skill"))
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "WP-C5: no keyframe selection in a focus run: "
-    "FocusProcessor._ensure_annotations (focus_processor.py:484-508) sends "
-    "every one of the 208 focus frames to the VLM (skip_stale_check=True), "
-    "~4,290 cassette seconds of annotation against a 20-keyframe bound, then "
-    "a text diff per frame pair (~416 s); the whole run is ~6,680 s against "
-    "a ~2,275 s budget"
-))
 def test_focus_run_stays_within_its_model_budget(
     events_db, worker, clock, temp_home, cassette,
 ) -> None:
-    """Time to Skill, in cassette model-seconds, is at most 20 keyframe
-    annotations plus the calls on the SOP model (WP-C5's bound)."""
+    """Time to Skill, in cassette model-seconds, is at most 20 keyframes
+    (each annotated and diffed) plus the synthesis calls (WP-C5's bound)."""
     run, _proc, _packet = _run(events_db, worker, clock, temp_home, cassette)
     budget = focus_budget_seconds(run.tape)
     assert run.tape.model_seconds() <= budget, (run.tape.model_seconds(), budget)
 
 
+def _seconds(entry: dict) -> float:
+    return entry["response"].get("total_duration", 0) / 1e9
+
+
 def focus_budget_seconds(tape) -> float:
-    annotation = [
-        e["response"]["total_duration"] / 1e9 for e in tape.served
-        if e["request"].get("model") == JOURNEY_MODELS["annotation_model"]
-        and e["request"].get("images")
-    ]
-    sop = [
-        e["response"].get("total_duration", 0) / 1e9 for e in tape.served
-        if e["request"].get("model") == JOURNEY_MODELS["sop_model"]
-    ]
-    assert annotation and sop, "the run made no annotation or no SOP-model call"
-    return KEYFRAMES * statistics.median(annotation) + sum(sop)
+    """``KEYFRAMES`` x (median annotation + median frame diff) + every other
+    model call of the run (SOP generation, questions, synthesis, embeddings).
+    Annotation and diff calls are told apart by their system prompt."""
+    annotation, diff, other = [], [], []
+    for entry in tape.served:
+        request = entry["request"]
+        model = request.get("model")
+        if not model:
+            continue
+        profile = get_profile(model)
+        system = request.get("system") or ""
+        if system == annotation_system_prompt(profile.ann_system):
+            annotation.append(_seconds(entry))
+        elif system == (profile.diff_system or DIFF_SYSTEM_PROMPT):
+            diff.append(_seconds(entry))
+        else:
+            other.append(_seconds(entry))
+    assert annotation and other, "the run made no annotation or no synthesis call"
+    per_keyframe = statistics.median(annotation) + (statistics.median(diff) if diff else 0.0)
+    return KEYFRAMES * per_keyframe + sum(other)
 
 
 def test_focus_packet_has_no_assumed_text(

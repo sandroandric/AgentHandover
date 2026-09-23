@@ -55,31 +55,49 @@ class TestClipboardPreview:
         )
         assert '>>> Copied text: "SQLite\'s WAL mode | https://blog.example.org/wal"' in entry
 
-    def test_typed_text_urls_and_compose_are_rendered_and_capped(self) -> None:
+    def test_typed_text_urls_items_and_screen_text_are_rendered_and_capped(self) -> None:
         annotation = {
             "app": "Google Chrome",
             "key_text": {
                 "typed_text": "Top news:\n" + "x" * 400,
                 "urls": ["https://news.ycombinator.com/", "https://blog.example.org/wal"],
+                "emails": [],
             },
-            "compose": {
-                "is_compose_window_open": True, "recipient": "Jane Doe (example.com)",
-                "subject": "Daily news", "body_first_line": "Hi Jane,",
-                "send_button_state": "visible",
-            },
+            "visible_items": [
+                {"label": "SQLite's WAL mode", "chosen": True},
+                {"label": "Typst 1.0 released", "chosen": False},
+            ],
+            "_screen_text": "To: Jane Doe (example.com)\nSubject: Daily news\n" + "y" * 400,
         }
         entry = _format_timeline_entry(0, annotation, None, "2026-09-15T08:31:20+00:00")
         typed = next(line for line in entry.splitlines() if line.startswith("  Typed:"))
         assert typed.startswith('  Typed: "Top news: | xxx')
         assert len(typed) <= len('  Typed: ""') + 200
         assert "  URLs: https://news.ycombinator.com/, https://blog.example.org/wal" in entry
-        assert '  Compose To: "Jane Doe (example.com)"' in entry
-        assert '  Compose Subject: "Daily news"' in entry
-        assert '  Compose Body first line: "Hi Jane,"' in entry
+        assert "  Items: SQLite's WAL mode [chosen]; Typst 1.0 released" in entry
+        screen = next(line for line in entry.splitlines() if line.startswith("  Screen text:"))
+        assert screen.startswith('  Screen text: "To: Jane Doe (example.com) | Subject: Daily news | yyy')
+        assert len(screen) <= len('  Screen text: ""') + 300
+
+    def test_legacy_compose_fields_become_screen_text(self) -> None:
+        """Rows annotated before the compact schema keep their compose
+        fields and visible values in the SOP prompt, as screen text."""
+        annotation = {
+            "app": "Google Chrome",
+            "visible_content": {"headings": ["Inbox"], "labels": [], "values": ["3 unread"]},
+            "compose": {
+                "is_compose_window_open": True, "recipient": "Jane Doe (example.com)",
+                "subject": "Daily news", "body_first_line": "Hi Jane,",
+                "send_button_state": "visible",
+            },
+        }
+        entry = _format_timeline_entry(0, annotation, None, "")
+        assert ('  Screen text: "Inbox | 3 unread | To: Jane Doe (example.com) | '
+                'Subject: Daily news | Body: Hi Jane,"') in entry
 
     def test_closed_compose_window_is_not_rendered(self) -> None:
         annotation = {"app": "Mail", "compose": {"is_compose_window_open": False, "subject": "stale"}}
-        assert "Compose" not in _format_timeline_entry(0, annotation, None, "")
+        assert "stale" not in _format_timeline_entry(0, annotation, None, "")
 
     def test_frame_app_line_never_shows_a_bundle_id(self) -> None:
         entry = _format_timeline_entry(0, {"app": "com.google.Chrome"}, None, "")

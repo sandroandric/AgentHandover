@@ -11,7 +11,6 @@ import pytest
 
 from agenthandover_worker.setup_vlm import (
     _REMOTE_PROVIDERS,
-    _toml_value,
     validate_api_key,
 )
 
@@ -113,27 +112,87 @@ class TestWriteRemoteConfig:
 
 
 # ---------------------------------------------------------------------------
-# TOML value formatting tests
+# In-place [vlm] edit (#138): comments and [privacy.zones] survive
 # ---------------------------------------------------------------------------
 
-class TestTomlValue:
-    def test_string(self):
-        assert _toml_value("hello") == '"hello"'
+_USER_CONFIG = """# My AgentHandover config -- hand edited
+[observer]
+capture_screenshots = true   # keep frames
 
-    def test_int(self):
-        assert _toml_value(42) == "42"
+[vlm]
+# which backend
+mode = "local"
+model = "qwen3.5:4b"
+ollama_host = "http://localhost:11434"
 
-    def test_float(self):
-        assert _toml_value(3.14) == "3.14"
+[privacy]
+enable_inline_secret_redaction = true
 
-    def test_bool_true(self):
-        assert _toml_value(True) == "true"
+[privacy.zones]
+# never look at the password manager
+blocked = ["1password*"]
+blocked_urls = ["*vault.example.com*"]
+"""
 
-    def test_bool_false(self):
-        assert _toml_value(False) == "false"
 
-    def test_list(self):
-        assert _toml_value([1, 2, 3]) == "[1, 2, 3]"
+class TestRemoteConfigInPlace:
+    def _run(self, tmp_path: Path, text: str | None) -> str:
+        from agenthandover_worker.setup_vlm import _write_remote_config
 
-    def test_string_list(self):
-        assert _toml_value(["a", "b"]) == '["a", "b"]'
+        config_file = tmp_path / "config.toml"
+        if text is not None:
+            config_file.write_text(text, encoding="utf-8")
+        with patch("agenthandover_worker.setup_vlm._config_path", return_value=config_file):
+            _write_remote_config({
+                "provider": "openai",
+                "model": "gpt-4o-mini",
+                "api_key_env": "OPENAI_API_KEY",
+                "env_var_value": "sk-test",
+            })
+        return config_file.read_text(encoding="utf-8")
+
+    def test_other_sections_and_comments_are_byte_identical(self, tmp_path):
+        import tomllib
+
+        after = self._run(tmp_path, _USER_CONFIG)
+        before_vlm, _, _ = _USER_CONFIG.partition("[vlm]")
+        assert after.startswith(before_vlm), "everything above [vlm] is untouched"
+        tail = _USER_CONFIG[_USER_CONFIG.index("[privacy]"):]
+        assert after.endswith(tail), "[privacy] and [privacy.zones] with comments are untouched"
+
+        cfg = tomllib.loads(after)
+        assert cfg["vlm"] == {
+            "mode": "remote",
+            "provider": "openai",
+            "model": "gpt-4o-mini",
+            "api_key_env": "OPENAI_API_KEY",
+            "ollama_host": "http://localhost:11434",
+        }
+        assert cfg["privacy"]["zones"]["blocked"] == ["1password*"]
+        assert "# which backend" in after
+
+    def test_running_twice_does_not_duplicate_keys(self, tmp_path):
+        import tomllib
+
+        once = self._run(tmp_path, _USER_CONFIG)
+        twice = self._run(tmp_path, once)
+        assert twice == once
+        tomllib.loads(twice)
+
+    def test_keys_outside_vlm_are_not_touched(self, tmp_path):
+        text = '[llm]\nmodel = "other"\nmode = "x"\n\n[vlm]\nmode = "local"\n'
+        after = self._run(tmp_path, text)
+        assert after.startswith('[llm]\nmodel = "other"\nmode = "x"\n\n[vlm]\n')
+
+    def test_missing_vlm_section_is_appended(self, tmp_path):
+        import tomllib
+
+        text = "[privacy.zones]\nblocked = [\"1password*\"]"
+        after = self._run(tmp_path, text)
+        assert after.startswith(text + "\n")
+        assert tomllib.loads(after)["vlm"]["mode"] == "remote"
+
+    def test_missing_file_is_created(self, tmp_path):
+        import tomllib
+
+        assert tomllib.loads(self._run(tmp_path, None))["vlm"]["provider"] == "openai"

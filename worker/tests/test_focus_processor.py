@@ -138,20 +138,23 @@ def _make_mock_annotator():
     annotator = MagicMock(spec=SceneAnnotator)
     annotator.config = AnnotationConfig()
 
-    def mock_annotate(event, *, recent_annotations=None, artifact_dir=None, skip_stale_check=False):
+    def mock_annotate(event, *, recent_annotations=None, artifact_dir=None, page=None):
         return AnnotationResult(
             event_id=event.get("id", "unknown"),
             status="completed",
             annotation={
                 "app": "Google Chrome",
                 "location": "https://example.com",
-                "visible_content": {"headings": ["Test"], "labels": [], "values": []},
-                "ui_state": {"active_element": "", "modals_or_popups": "none", "scroll_position": "top"},
                 "task_context": {
-                    "what_doing": "Testing the task",
-                    "likely_next": "Next step",
                     "is_workflow": True,
+                    "what_doing": "Testing the task",
+                    "next_likely": "Next step",
                 },
+                "ui_state": {"active_element": "", "modal": ""},
+                "key_text": {"typed_text": "", "urls": [], "emails": []},
+                "visible_items": [],
+                "needs_vision": False,
+                "_screen_text": "Test",
             },
             inference_time_seconds=1.0,
         )
@@ -301,29 +304,6 @@ class TestFocusProcessorBasic:
 
 
 class TestFocusProcessorAnnotation:
-    def test_skip_stale_check_passed(self, tmp_path):
-        """Focus processor passes skip_stale_check=True to annotator."""
-        db_path = _create_test_db(tmp_path)
-        session_id = "focus-sess-010"
-        _insert_focus_events(db_path, session_id, count=2, annotated=False)
-
-        with WorkerDB(db_path) as db:
-            annotator = _make_mock_annotator()
-            processor = FocusProcessor(
-                annotator,
-                _make_mock_differ(),
-                _make_mock_sop_generator(),
-            )
-            processor.process_session(
-                db, session_id, "Task",
-                db.get_focus_session_events(session_id),
-                screenshots_dir=str(tmp_path),
-            )
-
-        # Verify skip_stale_check=True was passed
-        for call in annotator.annotate_event.call_args_list:
-            assert call.kwargs.get("skip_stale_check") is True
-
     def test_mixed_annotated_unannotated(self, tmp_path):
         """Some events annotated, some not — only unannotated get processed."""
         db_path = _create_test_db(tmp_path)
@@ -921,6 +901,11 @@ class TestFocusProcessorDomNodes:
             def get_click_intents(self, start, end):
                 return []
 
+
+            def get_shell_commands(self, start, end):
+
+                return []
+
             def get_dom_snapshots_near_timestamp(self, ts, url, tolerance_sec=5.0):
                 if "example.com" in url:
                     return [{
@@ -964,6 +949,11 @@ class TestFocusProcessorDomNodes:
                 }
 
             def get_click_intents(self, start, end):
+                return []
+
+
+            def get_shell_commands(self, start, end):
+
                 return []
 
             def get_dom_snapshots_near_timestamp(self, ts, url, tolerance_sec=5.0):

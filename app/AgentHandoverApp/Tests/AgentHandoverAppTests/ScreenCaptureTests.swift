@@ -22,6 +22,34 @@ final class ScreenCaptureTests: XCTestCase {
         return context.makeImage()!
     }
 
+    /// Rows of 12 pt monospaced text at 2x (24 px glyphs, 16 pt line pitch)
+    /// covering `coverage` of each row's width: 1.0 is a terminal filled
+    /// edge to edge, 0.4 an editor with gutter, sidebar and ragged lines.
+    private func denseTextImage(width: Int, height: Int, coverage: Double = 1) -> CGImage {
+        let context = CGContext(
+            data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
+            space: CGColorSpace(name: CGColorSpace.sRGB)!,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+        context.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        let source = "func captureFrame(_ request: CaptureRequest) async -> Result<EncodedFrame, CaptureError> { guard hasPermission() else { return .failure(.permissionDenied) } } // 0123456789 "
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.monospacedSystemFont(ofSize: 24, weight: .regular),
+            .foregroundColor: NSColor(red: 0.15, green: 0.15, blue: 0.2, alpha: 1),
+        ]
+        var row = 0
+        for y in stride(from: height - 32, to: 0, by: -32) {
+            let offset = (row * 7) % source.count
+            let text = String((String(source.dropFirst(offset)) + source + source + source)
+                .prefix(Int(Double(width / 14) * coverage)))
+            let line = CTLineCreateWithAttributedString(NSAttributedString(string: text, attributes: attributes))
+            context.textPosition = CGPoint(x: 12, y: y)
+            CTLineDraw(line, context)
+            row += 1
+        }
+        return context.makeImage()!
+    }
+
     private func sampleFrame() -> EncodedFrame {
         ScreenCaptureService.encodeJPEG(syntheticImage(width: 64, height: 48), scale: 1, quality: 70)!
     }
@@ -107,14 +135,83 @@ final class ScreenCaptureTests: XCTestCase {
 
     func testNativePixelSizeUsesBackingScale() {
         let size = ScreenCaptureService.nativePixelSize(
-            contentRect: CGRect(x: 0, y: 0, width: 1728, height: 1117), pointPixelScale: 2)
+            contentRect: CGRect(x: 0, y: 0, width: 1728, height: 1117), pixelScale: 2)
         XCTAssertEqual(size.width, 3456)
         XCTAssertEqual(size.height, 2234)
 
         let window = ScreenCaptureService.nativePixelSize(
-            contentRect: CGRect(x: 0, y: 0, width: 800.5, height: 600), pointPixelScale: 2)
+            contentRect: CGRect(x: 0, y: 0, width: 800.5, height: 600), pixelScale: 2)
         XCTAssertEqual(window.width, 1601)
         XCTAssertEqual(window.height, 1200)
+    }
+
+    /// WP-C8b: on the test Mac (3840x2160 panel at 2x, 1920x1080 points) the
+    /// stored frame was 960x540. The capture size must come out native even
+    /// when the filter reports a point-to-pixel scale of 1.
+    func testCaptureScaleFallsBackToTheDisplayModeScale() {
+        XCTAssertEqual(ScreenCaptureService.capturePixelScale(filterScale: 1, displayScale: 2), 2)
+        XCTAssertEqual(ScreenCaptureService.capturePixelScale(filterScale: 2, displayScale: nil), 2)
+        XCTAssertEqual(ScreenCaptureService.capturePixelScale(filterScale: 2, displayScale: 1), 2)
+        XCTAssertEqual(ScreenCaptureService.capturePixelScale(filterScale: 0, displayScale: nil), 1)
+
+        let testMac = ScreenCaptureService.nativePixelSize(
+            contentRect: CGRect(x: 0, y: 0, width: 1920, height: 1080),
+            pixelScale: ScreenCaptureService.capturePixelScale(filterScale: 1, displayScale: 2))
+        XCTAssertEqual(testMac.width, 3840)
+        XCTAssertEqual(testMac.height, 2160)
+    }
+
+    func testDisplayPixelScaleReadsTheMainDisplayMode() throws {
+        let mode = try XCTUnwrap(CGDisplayCopyDisplayMode(CGMainDisplayID()))
+        let scale = try XCTUnwrap(ScreenCaptureService.displayPixelScale(CGMainDisplayID()))
+        XCTAssertEqual(scale, CGFloat(mode.pixelWidth) / CGFloat(mode.width))
+        XCTAssertGreaterThanOrEqual(scale, 1)
+    }
+
+    /// Native 3840x2160 at the daemon's scale 0.5 is a 1920x1080 frame, and a
+    /// text-heavy editor screen fits the 400 KB per-frame budget (quality
+    /// stepped down from 70 where needed, never below the floor).
+    func testNativeFrameAtDaemonScaleIsFullHDAndWithinBudget() throws {
+        let native = denseTextImage(width: 3840, height: 2160, coverage: 0.4)
+        let frame = try XCTUnwrap(ScreenCaptureService.encodeJPEG(
+            native, scale: CaptureRequest.defaultScale, quality: CaptureRequest.defaultQuality))
+        XCTAssertEqual(frame.width, 1920)
+        XCTAssertEqual(frame.height, 1080)
+        XCTAssertLessThanOrEqual(frame.jpeg.count, EncodedFrame.maxBytes)
+        XCTAssertGreaterThanOrEqual(frame.quality, EncodedFrame.minQuality)
+        print("editor text 1920x1080: \(frame.jpeg.count) bytes at q\(frame.quality)")
+    }
+
+    /// A display filled edge to edge with small text cannot reach 400 KB at a
+    /// legible quality (about 560 KB at q40): the encoder stops at the floor
+    /// and sends it rather than blurring the text further.
+    func testWallOfTextStopsAtTheQualityFloor() throws {
+        let native = denseTextImage(width: 3840, height: 2160, coverage: 1)
+        let frame = try XCTUnwrap(ScreenCaptureService.encodeJPEG(
+            native, scale: CaptureRequest.defaultScale, quality: CaptureRequest.defaultQuality))
+        XCTAssertEqual(frame.width, 1920)
+        XCTAssertEqual(frame.height, 1080)
+        XCTAssertEqual(frame.quality, EncodedFrame.minQuality)
+        print("wall of text 1920x1080: \(frame.jpeg.count) bytes at q\(frame.quality)")
+    }
+
+    func testEncodeJPEGStepsQualityDownToFitTheBudget() throws {
+        let image = denseTextImage(width: 1200, height: 800)
+        let full = try XCTUnwrap(
+            ScreenCaptureService.encodeJPEG(image, scale: 1, quality: 90, maxBytes: .max))
+        XCTAssertEqual(full.quality, 90)
+
+        let budget = full.jpeg.count * 2 / 3
+        let fitted = try XCTUnwrap(
+            ScreenCaptureService.encodeJPEG(image, scale: 1, quality: 90, maxBytes: budget))
+        XCTAssertLessThan(fitted.quality, 90)
+        XCTAssertGreaterThanOrEqual(fitted.quality, EncodedFrame.minQuality)
+        XCTAssertLessThanOrEqual(fitted.jpeg.count, budget)
+
+        // An unreachable budget stops at the floor instead of destroying the text.
+        let floor = try XCTUnwrap(
+            ScreenCaptureService.encodeJPEG(image, scale: 1, quality: 90, maxBytes: 1))
+        XCTAssertEqual(floor.quality, EncodedFrame.minQuality)
     }
 
     func testDisplaySelectionFollowsFocusedWindowNotFirstDisplay() {
@@ -607,9 +704,13 @@ final class ScreenCaptureTests: XCTestCase {
                        "frame height \(frame.height) must be native pixels (\(expectedHeight))")
         print("live capture: \(frame.width)x\(frame.height), \(frame.jpeg.count) bytes at scale 1.0")
 
+        // The daemon's request (scale 0.5): half the native pixels, not half
+        // the points. On a 3840x2160 panel at 2x this is 1920x1080, not 960x540.
         let half = try await service.captureFrame(CaptureRequest()).get()
-        print("live capture: \(half.width)x\(half.height), \(half.jpeg.count) bytes at scale 0.5 q70")
-        XCTAssertLessThanOrEqual(half.jpeg.count, 400_000)
+        print("live capture: \(half.width)x\(half.height), \(half.jpeg.count) bytes at scale 0.5 q\(half.quality)")
+        XCTAssertEqual(Double(half.height), Double(expectedHeight) * CaptureRequest.defaultScale, accuracy: 2,
+                       "scale-0.5 frame height \(half.height) must be half the native \(expectedHeight)")
+        XCTAssertLessThanOrEqual(half.jpeg.count, EncodedFrame.maxBytes)
     }
 }
 

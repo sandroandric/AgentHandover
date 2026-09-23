@@ -47,9 +47,18 @@ struct CaptureRequest: Equatable {
 
 /// One JPEG-encoded frame, ready to go over `capture.sock`.
 struct EncodedFrame {
+    /// Per-frame JPEG budget on `capture.sock` (and on disk).
+    static let maxBytes = 400_000
+    /// Quality floor when stepping down to fit `maxBytes`; below this small
+    /// UI text stops being legible, so a frame is sent over budget instead.
+    static let minQuality = 40
+    static let qualityStep = 10
+
     let width: Int
     let height: Int
     let jpeg: Data
+    /// The quality the JPEG was actually encoded at.
+    let quality: Int
 }
 
 enum CaptureError: Error, Equatable {
@@ -230,10 +239,26 @@ final class ScreenCaptureService {
         return frames.first(where: { $0.id == mainID })?.id
     }
 
-    /// Native pixel size for a filter's content rect (points) and its
-    /// point-to-pixel scale (the backing scale factor of its display).
-    static func nativePixelSize(contentRect: CGRect, pointPixelScale: Float) -> (width: Int, height: Int) {
-        let scale = CGFloat(max(pointPixelScale, 1))
+    /// Point-to-pixel scale of a display's current mode: 2 on a Retina panel
+    /// (including "looks like" scaled modes), 1 on a standard display.
+    /// Read from the display mode itself because the running app on a 2x
+    /// panel produced frames at point resolution when the size came from
+    /// `SCContentFilter.pointPixelScale` alone.
+    static func displayPixelScale(_ id: CGDirectDisplayID) -> CGFloat? {
+        guard let mode = CGDisplayCopyDisplayMode(id), mode.width > 0 else { return nil }
+        return CGFloat(mode.pixelWidth) / CGFloat(mode.width)
+    }
+
+    /// The point-to-pixel scale to capture at: the larger of what the filter
+    /// reports and the scale of the display the target is on, never below 1.
+    static func capturePixelScale(filterScale: Float, displayScale: CGFloat?) -> CGFloat {
+        max(CGFloat(filterScale), displayScale ?? 1, 1)
+    }
+
+    /// Native pixel size for a filter's content rect (points) at a
+    /// point-to-pixel scale.
+    static func nativePixelSize(contentRect: CGRect, pixelScale: CGFloat) -> (width: Int, height: Int) {
+        let scale = max(pixelScale, 1)
         return (
             max(Int((contentRect.width * scale).rounded()), 1),
             max(Int((contentRect.height * scale).rounded()), 1)
@@ -253,33 +278,47 @@ final class ScreenCaptureService {
         }
 
         let focused = Self.focusedWindow()
+        // The display under the focused window (or the cursor): the capture
+        // target when no window filter is possible, and the source of the
+        // pixel scale on both paths.
+        let displayID = Self.displayID(
+            containing: Self.anchorPoint(focusedBounds: focused?.bounds),
+            frames: content.displays.map { (id: $0.displayID, frame: $0.frame) },
+            mainID: CGMainDisplayID()
+        )
         let filter: SCContentFilter
         if let focused, let window = content.windows.first(where: { $0.windowID == focused.id }) {
             filter = SCContentFilter(desktopIndependentWindow: window)
         } else {
-            // Desktop, full-screen space or unresolvable window: capture the
-            // display under the focused window (or the cursor).
-            let frames = content.displays.map { (id: $0.displayID, frame: $0.frame) }
-            guard let id = Self.displayID(
-                containing: Self.anchorPoint(focusedBounds: focused?.bounds),
-                frames: frames,
-                mainID: CGMainDisplayID()
-            ), let display = content.displays.first(where: { $0.displayID == id }) else {
+            // Desktop, full-screen space or unresolvable window.
+            guard let displayID,
+                  let display = content.displays.first(where: { $0.displayID == displayID }) else {
                 return .failure(.noDisplay)
             }
             filter = SCContentFilter(display: display, excludingWindows: [])
         }
 
+        let pixelScale = Self.capturePixelScale(
+            filterScale: filter.pointPixelScale,
+            displayScale: displayID.flatMap(Self.displayPixelScale))
+        let size = Self.nativePixelSize(contentRect: filter.contentRect, pixelScale: pixelScale)
         let config = SCStreamConfiguration()
-        let size = Self.nativePixelSize(
-            contentRect: filter.contentRect, pointPixelScale: filter.pointPixelScale)
         config.width = size.width
         config.height = size.height
+        // `.automatic` may capture at point resolution and resample up to
+        // width x height; `.best` takes the backing store's pixels.
+        config.captureResolution = .best
         config.pixelFormat = kCVPixelFormatType_32BGRA
 
         do {
             let image = try await SCScreenshotManager.captureImage(
                 contentFilter: filter, configuration: config)
+            if image.width != size.width || image.height != size.height {
+                NSLog(
+                    "ScreenCaptureService: asked for %dx%d (%.0fx%.0f pt, filter scale %.2f, capture scale %.2f), got %dx%d",
+                    size.width, size.height, filter.contentRect.width, filter.contentRect.height,
+                    Double(filter.pointPixelScale), Double(pixelScale), image.width, image.height)
+            }
             return .success(image)
         } catch {
             return .failure(.captureFailed(error.localizedDescription))
@@ -288,8 +327,12 @@ final class ScreenCaptureService {
 
     // MARK: - Downscale + JPEG
 
-    /// Downscale `image` by `scale` and encode it as JPEG at `quality` (1-100).
-    static func encodeJPEG(_ image: CGImage, scale: Double, quality: Int) -> EncodedFrame? {
+    /// Downscale `image` by `scale` and encode it as JPEG at `quality` (1-100),
+    /// lowering the quality in steps (not below `EncodedFrame.minQuality`)
+    /// while the JPEG exceeds `maxBytes`.
+    static func encodeJPEG(
+        _ image: CGImage, scale: Double, quality: Int, maxBytes: Int = EncodedFrame.maxBytes
+    ) -> EncodedFrame? {
         let width = max(Int(Double(image.width) * scale), 1)
         let height = max(Int(Double(image.height) * scale), 1)
 
@@ -315,6 +358,19 @@ final class ScreenCaptureService {
             target = scaled
         }
 
+        // Dense screens (code, spreadsheets) can exceed the per-frame budget
+        // at the requested quality; step the quality down until they fit.
+        var q = quality
+        while true {
+            guard let jpeg = jpegData(target, quality: q) else { return nil }
+            if jpeg.count <= maxBytes || q <= EncodedFrame.minQuality {
+                return EncodedFrame(width: target.width, height: target.height, jpeg: jpeg, quality: q)
+            }
+            q = max(q - EncodedFrame.qualityStep, EncodedFrame.minQuality)
+        }
+    }
+
+    private static func jpegData(_ image: CGImage, quality: Int) -> Data? {
         let data = NSMutableData()
         guard let destination = CGImageDestinationCreateWithData(
             data, UTType.jpeg.identifier as CFString, 1, nil
@@ -324,9 +380,9 @@ final class ScreenCaptureService {
         let options = [
             kCGImageDestinationLossyCompressionQuality: Double(quality) / 100.0
         ] as CFDictionary
-        CGImageDestinationAddImage(destination, target, options)
+        CGImageDestinationAddImage(destination, image, options)
         guard CGImageDestinationFinalize(destination) else { return nil }
-        return EncodedFrame(width: target.width, height: target.height, jpeg: data as Data)
+        return data as Data
     }
 }
 

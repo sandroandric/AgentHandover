@@ -84,34 +84,101 @@ struct ClaudeCodeCLI {
 
     /// Runs the CLI and returns its exit status and combined output.
     func run(_ arguments: [String]) -> (status: Int32, output: String) {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: binary)
-        process.arguments = arguments
-        // The npm install is a `#!/usr/bin/env node` script: give it the
-        // PATH a login shell would have.
-        var environment = ProcessInfo.processInfo.environment
-        let binDir = URL(fileURLWithPath: binary).deletingLastPathComponent().path
-        environment["PATH"] = ([binDir, "/opt/homebrew/bin", "/usr/local/bin"]
-            + (environment["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin").split(separator: ":").map(String.init))
-            .joined(separator: ":")
-        process.environment = environment
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = pipe
-        process.standardInput = FileHandle.nullDevice
-        do {
-            try process.run()
-        } catch {
-            return (-1, "could not run \(binary): \(error.localizedDescription)")
+        runAgentCLI(binary, arguments, timeout: timeout)
+    }
+}
+
+/// Runs an agent's command-line tool and returns its exit status and its
+/// output (stdout, plus stderr unless `discardStderr`, for output that is
+/// parsed as JSON).
+func runAgentCLI(
+    _ binary: String,
+    _ arguments: [String],
+    timeout: TimeInterval,
+    discardStderr: Bool = false
+) -> (status: Int32, output: String) {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: binary)
+    process.arguments = arguments
+    // npm installs are `#!/usr/bin/env node` scripts: give them the PATH a
+    // login shell would have.
+    var environment = ProcessInfo.processInfo.environment
+    let binDir = URL(fileURLWithPath: binary).deletingLastPathComponent().path
+    environment["PATH"] = ([binDir, "/opt/homebrew/bin", "/usr/local/bin"]
+        + (environment["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin").split(separator: ":").map(String.init))
+        .joined(separator: ":")
+    process.environment = environment
+    let pipe = Pipe()
+    process.standardOutput = pipe
+    process.standardError = discardStderr ? FileHandle.nullDevice : pipe
+    process.standardInput = FileHandle.nullDevice
+    do {
+        try process.run()
+    } catch {
+        return (-1, "could not run \(binary): \(error.localizedDescription)")
+    }
+    let deadline = DispatchWorkItem { if process.isRunning { process.terminate() } }
+    DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: deadline)
+    let data = pipe.fileHandleForReading.readDataToEndOfFile()
+    process.waitUntilExit()
+    deadline.cancel()
+    let output = String(data: data, encoding: .utf8)?
+        .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    return (process.terminationStatus, output)
+}
+
+/// Codex reads MCP servers from `~/.codex/config.toml`
+/// (`[mcp_servers.<name>]`); the supported way to change and read that is
+/// its CLI (`codex mcp add` / `codex mcp list --json`), which keeps the rest
+/// of the file as it is. (Pairing used to write `~/.codex/mcp.json`, which
+/// Codex never reads.)
+struct CodexCLI {
+    static let serverName = ClaudeCodeCLI.serverName
+
+    let binary: String
+    var timeout: TimeInterval = 60
+
+    /// `$AH_CODEX_BIN`, else the usual install locations (a GUI app has no
+    /// shell `PATH`).  Nil when Codex's CLI is not installed.
+    static func resolve(
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        home: URL = FileManager.default.homeDirectoryForCurrentUser
+    ) -> String? {
+        if let override = environment["AH_CODEX_BIN"], !override.isEmpty {
+            return override
         }
-        let deadline = DispatchWorkItem { if process.isRunning { process.terminate() } }
-        DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: deadline)
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-        deadline.cancel()
-        let output = String(data: data, encoding: .utf8)?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        return (process.terminationStatus, output)
+        let candidates = [
+            "/opt/homebrew/bin/codex",
+            "/usr/local/bin/codex",
+            home.appendingPathComponent(".local/bin/codex").path,
+            home.appendingPathComponent(".npm-global/bin/codex").path,
+        ]
+        return candidates.first { FileManager.default.isExecutableFile(atPath: $0) }
+    }
+
+    /// Whether `codex mcp list --json` output lists our server, enabled.
+    static func listsServer(_ json: String) -> Bool {
+        guard let data = json.data(using: .utf8),
+              let servers = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]]
+        else { return false }
+        return servers.contains {
+            $0["name"] as? String == serverName && ($0["enabled"] as? Bool ?? true)
+        }
+    }
+
+    /// Whether Codex lists our server; nil with the reason when the CLI failed.
+    func isRegistered() -> (listed: Bool, error: String?) {
+        let result = runAgentCLI(binary, ["mcp", "list", "--json"], timeout: timeout, discardStderr: true)
+        guard result.status == 0 else {
+            return (false, "codex mcp list failed (exit \(result.status))")
+        }
+        return (Self.listsServer(result.output), nil)
+    }
+
+    /// Registers (or replaces) the server; nil on success, else the error.
+    func add(mcpCommand: String) -> String? {
+        let result = runAgentCLI(binary, ["mcp", "add", Self.serverName, "--", mcpCommand], timeout: timeout)
+        return result.status == 0 ? nil : result.output
     }
 }
 
@@ -120,16 +187,19 @@ class AgentDetector: ObservableObject {
 
     private let home: URL
     private let claude: ClaudeCodeCLI?
+    private let codex: CodexCLI?
     private let mcpCommand: String
     private let work = DispatchQueue(label: "com.agenthandover.agent-detector")
 
     init(
         home: URL = FileManager.default.homeDirectoryForCurrentUser,
         claudeBinary: String? = ClaudeCodeCLI.resolve(),
+        codexBinary: String? = CodexCLI.resolve(),
         mcpCommand: String = AgentDetector.defaultMCPCommand()
     ) {
         self.home = home
         self.claude = claudeBinary.map { ClaudeCodeCLI(binary: $0) }
+        self.codex = codexBinary.map { CodexCLI(binary: $0) }
         self.mcpCommand = mcpCommand
     }
 
@@ -193,15 +263,18 @@ class AgentDetector: ObservableObject {
             ))
         }
 
-        // Codex — installed if codex CLI exists
-        if fm.fileExists(atPath: "/usr/local/bin/codex") || fm.fileExists(atPath: "/opt/homebrew/bin/codex") {
-            let codexConfig = home.appendingPathComponent(".codex/mcp.json")
+        // Codex — installed if its CLI exists; connected only when
+        // `codex mcp list` lists the server (read off the main thread).
+        if codex != nil {
+            let previous = agents.first { $0.id == "codex" }
             detected.append(DetectedAgent(
                 id: "codex",
                 name: "Codex",
                 icon: "chevron.left.forwardslash.chevron.right",
-                configPath: codexConfig,
-                isConnected: Self.hasServer(in: codexConfig, keyPath: ["mcpServers"])
+                configPath: home.appendingPathComponent(".codex/config.toml"),
+                isConnected: previous?.isConnected ?? false,
+                failure: previous?.failure,
+                isBusy: true
             ))
         }
 
@@ -220,7 +293,12 @@ class AgentDetector: ObservableObject {
         }
 
         agents = detected
-        refreshClaudeCode(completion: completion)
+        let pending = DispatchGroup()
+        pending.enter()
+        refreshClaudeCode { pending.leave() }
+        pending.enter()
+        refreshCodex { pending.leave() }
+        pending.notify(queue: .main) { completion?() }
     }
 
     func connect(_ agent: DetectedAgent, completion: (() -> Void)? = nil) {
@@ -256,6 +334,30 @@ class AgentDetector: ObservableObject {
                     completion?()
                 }
             }
+        case "codex":
+            guard let codex else { completion?(); return }
+            update("codex") { $0.isBusy = true; $0.failure = nil }
+            let command = mcpCommand
+            work.async { [weak self] in
+                let addError = codex.add(mcpCommand: command)
+                let registered = codex.isRegistered()
+                DispatchQueue.main.async {
+                    self?.update("codex") {
+                        $0.isBusy = false
+                        $0.isConnected = registered.listed
+                        if let addError {
+                            $0.failure = "codex mcp add failed: \(addError)"
+                        } else if let error = registered.error {
+                            $0.failure = error
+                        } else if !registered.listed {
+                            $0.failure = "Codex does not list the AgentHandover MCP server."
+                        } else {
+                            $0.failure = nil
+                        }
+                    }
+                    completion?()
+                }
+            }
         case "openclaw":
             write(agent, keyPath: ["mcp", "servers"])
             completion?()
@@ -282,6 +384,26 @@ class AgentDetector: ObservableObject {
                     if state == .failing { $0.failure = Self.describe(state, command: command) }
                 }
                 completion?()
+            }
+        }
+    }
+
+    // MARK: - Codex
+
+    private func refreshCodex(completion: @escaping () -> Void) {
+        guard let codex, agents.contains(where: { $0.id == "codex" }) else {
+            completion()
+            return
+        }
+        work.async { [weak self] in
+            let registered = codex.isRegistered()
+            DispatchQueue.main.async {
+                self?.update("codex") {
+                    $0.isBusy = false
+                    $0.isConnected = registered.listed
+                    if let error = registered.error { $0.failure = error }
+                }
+                completion()
             }
         }
     }

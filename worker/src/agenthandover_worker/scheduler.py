@@ -13,18 +13,25 @@ Gate conditions (from config.example.toml [idle_jobs]):
 
 The scheduler probes macOS system state using the same approach as the
 Rust daemon's ``macos_power`` module: ``pmset -g batt`` for power state,
-``ps -A -o %cpu`` divided by ``hw.ncpu`` for CPU usage, and
-``pmset -g therm`` CPU_Speed_Limit for thermal proxy.
+``ps -A -o %cpu`` divided by the core count for CPU usage, and
+``pmset -g therm`` CPU_Speed_Limit for thermal proxy.  Passive annotation
+has its own, lighter policy (:meth:`IdleJobGate.passive_annotation_allowed`):
+AC power, a locked screen, or two minutes without input (``ioreg``).
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import platform
+import plistlib
 import subprocess
+import xml.parsers.expat
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, time
+from time import monotonic
 
 logger = logging.getLogger(__name__)
 
@@ -57,12 +64,17 @@ class SchedulerConfig:
 
 @dataclass
 class SystemConditions:
-    """A point-in-time snapshot of system resource state."""
+    """A point-in-time snapshot of system resource state.
+
+    ``cpu_temp_c`` is None when the temperature cannot be read (Apple
+    Silicon's ``pmset -g therm`` reports no ``CPU_Speed_Limit``); the gate
+    then skips the temperature check instead of blocking forever.
+    """
 
     on_ac_power: bool
     battery_percent: int
     cpu_percent: float
-    cpu_temp_c: float
+    cpu_temp_c: float | None
     current_time: time
 
     def to_dict(self) -> dict:
@@ -71,7 +83,9 @@ class SystemConditions:
             "on_ac_power": self.on_ac_power,
             "battery_percent": self.battery_percent,
             "cpu_percent": round(self.cpu_percent, 1),
-            "cpu_temp_c": round(self.cpu_temp_c, 1),
+            "cpu_temp_c": (
+                None if self.cpu_temp_c is None else round(self.cpu_temp_c, 1)
+            ),
             "current_time": self.current_time.isoformat(),
         }
 
@@ -83,16 +97,26 @@ class SystemConditions:
 
 @dataclass
 class GateResult:
-    """Outcome of evaluating all gate conditions."""
+    """Outcome of evaluating all gate conditions.
+
+    ``conditions`` is None when the gate stopped at the time window and
+    never probed the system.
+    """
 
     can_run: bool
     blockers: list[str]
-    conditions: SystemConditions
+    conditions: SystemConditions | None
 
 
 # ---------------------------------------------------------------------------
 # IdleJobGate — evaluates whether heavy processing may run
 # ---------------------------------------------------------------------------
+
+# Each system probe (a subprocess) is reused for this long.
+PROBE_TTL_SECONDS = 60.0
+
+# Passive annotation on battery waits for this much user inactivity.
+PASSIVE_IDLE_SECONDS = 120.0
 
 
 class IdleJobGate:
@@ -100,10 +124,19 @@ class IdleJobGate:
 
     Evaluates AC power, battery level, CPU utilisation, CPU temperature,
     and time-of-day window against the supplied ``SchedulerConfig``.
+    The time window is evaluated first, so outside it no subprocess is
+    started; each probe's answer is cached for ``PROBE_TTL_SECONDS``.
     """
 
-    def __init__(self, config: SchedulerConfig | None = None) -> None:
+    def __init__(
+        self,
+        config: SchedulerConfig | None = None,
+        *,
+        clock: Callable[[], float] = monotonic,
+    ) -> None:
         self.config = config or SchedulerConfig()
+        self._clock = clock
+        self._probe_cache: dict[str, tuple[float, object]] = {}
 
     def check(self, conditions: SystemConditions | None = None) -> GateResult:
         """Evaluate all gate conditions.
@@ -112,7 +145,7 @@ class IdleJobGate:
         ----------
         conditions:
             Pre-built snapshot for deterministic testing.  When ``None``
-            the gate probes the live system.
+            the gate probes the live system (after the time window passed).
 
         Returns
         -------
@@ -121,7 +154,14 @@ class IdleJobGate:
             ``blockers`` lists human-readable reasons for each failure.
         """
         if conditions is None:
-            conditions = self._probe_system()
+            now = datetime.now().time()
+            if not self._in_time_window(now):
+                return GateResult(
+                    can_run=False,
+                    blockers=[self._window_blocker(now)],
+                    conditions=None,
+                )
+            conditions = self._probe_system(now)
 
         blockers: list[str] = []
 
@@ -138,22 +178,39 @@ class IdleJobGate:
                 f"cpu_high ({conditions.cpu_percent:.1f}% > {self.config.max_cpu_percent}%)"
             )
 
-        if conditions.cpu_temp_c > self.config.max_temp_c:
+        if (
+            conditions.cpu_temp_c is not None
+            and conditions.cpu_temp_c > self.config.max_temp_c
+        ):
             blockers.append(
                 f"temp_high ({conditions.cpu_temp_c:.1f}C > {self.config.max_temp_c}C)"
             )
 
         if not self._in_time_window(conditions.current_time):
-            blockers.append(
-                f"outside_time_window ({conditions.current_time.isoformat()} "
-                f"not in {self.config.run_window_start.isoformat()}-{self.config.run_window_end.isoformat()})"
-            )
+            blockers.append(self._window_blocker(conditions.current_time))
 
         return GateResult(
             can_run=len(blockers) == 0,
             blockers=blockers,
             conditions=conditions,
         )
+
+    def passive_annotation_allowed(self) -> tuple[bool, str]:
+        """Whether passive (non-focus) annotation may run now, and why.
+
+        It runs on AC power, while the screen is locked, or once the user
+        has been idle for ``PASSIVE_IDLE_SECONDS``; on battery with the
+        user at the keyboard it waits.  Focus processing does not ask.
+        """
+        on_ac, _battery = self._cached("power", self._get_power_state)
+        if on_ac:
+            return True, "on_ac_power"
+        if self._cached("locked", self._get_screen_locked):
+            return True, "screen_locked"
+        idle = self._cached("idle", self._get_idle_seconds)
+        if idle is not None and idle >= PASSIVE_IDLE_SECONDS:
+            return True, "user_idle"
+        return False, "on_battery_user_active"
 
     # ------------------------------------------------------------------
     # Time window
@@ -175,20 +232,35 @@ class IdleJobGate:
             # Midnight-crossing window (e.g. 23:00-05:00)
             return current >= start or current <= end
 
+    def _window_blocker(self, current: time) -> str:
+        return (
+            f"outside_time_window ({current.isoformat()} "
+            f"not in {self.config.run_window_start.isoformat()}-{self.config.run_window_end.isoformat()})"
+        )
+
     # ------------------------------------------------------------------
     # System probing (macOS)
     # ------------------------------------------------------------------
 
-    def _probe_system(self) -> SystemConditions:
+    def _cached(self, name: str, probe: Callable[[], object]):
+        """*probe*'s answer, reused for ``PROBE_TTL_SECONDS``."""
+        now = self._clock()
+        hit = self._probe_cache.get(name)
+        if hit is not None and now - hit[0] < PROBE_TTL_SECONDS:
+            return hit[1]
+        value = probe()
+        self._probe_cache[name] = (now, value)
+        return value
+
+    def _probe_system(self, now: time) -> SystemConditions:
         """Probe live system conditions (macOS implementation).
 
-        Falls back to safe defaults when a probe fails so the gate
-        errs on the side of *not* running heavy jobs.
+        Falls back to safe defaults when a power or CPU probe fails so the
+        gate errs on the side of *not* running heavy jobs.
         """
-        on_ac, battery = self._get_power_state()
-        cpu = self._get_cpu_usage()
-        temp = self._get_cpu_temp()
-        now = datetime.now().time()
+        on_ac, battery = self._cached("power", self._get_power_state)
+        cpu = self._cached("cpu", self._get_cpu_usage)
+        temp = self._cached("temp", self._get_cpu_temp)
 
         return SystemConditions(
             on_ac_power=on_ac,
@@ -245,9 +317,9 @@ class IdleJobGate:
     def _get_cpu_usage() -> float:
         """Get current aggregate CPU utilisation percentage.
 
-        Sums per-process CPU from ``ps -A -o %cpu`` and divides by
-        the number of logical cores from ``sysctl -n hw.ncpu``.
-        Returns 100.0 on failure (blocks heavy jobs).
+        Sums per-process CPU from ``ps -A -o %cpu`` and divides by the
+        number of logical cores.  Returns 100.0 on failure (blocks heavy
+        jobs).
         """
         if platform.system() != "Darwin":
             try:
@@ -276,36 +348,26 @@ class IdleJobGate:
                     except ValueError:
                         pass
 
-            # Get number of logical cores
-            ncpu_result = subprocess.run(
-                ["sysctl", "-n", "hw.ncpu"],
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-            ncpu = int(ncpu_result.stdout.strip()) if ncpu_result.stdout.strip() else 1
-            ncpu = max(ncpu, 1)
-
-            return total_cpu / ncpu
+            return total_cpu / max(os.cpu_count() or 1, 1)
 
         except (subprocess.TimeoutExpired, FileNotFoundError, OSError, ValueError) as exc:
             logger.warning("Failed to probe CPU usage: %s", exc)
             return 100.0
 
     @staticmethod
-    def _get_cpu_temp() -> float:
-        """Get CPU temperature estimate from thermal pressure.
+    def _get_cpu_temp() -> float | None:
+        """Get a CPU temperature estimate from thermal pressure.
 
-        Parses ``pmset -g therm`` for ``CPU_Speed_Limit`` and maps it
-        to an approximate temperature using the same linear model as
-        the Rust daemon: ``temp = 50 + (100 - limit) * 0.5``.
+        Parses ``pmset -g therm`` for ``CPU_Speed_Limit`` and maps it to an
+        approximate temperature using the same linear model as the Rust
+        daemon: ``temp = 50 + (100 - limit) * 0.5``.
 
-        Returns 85.0 on failure (safety-first: blocks heavy jobs when
-        temperature is unknown, since we cannot confirm it is safe).
+        Returns None when there is no reading (no ``CPU_Speed_Limit`` line,
+        as on Apple Silicon, or the probe failed): the gate then skips the
+        temperature check rather than blocking every job for good.
         """
         if platform.system() != "Darwin":
-            # Non-macOS: assume safe since we cannot probe
-            return 50.0
+            return None
 
         try:
             result = subprocess.run(
@@ -314,28 +376,147 @@ class IdleJobGate:
                 text=True,
                 timeout=5,
             )
-            stdout = result.stdout
-
-            for line in stdout.splitlines():
-                if "CPU_Speed_Limit" in line:
-                    tokens = line.split()
-                    if tokens:
-                        try:
-                            limit = int(tokens[-1])
-                            # Same mapping as Rust daemon macos_power.rs:
-                            # 100 = ~50C, 80 = ~70C, 50 = ~90C
-                            return 50.0 + (100.0 - limit) * 0.5
-                        except ValueError:
-                            pass
-
-            # No CPU_Speed_Limit found — return high value to block heavy
-            # jobs when temperature is unknown (safety-first approach)
-            return 85.0
-
         except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
             logger.warning("Failed to probe CPU temperature: %s", exc)
-            # Safety-first: block heavy jobs when probe fails
-            return 85.0
+            return None
+
+        for line in result.stdout.splitlines():
+            if "CPU_Speed_Limit" in line:
+                tokens = line.split()
+                if tokens:
+                    try:
+                        limit = int(tokens[-1])
+                    except ValueError:
+                        continue
+                    # Same mapping as Rust daemon macos_power.rs:
+                    # 100 = ~50C, 80 = ~70C, 50 = ~90C
+                    return 50.0 + (100.0 - limit) * 0.5
+        return None
+
+    @staticmethod
+    def _get_idle_seconds() -> float | None:
+        """Seconds since the last keyboard or mouse input (``HIDIdleTime``).
+
+        None when it cannot be read (non-macOS or a failed probe).
+        """
+        if platform.system() != "Darwin":
+            return None
+        try:
+            result = subprocess.run(
+                ["ioreg", "-c", "IOHIDSystem", "-d", "4", "-r", "-k", "HIDIdleTime"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
+            logger.warning("Failed to probe idle time: %s", exc)
+            return None
+        return parse_hid_idle_seconds(result.stdout)
+
+    @staticmethod
+    def _get_screen_locked() -> bool:
+        """Whether the console session's screen is locked (``ioreg`` root)."""
+        if platform.system() != "Darwin":
+            return False
+        try:
+            result = subprocess.run(
+                ["ioreg", "-n", "Root", "-d1", "-a"],
+                capture_output=True,
+                timeout=5,
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
+            logger.warning("Failed to probe screen lock: %s", exc)
+            return False
+        return parse_screen_locked(result.stdout)
+
+
+def parse_hid_idle_seconds(ioreg_output: str) -> float | None:
+    """``"HIDIdleTime" = <ns>`` from ``ioreg`` output, in seconds."""
+    for line in ioreg_output.splitlines():
+        if '"HIDIdleTime"' in line and "=" in line:
+            try:
+                return int(line.rsplit("=", 1)[1].strip()) / 1e9
+            except ValueError:
+                return None
+    return None
+
+
+def parse_screen_locked(ioreg_plist: bytes) -> bool:
+    """True when a console user's ``CGSSessionScreenIsLocked`` is set."""
+    try:
+        root = plistlib.loads(ioreg_plist)
+    except (plistlib.InvalidFileException, ValueError, xml.parsers.expat.ExpatError):
+        return False
+    users = root.get("IOConsoleUsers", []) if isinstance(root, dict) else []
+    return any(
+        isinstance(user, dict) and user.get("CGSSessionScreenIsLocked") is True
+        for user in users
+    )
+
+
+# ---------------------------------------------------------------------------
+# AnnotationBudget — daily cap on passive annotation
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class AnnotationBudget:
+    """Frames and Ollama compute spent on passive annotation in one local day.
+
+    ``[vlm] annotation_max_frames_per_day`` and
+    ``annotation_max_compute_minutes_per_day`` set the caps; compute is
+    Ollama's own ``prompt_eval_duration + eval_duration``.  The counters
+    belong to ``date`` and start over when :meth:`roll` sees a new one.
+    Focus recordings are not charged.
+    """
+
+    max_frames: int
+    max_compute_seconds: float
+    date: str = ""
+    frames: int = 0
+    compute_seconds: float = 0.0
+
+    def roll(self, today: str) -> None:
+        if today != self.date:
+            self.date, self.frames, self.compute_seconds = today, 0, 0.0
+
+    def exhausted(self) -> bool:
+        return (
+            self.frames >= self.max_frames
+            or self.compute_seconds >= self.max_compute_seconds
+        )
+
+    def charge(self, compute_seconds: float) -> None:
+        """Count one frame sent to the model and its compute."""
+        self.frames += 1
+        self.compute_seconds += max(compute_seconds, 0.0)
+
+    def to_json(self) -> str:
+        return json.dumps({
+            "date": self.date,
+            "frames": self.frames,
+            "compute_seconds": round(self.compute_seconds, 3),
+        })
+
+    def load(self, raw: str | None) -> None:
+        """Restore the counters persisted by :meth:`to_json` (if any)."""
+        try:
+            saved = json.loads(raw) if raw else {}
+            self.date = str(saved.get("date", ""))
+            self.frames = int(saved.get("frames", 0))
+            self.compute_seconds = float(saved.get("compute_seconds", 0.0))
+        except (ValueError, TypeError, AttributeError):
+            self.date, self.frames, self.compute_seconds = "", 0, 0.0
+
+    def status(self) -> dict:
+        """The counters as published in ``worker-status.json``."""
+        return {
+            "date": self.date,
+            "frames": self.frames,
+            "max_frames": self.max_frames,
+            "compute_minutes": round(self.compute_seconds / 60.0, 2),
+            "max_compute_minutes": round(self.max_compute_seconds / 60.0, 2),
+        }
 
 
 # ---------------------------------------------------------------------------

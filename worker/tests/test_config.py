@@ -14,6 +14,7 @@ from agenthandover_worker.config import (
     config_path,
     load_config,
 )
+from agenthandover_worker.model_profiles import get_tier, recommend_tier
 from agenthandover_worker.scheduler import SchedulerConfig
 
 
@@ -51,9 +52,15 @@ def test_missing_file_gives_every_default(tmp_path):
     assert cfg == Config()
     assert cfg.path is None
     assert cfg.vlm.annotation_enabled is True
-    assert cfg.vlm.annotation_model == "qwen3.5:2b"
-    assert cfg.vlm.sop_model == "qwen3.5:4b"
-    assert cfg.vlm.stale_skip_count == 3
+    tier = recommend_tier()  # this machine's RAM tier
+    assert cfg.vlm.tier == tier.id
+    assert cfg.vlm.annotation_model == tier.annotation_model == "qwen3.5:4b"
+    assert cfg.vlm.sop_model == tier.sop_model
+    assert cfg.vlm.reasoner_model == tier.sop_model
+    assert cfg.vlm.annotation_max_frames_per_day == 1500
+    assert cfg.vlm.annotation_max_compute_minutes_per_day == 60.0
+    assert cfg.embedding.model == "nomic-embed-text"
+    assert (cfg.embedding.retention_days, cfg.embedding.max_rows) == (90, 50_000)
     assert cfg.vlm.sliding_window_max_age_sec == 600
     assert cfg.vlm.ollama_host == "http://localhost:11434"
     assert cfg.vlm.annotation_timeout_seconds == 180.0
@@ -96,7 +103,7 @@ def test_raw_and_privacy_zones_are_passed_through(tmp_path):
 def test_vlm_values(tmp_path):
     cfg = load_config(_write(tmp_path, (
         '[vlm]\nannotation_enabled = false\nannotation_model = "qwen3:4b"\n'
-        'sop_model = "gemma4:e4b"\nstale_skip_count = 5\n'
+        'sop_model = "gemma4:e4b"\nannotation_max_frames_per_day = 5\n'
         'sliding_window_max_age_sec = 900\nollama_host = "http://127.0.0.1:1"\n'
         'mode = "remote"\nprovider = "openai"\nmodel = "gpt"\n'
         'api_key_env = "KEY"\n'
@@ -105,7 +112,7 @@ def test_vlm_values(tmp_path):
     assert vlm.annotation_enabled is False
     assert vlm.annotation_model == "qwen3:4b"
     assert vlm.sop_model == "gemma4:e4b"
-    assert vlm.stale_skip_count == 5
+    assert vlm.annotation_max_frames_per_day == 5
     assert vlm.sliding_window_max_age_sec == 900
     assert vlm.ollama_host == "http://127.0.0.1:1"
     assert (vlm.mode, vlm.provider, vlm.model, vlm.api_key_env) == (
@@ -123,12 +130,12 @@ def test_booleans_written_as_strings_or_numbers(tmp_path, raw, expected):
 
 def test_invalid_values_keep_the_default(tmp_path, caplog):
     cfg = load_config(_write(tmp_path, (
-        '[vlm]\nannotation_timeout_seconds = "soon"\nstale_skip_count = "many"\n'
+        '[vlm]\nannotation_timeout_seconds = "soon"\nannotation_max_frames_per_day = 0\n'
         'ollama_host = 11434\nannotation_enabled = "maybe"\n'
         "[focus]\nmax_session_hours = -1\n"
     )))
     assert cfg.vlm.annotation_timeout_seconds == 180.0
-    assert cfg.vlm.stale_skip_count == 3
+    assert cfg.vlm.annotation_max_frames_per_day == 1500
     assert cfg.vlm.ollama_host == "http://localhost:11434"
     assert cfg.vlm.annotation_enabled is True
     assert cfg.focus.max_session_hours == 4.0
@@ -298,3 +305,52 @@ def test_idle_jobs_bad_window_keeps_the_default(tmp_path, caplog):
         time(1, 0), time(5, 0),
     )
     assert "run_window_local_time" in caplog.text
+
+
+
+# ---------------------------------------------------------------------------
+# [vlm] models from the tier table (WP-C6)
+# ---------------------------------------------------------------------------
+
+
+def test_a_named_tier_supplies_the_models_the_file_leaves_out(tmp_path):
+    cfg = load_config(_write(tmp_path, '[vlm]\ntier = "recommended"\n'))
+    assert (cfg.vlm.tier, cfg.vlm.annotation_model, cfg.vlm.sop_model) == (
+        "recommended", "qwen3.5:4b", "gemma4:12b-it-qat",
+    )
+
+
+def test_explicit_models_win_over_the_tier(tmp_path):
+    cfg = load_config(_write(tmp_path, (
+        '[vlm]\ntier = "max_quality"\nannotation_model = "a:1"\nsop_model = "s:1"\n'
+    )))
+    assert (cfg.vlm.annotation_model, cfg.vlm.sop_model) == ("a:1", "s:1")
+
+
+def test_unknown_tier_falls_back_to_the_ram_tier(tmp_path, caplog):
+    cfg = load_config(_write(tmp_path, '[vlm]\ntier = "huge"\n'))
+    assert cfg.vlm.tier == recommend_tier().id
+    assert "huge" in caplog.text
+
+
+def test_sop_ab_flag_picks_the_tiers_ab_model(tmp_path):
+    cfg = load_config(_write(tmp_path, (
+        '[vlm]\ntier = "max_quality"\nsop_model = "gemma4:31b-it-qat"\nsop_ab = true\n'
+    )))
+    assert cfg.vlm.sop_model == get_tier("max_quality").ab_sop_model
+    # A tier without an A/B arm keeps its SOP model.
+    cfg = load_config(_write(tmp_path, '[vlm]\ntier = "standard"\nsop_ab = true\n'))
+    assert cfg.vlm.sop_model == "qwen3.5:4b"
+
+
+def test_reasoning_model_overrides_the_reasoner_only(tmp_path):
+    cfg = load_config(_write(tmp_path, (
+        '[vlm]\ntier = "recommended"\nreasoning_model = "r:1"\n'
+    )))
+    assert cfg.vlm.reasoner_model == "r:1"
+    assert cfg.vlm.sop_model == "gemma4:12b-it-qat"
+
+
+def test_embedding_model_is_read(tmp_path):
+    cfg = load_config(_write(tmp_path, '[embedding]\nmodel = "mxbai-embed-large"\n'))
+    assert cfg.embedding.model == "mxbai-embed-large"

@@ -37,12 +37,66 @@ typedef struct {
 // Vision OCR — entire pipeline in ObjC, exception-safe
 // ──────────────────────────────────────────────────────────
 
+/// Recognition languages for `request`: the user's preferred languages
+/// (System Settings > Language & Region) that Vision supports at the
+/// request's recognition level, in preference order, with en-US last as a
+/// fallback. A preferred language matches a supported one exactly
+/// ("de-DE") or by its language code ("de-AT" -> "de-DE", "zh-Hans-CN" ->
+/// "zh-Hans"). Returns nil when Vision cannot list its languages, which
+/// leaves the request on its default.
+static NSArray<NSString *> *ocr_languages_for_request(VNRecognizeTextRequest *request) {
+    NSError *error = nil;
+    NSArray<NSString *> *supported = [request supportedRecognitionLanguagesAndReturnError:&error];
+    if (!supported || supported.count == 0) return nil;
+
+    NSMutableArray<NSString *> *chosen = [NSMutableArray array];
+    for (NSString *preferred in [NSLocale preferredLanguages]) {
+        NSString *match = nil;
+        for (NSString *candidate in supported) {
+            if ([candidate caseInsensitiveCompare:preferred] == NSOrderedSame) {
+                match = candidate;
+                break;
+            }
+        }
+        if (!match) {
+            NSString *code = [[preferred componentsSeparatedByString:@"-"] firstObject];
+            for (NSString *candidate in supported) {
+                NSString *candidateCode = [[candidate componentsSeparatedByString:@"-"] firstObject];
+                if ([candidateCode caseInsensitiveCompare:code] == NSOrderedSame
+                    && [preferred.lowercaseString hasPrefix:candidate.lowercaseString]) {
+                    match = candidate;
+                    break;
+                }
+            }
+            if (!match) {
+                for (NSString *candidate in supported) {
+                    NSString *candidateCode = [[candidate componentsSeparatedByString:@"-"] firstObject];
+                    if ([candidateCode caseInsensitiveCompare:code] == NSOrderedSame) {
+                        match = candidate;
+                        break;
+                    }
+                }
+            }
+        }
+        if (match && ![chosen containsObject:match]) [chosen addObject:match];
+    }
+    if ([supported containsObject:@"en-US"] && ![chosen containsObject:@"en-US"]) {
+        [chosen addObject:@"en-US"];
+    }
+    return chosen.count > 0 ? chosen : nil;
+}
+
 /// Perform OCR on raw BGRA pixel data using Apple Vision framework.
 /// All ObjC work happens here so exceptions are caught before reaching Rust.
+///
+/// `fast` selects VNRequestTextRecognitionLevelFast without language
+/// correction (used to gate frames); otherwise the accurate level with
+/// language correction (used for frames that are kept).
 OcrCResult perform_ocr_safe(
     const uint8_t *pixels,
     size_t width,
-    size_t height
+    size_t height,
+    int fast
 ) {
     OcrCResult result = { .elements = NULL, .count = 0, .full_text = NULL, .success = 0 };
 
@@ -77,7 +131,15 @@ OcrCResult perform_ocr_safe(
 
             // 3. Create and configure VNRecognizeTextRequest
             VNRecognizeTextRequest *request = [[VNRecognizeTextRequest alloc] init];
-            request.recognitionLevel = VNRequestTextRecognitionLevelAccurate;
+            if (fast) {
+                request.recognitionLevel = VNRequestTextRecognitionLevelFast;
+                request.usesLanguageCorrection = NO;
+            } else {
+                request.recognitionLevel = VNRequestTextRecognitionLevelAccurate;
+                request.usesLanguageCorrection = YES;
+            }
+            NSArray<NSString *> *languages = ocr_languages_for_request(request);
+            if (languages) request.recognitionLanguages = languages;
 
             // 4. Perform the request
             NSError *error = nil;

@@ -15,12 +15,24 @@ impl<'a> MaintenanceRunner<'a> {
 
     /// Delete events older than `retention_days` that have left the queue
     /// (processed = 1, or quarantined by the worker as -1).
+    /// Their VLM queue jobs go with them (a job references its event, so a
+    /// leftover job would fail the delete on the foreign key).
     /// Returns the number of rows deleted.
     pub fn purge_old_events(&self, retention_days: u32) -> Result<usize> {
-        let deleted = self.conn.execute(
-            "DELETE FROM events WHERE processed != 0 AND datetime(timestamp) < datetime('now', ?1)",
-            [format!("-{} days", retention_days)],
+        let cutoff = format!("-{} days", retention_days);
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "DELETE FROM vlm_queue WHERE event_id IN (\
+                SELECT id FROM events \
+                WHERE processed != 0 AND datetime(timestamp) < datetime('now', ?1)\
+            )",
+            [&cutoff],
         )?;
+        let deleted = tx.execute(
+            "DELETE FROM events WHERE processed != 0 AND datetime(timestamp) < datetime('now', ?1)",
+            [&cutoff],
+        )?;
+        tx.commit()?;
         info!(deleted, retention_days, "Purged old processed events");
         Ok(deleted)
     }

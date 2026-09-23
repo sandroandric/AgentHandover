@@ -23,6 +23,7 @@ fn make_test_event() -> Event {
         artifact_ids: vec![],
         metadata: serde_json::json!({}),
         display_ids_spanned: None,
+        focused_element: None,
     }
 }
 
@@ -344,4 +345,35 @@ fn test_full_maintenance_sweeps_screenshots_past_ttl() {
     assert!(!jpg.exists());
     assert_eq!(report.screenshots_purged, 1);
     assert_eq!(report.bytes_freed, 64);
+}
+
+/// A queued VLM job still references its event when the event ages out
+/// (seen on a real install: a job left pending since April blocked the
+/// hourly maintenance with "FOREIGN KEY constraint failed", so nothing
+/// after the event purge, VACUUM included, ever ran).
+#[test]
+fn test_full_maintenance_purges_events_with_queued_vlm_jobs() {
+    let tmp = TempDir::new().unwrap();
+    let db_path = tmp.path().join("events.db");
+    let artifact_dir = tmp.path().join("artifacts");
+    let store = EventStore::open(&db_path).unwrap();
+
+    let old = insert_aged_event(&store, 30);
+    let fresh = insert_aged_event(&store, 1);
+    for (event_id, ttl) in [(&old, "2026-01-01T00:00:00Z"), (&old, "2999-01-01T00:00:00Z"), (&fresh, "2999-01-01T00:00:00Z")] {
+        store.connection().execute(
+            "INSERT INTO vlm_queue (id, event_id, ttl_expires_at) VALUES (?1, ?2, ?3)",
+            rusqlite::params![Uuid::new_v4().to_string(), event_id, ttl],
+        ).unwrap();
+    }
+
+    let runner = MaintenanceRunner::new(store.connection());
+    let report = runner.run_full_maintenance(&options(&db_path, &artifact_dir)).unwrap();
+
+    assert_eq!(report.events_purged, 1);
+    let jobs: Vec<String> = store.connection()
+        .prepare("SELECT event_id FROM vlm_queue").unwrap()
+        .query_map([], |r| r.get(0)).unwrap()
+        .map(|r| r.unwrap()).collect();
+    assert_eq!(jobs, vec![fresh], "only the live event's job remains");
 }

@@ -24,6 +24,7 @@ import hashlib
 import json
 import logging
 import math
+import sqlite3
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -32,6 +33,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from agenthandover_worker.ollama import OllamaClient, OllamaError
+from agenthandover_worker.vector_kb import CLUSTERING_PREFIX
 
 if TYPE_CHECKING:
     from agenthandover_worker.llm_reasoning import LLMReasoner
@@ -230,23 +232,23 @@ class SegmentationResult:
 # nomic-embed-text is trained with task prefixes; grouping frames by task is
 # its ``clustering`` task.  The similarity threshold is calibrated for
 # vectors computed with this prefix.
-CLUSTERING_PREFIX = "clustering: "
 
 
 def _compute_embeddings(
     texts: list[str],
     *,
-    model: str = "all-minilm:l6-v2",
+    model: str,
     host: str = "http://localhost:11434",
     timeout: float = 30.0,
 ) -> list[list[float]]:
-    """Compute text embeddings via Ollama's /api/embed endpoint.
+    """Embed *texts* with the ``clustering:`` task prefix via /api/embed.
 
-    *texts* are sent as given: the caller includes any task prefix.
     Returns a list of embedding vectors (one per input text).
     Raises ConnectionError if Ollama is not reachable.
     """
-    return OllamaClient(host).embed(model, texts, timeout=timeout)
+    return OllamaClient(host).embed(
+        model, texts, prefix=CLUSTERING_PREFIX, timeout=timeout,
+    )
 
 
 def _cosine_similarity(a: list[float], b: list[float]) -> float:
@@ -370,15 +372,29 @@ def _timestamp_to_epoch(ts: str) -> float:
         return 0.0
 
 
+def _sleep_starts(sleep_boundaries: list[tuple[str, str]] | None) -> list[float]:
+    """Epoch seconds at which each ``(slept_at, woke_at)`` sleep began."""
+    return sorted(
+        epoch for slept_at, _ in sleep_boundaries or []
+        if (epoch := _timestamp_to_epoch(slept_at))
+    )
+
+
+def _sleep_between(start: float, end: float, sleep_starts: list[float]) -> bool:
+    """True when the Mac went to sleep at or after *start* and before *end*."""
+    return any(start <= s < end for s in sleep_starts)
+
+
 def _split_into_contiguous_segments(
     frames: list[AnnotatedFrame],
     cluster_id: int,
     max_gap_seconds: int = 1800,
+    sleep_starts: list[float] | None = None,
 ) -> list[TaskSegment]:
     """Split a cluster's frames into contiguous time segments.
 
-    Two consecutive frames with > max_gap_seconds between them
-    form separate segments (indicating an interruption).
+    Two consecutive frames with > max_gap_seconds between them, or with a
+    system sleep between them (*sleep_starts*), form separate segments.
     """
     if not frames:
         return []
@@ -394,8 +410,11 @@ def _split_into_contiguous_segments(
         curr_epoch = _timestamp_to_epoch(sorted_frames[i].timestamp)
 
         gap = curr_epoch - prev_epoch if prev_epoch and curr_epoch else 0
+        slept = bool(prev_epoch and curr_epoch) and _sleep_between(
+            prev_epoch, curr_epoch, sleep_starts or [],
+        )
 
-        if gap > max_gap_seconds:
+        if gap > max_gap_seconds or slept:
             # Gap too large — start new segment
             seg = _make_segment(current_frames, cluster_id, len(segments))
             segments.append(seg)
@@ -643,19 +662,45 @@ class TaskSegmenter:
         except OSError:
             logger.debug("Failed to save cluster label cache", exc_info=True)
 
+    def _cached_embeddings(
+        self, frames: list[AnnotatedFrame], texts: list[str],
+    ) -> list[list[float] | None]:
+        """Each frame's stored vector for exactly this text and model, or None."""
+        vkb = self._vector_kb
+        if vkb is None or vkb.config.embedding_model != self.config.embedding_model:
+            return [None] * len(frames)
+        cached: list[list[float] | None] = []
+        for frame, text in zip(frames, texts):
+            try:
+                cached.append(
+                    vkb.get_current(
+                        "annotation", frame.event_id, text,
+                        prefix=CLUSTERING_PREFIX,
+                    )
+                    if frame.event_id else None
+                )
+            except sqlite3.Error:
+                logger.debug("Vector KB lookup failed", exc_info=True)
+                cached.append(None)
+        return cached
+
     def segment(
         self,
         events: list[dict],
+        sleep_boundaries: list[tuple[str, str]] | None = None,
     ) -> SegmentationResult:
         """Run the full segmentation pipeline on a batch of annotated events.
 
         Args:
             events: List of event dicts from the DB with completed
                 annotations (scene_annotation_json, frame_diff_json).
+            sleep_boundaries: ``(slept_at, woke_at)`` of each system sleep
+                (``WorkerDB.get_sleep_boundaries``); no segment spans one.
 
         Returns:
             SegmentationResult with task segments grouped by cluster.
         """
+        sleep_starts = _sleep_starts(sleep_boundaries)
         result = SegmentationResult(total_frames_processed=len(events))
 
         if not events:
@@ -686,23 +731,32 @@ class TaskSegmenter:
             proxy = f.annotation.get("_visual_text_proxy", "") if f.annotation else ""
             if proxy and len(proxy) > 20:
                 parts.append(proxy[:500])
-            texts.append(CLUSTERING_PREFIX + " | ".join(parts))
+            texts.append(" | ".join(parts))
+
+        # A frame embedded by an earlier pass keeps its vector in the vector
+        # KB (keyed by event id and text); only the others go to Ollama, so
+        # the 2-hourly pass over a 24-hour window never re-embeds a frame.
+        cached = self._cached_embeddings(frames, texts)
+        missing = [i for i, emb in enumerate(cached) if emb is None]
         try:
             embed_start = time.monotonic()
             embeddings = _compute_embeddings(
-                texts,
+                [texts[i] for i in missing],
                 model=self.config.embedding_model,
                 host=self.config.ollama_host,
-            )
+            ) if missing else []
             result.embedding_time_seconds = time.monotonic() - embed_start
 
-            for i, emb in enumerate(embeddings):
-                if i < len(frames):
+            for i, emb in enumerate(cached):
+                if emb is not None:
                     frames[i].embedding = emb
+            for i, emb in zip(missing, embeddings):
+                frames[i].embedding = emb
 
             logger.info(
-                "Computed %d embeddings in %.1fs",
+                "Computed %d embeddings in %.1fs (%d reused)",
                 len(embeddings), result.embedding_time_seconds,
+                len(frames) - len(missing),
             )
 
             # Store annotation embeddings in vector KB (piggybacks on
@@ -711,16 +765,11 @@ class TaskSegmenter:
                 try:
                     items = [
                         ("annotation", frames[i].event_id, texts[i])
-                        for i in range(len(frames))
-                        if i < len(embeddings) and embeddings[i]
+                        for i, emb in zip(missing, embeddings) if emb
                     ]
-                    valid_embs = [
-                        embeddings[i]
-                        for i in range(len(frames))
-                        if i < len(embeddings) and embeddings[i]
-                    ]
+                    valid_embs = [emb for emb in embeddings if emb]
                     stored = self._vector_kb.upsert_batch(
-                        items, embeddings=valid_embs,
+                        items, embeddings=valid_embs, prefix=CLUSTERING_PREFIX,
                     )
                     logger.info(
                         "Vector KB: %d/%d annotation embeddings stored",
@@ -732,7 +781,7 @@ class TaskSegmenter:
         except (ConnectionError, OllamaError) as exc:
             logger.warning("Embedding failed (Ollama not reachable): %s", exc)
             # Fall back to app-based clustering (no embeddings)
-            return self._fallback_app_clustering(frames, result)
+            return self._fallback_app_clustering(frames, result, sleep_starts)
 
         # Step 3: Cluster by embedding similarity
         clusters = _cluster_frames(frames, self.config.similarity_threshold)
@@ -754,6 +803,7 @@ class TaskSegmenter:
             segs = _split_into_contiguous_segments(
                 cluster_frames, cluster_id,
                 self.config.stitch_max_gap_seconds,
+                sleep_starts,
             )
             # Step 5: Group segments by cluster for SOP generation
             result.segments.extend(segs)
@@ -788,8 +838,12 @@ class TaskSegmenter:
         self,
         segments: list[TaskSegment],
         all_frames: list[AnnotatedFrame],
+        sleep_boundaries: list[tuple[str, str]] | None = None,
     ) -> list[TaskSegment]:
         """Post-process segments to classify and merge interruptions.
+
+        Segments separated by a system sleep (*sleep_boundaries*, as for
+        :meth:`segment`) are never merged, whatever the gap.
 
         Rules:
         - Brief interrupt (<60s): Absorb into parent segment. A 30s Slack check
@@ -809,6 +863,7 @@ class TaskSegmenter:
         # Sort segments by start_time for chronological processing
         sorted_segs = sorted(segments, key=lambda s: _timestamp_to_epoch(s.start_time))
 
+        sleep_starts = _sleep_starts(sleep_boundaries)
         brief_max = self.config.brief_interrupt_max_seconds
         pause_max = self.config.pause_max_minutes * 60  # convert to seconds
         related_max = self.config.related_interrupt_max_seconds
@@ -853,6 +908,11 @@ class TaskSegmenter:
                     continue
 
                 gap_seconds = start_b - end_a
+
+                if _sleep_between(end_a, start_b, sleep_starts):
+                    # The Mac slept in between: separate sessions.
+                    i += 1
+                    continue
 
                 if gap_seconds <= 0:
                     # Overlapping or adjacent — just merge
@@ -1150,6 +1210,7 @@ class TaskSegmenter:
         self,
         frames: list[AnnotatedFrame],
         result: SegmentationResult,
+        sleep_starts: list[float] | None = None,
     ) -> SegmentationResult:
         """Fallback clustering by app name when embeddings are unavailable.
 
@@ -1171,6 +1232,7 @@ class TaskSegmenter:
             segs = _split_into_contiguous_segments(
                 app_frames, cluster_id,
                 self.config.stitch_max_gap_seconds,
+                sleep_starts,
             )
             result.segments.extend(segs)
             result.clusters.setdefault(cluster_id, []).extend(segs)

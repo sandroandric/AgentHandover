@@ -11,8 +11,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Zoom", "title": "Zoom - Join Meeting"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.85, 0.15, 0.00, 0.00]
+      "metadata_json": {}
     },
     {
       "id": "evt-d1-002",
@@ -24,8 +23,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Zoom", "title": "Zoom - Daily Standup"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.86, 0.14, 0.00, 0.00]
+      "metadata_json": {}
     },
     {
       "id": "evt-d1-003",
@@ -37,8 +35,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Zoom", "title": "Zoom - Daily Standup"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.84, 0.16, 0.00, 0.00]
+      "metadata_json": {}
     },
     {
       "id": "evt-d1-004",
@@ -50,8 +47,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Chrome", "title": "Jira - Sprint Board"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.82, 0.18, 0.00, 0.00]
+      "metadata_json": {}
     },
     {
       "id": "evt-d1-005",
@@ -63,8 +59,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Chrome", "title": "Jira - Sprint Board"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.83, 0.17, 0.00, 0.00]
+      "metadata_json": {}
     },
     {
       "id": "evt-d1-006",
@@ -76,8 +71,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Chrome", "title": "Jira - PROJ-101"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.81, 0.19, 0.00, 0.00]
+      "metadata_json": {}
     },
     {
       "id": "evt-d1-007",
@@ -89,8 +83,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Chrome", "title": "Jira - PROJ-102"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.82, 0.18, 0.00, 0.00]
+      "metadata_json": {}
     },
     {
       "id": "evt-d1-008",
@@ -102,8 +95,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Chrome", "title": "Jira - PROJ-101 - Update Status"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.83, 0.17, 0.00, 0.00]
+      "metadata_json": {}
     },
     {
       "id": "evt-d1-009",
@@ -115,8 +107,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Chrome", "title": "Jira - PROJ-101 - Comment"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.84, 0.16, 0.00, 0.00]
+      "metadata_json": {}
     },
     {
       "id": "evt-d1-010",
@@ -128,8 +119,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Chrome", "title": "Jira - Sprint Board Updated"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.85, 0.15, 0.00, 0.00]
+      "metadata_json": {}
     },
 
     {
@@ -142,8 +132,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Zoom", "title": "Zoom - Join Meeting"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.85, 0.15, 0.00, 0.00]
+      "metadata_json": {}
     },
     {
       "id": "evt-d2-002",
@@ -155,8 +144,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Zoom", "title": "Zoom - Daily Standup"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.86, 0.14, 0.00, 0.00]
+      "metadata_json": {}
     },
     {
       "id": "evt-d2-003",
@@ -168,8 +156,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Zoom", "title": "Zoom - Daily Standup"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.84, 0.16, 0.00, 0.00]
+      "metadata_json": {}
     },
     {
       "id": "evt-d2-004",
@@ -181,8 +168,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Chrome", "title": "Jira - Sprint Board"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.82, 0.18, 0.00, 0.00]
+      "metadata_json": {}
     },
     {
       "id": "evt-d2-005",
@@ -194,8 +180,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Chrome", "title": "Jira - Sprint Board"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.83, 0.17, 0.00, 0.00]
+      "metadata_json": {}
     },
     {
       "id": "evt-d2-006",
@@ -207,8 +192,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Chrome", "title": "Jira - PROJ-103"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.81, 0.19, 0.00, 0.00]
+      "metadata_json": {}
     },
     {
       "id": "evt-d2-007",
@@ -220,8 +204,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Chrome", "title": "Jira - PROJ-104"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.82, 0.18, 0.00, 0.00]
+      "metadata_json": {}
     },
     {
       "id": "evt-d2-008",
@@ -233,8 +216,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Chrome", "title": "Jira - PROJ-103 - Update Status"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.83, 0.17, 0.00, 0.00]
+      "metadata_json": {}
     },
     {
       "id": "evt-d2-009",
@@ -246,8 +228,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Chrome", "title": "Jira - PROJ-103 - Comment"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.84, 0.16, 0.00, 0.00]
+      "metadata_json": {}
     },
     {
       "id": "evt-d2-010",
@@ -259,8 +240,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Chrome", "title": "Jira - Sprint Board Updated"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.85, 0.15, 0.00, 0.00]
+      "metadata_json": {}
     },
 
     {
@@ -273,8 +253,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Zoom", "title": "Zoom - Join Meeting"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.85, 0.15, 0.00, 0.00]
+      "metadata_json": {}
     },
     {
       "id": "evt-d3-002",
@@ -286,8 +265,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Zoom", "title": "Zoom - Daily Standup"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.86, 0.14, 0.00, 0.00]
+      "metadata_json": {}
     },
     {
       "id": "evt-d3-003",
@@ -299,8 +277,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Zoom", "title": "Zoom - Daily Standup"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.84, 0.16, 0.00, 0.00]
+      "metadata_json": {}
     },
     {
       "id": "evt-d3-004",
@@ -312,8 +289,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Chrome", "title": "Jira - Sprint Board"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.82, 0.18, 0.00, 0.00]
+      "metadata_json": {}
     },
     {
       "id": "evt-d3-005",
@@ -325,8 +301,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Chrome", "title": "Jira - Sprint Board"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.83, 0.17, 0.00, 0.00]
+      "metadata_json": {}
     },
     {
       "id": "evt-d3-006",
@@ -338,8 +313,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Chrome", "title": "Jira - PROJ-105"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.81, 0.19, 0.00, 0.00]
+      "metadata_json": {}
     },
     {
       "id": "evt-d3-007",
@@ -351,8 +325,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Chrome", "title": "Jira - PROJ-106"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.82, 0.18, 0.00, 0.00]
+      "metadata_json": {}
     },
     {
       "id": "evt-d3-008",
@@ -364,8 +337,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Chrome", "title": "Jira - PROJ-105 - Update Status"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.83, 0.17, 0.00, 0.00]
+      "metadata_json": {}
     },
     {
       "id": "evt-d3-009",
@@ -377,8 +349,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Chrome", "title": "Jira - PROJ-105 - Comment"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.84, 0.16, 0.00, 0.00]
+      "metadata_json": {}
     },
     {
       "id": "evt-d3-010",
@@ -390,8 +361,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Chrome", "title": "Jira - Sprint Board Updated"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.85, 0.15, 0.00, 0.00]
+      "metadata_json": {}
     },
 
     {
@@ -404,8 +374,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Zoom", "title": "Zoom - Join Meeting"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.85, 0.15, 0.00, 0.00]
+      "metadata_json": {}
     },
     {
       "id": "evt-d4-002",
@@ -417,8 +386,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Zoom", "title": "Zoom - Daily Standup"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.86, 0.14, 0.00, 0.00]
+      "metadata_json": {}
     },
     {
       "id": "evt-d4-003",
@@ -430,8 +398,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Zoom", "title": "Zoom - Daily Standup"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.84, 0.16, 0.00, 0.00]
+      "metadata_json": {}
     },
     {
       "id": "evt-d4-004",
@@ -443,8 +410,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Chrome", "title": "Jira - Sprint Board"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.82, 0.18, 0.00, 0.00]
+      "metadata_json": {}
     },
     {
       "id": "evt-d4-005",
@@ -456,8 +422,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Chrome", "title": "Jira - Sprint Board"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.83, 0.17, 0.00, 0.00]
+      "metadata_json": {}
     },
     {
       "id": "evt-d4-006",
@@ -469,8 +434,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Chrome", "title": "Jira - PROJ-107"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.81, 0.19, 0.00, 0.00]
+      "metadata_json": {}
     },
     {
       "id": "evt-d4-007",
@@ -482,8 +446,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Chrome", "title": "Jira - PROJ-108"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.82, 0.18, 0.00, 0.00]
+      "metadata_json": {}
     },
     {
       "id": "evt-d4-008",
@@ -495,8 +458,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Chrome", "title": "Jira - PROJ-107 - Update Status"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.83, 0.17, 0.00, 0.00]
+      "metadata_json": {}
     },
     {
       "id": "evt-d4-009",
@@ -508,8 +470,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Chrome", "title": "Jira - PROJ-107 - Comment"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.84, 0.16, 0.00, 0.00]
+      "metadata_json": {}
     },
     {
       "id": "evt-d4-010",
@@ -521,8 +482,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Chrome", "title": "Jira - Sprint Board Updated"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.85, 0.15, 0.00, 0.00]
+      "metadata_json": {}
     },
 
     {
@@ -535,8 +495,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Zoom", "title": "Zoom - Join Meeting"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.85, 0.15, 0.00, 0.00]
+      "metadata_json": {}
     },
     {
       "id": "evt-d5-002",
@@ -548,8 +507,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Zoom", "title": "Zoom - Daily Standup"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.86, 0.14, 0.00, 0.00]
+      "metadata_json": {}
     },
     {
       "id": "evt-d5-003",
@@ -561,8 +519,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Zoom", "title": "Zoom - Daily Standup"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.84, 0.16, 0.00, 0.00]
+      "metadata_json": {}
     },
     {
       "id": "evt-d5-004",
@@ -574,8 +531,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Chrome", "title": "Jira - Sprint Board"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.82, 0.18, 0.00, 0.00]
+      "metadata_json": {}
     },
     {
       "id": "evt-d5-005",
@@ -587,8 +543,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Chrome", "title": "Jira - Sprint Board"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.83, 0.17, 0.00, 0.00]
+      "metadata_json": {}
     },
     {
       "id": "evt-d5-006",
@@ -600,8 +555,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Chrome", "title": "Jira - PROJ-109"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.81, 0.19, 0.00, 0.00]
+      "metadata_json": {}
     },
     {
       "id": "evt-d5-007",
@@ -613,8 +567,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Chrome", "title": "Jira - PROJ-110"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.82, 0.18, 0.00, 0.00]
+      "metadata_json": {}
     },
     {
       "id": "evt-d5-008",
@@ -626,8 +579,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Chrome", "title": "Jira - PROJ-109 - Update Status"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.83, 0.17, 0.00, 0.00]
+      "metadata_json": {}
     },
     {
       "id": "evt-d5-009",
@@ -639,8 +591,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Chrome", "title": "Jira - PROJ-109 - Comment"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.84, 0.16, 0.00, 0.00]
+      "metadata_json": {}
     },
     {
       "id": "evt-d5-010",
@@ -652,8 +603,27 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Chrome", "title": "Jira - Sprint Board Updated"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.85, 0.15, 0.00, 0.00]
+      "metadata_json": {}
+    }
+  ],
+  "procedures": [
+    {
+      "schema_version": "3.0.0",
+      "id": "daily-standup",
+      "title": "Daily standup",
+      "description": "Join the morning standup on Zoom, then review the sprint board in Jira and update ticket status.",
+      "apps_involved": ["Zoom", "Chrome"],
+      "source": "focus_recording",
+      "steps": [
+        {"step_id": "step_1", "index": 0, "action": "Join the daily standup meeting", "target": "Zoom meeting", "app": "Zoom", "location": "zoom://meeting/123456", "input": "", "verify": "In the meeting", "parameters": {}},
+        {"step_id": "step_2", "index": 1, "action": "Review the Jira sprint board", "target": "Sprint board", "app": "Chrome", "location": "https://jira.atlassian.net/board/42", "input": "", "verify": "Board is open", "parameters": {}},
+        {"step_id": "step_3", "index": 2, "action": "Update Jira ticket status", "target": "Ticket status", "app": "Chrome", "location": "https://jira.atlassian.net/browse/PROJ-101", "input": "", "verify": "Status changed", "parameters": {}}
+      ],
+      "inputs": [],
+      "outputs": [],
+      "branches": [],
+      "staleness": {"last_observed": null, "last_confirmed": null, "drift_signals": [], "confidence_trend": []},
+      "evidence": {"observations": [], "total_observations": 0}
     }
   ],
   "ground_truth": {
@@ -674,48 +644,6 @@
       {"after_event_id": "evt-d3-010", "before_event_id": "evt-d4-001", "reason": "Day 3 standup ends, Day 4 begins"},
       {"after_event_id": "evt-d4-010", "before_event_id": "evt-d5-001", "reason": "Day 4 standup ends, Day 5 begins"},
       {"after_event_id": "evt-d5-010", "before_event_id": null, "reason": "Day 5 standup ends (last day)"}
-    ],
-    "daily_summaries": [
-      {
-        "date": "2026-03-10",
-        "procedures_observed": ["daily-standup"],
-        "active_hours": 0.25,
-        "task_count": 1,
-        "apps_used": ["Zoom", "Chrome"],
-        "tasks": [{"intent": "Daily standup", "matched_procedure": "daily-standup", "start_time": "2026-03-10T09:00:00Z", "duration_minutes": 15, "apps": ["Zoom", "Chrome"]}]
-      },
-      {
-        "date": "2026-03-11",
-        "procedures_observed": ["daily-standup"],
-        "active_hours": 0.25,
-        "task_count": 1,
-        "apps_used": ["Zoom", "Chrome"],
-        "tasks": [{"intent": "Daily standup", "matched_procedure": "daily-standup", "start_time": "2026-03-11T09:00:00Z", "duration_minutes": 15, "apps": ["Zoom", "Chrome"]}]
-      },
-      {
-        "date": "2026-03-12",
-        "procedures_observed": ["daily-standup"],
-        "active_hours": 0.25,
-        "task_count": 1,
-        "apps_used": ["Zoom", "Chrome"],
-        "tasks": [{"intent": "Daily standup", "matched_procedure": "daily-standup", "start_time": "2026-03-12T09:00:00Z", "duration_minutes": 15, "apps": ["Zoom", "Chrome"]}]
-      },
-      {
-        "date": "2026-03-13",
-        "procedures_observed": ["daily-standup"],
-        "active_hours": 0.25,
-        "task_count": 1,
-        "apps_used": ["Zoom", "Chrome"],
-        "tasks": [{"intent": "Daily standup", "matched_procedure": "daily-standup", "start_time": "2026-03-13T09:00:00Z", "duration_minutes": 15, "apps": ["Zoom", "Chrome"]}]
-      },
-      {
-        "date": "2026-03-14",
-        "procedures_observed": ["daily-standup"],
-        "active_hours": 0.25,
-        "task_count": 1,
-        "apps_used": ["Zoom", "Chrome"],
-        "tasks": [{"intent": "Daily standup", "matched_procedure": "daily-standup", "start_time": "2026-03-14T09:00:00Z", "duration_minutes": 15, "apps": ["Zoom", "Chrome"]}]
-      }
     ]
   }
 }

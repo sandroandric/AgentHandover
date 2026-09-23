@@ -11,6 +11,8 @@ warn() { WARNINGS="${WARNINGS}\n  ! $1"; }
 # script unprivileged into a temporary prefix. AH_NO_SERVICES=1 skips
 # everything that touches the live login session (launchctl, tccutil,
 # defaults, opening the app) so a test install cannot disturb a real one.
+# (The grant reset after a code-signature change is not gated by it: it
+# only runs for the app at AH_APP_PATH, under that app's own bundle id.)
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=resolve-user.sh
 . "${SCRIPT_DIR}/resolve-user.sh"
@@ -53,8 +55,11 @@ sed -i '' \
     "${LAUNCH_AGENTS}/com.agenthandover.worker.plist"
 chown "${CONSOLE_USER}" "${LAUNCH_AGENTS}/com.agenthandover.worker.plist"
 
-# Create default config if none exists
+# Create default config if none exists. Its [vlm] block is appended once
+# the worker is installed (the tier table lives in the worker).
+CONFIG_CREATED=0
 if [ ! -f "${DATA_DIR}/config.toml" ]; then
+    CONFIG_CREATED=1
     cat > "${DATA_DIR}/config.toml" << 'TOML'
 # AgentHandover Configuration
 # See https://github.com/sandroandric/AgentHandover for documentation
@@ -217,6 +222,23 @@ else
     fi
 fi
 
+# The model tier table (model_profiles.TIERS in the worker) as tiers.json:
+# the app's onboarding and `agenthandover setup` read it, so they name the
+# same models as the worker. A new config gets the [vlm] block of the
+# "standard" tier, the pair every Mac can run; onboarding replaces it with
+# the tier the user picks.
+if ! as_user "${VENV}/bin/python" -m agenthandover_worker.model_profiles \
+        write-tiers "${DATA_DIR}/tiers.json"; then
+    warn "could not write ${DATA_DIR}/tiers.json; onboarding cannot list the model tiers"
+fi
+if [ "${CONFIG_CREATED}" -eq 1 ]; then
+    if VLM_BLOCK=$(as_user "${VENV}/bin/python" -m agenthandover_worker.model_profiles vlm-block standard); then
+        printf '\n%s\n' "${VLM_BLOCK}" >> "${DATA_DIR}/config.toml"
+    else
+        warn "could not write the [vlm] block to config.toml"
+    fi
+fi
+
 # Ownership and permissions. The daemon binary holds Screen Recording and
 # Accessibility, so nothing but the venv may be writable by the user.
 # Re-asserted on every install so earlier installs that chowned the whole
@@ -235,6 +257,28 @@ for cmd in agenthandover-mcp agenthandover-connect agenthandover-worker; do
     fi
 done
 
+# Upgrade that changed the app's code identity (preinstall saved the old
+# designated requirement): the old Accessibility and Screen Recording
+# grants stay switched ON in System Settings but no longer apply, and
+# onboarding would ask the user to toggle on a switch that is already on.
+# Reset both so the app is asked for them again. The bundle id comes from
+# the installed app itself, so a test install into a temporary prefix
+# (whose app has its own id) can never reset the real app's grants.
+APP_DR_FILE="${LIB_DIR}/.app-designated-requirement"
+if [ -f "${APP_DR_FILE}" ] && [ -d "${APP_PATH}" ]; then
+    NEW_APP_DR=$(codesign -dr - "${APP_PATH}" 2>/dev/null || echo "unreadable")
+    if [ "${NEW_APP_DR}" != "$(cat "${APP_DR_FILE}")" ]; then
+        APP_ID=$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" \
+            "${APP_PATH}/Contents/Info.plist" 2>/dev/null || echo "com.agenthandover.app")
+        echo "  The app's code signature changed: resetting its Accessibility and Screen Recording grants (${APP_ID})."
+        as_user tccutil reset Accessibility "${APP_ID}" >/dev/null 2>&1 \
+            || warn "could not reset the Accessibility grant; in System Settings remove AgentHandover with - and add it again"
+        as_user tccutil reset ScreenCapture "${APP_ID}" >/dev/null 2>&1 \
+            || warn "could not reset the Screen Recording grant; in System Settings remove AgentHandover with - and add it again"
+    fi
+fi
+rm -f "${APP_DR_FILE}"
+
 if [ "${NO_SERVICES}" != "1" ]; then
     if [ "${IS_FRESH}" -eq 1 ]; then
         # Clear the stale pre-v0.2.1 daemon TCC identity so users only see
@@ -243,6 +287,8 @@ if [ "${NO_SERVICES}" != "1" ]; then
         as_user tccutil reset ScreenCapture com.agenthandover.daemon >/dev/null 2>&1 || true
         as_user tccutil reset Accessibility com.agenthandover.daemon >/dev/null 2>&1 || true
         as_user defaults write com.agenthandover.app hasCompletedOnboarding -bool false || warn "could not reset onboarding state"
+        # A setup step saved by an earlier install (the app resumes setup there).
+        as_user defaults delete com.agenthandover.app onboardingStep >/dev/null 2>&1 || true
     fi
     as_user launchctl disable "gui/${CONSOLE_UID}/com.agenthandover.daemon" 2>/dev/null || true
 fi

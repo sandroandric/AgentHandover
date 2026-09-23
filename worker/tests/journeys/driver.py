@@ -10,14 +10,15 @@ the loop body's processors in the loop's order:
 1. ``trigger_spool.drain`` over main()'s trigger handlers (retry, approve,
    failed query, search, recall, trust accept / dismiss, staleness
    reviewed, lifecycle promote, merge, drift reviewed, lifecycle dismiss,
-   export) and the curation queue refresh;
+   export) and, when a trigger was consumed, the curation queue refresh;
 2. the stale focus-session sweep, then ``_process_focus_sessions_v2``
    (or the v1 path when the v2 pipeline is off);
 3. ``run_pipeline`` over one ``EventRetryGuard`` batch of unprocessed
    events, marking them processed and persisting VLM jobs;
 4. ``_process_annotations`` and ``_process_diffs``;
-5. ``_process_passive_discovery`` every 2 hours of *clock* time while no
-   focus session is pending;
+5. ``_process_passive_discovery`` every 2 hours of *clock* time (the timer
+   starts when the worker is built, as main() seeds it at loop entry)
+   while no focus session is pending;
 6. ``_write_sops_index``.
 
 Not driven here, because they only exist inline in ``main()``: the VLM
@@ -111,7 +112,9 @@ class JourneyWorker:
         self.clock = clock
         self.state_dir = wm._status_dir()
         self.screenshots_dir = self.state_dir / "screenshots"
-        self._last_passive_discovery: datetime | None = None
+        self._last_passive_discovery = clock.now()
+        # main()'s memory of the episode store at the last SOP mining run.
+        self.mining_watermark: dict = {}
 
         cfg = load_config()
         self.cfg = cfg
@@ -125,12 +128,15 @@ class JourneyWorker:
 
         self.vlm_queue = wm.VLMFallbackQueue()
         llm_reasoner = LLMReasoner(
-            config=ReasoningConfig(ollama_host=host), vlm_queue=self.vlm_queue,
+            config=ReasoningConfig(model=vlm_cfg.reasoner_model, ollama_host=host),
+            vlm_queue=self.vlm_queue,
         )
         # Vector KB with main()'s health check (unavailable -> None),
         # built before its consumers as main() builds it.
         self.vector_kb = None
-        vector_kb = VectorKB(self.db_path, VectorKBConfig(ollama_host=host))
+        vector_kb = VectorKB(self.db_path, VectorKBConfig(
+            embedding_model=cfg.embedding.model, ollama_host=host,
+        ))
         try:
             embedding = vector_kb.compute_embeddings(["health check"])
         except (ConnectionError, OllamaError):
@@ -242,7 +248,6 @@ class JourneyWorker:
                 config=wm.AnnotationConfig(
                     model=vlm_cfg.annotation_model,
                     ollama_host=host,
-                    stale_skip_count=vlm_cfg.stale_skip_count,
                     sliding_window_max_age_sec=vlm_cfg.sliding_window_max_age_sec,
                     timeout_seconds=vlm_cfg.annotation_timeout_seconds,
                 ),
@@ -262,7 +267,9 @@ class JourneyWorker:
                 sop_generator=self.sop_generator,
             )
             self.task_segmenter = wm.TaskSegmenter(
-                config=wm.SegmenterConfig(ollama_host=host),
+                config=wm.SegmenterConfig(
+                    embedding_model=cfg.embedding.model, ollama_host=host,
+                ),
                 llm_reasoner=llm_reasoner,
                 cluster_label_store=kb.root / "observations" / "cluster_labels.json",
                 vector_kb=self.vector_kb,
@@ -369,7 +376,8 @@ class JourneyWorker:
             self.vector_kb.reset_cycle_budget()
 
         triggers_consumed = trigger_spool.drain(self.state_dir, self.trigger_handlers)
-        wm._write_curation_queue(self.procedure_curator, force=True)
+        if triggers_consumed:
+            wm._write_curation_queue(self.procedure_curator)
 
         wm._sweep_stale_focus_session(self.state_dir, self.focus_max_session_hours)
         if self.focus_processor is not None and self.v2_schema_ok:
@@ -417,6 +425,7 @@ class JourneyWorker:
                 sop_enhancer=self.sop_enhancer,
                 db=db,
                 sop_auto_approve=self.sop_auto_approve,
+                mining_watermark=self.mining_watermark,
                 **writers,
             )
             if summary["sops_exported"] > 0:
@@ -459,6 +468,7 @@ class JourneyWorker:
                 continuity_tracker=self.continuity_tracker,
                 variant_detector=self.variant_detector,
                 evidence_normalizer=self.evidence_normalizer,
+                now=self.clock.now(),
                 **writers,
             )
             self._last_passive_discovery = self.clock.now()
@@ -476,7 +486,5 @@ class JourneyWorker:
         }
 
     def _passive_discovery_due(self) -> bool:
-        # main() starts its timer at 0 on a monotonic clock, so the first
-        # iteration after start-up is due; later ones every 2 hours.
-        last = self._last_passive_discovery
-        return last is None or self.clock.now() - last >= PASSIVE_DISCOVERY_INTERVAL
+        # main() seeds its timer when the loop starts: due every 2 hours.
+        return self.clock.now() - self._last_passive_discovery >= PASSIVE_DISCOVERY_INTERVAL

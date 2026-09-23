@@ -10,10 +10,9 @@ journey never reaches a service running on the machine.
 
 from __future__ import annotations
 
-import json
 import socket
 from contextlib import ExitStack
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
@@ -36,21 +35,10 @@ def _closed_port_host() -> str:
         return f"http://127.0.0.1:{sock.getsockname()[1]}"
 
 
-# The measured target model split (WP-C6): journeys record and replay with
-# these, so a cassette holds the answers of the models a user runs.
-JOURNEY_MODELS = {
-    "annotation_model": "qwen3.5:4b",
-    "sop_model": "gemma4:12b-it-qat",
-}
-
-
 @dataclass
 class TempHome:
     path: Path
     monkeypatch: pytest.MonkeyPatch
-    ollama_host: str = ""
-    vlm: dict = field(default_factory=dict)
-    extra: str = ""
 
     @property
     def data_dir(self) -> Path:
@@ -64,32 +52,22 @@ class TempHome:
         return self.path / ".config" / "agenthandover" / "config.toml"
 
     def configure(
-        self,
-        *,
-        ollama_host: str | None = None,
-        vlm: dict | None = None,
-        extra: str | None = None,
+        self, *, ollama_host: str, tier: str = "standard", extra: str = "",
     ) -> None:
-        """Write ``config.toml``.  Each argument replaces what an earlier call
-        set; the others are kept.  ``vlm`` holds more ``[vlm]`` keys,
-        ``extra`` is appended verbatim (more TOML sections)."""
-        if ollama_host is not None:
-            self.ollama_host = ollama_host
-        if vlm is not None:
-            self.vlm = dict(vlm)
-        if extra is not None:
-            self.extra = extra
-        vlm_lines = "".join(
-            f"{key} = {json.dumps(value)}\n" for key, value in self.vlm.items()
-        )
+        """Write ``config.toml``; ``extra`` is appended verbatim (more TOML sections).
+
+        ``tier`` names the RAM tier whose models the worker runs, so a
+        journey's model calls (and its cassette keys) do not depend on the
+        RAM of the machine running the test.
+        """
         self.config_file.parent.mkdir(parents=True, exist_ok=True)
         self.config_file.write_text(
-            f'[vlm]\nollama_host = "{self.ollama_host}"\n{vlm_lines}\n'
+            f'[vlm]\nollama_host = "{ollama_host}"\ntier = "{tier}"\n\n'
             "[knowledge]\nquery_api_enabled = false\n"
-            + (f"\n{self.extra}\n" if self.extra else ""),
+            + (f"\n{extra}\n" if extra else ""),
             encoding="utf-8",
         )
-        self.monkeypatch.setenv("OLLAMA_HOST", self.ollama_host)
+        self.monkeypatch.setenv("OLLAMA_HOST", ollama_host)
 
 
 @pytest.fixture()
@@ -125,9 +103,11 @@ def cassette(temp_home: TempHome) -> Callable[..., Cassette]:
     the worker's config at it.  A replay miss fails the test at teardown."""
     with ExitStack() as stack:
 
-        def start(journey: str, *, record: bool | None = None) -> Cassette:
+        def start(
+            journey: str, *, record: bool | None = None, tier: str = "standard",
+        ) -> Cassette:
             tape = stack.enter_context(open_cassette(journey, record=record))
-            temp_home.configure(ollama_host=tape.host)
+            temp_home.configure(ollama_host=tape.host, tier=tier)
             return tape
 
         yield start

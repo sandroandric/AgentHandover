@@ -17,10 +17,12 @@ Key features:
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import re
 import sqlite3
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -144,6 +146,17 @@ def _calculate_active_minutes(timestamps: list[str]) -> int:
     return int(total_seconds / 60)
 
 
+def _locked(method):
+    """Run an ActivitySearcher method while holding the instance lock."""
+
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with self._lock:
+            return method(self, *args, **kwargs)
+
+    return wrapper
+
+
 class ActivitySearcher:
     """Full-text + structured search over VLM annotations.
 
@@ -164,7 +177,11 @@ class ActivitySearcher:
             raise FileNotFoundError(f"Database file does not exist: {resolved}")
 
         self._db_path = str(resolved)
-        self._conn = sqlite3.connect(self._db_path)
+        # One connection shared by the worker loop and the query API's
+        # HTTP thread; every public method holds ``_lock`` so the two never
+        # interleave (and two index fills cannot insert duplicate rows).
+        self._lock = threading.RLock()
+        self._conn = sqlite3.connect(self._db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA busy_timeout = 5000;")
 
@@ -181,6 +198,7 @@ class ActivitySearcher:
     # Public API
     # ------------------------------------------------------------------
 
+    @_locked
     def search(
         self,
         query: str,
@@ -289,6 +307,7 @@ class ActivitySearcher:
 
         return results
 
+    @_locked
     def session_recall(
         self,
         *,
@@ -392,6 +411,7 @@ class ActivitySearcher:
             apps_used=list(apps_seen.keys()),
         )
 
+    @_locked
     def close(self) -> None:
         """Close the underlying database connection."""
         try:
@@ -414,11 +434,13 @@ class ActivitySearcher:
     # ------------------------------------------------------------------
 
     def _ensure_fts_index(self) -> None:
-        """Create the FTS5 virtual table if it does not exist.
+        """Create the FTS5 table and its ``events_fts_ids`` shadow if missing.
 
+        ``events_fts_ids`` maps each indexed event id to its FTS rowid, so
+        finding unindexed events is a primary-key lookup per event rather
+        than a scan of the FTS table, and pruning deletes by rowid.
         Called lazily on the first ``search()`` or ``session_recall()``
-        invocation.  If the table already exists (from a previous run)
-        it is a fast no-op.
+        invocation.
         """
         if self._fts_ready:
             return
@@ -427,6 +449,18 @@ class ActivitySearcher:
             self._conn.execute(
                 "CREATE VIRTUAL TABLE IF NOT EXISTS events_fts "
                 "USING fts5(event_id, what_doing, app, location)"
+            )
+            self._conn.execute(
+                "CREATE TABLE IF NOT EXISTS events_fts_ids ("
+                "  event_id TEXT PRIMARY KEY,"
+                "  fts_rowid INTEGER NOT NULL"
+                ")"
+            )
+            # An index built before the shadow table existed: record its rows.
+            self._conn.execute(
+                "INSERT OR IGNORE INTO events_fts_ids (event_id, fts_rowid) "
+                "SELECT event_id, rowid FROM events_fts "
+                "WHERE NOT EXISTS (SELECT 1 FROM events_fts_ids LIMIT 1)"
             )
             self._conn.commit()
         except sqlite3.OperationalError as exc:
@@ -438,47 +472,40 @@ class ActivitySearcher:
         self._fts_ready = True
 
     def _populate_fts_index(self) -> int:
-        """Fill the FTS5 table from existing scene annotations.
-
-        Only inserts rows that are not already present in the FTS5 table.
-        Uses a SQL NOT EXISTS subquery to avoid loading all indexed IDs
-        into Python memory.
+        """Index annotated events that are not in the FTS5 table yet.
 
         Returns the number of new entries added.
         """
-        # Fetch annotated events not yet in the FTS table using SQL
-        # to filter, avoiding unbounded memory from loading all IDs.
         cur = self._conn.execute(
             "SELECT e.id, e.scene_annotation_json FROM events e "
             "WHERE e.annotation_status = 'completed' "
             "  AND e.scene_annotation_json IS NOT NULL "
             "  AND NOT EXISTS ("
-            "    SELECT 1 FROM events_fts f WHERE f.event_id = e.id"
+            "    SELECT 1 FROM events_fts_ids i WHERE i.event_id = e.id"
             "  )"
         )
 
-        batch: list[tuple[str, str, str, str]] = []
+        added = 0
         for row in cur.fetchall():
             parsed = _parse_annotation(row["scene_annotation_json"])
-            batch.append((
-                row["id"],
-                parsed["what_doing"],
-                parsed["app"],
-                parsed["location"],
-            ))
+            fts = self._conn.execute(
+                "INSERT INTO events_fts(event_id, what_doing, app, location) "
+                "VALUES (?, ?, ?, ?)",
+                (row["id"], parsed["what_doing"], parsed["app"], parsed["location"]),
+            )
+            self._conn.execute(
+                "INSERT INTO events_fts_ids (event_id, fts_rowid) VALUES (?, ?)",
+                (row["id"], fts.lastrowid),
+            )
+            added += 1
 
-        if not batch:
+        if not added:
             return 0
-
-        self._conn.executemany(
-            "INSERT INTO events_fts(event_id, what_doing, app, location) "
-            "VALUES (?, ?, ?, ?)",
-            batch,
-        )
         self._conn.commit()
-        logger.info("Populated FTS5 index with %d new entries", len(batch))
-        return len(batch)
+        logger.info("Populated FTS5 index with %d new entries", added)
+        return added
 
+    @_locked
     def refresh_index(self) -> int:
         """Re-scan events and add any new annotations to the FTS5 index.
 
@@ -486,6 +513,30 @@ class ActivitySearcher:
         """
         self._ensure_fts_index()
         return self._populate_fts_index()
+
+    @_locked
+    def prune_index(self) -> int:
+        """Drop index entries whose event the daemon has deleted.
+
+        Run with the daily maintenance, after the daemon's retention pass
+        has removed old events.  Returns the number of entries removed.
+        """
+        self._ensure_fts_index()
+        gone = self._conn.execute(
+            "SELECT event_id, fts_rowid FROM events_fts_ids i "
+            "WHERE NOT EXISTS (SELECT 1 FROM events e WHERE e.id = i.event_id)"
+        ).fetchall()
+        if not gone:
+            return 0
+        self._conn.executemany(
+            "DELETE FROM events_fts WHERE rowid = ?", [(r[1],) for r in gone],
+        )
+        self._conn.executemany(
+            "DELETE FROM events_fts_ids WHERE event_id = ?", [(r[0],) for r in gone],
+        )
+        self._conn.commit()
+        logger.info("Pruned %d search index entries of deleted events", len(gone))
+        return len(gone)
 
 
 _HHMM_RE = re.compile(r"^\d{2}:\d{2}$")

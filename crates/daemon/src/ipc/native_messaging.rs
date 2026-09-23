@@ -17,6 +17,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
+use agenthandover_common::browser_transition::BrowserTransitionKind;
 use agenthandover_common::event::*;
 
 // ---------------------------------------------------------------------------
@@ -53,6 +54,12 @@ pub enum ExtensionMessageType {
     DwellSnapshot,
     ScrollSnapshot,
     SecureFieldStatus,
+    /// A `paste` DOM event (Cmd-V, Edit > Paste, context menu).
+    Paste,
+    /// The active tab committed a navigation (`tabs.onUpdated`).
+    NavigationChange,
+    /// A form was submitted in a page (content-script `submit` listener).
+    FormSubmit,
 }
 
 /// Top-level envelope for an inbound native message from the browser extension.
@@ -473,6 +480,25 @@ where
 /// Returns `None` for message types that do not directly map to an event
 /// (currently all defined types map, but this keeps the API extensible).
 fn convert_to_event(msg: &ExtensionMessage) -> Option<Event> {
+    // Only origin + pathname of the page URL is stored: query strings and
+    // fragments carry search terms, session ids, reset tokens and email
+    // addresses.  The sanitized URL replaces the payload's `url` so neither
+    // the window title fallback nor the metadata keeps the original.
+    let mut metadata = msg.payload.clone();
+    let url = match metadata.get("url").and_then(|v| v.as_str()) {
+        Some(raw) => {
+            let stripped = strip_url_to_origin_and_path(raw);
+            metadata["url"] = serde_json::Value::String(stripped.clone());
+            stripped
+        }
+        None => "unknown".to_string(),
+    };
+    let title = msg
+        .payload
+        .get("title")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
     let kind = match &msg.msg_type {
         ExtensionMessageType::ContentReady => EventKind::FocusChange,
         ExtensionMessageType::DomSnapshot => EventKind::DwellSnapshot,
@@ -497,21 +523,33 @@ fn convert_to_event(msg: &ExtensionMessage) -> Option<Event> {
         ExtensionMessageType::DwellSnapshot => EventKind::DwellSnapshot,
         ExtensionMessageType::ScrollSnapshot => EventKind::ScrollReadSnapshot,
         ExtensionMessageType::SecureFieldStatus => EventKind::SecureFieldFocus,
+        // The pasted content's hash is added by `capture::paste::resolve_paste`.
+        ExtensionMessageType::Paste => EventKind::PasteDetected { matched_copy_hash: None },
+        ExtensionMessageType::NavigationChange => EventKind::NavigationChange {
+            url: url.clone(),
+            title: title.clone().unwrap_or_default(),
+        },
+        ExtensionMessageType::FormSubmit => {
+            let mut form_anchor = msg
+                .payload
+                .get("formAnchor")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!({}));
+            // The form's action URL gets the same origin + path treatment.
+            if let Some(action) = form_anchor.get("action").and_then(|v| v.as_str()) {
+                form_anchor["action"] =
+                    serde_json::Value::String(strip_url_to_origin_and_path(action));
+            }
+            if let Some(anchor) = metadata.get_mut("formAnchor") {
+                *anchor = form_anchor.clone();
+            }
+            EventKind::FormSubmit {
+                url: url.clone(),
+                form_anchor,
+            }
+        }
     };
 
-    // Only origin + pathname of the page URL is stored: query strings and
-    // fragments carry search terms, session ids, reset tokens and email
-    // addresses.  The sanitized URL replaces the payload's `url` so neither
-    // the window title fallback nor the metadata keeps the original.
-    let mut metadata = msg.payload.clone();
-    let url = match metadata.get("url").and_then(|v| v.as_str()) {
-        Some(raw) => {
-            let stripped = strip_url_to_origin_and_path(raw);
-            metadata["url"] = serde_json::Value::String(stripped.clone());
-            stripped
-        }
-        None => "unknown".to_string(),
-    };
     let tab_id = msg
         .payload
         .get("tabId")
@@ -521,12 +559,7 @@ fn convert_to_event(msg: &ExtensionMessage) -> Option<Event> {
     let window = Some(WindowInfo {
         window_id: format!("chrome-tab-{}", tab_id),
         app_id: "com.google.Chrome".to_string(),
-        title: msg
-            .payload
-            .get("title")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-            .unwrap_or(url.clone()),
+        title: title.unwrap_or(url),
         bounds_global_px: [0, 0, 0, 0],
         z_order: 0,
         is_fullscreen: false,
@@ -544,7 +577,20 @@ fn convert_to_event(msg: &ExtensionMessage) -> Option<Event> {
         artifact_ids: vec![],
         metadata,
         display_ids_spanned: None,
+        focused_element: None,
     })
+}
+
+/// The screen transition a browser event stands for, if any: the bridge
+/// hands these to the observer (`browser_transition`) so it captures a
+/// frame of the page the user just acted on.
+pub fn browser_transition_kind(kind: &EventKind) -> Option<BrowserTransitionKind> {
+    match kind {
+        EventKind::NavigationChange { .. } => Some(BrowserTransitionKind::Navigation),
+        EventKind::FormSubmit { .. } => Some(BrowserTransitionKind::FormSubmit),
+        EventKind::ClickIntent { .. } => Some(BrowserTransitionKind::Click),
+        _ => None,
+    }
 }
 
 /// Reduce a URL to origin + pathname: drop the query string, the fragment
@@ -669,6 +715,87 @@ mod tests {
             }
             other => panic!("expected ClickIntent, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_convert_paste() {
+        let msg: ExtensionMessage = serde_json::from_value(serde_json::json!({
+            "type": "paste",
+            "seq": 7,
+            "timestamp": "2026-01-01T00:00:00Z",
+            "payload": {
+                "target": {"tagName": "TEXTAREA", "ariaLabel": "Comment"},
+                "tabId": 3,
+                "url": "https://tracker.example.com/issues/12?draft=1",
+            },
+        }))
+        .unwrap();
+        let event = convert_to_event(&msg).unwrap();
+        assert_eq!(event.kind, EventKind::PasteDetected { matched_copy_hash: None });
+        assert_eq!(event.metadata["url"], "https://tracker.example.com/issues/12");
+        assert_eq!(event.metadata["target"]["ariaLabel"], "Comment");
+    }
+
+    #[test]
+    fn test_convert_navigation_change() {
+        let msg: ExtensionMessage = serde_json::from_value(serde_json::json!({
+            "type": "navigation_change",
+            "seq": 3,
+            "timestamp": "2026-01-01T00:00:00Z",
+            "payload": {
+                "url": "https://mail.example.com/inbox?q=invoice#msg-1",
+                "title": "Inbox - Mail",
+                "tabId": 7
+            }
+        }))
+        .unwrap();
+        let event = convert_to_event(&msg).unwrap();
+        assert_eq!(
+            event.kind,
+            EventKind::NavigationChange {
+                url: "https://mail.example.com/inbox".into(),
+                title: "Inbox - Mail".into(),
+            }
+        );
+        assert_eq!(event.metadata["url"], "https://mail.example.com/inbox");
+        assert_eq!(event.window.as_ref().unwrap().title, "Inbox - Mail");
+        assert_eq!(
+            browser_transition_kind(&event.kind),
+            Some(BrowserTransitionKind::Navigation)
+        );
+    }
+
+    #[test]
+    fn test_convert_form_submit_strips_action_url() {
+        let msg: ExtensionMessage = serde_json::from_value(serde_json::json!({
+            "type": "form_submit",
+            "seq": 4,
+            "timestamp": "2026-01-01T00:00:00Z",
+            "payload": {
+                "url": "https://shop.example.com/checkout?session=abc",
+                "tabId": 7,
+                "formAnchor": {
+                    "tag": "form",
+                    "name": "checkout",
+                    "action": "https://shop.example.com/pay?token=secret",
+                    "method": "post",
+                    "submitter": {"tagName": "button", "text": "Pay now"}
+                }
+            }
+        }))
+        .unwrap();
+        let event = convert_to_event(&msg).unwrap();
+        let EventKind::FormSubmit { url, form_anchor } = &event.kind else {
+            panic!("expected FormSubmit, got {:?}", event.kind);
+        };
+        assert_eq!(url, "https://shop.example.com/checkout");
+        assert_eq!(form_anchor["action"], "https://shop.example.com/pay");
+        assert_eq!(form_anchor["submitter"]["text"], "Pay now");
+        assert_eq!(event.metadata["formAnchor"]["action"], "https://shop.example.com/pay");
+        assert_eq!(
+            browser_transition_kind(&event.kind),
+            Some(BrowserTransitionKind::FormSubmit)
+        );
     }
 
     #[test]
