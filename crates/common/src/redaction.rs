@@ -2,8 +2,73 @@ use regex::Regex;
 
 pub struct Redactor {
     patterns: Vec<(Regex, &'static str)>,
+    passwords: PasswordRules,
     cc_pattern: Regex,
     high_entropy_pattern: Regex,
+}
+
+/// Passwords (the worker's `redaction.py` has the same rules). A value is
+/// dropped, its label kept, when it follows
+/// - a label and `=` (`pwd=x`, stopping at `&` as in a query) or `:`
+///   (`password: x`, `pw: x`);
+/// - a PIN label (`PIN 1234`, `passcode: 482913`): 4-8 digits;
+/// - `password is x`, `my password's x`, or the bare `passcode x` (a
+///   password manager's `password  x` column): only when the value looks
+///   like a secret (a digit, a symbol inside it, or an inner capital), so
+///   prose that mentions passwords ("reset your password", "password is
+///   required") is left alone.
+struct PasswordRules {
+    equals: Regex,
+    colon: Regex,
+    pin: Regex,
+    phrase: Regex,
+    secret_like: Regex,
+}
+
+const PW_LABEL: &str = r"(?:pass(?:word|wd|phrase|code)|pwd|pw)";
+const PW_TOKEN: &str = "[REDACTED_PASSWORD]";
+const WRAP_OPEN: &[char] = &['(', '[', '{', '<', '\'', '"', '\u{201c}', '\u{2018}'];
+const WRAP_CLOSE: &[char] = &['.', ',', ';', ':', ')', ']', '}', '>', '\'', '"', '\u{201d}', '\u{2019}'];
+
+impl PasswordRules {
+    fn new() -> Self {
+        Self {
+            equals: Regex::new(&format!(r#"(?i)\b({PW_LABEL}[ \t]*=[ \t]*)['"]?[^\s'"&,;]+['"]?"#)).unwrap(),
+            colon: Regex::new(&format!(r#"(?i)\b({PW_LABEL}[ \t]*:[ \t]*)['"]?[^\s'",;]+['"]?"#)).unwrap(),
+            pin: Regex::new(
+                r"(?i)\b((?:pin|passcode)(?:[ \t]+(?:code|number))?(?:[ \t]+is)?[ \t]*[:=#]?[ \t]*)\d{4,8}\b",
+            )
+            .unwrap(),
+            phrase: Regex::new(&format!(
+                r"(?i)\b({PW_LABEL}(?:['\x{{2019}}]s|[ \t]+(?:is|was))?:?[ \t]+)(\S+)"
+            ))
+            .unwrap(),
+            secret_like: Regex::new(r"\d|[^\w]|[a-z][A-Z]").unwrap(),
+        }
+    }
+
+    fn redact(&self, input: &str) -> String {
+        let text = self.equals.replace_all(input, format!("${{1}}{PW_TOKEN}"));
+        let text = self.colon.replace_all(&text, format!("${{1}}{PW_TOKEN}"));
+        let text = self.pin.replace_all(&text, "${1}[REDACTED_PIN]");
+        self.phrase
+            .replace_all(&text, |caps: &regex::Captures| {
+                let value = &caps[2];
+                let core = value.trim_start_matches(WRAP_OPEN);
+                let lead = &value[..value.len() - core.len()];
+                let stripped = core.trim_end_matches(WRAP_CLOSE);
+                let trail = &core[stripped.len()..];
+                if stripped.chars().count() < 4
+                    || stripped.starts_with("[REDACTED")
+                    || !self.secret_like.is_match(stripped)
+                {
+                    caps[0].to_string()
+                } else {
+                    format!("{}{lead}{PW_TOKEN}{trail}", &caps[1])
+                }
+            })
+            .into_owned()
+    }
 }
 
 /// Validate a number string using the Luhn algorithm.
@@ -67,10 +132,6 @@ impl Redactor {
             (Regex::new(r"\b(hf_[A-Za-z0-9]{30,})").unwrap(), "[REDACTED_HF_TOKEN]"),
             // JSON Web Tokens: three base64url segments, header starts with `{"`
             (Regex::new(r"\b(eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,})").unwrap(), "[REDACTED_JWT]"),
-            // Labelled secrets (`password: hunter2`, `pwd=hunter2`): keep the
-            // label, drop the value. The value stops at whitespace, a quote or
-            // a URL/list separator so the rest of the line survives.
-            (Regex::new(r#"(?i)\b((?:password|passwd|passphrase|pwd)[ \t]*[=:][ \t]*)['"]?[^\s'"&,;]+['"]?"#).unwrap(), "${1}[REDACTED_PASSWORD]"),
         ];
 
         // Credit card pattern — matches are validated with Luhn before redacting.
@@ -81,7 +142,7 @@ impl Redactor {
         // standard hash lengths but catches genuinely suspicious long hex secrets.
         let high_entropy_pattern = Regex::new(r"\b([a-f0-9]{80,})\b").unwrap();
 
-        Self { patterns, cc_pattern, high_entropy_pattern }
+        Self { patterns, passwords: PasswordRules::new(), cc_pattern, high_entropy_pattern }
     }
 
     pub fn redact(&self, input: &str) -> String {
@@ -90,6 +151,7 @@ impl Redactor {
         for (pattern, replacement) in &self.patterns {
             output = pattern.replace_all(&output, *replacement).to_string();
         }
+        output = self.passwords.redact(&output);
 
         // Credit card numbers — only redact if they pass the Luhn check
         output = self.cc_pattern.replace_all(&output, |caps: &regex::Captures| {
@@ -112,6 +174,9 @@ impl Redactor {
             if pattern.is_match(input) {
                 return true;
             }
+        }
+        if self.passwords.redact(input) != input {
+            return true;
         }
         // Check CC with Luhn validation
         if let Some(caps) = self.cc_pattern.captures(input) {

@@ -142,3 +142,56 @@ fn test_does_not_redact_prefix_lookalikes() {
         assert_eq!(r.redact(input), input);
     }
 }
+
+/// WP-F1: password phrasing and PINs (the worker's `redaction.py` has the
+/// same rules and the same cases in `test_redaction.py`).
+#[test]
+fn test_redacts_password_phrasing_and_pins() {
+    let r = Redactor::new();
+    for (input, expected) in [
+        ("my password is hunter22", "my password is [REDACTED_PASSWORD]"),
+        (
+            "The staging GitHub password is Tr0ub4dor&3-horse-battery",
+            "The staging GitHub password is [REDACTED_PASSWORD]",
+        ),
+        ("pw: abc", "pw: [REDACTED_PASSWORD]"),
+        ("PW=abc", "PW=[REDACTED_PASSWORD]"),
+        ("passcode 482913", "passcode [REDACTED_PIN]"),
+        ("passcode Zq9-x", "passcode [REDACTED_PASSWORD]"),
+        ("my password's S3cret!x", "my password's [REDACTED_PASSWORD]"),
+        ("my password\u{2019}s S3cret", "my password\u{2019}s [REDACTED_PASSWORD]"),
+        ("PIN 1234", "PIN [REDACTED_PIN]"),
+        ("Your pin code is 90210.", "Your pin code is [REDACTED_PIN]."),
+        ("the wifi password was CorrectHorse, ok", "the wifi password was [REDACTED_PASSWORD], ok"),
+        ("password is \"hunter22\".", "password is \"[REDACTED_PASSWORD]\"."),
+        ("password  Tr0ub4dor&3-horse-battery", "password  [REDACTED_PASSWORD]"),
+        ("password: Tr0ub4dor&3 ok", "password: [REDACTED_PASSWORD] ok"),
+        ("password=hunter2&x=1", "password=[REDACTED_PASSWORD]&x=1"),
+    ] {
+        assert_eq!(r.redact(input), expected, "{input}");
+        assert!(r.contains_sensitive(input), "{input}");
+        assert_eq!(r.redact(expected), expected, "idempotent: {expected}");
+    }
+}
+
+/// Prose that merely mentions passwords is left alone.
+#[test]
+fn test_prose_about_passwords_is_left_alone() {
+    let r = Redactor::new();
+    for input in [
+        "reset your password",
+        "Forgot password?",
+        "Password is required.",
+        "Your password is incorrect",
+        "New password\nConfirm new password",
+        "Password (optional)",
+        "Change your passcode settings",
+        "password reset link sent",
+        "Enter the PIN you received",
+        "pinned 1234 items",
+        "Passwords",
+    ] {
+        assert_eq!(r.redact(input), input);
+        assert!(!r.contains_sensitive(input), "{input}");
+    }
+}
