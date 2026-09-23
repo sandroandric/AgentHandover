@@ -8,8 +8,9 @@ It also holds the one RAM tier table (:data:`TIERS`).  The installer runs
 ``python -m agenthandover_worker.model_profiles write-tiers`` to write it as
 ``tiers.json``; the app's onboarding, the CLI (``agenthandover setup``,
 ``doctor``) and the daemon's config defaults all read that JSON, so the
-tiers cannot diverge.  ``resources/tiers.json`` is the committed copy the
-Rust and Swift builds compile against; a test pins it to :func:`tiers_document`.
+tiers cannot diverge.  ``resources/tiers.json`` is the committed copy: the
+Rust crates compile it in and the Swift tests decode it; a worker test pins
+it to :func:`tiers_json`.
 """
 
 from __future__ import annotations

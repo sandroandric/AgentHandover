@@ -60,76 +60,16 @@ struct OnboardingView: View {
     @State private var enableImageEmbeddings = false
     @State private var remoteConsentGiven = false
     @State private var useCustomModels = false
-    @State private var customAnnotationModel = "qwen3.5:2b"
-    @State private var customSOPModel = "qwen3.5:4b"
+    @State private var customAnnotationModel = ""
+    @State private var customSOPModel = ""
 
-    // Model tier selection
-    enum ModelTier: String, CaseIterable {
-        case standard = "Standard"
-        case recommended = "Recommended"
-        case performance = "Performance"
-        case maxQuality = "Max Quality"
-
-        var annotationModel: String {
-            switch self {
-            case .standard: return "qwen3.5:2b"
-            case .recommended: return "gemma4:12b-it-qat"
-            case .performance: return "gemma4:12b-it-qat"
-            case .maxQuality: return "gemma4:31b-it-qat"
-            }
-        }
-
-        var sopModel: String {
-            switch self {
-            case .standard: return "qwen3.5:4b"
-            case .recommended: return "gemma4:12b-it-qat"
-            case .performance: return "gemma4:12b-it-qat"
-            case .maxQuality: return "gemma4:31b-it-qat"
-            }
-        }
-
-        var diskSize: String {
-            switch self {
-            case .standard: return "~6 GB"
-            case .recommended: return "~7 GB"
-            case .performance: return "~7 GB"
-            case .maxQuality: return "~19 GB"
-            }
-        }
-
-        var minRAM: Int {
-            switch self {
-            case .standard: return 0
-            case .recommended: return 16
-            case .performance: return 24
-            case .maxQuality: return 48
-            }
-        }
-
-        var subtitle: String {
-            switch self {
-            case .standard: return "Qwen 3.5 — works on 8 GB Macs"
-            case .recommended: return "Gemma 4 12B QAT — 12B dense reasoning"
-            case .performance: return "Gemma 4 12B QAT — with frame headroom"
-            case .maxQuality: return "Gemma 4 31B QAT — frontier intelligence"
-            }
-        }
-
-        var needsNewOllama: Bool {
-            self != .standard
-        }
-
-        static func recommendedFor(ramGB: Int) -> ModelTier {
-            if ramGB >= 48 { return .maxQuality }
-            if ramGB >= 24 { return .performance }
-            if ramGB >= 16 { return .recommended }
-            return .standard
-        }
-    }
-
-    @State private var selectedTier: ModelTier = .standard
+    // Model tiers: tiers.json, written at install from the worker's
+    // model_profiles.TIERS (see ModelTiers.swift).
+    @State private var tierTable: ModelTierTable? = nil
+    @State private var tierTableError = ""
+    @State private var selectedTierID = ""
     @State private var detectedRAMGB: Int = 0
-    @State private var recommendedTier: ModelTier = .standard
+    @State private var recommendedTierID = ""
     @State private var ollamaInstalled = false
     @State private var ollamaRunning = false
     @State private var ollamaHasRequiredModels = false
@@ -1045,24 +985,31 @@ struct OnboardingView: View {
         )
     }
 
+    private var selectedTier: ModelTier? {
+        tierTable?.tier(id: selectedTierID)
+    }
+
     private var resolvedAnnotationModel: String {
+        let tierModel = selectedTier?.annotationModel ?? ""
         if useCustomModels {
             let custom = customAnnotationModel.trimmingCharacters(in: .whitespacesAndNewlines)
-            return custom.isEmpty ? selectedTier.annotationModel : custom
+            return custom.isEmpty ? tierModel : custom
         }
-        return selectedTier.annotationModel
+        return tierModel
     }
 
     private var resolvedSOPModel: String {
+        let tierModel = selectedTier?.sopModel ?? ""
         if useCustomModels {
             let custom = customSOPModel.trimmingCharacters(in: .whitespacesAndNewlines)
-            return custom.isEmpty ? selectedTier.sopModel : custom
+            return custom.isEmpty ? tierModel : custom
         }
-        return selectedTier.sopModel
+        return tierModel
     }
 
     private var requiredLocalModels: [String] {
-        Array(Set([resolvedAnnotationModel, resolvedSOPModel, "nomic-embed-text"])).sorted()
+        guard let table = tierTable, !resolvedAnnotationModel.isEmpty else { return [] }
+        return Array(Set([resolvedAnnotationModel, resolvedSOPModel, table.embeddingModel])).sorted()
     }
 
     private var localVLMReady: Bool {
@@ -1515,18 +1462,26 @@ struct OnboardingView: View {
                                 .foregroundColor(darkNavy.opacity(0.5))
                         }
 
-                        ForEach(ModelTier.allCases.filter { $0.minRAM <= detectedRAMGB }, id: \.rawValue) { tier in
-                            Button(action: { selectedTier = tier }) {
+                        if !tierTableError.isEmpty {
+                            Text("Model tiers unavailable: \(tierTableError). Reinstall AgentHandover.")
+                                .font(.system(size: 12))
+                                .foregroundColor(.red)
+                        }
+                        ForEach(tierTable?.available(forRAMGB: detectedRAMGB) ?? []) { tier in
+                            Button(action: {
+                                selectedTierID = tier.id
+                                persistModelChoice()
+                            }) {
                                 HStack(spacing: 10) {
-                                    Image(systemName: selectedTier == tier ? "checkmark.circle.fill" : "circle")
-                                        .foregroundColor(selectedTier == tier ? warmOrange : darkNavy.opacity(0.2))
+                                    Image(systemName: selectedTierID == tier.id ? "checkmark.circle.fill" : "circle")
+                                        .foregroundColor(selectedTierID == tier.id ? warmOrange : darkNavy.opacity(0.2))
                                         .font(.system(size: 16))
                                     VStack(alignment: .leading, spacing: 2) {
                                         HStack(spacing: 6) {
-                                            Text(tier.rawValue)
+                                            Text(tier.label)
                                                 .font(.system(size: 13, weight: .bold, design: .rounded))
                                                 .foregroundColor(darkNavy)
-                                            if tier == recommendedTier {
+                                            if tier.id == recommendedTierID {
                                                 Text("Best for your Mac")
                                                     .font(.system(size: 9, weight: .bold))
                                                     .foregroundColor(.white)
@@ -1535,7 +1490,7 @@ struct OnboardingView: View {
                                                     .background(Capsule().fill(warmOrange))
                                             }
                                         }
-                                        Text("\(tier.subtitle) \u{00B7} \(tier.diskSize)")
+                                        Text("\(tier.subtitle) \u{00B7} \(tierTable?.downloadLabel(for: tier) ?? "")")
                                             .font(.system(size: 11))
                                             .foregroundColor(darkNavy.opacity(0.5))
                                     }
@@ -1544,11 +1499,11 @@ struct OnboardingView: View {
                                 .padding(10)
                                 .background(
                                     RoundedRectangle(cornerRadius: 10)
-                                        .fill(selectedTier == tier ? warmOrange.opacity(0.08) : Color.clear)
+                                        .fill(selectedTierID == tier.id ? warmOrange.opacity(0.08) : Color.clear)
                                 )
                                 .overlay(
                                     RoundedRectangle(cornerRadius: 10)
-                                        .stroke(selectedTier == tier ? warmOrange.opacity(0.3) : darkNavy.opacity(0.08), lineWidth: 1)
+                                        .stroke(selectedTierID == tier.id ? warmOrange.opacity(0.3) : darkNavy.opacity(0.08), lineWidth: 1)
                                 )
                             }
                             .buttonStyle(.plain)
@@ -1559,7 +1514,7 @@ struct OnboardingView: View {
                         Image(systemName: ollamaHasRequiredModels ? "checkmark.circle.fill" : "arrow.down.circle.fill")
                             .foregroundColor(ollamaHasRequiredModels ? brightGreen : warmOrange)
                             .font(.system(size: 16))
-                        Text(ollamaHasRequiredModels ? "Required models ready." : "\(selectedTier.diskSize) download \u{00B7} Runs on Apple Silicon")
+                        Text(ollamaHasRequiredModels ? "Required models ready." : "\(selectedTier.flatMap { tierTable?.downloadLabel(for: $0) } ?? "") download \u{00B7} Runs on Apple Silicon")
                             .font(.system(size: 13, weight: .medium))
                             .foregroundColor(darkNavy.opacity(0.5))
                     }
@@ -1574,13 +1529,15 @@ struct OnboardingView: View {
                     }
 
                     VStack(alignment: .leading, spacing: 6) {
-                        if selectedTier == .standard {
-                            modelRow("qwen3.5:2b", "2.7 GB", "Screen annotation")
-                            modelRow("qwen3.5:4b", "3.4 GB", "Skill generation")
-                        } else {
-                            modelRow(selectedTier.annotationModel, selectedTier.diskSize, "Screen annotation + Skill generation (single model)")
+                        if let table = tierTable, let tier = selectedTier {
+                            if tier.annotationModel == tier.sopModel {
+                                modelRow(tier.annotationModel, table.sizeLabel(tier.annotationModel) ?? "", "Screen annotation + Skill generation (single model)")
+                            } else {
+                                modelRow(tier.annotationModel, table.sizeLabel(tier.annotationModel) ?? "", "Screen annotation")
+                                modelRow(tier.sopModel, table.sizeLabel(tier.sopModel) ?? "", "Skill generation")
+                            }
+                            modelRow(table.embeddingModel, table.sizeLabel(table.embeddingModel) ?? "", "Semantic search")
                         }
-                        modelRow("nomic-embed-text", "274 MB", "Semantic search")
                     }
 
                         // Image embeddings toggle
@@ -1644,7 +1601,7 @@ struct OnboardingView: View {
                                         .font(.system(size: 12, weight: .medium))
                                         .foregroundColor(darkNavy.opacity(0.6))
                                         .frame(width: 80, alignment: .trailing)
-                                    TextField("qwen3.5:2b", text: $customAnnotationModel)
+                                    TextField(selectedTier?.annotationModel ?? "", text: $customAnnotationModel)
                                         .textFieldStyle(.plain)
                                         .font(.system(size: 12, design: .monospaced))
                                         .padding(6)
@@ -1662,7 +1619,7 @@ struct OnboardingView: View {
                                         .font(.system(size: 12, weight: .medium))
                                         .foregroundColor(darkNavy.opacity(0.6))
                                         .frame(width: 80, alignment: .trailing)
-                                    TextField("qwen3.5:4b", text: $customSOPModel)
+                                    TextField(selectedTier?.sopModel ?? "", text: $customSOPModel)
                                         .textFieldStyle(.plain)
                                         .font(.system(size: 12, design: .monospaced))
                                         .padding(6)
@@ -2657,25 +2614,22 @@ struct OnboardingView: View {
         vlmPullInProgress = true
         vlmPullOutput = "Starting download..."
 
-        let annModel: String
-        let sopModel: String
-        if useCustomModels {
-            annModel = customAnnotationModel
-            sopModel = customSOPModel
-        } else {
-            annModel = selectedTier.annotationModel
-            sopModel = selectedTier.sopModel
+        guard let table = tierTable, !resolvedAnnotationModel.isEmpty else {
+            vlmPullInProgress = false
+            vlmPullOutput = "Model tiers unavailable: \(tierTableError)"
+            return
         }
+        let annModel = resolvedAnnotationModel
+        let sopModel = resolvedSOPModel
 
-        // Check Ollama version if Gemma 4 is selected. The QAT Gemma 4 tags
-        // (12b-it-qat, 31b-it-qat) require Ollama 0.30.6+ — older Ollama
-        // returns HTTP 412 ("requires a newer version of Ollama") on pull.
-        let needsGemma = annModel.contains("gemma4") || sopModel.contains("gemma4")
-        if needsGemma {
+        // The QAT Gemma 4 tags need a recent Ollama (older ones answer the
+        // pull with HTTP 412, "requires a newer version of Ollama").
+        let minimum = table.minimumOllamaVersionForGemma4
+        if table.needsNewOllama([annModel, sopModel]) {
             let ollamaVersion = getOllamaVersion(ollamaPath)
-            if let version = ollamaVersion, !isOllamaVersionSufficient(version, minimum: "0.30.6") {
+            if let version = ollamaVersion, !isOllamaVersionSufficient(version, minimum: minimum) {
                 vlmPullInProgress = false
-                vlmPullOutput = "Gemma 4 QAT models require Ollama 0.30.6+. You have \(version). "
+                vlmPullOutput = "Gemma 4 QAT models require Ollama \(minimum)+. You have \(version). "
                     + "Update the official app at ollama.com/download (or run: "
                     + "brew install --cask ollama-app). The Homebrew 'ollama' "
                     + "formula does not bundle the GGUF runner — use the official app."
@@ -2683,9 +2637,13 @@ struct OnboardingView: View {
             }
         }
 
+        // Persist the choice before pulling, so an interrupted pull leaves
+        // the config naming the models being pulled.
+        persistModelChoice()
+
         var models = [
             (annModel, "scene annotation"),
-            ("nomic-embed-text", "semantic search"),
+            (table.embeddingModel, "semantic search"),
         ]
         // Only add SOP model separately if different from annotation model
         if sopModel != annModel {
@@ -2775,9 +2733,7 @@ struct OnboardingView: View {
                 }
             }
 
-            // Save embedding config + model config (always, to persist tier selection)
-            self.saveEmbeddingConfig(imageEmbeddings: imageEmbEnabled)
-            self.saveCustomModelConfig(annotation: annModel, sop: sopModel)
+            self.saveEmbeddingConfig(imageEmbeddings: imageEmbEnabled, model: table.embeddingModel)
 
             DispatchQueue.main.async {
                 vlmPullInProgress = false
@@ -2791,11 +2747,21 @@ struct OnboardingView: View {
         guard !hasSeededVLMFromConfig else { return }
         hasSeededVLMFromConfig = true
 
-        // Detect RAM and set recommended tier
+        // Detect RAM and set the recommended tier from tiers.json
         let ramBytes = ProcessInfo.processInfo.physicalMemory
         detectedRAMGB = Int(ramBytes / (1024 * 1024 * 1024))
-        recommendedTier = ModelTier.recommendedFor(ramGB: detectedRAMGB)
-        selectedTier = recommendedTier
+        let workerPython = ServiceController.daemonExecutableURL
+            .deletingLastPathComponent().appendingPathComponent("venv/bin/python")
+        switch ModelTierTable.loadInstalled(workerPython: workerPython) {
+        case .success(let table):
+            tierTable = table
+            tierTableError = ""
+            recommendedTierID = table.recommended(forRAMGB: detectedRAMGB).id
+            selectedTierID = recommendedTierID
+        case .failure(let error):
+            tierTable = nil
+            tierTableError = error.localizedDescription
+        }
 
         appState.refreshStatus()
         if appState.vlmMode == "remote" {
@@ -2829,7 +2795,7 @@ struct OnboardingView: View {
                 case .success(let installedModels):
                     running = true
                     let missingModels = requiredModels.filter { !installedModels.contains($0) }
-                    hasRequiredModels = missingModels.isEmpty
+                    hasRequiredModels = !requiredModels.isEmpty && missingModels.isEmpty
                     if missingModels.isEmpty {
                         statusMessage = "Local setup looks good."
                     } else if installedModels.isEmpty {
@@ -2851,6 +2817,9 @@ struct OnboardingView: View {
                 self.ollamaRunning = running
                 self.ollamaHasRequiredModels = hasRequiredModels
                 self.vlmStatusMessage = statusMessage
+                if hasRequiredModels && self.vlmMode == .local {
+                    self.persistModelChoice()
+                }
                 self.vlmStateRefreshing = false
                 self.appState.vlmAvailable = self.onboardingVLMReady
             }
@@ -2963,7 +2932,7 @@ struct OnboardingView: View {
             : "pip failed (see logs/pip-install.log)"
     }
 
-    private func saveEmbeddingConfig(imageEmbeddings: Bool) {
+    private func saveEmbeddingConfig(imageEmbeddings: Bool, model: String) {
         let home = FileManager.default.homeDirectoryForCurrentUser
         let configDir = home
             .appendingPathComponent("Library/Application Support/agenthandover")
@@ -2976,7 +2945,7 @@ struct OnboardingView: View {
         let embeddingSection = """
 
         [embedding]
-        model = "nomic-embed-text"
+        model = "\(model)"
         image_embeddings = \(imageEmbeddings)
 
         """
@@ -2995,38 +2964,26 @@ struct OnboardingView: View {
         try? content.write(to: configPath, atomically: true, encoding: .utf8)
     }
 
-    private func saveCustomModelConfig(annotation: String, sop: String) {
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        let configDir = home
+    /// Write the chosen tier and models into `[vlm]` of config.toml, in
+    /// the bytes `agenthandover setup` and the installer write.  Called on
+    /// tier selection, when a pull starts, and when the models are present.
+    private func persistModelChoice() {
+        guard selectedTier != nil, !resolvedAnnotationModel.isEmpty else { return }
+        let configDir = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Application Support/agenthandover")
         let configPath = configDir.appendingPathComponent("config.toml")
-
         try? FileManager.default.createDirectory(at: configDir, withIntermediateDirectories: true)
 
-        var content = (try? String(contentsOf: configPath, encoding: .utf8)) ?? ""
-
-        // Update or add annotation_model and sop_model in [vlm] section
-        let vlmFields = "annotation_model = \"\(annotation)\"\nsop_model = \"\(sop)\"\n"
-
-        if content.contains("[vlm]") {
-            // Remove existing model keys
-            for key in ["annotation_model", "sop_model"] {
-                let pattern = "(?m)^[ \\t]*\(key)[ \\t]*=[ \\t]*\"[^\"]*\"[ \\t]*\\n?"
-                if let regex = try? NSRegularExpression(pattern: pattern) {
-                    let range = NSRange(content.startIndex..., in: content)
-                    content = regex.stringByReplacingMatches(in: content, range: range, withTemplate: "")
-                }
-            }
-            // Insert after [vlm]
-            if let vlmRange = content.range(of: "[vlm]") {
-                let insertIdx = content.index(vlmRange.upperBound, offsetBy: 1, limitedBy: content.endIndex) ?? vlmRange.upperBound
-                content.insert(contentsOf: "\n" + vlmFields, at: insertIdx)
-            }
-        } else {
-            content += "\n[vlm]\n" + vlmFields
+        let current = (try? String(contentsOf: configPath, encoding: .utf8)) ?? ""
+        let block = ModelTierTable.vlmBlock(
+            tierID: selectedTierID,
+            annotationModel: resolvedAnnotationModel,
+            sopModel: resolvedSOPModel
+        )
+        let updated = ModelTierTable.applyVLMBlock(block, to: current)
+        if updated != current {
+            try? updated.write(to: configPath, atomically: true, encoding: .utf8)
         }
-
-        try? content.write(to: configPath, atomically: true, encoding: .utf8)
     }
 }
 
