@@ -16,7 +16,11 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// Show daemon and worker status
-    Status,
+    Status {
+        /// Show what capture and the models cost in the last hour
+        #[arg(long)]
+        compute: bool,
+    },
     /// Start services (daemon launched directly, worker via launchd)
     Start {
         /// Which service to start: daemon, worker, or all (default)
@@ -221,7 +225,8 @@ enum SopsAction {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Commands::Status => commands::status::run(),
+        Commands::Status { compute: false } => commands::status::run(),
+        Commands::Status { compute: true } => commands::status::run_compute(),
         Commands::Start { service } => commands::service::start(&service),
         Commands::Stop { service } => commands::service::stop(&service),
         Commands::Restart { service } => commands::service::restart(&service),

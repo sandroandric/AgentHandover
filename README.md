@@ -448,6 +448,7 @@ Chrome Extension -----> Daemon (Rust) ---SQLite WAL---> Worker (Python)
 | Command | Description |
 |---------|-------------|
 | `agenthandover status` | Service health and stats |
+| `agenthandover status --compute` | Last hour's cost: frames captured, kept and gated; capture and OCR time; model seconds per call type |
 | `agenthandover start all` | Start daemon + worker |
 | `agenthandover stop all` | Stop services |
 | `agenthandover focus start "title"` | Record a workflow |
