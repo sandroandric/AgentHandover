@@ -31,7 +31,7 @@ from agenthandover_worker.export_adapter import SOPExportAdapter
 from agenthandover_worker.knowledge_base import KnowledgeBase
 from agenthandover_worker.lifecycle_manager import LifecycleManager, ProcedureLifecycle
 from agenthandover_worker.procedure_verifier import ProcedureVerifier, PreflightResult
-from agenthandover_worker.staleness_detector import procedure_freshness
+from agenthandover_worker.staleness_detector import MIN_FRESHNESS, procedure_freshness
 
 logger = logging.getLogger(__name__)
 
@@ -64,7 +64,7 @@ _DRAFTABLE_LIFECYCLE_STATES = frozenset({
     ProcedureLifecycle.AGENT_READY,
 })
 
-_MIN_FRESHNESS = 0.3
+_MIN_FRESHNESS = MIN_FRESHNESS
 
 
 @dataclass

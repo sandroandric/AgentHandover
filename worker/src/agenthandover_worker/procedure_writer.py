@@ -58,14 +58,16 @@ def merge_existing_procedure(
     """Carry what accumulated on *existing* over to its regeneration *new_proc*.
 
     Kept from *existing*: everything :func:`carry_run_history` keeps, plus
-    evidence, constraints, recurrence, branches, expected outcomes,
+    evidence, constraints, recurrence, the learning ledger (``knowledge``:
+    entries other learners wrote survive, observation entries are
+    re-derived on save), branches, expected outcomes,
     compiled outputs, the lifecycle history and, unless *keep_lifecycle*
     is false, the lifecycle state.  Everything else comes from
     *new_proc*.  Mutates and returns *new_proc*.
     """
     if new_proc is existing:
         return new_proc
-    for key in ("evidence", "constraints", "recurrence"):
+    for key in ("evidence", "constraints", "recurrence", "knowledge"):
         if key in existing:
             new_proc[key] = existing[key]
     new_proc["branches"] = existing.get("branches", [])

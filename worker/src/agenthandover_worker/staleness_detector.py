@@ -23,6 +23,12 @@ _NEEDS_REVIEW_DAYS = 30
 _STALE_DAYS = 60
 _CONFIDENCE_DRIFT_THRESHOLD = 0.15
 
+# Below this procedure_freshness() a procedure is not handed to agents and an
+# agent_ready or draft one is auto-demoted to stale.  The one floor every
+# gate uses (ledger.handoff_gate, the bundle compiler, the verifier, the
+# lifecycle manager).
+MIN_FRESHNESS = 0.3
+
 
 @dataclass
 class StalenessSignal:

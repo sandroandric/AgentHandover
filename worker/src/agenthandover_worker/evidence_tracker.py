@@ -45,6 +45,39 @@ class StepEvidence:
         return self.consistent_count / self.observed_count
 
 
+def append_observation(
+    proc: dict, evidence: ObservationEvidence, *, once_per_session: bool = False,
+) -> bool:
+    """Append *evidence* to ``proc["evidence"]["observations"]`` in place.
+
+    Updates ``total_observations`` and ``staleness.last_observed``.  With
+    *once_per_session*, a session already recorded is not added again (a
+    retried focus session is one instance).  Returns True if appended.
+    """
+    ev = proc.setdefault("evidence", {
+        "observations": [],
+        "step_evidence": [],
+        "contradictions": [],
+        "total_observations": 0,
+    })
+    observations = ev.setdefault("observations", [])
+    if once_per_session and any(
+        isinstance(o, dict) and o.get("session_id") == evidence.session_id
+        for o in observations
+    ):
+        return False
+    observations.append({
+        "date": evidence.date,
+        "type": evidence.type,
+        "duration_minutes": evidence.duration_minutes,
+        "session_id": evidence.session_id,
+        "event_count": evidence.event_count,
+    })
+    ev["total_observations"] = len(observations)
+    proc.setdefault("staleness", {})["last_observed"] = datetime.now(timezone.utc).isoformat()
+    return True
+
+
 class EvidenceTracker:
     """Track and build evidence linking procedures to observations."""
 
@@ -87,24 +120,8 @@ class EvidenceTracker:
             )
             return
 
-        ev = proc.setdefault("evidence", {
-            "observations": [],
-            "step_evidence": [],
-            "contradictions": [],
-            "total_observations": 0,
-        })
-        ev["observations"].append({
-            "date": evidence.date,
-            "type": evidence.type,
-            "duration_minutes": evidence.duration_minutes,
-            "session_id": evidence.session_id,
-            "event_count": evidence.event_count,
-        })
-        ev["total_observations"] = len(ev["observations"])
-
-        # Update staleness.last_observed
-        staleness = proc.setdefault("staleness", {})
-        staleness["last_observed"] = datetime.now(timezone.utc).isoformat()
+        append_observation(proc, evidence)
+        ev = proc["evidence"]
 
         self._kb.save_procedure(proc)
         logger.info(

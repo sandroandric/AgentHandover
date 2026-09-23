@@ -29,6 +29,7 @@ from agenthandover_worker.config import EXPORT_ADAPTERS, load_config
 from agenthandover_worker.confidence import ConfidenceScorer, is_native_app_context
 from agenthandover_worker.db import WorkerDB
 from agenthandover_worker.episode_builder import EpisodeBuilder
+from agenthandover_worker.evidence_tracker import ObservationEvidence, append_observation
 from agenthandover_worker.exporter import IndexGenerator
 from agenthandover_worker.focus_processor import FocusProcessor
 from agenthandover_worker.frame_differ import DiffConfig, FrameDiffer
@@ -2001,6 +2002,12 @@ def _process_focus_sessions_v2(
                 merge_existing_procedure(
                     procedure_dict, existing_proc, keep_lifecycle=False,
                 )
+        # This recording is one instance of the procedure: the ledger's
+        # evidence for what was learned from it.
+        append_observation(procedure_dict, ObservationEvidence(
+            date=datetime.now(timezone.utc).strftime("%Y-%m-%d"), type="focus",
+            duration_minutes=0, session_id=session_id, event_count=len(focus_events),
+        ), once_per_session=True)
         if behavioral_synthesizer is not None:
             try:
                 # Prefer the rich per-frame observations stashed by the

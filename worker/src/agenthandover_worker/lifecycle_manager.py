@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from enum import Enum
 
 from agenthandover_worker.knowledge_base import KnowledgeBase
+from agenthandover_worker.staleness_detector import MIN_FRESHNESS as _MIN_FRESHNESS
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +49,21 @@ _PROMOTION_CHAIN: tuple[ProcedureLifecycle, ...] = (
 
 # States eligible for auto-demotion to STALE when freshness drops
 _AUTO_STALE_STATES = frozenset({ProcedureLifecycle.DRAFT, ProcedureLifecycle.AGENT_READY})
-_MIN_FRESHNESS = 0.3
+
+
+def grant_approval_trust(proc: dict) -> bool:
+    """A human's approval for agents grants the first trust level above
+    ``observe`` (``suggest``): the hand-off gate (``ledger.handoff_gate``)
+    requires it, and higher levels still come only from accepted
+    ``TrustAdvisor`` suggestions.  A higher level is never lowered.
+    Mutates *proc*; returns True if the level changed."""
+    constraints = proc.get("constraints")
+    if not isinstance(constraints, dict):
+        constraints = proc["constraints"] = {"guardrails": []}
+    if constraints.get("trust_level") not in (None, "", "observe"):
+        return False
+    constraints["trust_level"] = "suggest"
+    return True
 
 
 class InvalidTransitionError(ValueError):
@@ -109,6 +124,8 @@ class LifecycleManager:
         )
 
         proc["lifecycle_state"] = to_state.value
+        if to_state is ProcedureLifecycle.AGENT_READY and actor != "system":
+            grant_approval_trust(proc)
         history = proc.setdefault("lifecycle_history", [])
         history.append(asdict(transition))
         self._kb.save_procedure(proc)

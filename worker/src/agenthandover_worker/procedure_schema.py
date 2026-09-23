@@ -596,7 +596,11 @@ def backfill_procedure_fields(procedure: dict) -> bool:
     Fills an empty ``description`` from ``task_description``, and empty
     step ``app``/``location``/``input``/``verify`` from the step's
     ``parameters`` (where older ``sop_to_procedure`` left them), then an
-    empty ``target`` from ``location``.  Mutates *procedure* in place.
+    empty ``target`` from ``location``.  An ``agent_ready`` procedure a
+    human approved before approval granted trust (still ``observe``) gets
+    the trust that approval grants now
+    (``lifecycle_manager.grant_approval_trust``).  Mutates *procedure* in
+    place.
 
     Returns True if anything changed.
     """
@@ -616,4 +620,12 @@ def backfill_procedure_fields(procedure: dict) -> bool:
         if not step.get("target") and step.get("location"):
             step["target"] = step["location"]
             changed = True
+    if procedure.get("lifecycle_state") == "agent_ready":
+        into_ready = [
+            h for h in procedure.get("lifecycle_history") or []
+            if isinstance(h, dict) and h.get("to_state") == "agent_ready"
+        ]
+        if into_ready and into_ready[-1].get("actor") not in (None, "system"):
+            from agenthandover_worker.lifecycle_manager import grant_approval_trust
+            changed = grant_approval_trust(procedure) or changed
     return changed
