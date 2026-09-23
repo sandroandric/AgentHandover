@@ -898,6 +898,7 @@ def _vlm_sop_to_template(
 
     # Convert VLM steps to internal format
     steps = []
+    click_owners = _click_owners(vlm_sop.get("steps", []), timeline)
     for step_idx, raw_step in enumerate(vlm_sop.get("steps", [])):
         # Handle steps that are strings (Qwen sometimes returns plain text)
         if isinstance(raw_step, str):
@@ -969,7 +970,7 @@ def _vlm_sop_to_template(
 
         # Evidence: the frames the model cites for this step (none when it
         # cites none: unknown, not guessed), their DOM snapshots, and the
-        # clicked element's anchor from them.
+        # anchor of the element clicked to reach them.
         frames = _step_frames(raw_step, timeline)
         step["evidence"] = {
             "frames": [f.get("event_id") for f in frames if f.get("event_id")],
@@ -988,7 +989,9 @@ def _vlm_sop_to_template(
         commands = [c for f in frames for c in f.get("shell_commands") or []]
         if commands:
             step["evidence"]["shell_commands"] = commands
-        step["anchor"] = _anchor_for_step(raw_step, frames)
+        step["anchor"] = _anchor_for_step(
+            raw_step, frames, {c for c, owner in click_owners.items() if owner == step_idx},
+        )
 
         steps.append(step)
 
@@ -1219,28 +1222,66 @@ def _words(text: object) -> set[str]:
     return {w for w in re.findall(r"[a-z0-9']+", str(text or "").lower()) if len(w) > 2}
 
 
-def _anchor_for_step(raw_step: dict, frames: list[dict]) -> dict | None:
+def _step_words(raw_step: dict) -> set[str]:
+    """What the step says it acts on.  Not its ``input``: typed text is
+    user data ("...models now read screenshots") and matched the words of
+    unrelated buttons ("Send now")."""
+    return _words(" ".join(
+        str(raw_step.get(k) or "") for k in ("action", "description", "location")
+    ))
+
+
+def _click_words(click: dict) -> set[str]:
+    target = click.get("target") or {}
+    return _words(f"{target.get('innerText', '')} {target.get('ariaLabel', '')}")
+
+
+def _click_owners(raw_steps: list, timeline: list[dict] | None) -> dict[int, int]:
+    """The step each Chrome click belongs to, as ``{id(click): step index}``.
+
+    A click is attached to the frame that shows its result (see
+    ``FocusProcessor._attach_clicks``).  Several steps may cite that frame
+    ("Click the SQLite story", then "Copy its title"; "Paste the digest",
+    then "Click Send" on one screen): the click goes to the one sharing the
+    most words with its target, the earliest on a tie.
+    """
+    owners: dict[int, tuple[int, int]] = {}
+    for idx, raw_step in enumerate(raw_steps):
+        if not isinstance(raw_step, dict):
+            continue
+        words = _step_words(raw_step)
+        for frame in _step_frames(raw_step, timeline):
+            for click in frame.get("click_targets") or []:
+                overlap = len(words & _click_words(click))
+                if id(click) not in owners or overlap > owners[id(click)][0]:
+                    owners[id(click)] = (overlap, idx)
+    return {click: idx for click, (_overlap, idx) in owners.items()}
+
+
+def _anchor_for_step(
+    raw_step: dict, frames: list[dict], own_clicks: set[int],
+) -> dict | None:
     """The anchor of the element the step acts on, from its frames.
 
-    Among the Chrome clicks made on the step's frames, the one whose target
-    text shares the most words with the step is the step's click; its
-    anchor comes from the frame's DOM snapshot (:func:`dom.select_anchor`).
+    Among the step's own clicks (ids in *own_clicks*, from
+    :func:`_click_owners`) on its frames, the one whose target text shares
+    the most words with the step is the step's click; its anchor comes from
+    the DOM snapshot of the page it was made on (:func:`dom.select_anchor`).
     Without clicks, a snapshot's own interacted element is used.
     """
-    step_words = _words(" ".join(
-        str(raw_step.get(k) or "") for k in ("action", "description", "location", "input")
-    ))
+    step_words = _step_words(raw_step)
     best: tuple[int, dict, dict] | None = None
     for frame in frames:
         for click in frame.get("click_targets") or []:
-            target = click.get("target") or {}
-            overlap = len(step_words & _words(
-                f"{target.get('innerText', '')} {target.get('ariaLabel', '')}"
-            ))
+            if id(click) not in own_clicks:
+                continue
+            overlap = len(step_words & _click_words(click))
             if best is None or overlap > best[0]:
-                best = (overlap, frame, target)
+                best = (overlap, frame, click)
     if best is not None:
-        return select_anchor(best[1].get("dom_nodes"), best[2])
+        _overlap, frame, click = best
+        nodes = click["page_dom_nodes"] if "page_dom_nodes" in click else frame.get("dom_nodes")
+        return select_anchor(nodes, click.get("target") or {})
     for frame in frames:
         anchor = select_anchor(frame.get("dom_nodes"), None)
         if anchor:

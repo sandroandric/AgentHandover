@@ -785,7 +785,8 @@ class FocusProcessor:
         - app: application name
         - event_id: the frame's event id (the step evidence points at it)
         - host, dom_nodes, dom_snapshot_id: the DOM snapshot joined by host
-        - click_targets: the Chrome clicks made on this frame's page
+        - click_targets: the Chrome clicks whose result this frame shows
+          (each with ``page_dom_nodes``, the DOM of the page clicked on)
         - clipboard_context: the copy made from this frame, if any
         """
         timeline = []
@@ -895,14 +896,22 @@ class FocusProcessor:
 
     @staticmethod
     def _attach_clicks(db: object, timeline: list[dict]) -> None:
-        """Give each frame the Chrome clicks made on its page.
+        """Give each frame the Chrome clicks that lead to it.
 
         Extension events carry no ``focus_session_id``, so they are found by
-        time.  A click belongs to the last frame at or before it when that
-        frame shows the click's host (the page the user clicked on);
-        otherwise, when the page came on screen with the click itself (an
-        app switch into Chrome), to the first frame after it on that host
-        within the DOM tolerance.  A click no frame shows is left out.
+        time.  The page a click was made on is the last frame at or before
+        it when that frame shows the click's host; otherwise, when the page
+        came on screen with the click itself (an app switch into Chrome),
+        the first frame after it on that host within the DOM tolerance.  A
+        click no frame shows is left out.  The element is found in that
+        page's DOM (``page_dom_nodes``).
+
+        The click belongs to the first frame at or after it (the page it
+        was made on when no frame follows).  That frame shows the click's
+        result, and the model cites it for the step the click performs
+        ("Open the SQLite story" cites the story, not the list it was
+        clicked on); attached to the page frame, a story's link became the
+        anchor of the step before it.
         """
         timed = [
             (when, frame) for frame in timeline
@@ -920,12 +929,14 @@ class FocusProcessor:
             if when is None or not host:
                 continue
             before = [frame for t, frame in timed if t <= when]
-            owner = before[-1] if before and before[-1].get("host") == host else None
-            if owner is None:
-                owner = next(
+            page = before[-1] if before and before[-1].get("host") == host else None
+            if page is None:
+                page = next(
                     (frame for t, frame in timed
                      if when < t <= when + slack and frame.get("host") == host),
                     None,
                 )
-            if owner is not None:
-                owner["click_targets"].append(click)
+            if page is None:
+                continue
+            owner = next((frame for t, frame in timed if t >= when), page)
+            owner["click_targets"].append({**click, "page_dom_nodes": page.get("dom_nodes")})

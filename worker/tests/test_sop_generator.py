@@ -1151,3 +1151,59 @@ class TestTypedVariables:
         assert '"type":' in prompt
         assert '"sensitive":' in prompt
         assert '"validation":' in prompt
+
+
+# ---------------------------------------------------------------------------
+# A click's anchor belongs to one step (WP-F3)
+# ---------------------------------------------------------------------------
+
+
+class TestClickOwnership:
+    """A click joins the frame after it; the steps citing that frame share
+    it, and its anchor goes to the one that names the clicked element."""
+
+    @staticmethod
+    def _slack_timeline() -> list[dict]:
+        send = {"tagName": "button", "ariaLabel": "Send now", "composedPath": ["button"]}
+        frame = _frame("f20", clicks=[send])
+        frame["click_targets"][0]["page_dom_nodes"] = [
+            {"tag": "button", "ariaLabel": "Send now", "role": "button"},
+        ]
+        return [frame]
+
+    def test_the_step_naming_the_element_gets_the_anchor(self) -> None:
+        vlm_sop = {"steps": [
+            # Its typed input shares "now" with the button: input is user
+            # data, not what the step clicks.
+            {"action": "Paste the digest into the Slack message box", "frames": [1],
+             "input": "Small models now read screenshots"},
+            {"action": "Click the Send button", "frames": [1]},
+        ]}
+        steps = _vlm_sop_to_template(vlm_sop, timeline=self._slack_timeline())["steps"]
+        assert steps[0]["anchor"] is None
+        assert steps[1]["anchor"] == {
+            "role": "button", "name": "Send now", "selector": '[aria-label="Send now"]',
+        }
+
+    def test_on_a_tie_the_earliest_step_gets_the_anchor(self) -> None:
+        story = _frame("story", clicks=[_HN_CLICK])
+        story["click_targets"][0]["page_dom_nodes"] = _HN_TREE
+        vlm_sop = {"steps": [
+            {"action": "Open the next item", "frames": [1]},
+            {"action": "Copy the page address", "frames": [1]},
+        ]}
+        steps = _vlm_sop_to_template(vlm_sop, timeline=[story])["steps"]
+        assert steps[0]["anchor"]["name"] == "SQLite's WAL mode, explained with diagrams"
+        assert steps[1]["anchor"] is None
+
+    def test_the_anchor_comes_from_the_page_clicked_on(self) -> None:
+        # The story's own page has no such link; the list it was clicked on does.
+        story = _frame("story", nodes=[{"tag": "h1", "innerText": "SQLite's WAL"}], clicks=[_HN_CLICK])
+        story["click_targets"][0]["page_dom_nodes"] = _HN_TREE
+        vlm_sop = {"steps": [{"action": "Open the SQLite WAL story", "frames": [1]}]}
+        anchor = _vlm_sop_to_template(vlm_sop, timeline=[story])["steps"][0]["anchor"]
+        assert anchor == {
+            "role": "link",
+            "name": "SQLite's WAL mode, explained with diagrams",
+            "selector": 'role=link[name="SQLite\'s WAL mode, explained with diagrams"]',
+        }

@@ -17,7 +17,7 @@ import pytest
 
 from agenthandover_worker.db import WorkerDB, _url_match
 from agenthandover_worker.dom import flatten_dom, implicit_role, node_tag, select_anchor, url_host
-from agenthandover_worker.event_helpers import display_name, is_bundle_id, parse_json_field
+from agenthandover_worker.event_helpers import display_name, is_bundle_id, parse_json_field, parse_timestamp
 from agenthandover_worker.focus_processor import FocusProcessor
 from agenthandover_worker.procedure_schema import sop_to_procedure, validate_procedure
 from agenthandover_worker.scene_annotator import build_annotation_prompt, window_header
@@ -377,21 +377,34 @@ def dailynews(tmp_path: Path):
 
 
 class TestFocusDailynewsFixture:
-    def test_clicks_join_the_frame_on_their_page_with_its_dom_snapshot(self, dailynews) -> None:
+    def test_clicks_join_the_frame_after_them_with_their_pages_dom(self, dailynews) -> None:
+        """Each click joins the first frame at or after it, the screen that
+        shows its result (WP-F3: on the list's frame a story's link became
+        the anchor of the step before the click); the element is looked up
+        in the DOM of the page clicked on."""
         clicked = [f for f in dailynews if f["click_targets"]]
-        hosts = sorted({f["host"] for f in clicked})
-        assert hosts == ["app.slack.com", "news.ycombinator.com"]
         assert sum(len(f["click_targets"]) for f in clicked) == 5
+        times = [parse_timestamp(f["timestamp"]) for f in dailynews]
         for frame in clicked:
-            assert frame["dom_snapshot_id"] and frame["dom_nodes"]
+            for click in frame["click_targets"]:
+                when = parse_timestamp(click["timestamp"])
+                first_after = next(f for f, t in zip(dailynews, times) if t >= when)
+                assert first_after is frame
+                assert click["page_dom_nodes"]
+        story = next(
+            f for f in clicked
+            if any("SQLite" in c["target"].get("innerText", "") for c in f["click_targets"])
+        )
+        assert story["host"] == "blog.example.org"
 
     def test_story_click_anchors_to_the_nested_link_node(self, dailynews) -> None:
         idx, frame = next(
             (i, f) for i, f in enumerate(dailynews)
             if any("SQLite" in c["target"].get("innerText", "") for c in f["click_targets"])
         )
-        roots = frame["dom_nodes"]
-        root_texts = {r.get("innerText") for r in roots}
+        click = next(c for c in frame["click_targets"] if "SQLite" in c["target"].get("innerText", ""))
+        assert frame["host"] == "blog.example.org"  # the story, shown after the click
+        root_texts = {r.get("innerText") for r in click["page_dom_nodes"]}
         vlm_sop = {"steps": [{"action": "Open the SQLite WAL story on Hacker News", "frames": [idx + 1]}]}
         step = _vlm_sop_to_template(vlm_sop, timeline=dailynews)["steps"][0]
         anchor = step["anchor"]

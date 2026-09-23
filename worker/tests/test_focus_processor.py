@@ -1134,3 +1134,61 @@ class TestClipboardAttach:
         ]
         processor._attach_clipboard_context(events)
         assert "snap-only" in processor._clipboard_map
+
+
+# ---------------------------------------------------------------------------
+# Clicks join the frame that shows their result (WP-F3)
+# ---------------------------------------------------------------------------
+
+
+class TestAttachClicks:
+    """The WP-T4 journey found step 1 of the focus_dailynews Skill carrying
+    the third story's link: the click was attached to the list's frame,
+    which the model cites for "Navigate to Hacker News", not to the story's
+    frame it cites for "Open the story"."""
+
+    @staticmethod
+    def _frame(ts: str, host: str, nodes=None) -> dict:
+        return {"timestamp": ts, "host": host, "dom_nodes": nodes, "click_targets": []}
+
+    @staticmethod
+    def _attach(timeline: list[dict], clicks: list[dict]) -> None:
+        class DB:
+            def get_click_intents(self, start, end):
+                return [dict(c) for c in clicks]
+
+        FocusProcessor._attach_clicks(DB(), timeline)
+
+    def test_a_click_joins_the_next_frame_with_the_dom_of_its_page(self) -> None:
+        hn_nodes = [{"tag": "a", "innerText": "SQLite's WAL mode"}]
+        hn = self._frame("2026-09-15T08:50:39+00:00", "news.ycombinator.com", hn_nodes)
+        story = self._frame("2026-09-15T08:50:45+00:00", "blog.example.org", [{"tag": "h1"}])
+        click = {"timestamp": "2026-09-15T08:50:41+00:00", "url": "https://news.ycombinator.com/",
+                 "target": {"innerText": "SQLite's WAL mode"}}
+        self._attach([hn, story], [click])
+        assert hn["click_targets"] == []
+        assert story["click_targets"] == [{**click, "page_dom_nodes": hn_nodes}]
+
+    def test_a_click_after_the_last_frame_stays_on_its_page(self) -> None:
+        slack = self._frame("2026-09-15T08:59:59+00:00", "app.slack.com", [{"tag": "button"}])
+        click = {"timestamp": "2026-09-15T09:00:01+00:00", "url": "https://app.slack.com/client",
+                 "target": {"ariaLabel": "Send now"}}
+        self._attach([slack], [click])
+        assert slack["click_targets"] == [{**click, "page_dom_nodes": [{"tag": "button"}]}]
+
+    def test_a_click_that_brought_its_page_on_screen_joins_that_frame(self) -> None:
+        notes = self._frame("2026-09-15T08:57:23+00:00", "")
+        slack = self._frame("2026-09-15T08:57:45.900+00:00", "app.slack.com", [{"tag": "div"}])
+        click = {"timestamp": "2026-09-15T08:57:45.100+00:00", "url": "https://app.slack.com/client",
+                 "target": {"ariaLabel": "Message #daily-news"}}
+        self._attach([notes, slack], [click])
+        assert notes["click_targets"] == []
+        assert slack["click_targets"][0]["page_dom_nodes"] == [{"tag": "div"}]
+
+    def test_a_click_no_frame_shows_is_left_out(self) -> None:
+        notes = self._frame("2026-09-15T08:57:23+00:00", "")
+        later = self._frame("2026-09-15T08:58:23+00:00", "")
+        click = {"timestamp": "2026-09-15T08:57:30+00:00", "url": "https://example.com/",
+                 "target": {"innerText": "x"}}
+        self._attach([notes, later], [click])
+        assert notes["click_targets"] == later["click_targets"] == []
