@@ -786,6 +786,67 @@ class TestProcessPassiveDiscovery:
             db_path.unlink(missing_ok=True)
 
     @patch("agenthandover_worker.task_segmenter._compute_embeddings", side_effect=_mock_embeddings)
+    def test_a_model_that_fails_to_load_defers_the_pass(self, mock_embed):
+        """WP-C9: Ollama could not load the SOP model (HTTP 500, "timed out
+        waiting for llama-server to start"): no failure is recorded and the
+        cluster stays pending for the next pass."""
+        conn, db_path = _make_test_db()
+        try:
+            from datetime import datetime, timedelta, timezone
+
+            from agenthandover_worker.db import WorkerDB
+            from agenthandover_worker.knowledge_base import KnowledgeBase
+            from agenthandover_worker.main import _process_passive_discovery
+            from agenthandover_worker.sop_generator import GeneratedSOP, SOPGenerator
+
+            _now = datetime.now(timezone.utc)
+            ann = json.dumps({
+                "app": "Chrome",
+                "location": "https://expensify.com",
+                "task_context": {"what_doing": "Filing expense report", "is_workflow": True},
+            })
+            for i in range(4):
+                hours = 2 if i < 2 else 1
+                dt = _now - timedelta(hours=hours, minutes=-(i % 2))
+                conn.execute(
+                    "INSERT INTO events "
+                    "(id, timestamp, annotation_status, scene_annotation_json) "
+                    "VALUES (?, ?, 'completed', ?)",
+                    (f"e{i}", dt.strftime("%Y-%m-%dT%H:%M:%SZ"), ann),
+                )
+            conn.commit()
+            db = WorkerDB(db_path)
+            mock_sop_gen = MagicMock(spec=SOPGenerator)
+            mock_sop_gen.generate_from_passive.return_value = GeneratedSOP(
+                sop={}, success=False, deferred=True,
+                error="VLM connection failed: timed out waiting for llama-server to start",
+            )
+            kb = KnowledgeBase(root=Path(tempfile.mkdtemp()) / "knowledge")
+            kb.ensure_structure()
+            mock_writer = MagicMock()
+
+            sops = _process_passive_discovery(
+                db,
+                knowledge_base=kb,
+                segmenter=TaskSegmenter(config=SegmenterConfig(
+                    stitch_max_gap_seconds=1800, default_window_hours=24,
+                )),
+                sop_generator=mock_sop_gen,
+                openclaw_writer=mock_writer,
+                index_generator=MagicMock(),
+            )
+
+            assert sops == 0
+            mock_sop_gen.generate_from_passive.assert_called_once()
+            assert db.get_failed_generations() == []
+            assert db.get_sop_pending_clusters(), "the cluster must stay pending"
+            mock_writer.write_sop.assert_not_called()
+            db.close()
+        finally:
+            conn.close()
+            db_path.unlink(missing_ok=True)
+
+    @patch("agenthandover_worker.task_segmenter._compute_embeddings", side_effect=_mock_embeddings)
     def test_no_sop_with_single_demonstration(self, mock_embed):
         """Only 1 demonstration = no SOP generated."""
         conn, db_path = _make_test_db()
