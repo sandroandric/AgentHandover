@@ -52,7 +52,16 @@ class ModelProfile:
     ann_presence_penalty: float = 0.0
     ann_think: bool | str = False  # False, True, "low", "medium", "high"
 
-    # SOP generation settings (reasoning, structured output)
+    # SOP generation settings (reasoning, structured output).
+    # ``sop_num_ctx`` is the context of every generation-phase call on the
+    # model (SOP, synthesis, the reasoner's Q&A, labels and curation), not
+    # of the SOP call alone: Ollama reloads a model whose num_ctx changes,
+    # so per-call-type contexts would reload it inside one phase (WP-C9).
+    # It is the largest call measured plus a ~30% margin.  Measured on the
+    # focus_dailynews cassette (prompt_eval_count + num_predict): SOP 6,619
+    # prompt tokens at the 20-keyframe cap + num_predict; synthesis 4,225 +
+    # 3,000; reasoner calls <= 1,002 + 4,000.  Gemma (num_predict 6,000):
+    # 12,619 -> 16,384.  Qwen (num_predict 12,000): 18,619 -> 24,576.
     sop_system: str = ""
     sop_temperature: float = 0.3
     sop_num_predict: int = 6000
@@ -505,8 +514,9 @@ TIER_BASIS = (
     "Annotator qwen3.5:4b on every tier; Skills and synthesis on the largest "
     "model the RAM holds. Measured on a 16 GB Mac with Ollama 0.34.2: "
     "gemma4:12b-it-qat takes 40+ s per annotated frame (11 s image prefill "
-    "+ 30 s decode) against a 3 s budget; qwen3.5:4b (3.4 GB) and "
-    "gemma4:12b-it-qat (7.2 GB) stay resident together."
+    "+ 30 s decode) against a 3 s budget. With ordinary apps open, "
+    "qwen3.5:4b (3.4 GB) and gemma4:12b-it-qat (7.2 GB) do not fit together, "
+    "so the worker loads one at a time: annotation first, then Skills."
 )
 
 # Download size in GB of the models a tier installs by default (``ollama
