@@ -24,10 +24,11 @@ import logging
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, TYPE_CHECKING
+from typing import Any, Callable, TYPE_CHECKING
 
 from agenthandover_worker.json_extract import clean_model_text, extract_json
 from agenthandover_worker.model_profiles import STANDARD_TIER, get_profile
+from agenthandover_worker.model_scheduler import before_generation_call
 from agenthandover_worker.ollama import OllamaClient
 
 if TYPE_CHECKING:
@@ -117,6 +118,9 @@ class LLMReasoner:
     ) -> None:
         self.config = config or ReasoningConfig()
         self._queue = vlm_queue
+        # Set by ``ModelScheduler.register``: switches Ollama to the
+        # generation model before a call (see ``before_generation_call``).
+        self.before_call: Callable[[], bool] | None = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -265,6 +269,14 @@ class LLMReasoner:
         """Budget-check, call Ollama, build base ReasoningResult."""
         prompt_hash = hashlib.sha256(prompt.encode()).hexdigest()[:12]
         now_iso = datetime.now(timezone.utc).isoformat()
+        try:
+            before_generation_call(self)
+        except ConnectionError as exc:
+            logger.warning("LLM reasoning deferred (%s): %s", caller, exc)
+            return ReasoningResult(
+                model=self.config.model, prompt_hash=prompt_hash,
+                generated_at=now_iso, error=f"Ollama connection failed: {exc}",
+            )
 
         base = ReasoningResult(
             model=self.config.model,

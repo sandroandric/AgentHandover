@@ -15,24 +15,29 @@ start").  The worker therefore runs each tick in two phases:
 
 :class:`ModelScheduler` owns the switch between them:
 
-* before the generation phase it unloads the annotation model and loads the
-  SOP model (with the context size the calls use, so they do not reload it);
-  after the phase it unloads the SOP model.  The embedding model is never
-  unloaded.  What is loaded is read from Ollama's ``/api/ps``.
-* non-urgent generation work (passive discovery, the daily jobs) is
-  batched: it runs once :data:`GENERATION_BATCH_JOBS` jobs are due or the
-  oldest has waited :data:`GENERATION_BATCH_WAIT_SECONDS`.  A focus
-  recording the user stopped, or answered questions, never wait.
-* before loading the SOP model it checks free memory (``vm_stat``: free +
-  inactive + speculative pages, plus what unloading the annotation model
-  gives back) against the SOP model's size and :data:`MEMORY_MARGIN_BYTES`.
-  Without room, batched work waits ("waiting for memory: need 8.2 GB,
-  3.1 GB free") and is retried on the next tick; after
-  :data:`FALLBACK_AFTER_SECONDS` it runs on the annotation model instead,
-  which is already resident, and the worker status says so.  A focus
-  recording is always processed.
+* the first generation call of a phase (every component that calls the
+  SOP model is :meth:`~ModelScheduler.register`-ed and asks first) unloads
+  the annotation model and loads the SOP model with the context size the
+  calls use, so they do not reload it; the end of the phase unloads the
+  SOP model.  A phase with no generation call loads nothing.  The embedding
+  model is never unloaded.  What is loaded is read from Ollama's
+  ``/api/ps``.
+* :meth:`~ModelScheduler.plan_generation` decides which jobs the phase
+  runs.  Work the user waits for (a stopped focus recording, answered
+  questions) always runs.  A passive-discovery pass is batched: it waits
+  until other generation work runs anyway or it has been due for
+  :data:`GENERATION_BATCH_WAIT_SECONDS`.
+* before planning to load the SOP model it checks free memory
+  (``vm_stat``: free + inactive + speculative pages, plus what unloading the
+  annotation model gives back) against the SOP model's size and
+  :data:`MEMORY_MARGIN_BYTES`.  Without room, the jobs wait ("waiting for
+  memory: need 8.2 GB, 3.1 GB free") and are retried on the next tick;
+  after :data:`FALLBACK_AFTER_SECONDS` they run on the annotation model
+  instead, which is already resident, and the worker status says so.  A
+  focus recording is always processed, on the SOP model.
 * a load that fails (Ollama answers 5xx or times out) defers the phase with
-  an exponential backoff; nothing generated is marked failed.
+  an exponential backoff: the calls raise ``OllamaUnavailable``, which the
+  generators treat as "try again later", never as a failed Skill.
 
 On a tier with one model for both (Standard) none of this applies: the
 generation phase runs whenever work is due, as before.
@@ -48,16 +53,17 @@ from dataclasses import dataclass
 from typing import Callable
 
 from agenthandover_worker.model_profiles import MODEL_SIZES_GB, get_profile
-from agenthandover_worker.ollama import OllamaClient, OllamaError
+from agenthandover_worker.ollama import OllamaClient, OllamaError, OllamaUnavailable
 
 logger = logging.getLogger(__name__)
 
 GB = 1_000_000_000  # decimal, as ``ollama list`` and the tier table count
 
-# Batching of generation work that nobody is waiting for.  The worker has
-# two such jobs (a passive-discovery pass and the daily model jobs); both
-# due at once is a full batch, otherwise the older one waits at most M.
-GENERATION_BATCH_JOBS = 2
+# A passive-discovery pass that nobody waits for is due every 2 hours, or
+# after 5 idle minutes; it joins the next generation phase that runs
+# anyway, or waits this long for one.  (The daily jobs are not batched:
+# they come once a day.)
+BATCHED_JOBS = frozenset({"passive_discovery"})
 GENERATION_BATCH_WAIT_SECONDS = 30 * 60
 
 # Headroom over the SOP model's size (its /api/ps size includes the context
@@ -104,6 +110,16 @@ def free_memory_bytes() -> int | None:
     except (OSError, subprocess.SubprocessError):
         return None
     return parse_vm_stat(out)
+
+
+def before_generation_call(component: object) -> None:
+    """Run *component*'s ``before_call`` (set by :meth:`ModelScheduler.register`)
+    before a generation-model call; raise :class:`OllamaUnavailable` when the
+    generation model could not be loaded, which every caller treats as
+    "defer, try again later"."""
+    hook = getattr(component, "before_call", None)
+    if hook is not None and not hook():
+        raise OllamaUnavailable("the generation model could not be loaded; deferred")
 
 
 def _gb(n: int) -> str:
@@ -184,7 +200,12 @@ class ModelScheduler:
         return self._plan_model
 
     def register(self, *components: object) -> None:
-        self._components.extend(c for c in components if c is not None)
+        """Components that call the generation model: each switches Ollama
+        to it before a call (``before_generation_call``)."""
+        for component in components:
+            if component is not None:
+                component.before_call = self.enter_generation  # type: ignore[attr-defined]
+                self._components.append(component)
 
     def status(self) -> dict | None:
         """The ``model_schedule`` block of ``worker-status.json`` (None on a
@@ -250,7 +271,7 @@ class ModelScheduler:
         oldest = min(self._due_since.values(), default=now)
         if (
             not urgent
-            and len(jobs) < GENERATION_BATCH_JOBS
+            and jobs <= BATCHED_JOBS
             and now - oldest < GENERATION_BATCH_WAIT_SECONDS
         ):
             return GenerationPlan(run=False)
@@ -282,7 +303,8 @@ class ModelScheduler:
 
     def enter_generation(self) -> bool:
         """Switch to the generation model before the first generation call
-        of a phase (later calls in the phase return at once).
+        of a phase (later calls in the phase return at once).  Registered
+        components call it through ``before_generation_call``.
 
         Unloads the annotation model and loads the generation model with the
         context size its calls use.  False when the load failed: the phase

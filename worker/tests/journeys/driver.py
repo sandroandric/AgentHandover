@@ -316,8 +316,6 @@ class JourneyWorker:
         self.model_scheduler.register(
             self.sop_generator, self.behavioral_synthesizer, llm_reasoner,
         )
-        if self.focus_processor is not None:
-            self.focus_processor.before_generation = self.model_scheduler.enter_generation
 
         self.db = wm.WorkerDB(self.db_path)
         self.v2_schema_ok = (
@@ -482,22 +480,20 @@ class JourneyWorker:
         plan = scheduler.plan_generation(
             urgent=focus_work is not None, due={"passive_discovery": passive_due},
         )
-        focus_sops = 0
         if self.focus_processor is not None and self.v2_schema_ok:
-            if focus_work != "answers" or scheduler.enter_generation():
-                focus_sops = wm._process_focus_sessions_v2(
-                    db,
-                    focus_processor=self.focus_processor,
-                    screenshots_dir=self.screenshots_dir,
-                    sop_auto_approve=self.sop_auto_approve,
-                    behavioral_synthesizer=self.behavioral_synthesizer,
-                    focus_questioner=self.focus_questioner,
-                    knowledge_base=self.knowledge_base,
-                    vector_kb=self.vector_kb,
-                    ollama_host=self.cfg.vlm.ollama_host,
-                    qna_model=scheduler.generation_model,
-                    **writers,
-                )
+            focus_sops = wm._process_focus_sessions_v2(
+                db,
+                focus_processor=self.focus_processor,
+                screenshots_dir=self.screenshots_dir,
+                sop_auto_approve=self.sop_auto_approve,
+                behavioral_synthesizer=self.behavioral_synthesizer,
+                focus_questioner=self.focus_questioner,
+                knowledge_base=self.knowledge_base,
+                vector_kb=self.vector_kb,
+                ollama_host=self.cfg.vlm.ollama_host,
+                qna_model=scheduler.generation_model,
+                **writers,
+            )
         else:
             focus_sops = wm._process_focus_sessions(
                 db,
@@ -515,11 +511,7 @@ class JourneyWorker:
             wm._write_sops_index(db, self.knowledge_base)
 
         passive_sops = None
-        if (
-            passive_due
-            and plan.allows("passive_discovery")
-            and scheduler.enter_generation()
-        ):
+        if passive_due and plan.allows("passive_discovery"):
             passive_sops = wm._process_passive_discovery(
                 db,
                 knowledge_base=self.knowledge_base,

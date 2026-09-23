@@ -19,13 +19,14 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
 from agenthandover_worker.confidence import compute_v2_confidence
 from agenthandover_worker.dom import select_anchor
 from agenthandover_worker.event_helpers import describe_focused_field, display_name
 from agenthandover_worker.json_extract import extract_json
 from agenthandover_worker.model_profiles import STANDARD_TIER
+from agenthandover_worker.model_scheduler import before_generation_call
 from agenthandover_worker.ollama import OllamaClient
 from agenthandover_worker.scene_annotator import as_compact
 
@@ -1407,6 +1408,9 @@ class SOPGenerator:
 
     def __init__(self, config: SOPGeneratorConfig | None = None) -> None:
         self.config = config or SOPGeneratorConfig()
+        # Set by ``ModelScheduler.register``: switches Ollama to the
+        # generation model before a call (see ``before_generation_call``).
+        self.before_call: Callable[[], bool] | None = None
 
     def _call(
         self, prompt: str, *, retry: bool = False, system: str | None = None,
@@ -1421,6 +1425,7 @@ class SOPGenerator:
         """
         from agenthandover_worker.model_profiles import get_profile
 
+        before_generation_call(self)
         profile = get_profile(self.config.model)
         return _call_ollama(
             model=self.config.model,

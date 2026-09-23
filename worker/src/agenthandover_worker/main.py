@@ -4923,8 +4923,6 @@ def main(argv: list[str] | None = None) -> None:
         sop_model=vlm_cfg.sop_model,
     )
     model_scheduler.register(sop_generator, behavioral_synthesizer, llm_reasoner)
-    if focus_processor is not None:
-        focus_processor.before_generation = model_scheduler.enter_generation
     # SOP mining input seen by the last run_pipeline (see its docstring).
     mining_watermark: dict = {}
 
@@ -5358,37 +5356,31 @@ def main(argv: list[str] | None = None) -> None:
                 # Completed focus recordings, never batched or held for
                 # memory: the v2 VLM pipeline when available (semantic SOPs
                 # from screen annotations; its keyframes are annotated
-                # before its hook switches to the generation model), else
-                # v1 (episode builder + translator + PrefixSpan).  Answered
-                # questions export with the generation model loaded.
-                focus_sops = 0
+                # before the SOP call switches to the generation model),
+                # else v1 (episode builder + translator + PrefixSpan).
                 if focus_processor is not None and v2_schema_ok:
-                    if (
-                        focus_work != "answers"
-                        or model_scheduler.enter_generation()
-                    ):
-                        focus_sops = _process_focus_sessions_v2(
-                            db,
-                            focus_processor=focus_processor,
-                            openclaw_writer=sop_writer,
-                            skill_md_writer=skill_md_writer,
-                            claude_skill_writer=claude_skill_writer,
-                            index_generator=index_generator,
-                            screenshots_dir=screenshots_dir,
-                            sop_auto_approve=sop_auto_approve,
-                            procedure_writer=procedure_writer,
-                            kb_export_adapter=kb_export_adapter,
-                            behavioral_synthesizer=behavioral_synthesizer,
-                            focus_questioner=focus_questioner_inst,
-                            knowledge_base=knowledge_base,
-                            vector_kb=vector_kb,
-                            ollama_host=vlm_cfg.ollama_host,
-                            # Q&A questions on the generation phase's model
-                            # (the configured SOP model): never a hardcoded
-                            # default, which silently failed for users who
-                            # never pulled it (fixed in v0.2.3).
-                            qna_model=model_scheduler.generation_model,
-                        )
+                    focus_sops = _process_focus_sessions_v2(
+                        db,
+                        focus_processor=focus_processor,
+                        openclaw_writer=sop_writer,
+                        skill_md_writer=skill_md_writer,
+                        claude_skill_writer=claude_skill_writer,
+                        index_generator=index_generator,
+                        screenshots_dir=screenshots_dir,
+                        sop_auto_approve=sop_auto_approve,
+                        procedure_writer=procedure_writer,
+                        kb_export_adapter=kb_export_adapter,
+                        behavioral_synthesizer=behavioral_synthesizer,
+                        focus_questioner=focus_questioner_inst,
+                        knowledge_base=knowledge_base,
+                        vector_kb=vector_kb,
+                        ollama_host=vlm_cfg.ollama_host,
+                        # Q&A questions on the generation phase's model
+                        # (the configured SOP model): never a hardcoded
+                        # default, which silently failed for users who
+                        # never pulled it (fixed in v0.2.3).
+                        qna_model=model_scheduler.generation_model,
+                    )
                 else:
                     focus_sops = _process_focus_sessions(
                         db,
@@ -5415,11 +5407,7 @@ def main(argv: list[str] | None = None) -> None:
                     _write_sops_index(db, knowledge_base)
 
                 # --- v2 Passive Discovery (periodic) ---
-                if (
-                    should_segment
-                    and gen_plan.allows("passive_discovery")
-                    and model_scheduler.enter_generation()
-                ):
+                if should_segment and gen_plan.allows("passive_discovery"):
                     try:
                         pd_sops = _process_passive_discovery(
                             db,
@@ -5487,9 +5475,7 @@ def main(argv: list[str] | None = None) -> None:
 
                 # --- Once-per-day jobs: the first tick of each local day,
                 # keyed on the date persisted when they last ran. ---
-                run_daily = (
-                    gen_plan.allows("daily") and model_scheduler.enter_generation()
-                )
+                run_daily = gen_plan.allows("daily")
 
                 # Episode store cleanup
                 if run_daily:
