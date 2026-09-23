@@ -12,7 +12,7 @@ from __future__ import annotations
 import logging
 from collections import Counter, defaultdict
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime, timedelta
 
 from agenthandover_worker.knowledge_base import KnowledgeBase
 
@@ -30,6 +30,24 @@ class RecurrencePattern:
     time: str | None  # "09:00"
     avg_duration_minutes: int
     observations: int
+    weekday: int | None = None  # 0 = Monday, for weekly
+
+    def as_recurrence(self) -> dict:
+        """The procedure's ``recurrence`` section."""
+        return {
+            "pattern": self.pattern,
+            "confidence": round(self.confidence, 3),
+            "day": self.day,
+            "weekday": self.weekday,
+            "time": self.time,
+            "avg_duration_minutes": self.avg_duration_minutes,
+            "observations": self.observations,
+        }
+
+
+# The recurrence window of detect_from_observations, in local days.
+OBSERVATION_WINDOW_DAYS = 42
+_WEEKDAY_NAMES = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
 
 
 @dataclass
@@ -109,6 +127,76 @@ class PatternDetector:
 
         return sorted(patterns, key=lambda p: p.confidence, reverse=True)
 
+    def detect_from_observations(
+        self,
+        observations: list[dict],
+        *,
+        today: date,
+        active_dates: set[str] | None = None,
+        slug: str = "",
+    ) -> RecurrencePattern | None:
+        """The recurrence of one workflow from its ``workflow_observations``
+        rows, in the user's local time, over the
+        :data:`OBSERVATION_WINDOW_DAYS` local days up to *today*.
+
+        - daily: the workflow ran on at least 70% of the local workdays
+          (Monday to Friday) the user was active since its first
+          observation (*active_dates*: local dates with any observation;
+          default every workday), on at least ``min_observations`` days;
+        - weekly: one local weekday holds at least 60% of its days and the
+          median gap between consecutive days is 6 to 8 days.
+
+        None when neither holds.  A workflow run twice on one day counts
+        that day once.
+        """
+        first_day = (today - timedelta(days=OBSERVATION_WINDOW_DAYS)).isoformat()
+        obs = [o for o in observations if o["started_local_date"] >= first_day]
+        dates = sorted({o["started_local_date"] for o in obs})
+        if not dates:
+            return None
+        minutes = sorted(int(o["started_local_minute"]) for o in obs)
+        durations = sorted(float(o["duration_s"]) for o in obs)
+        median_minute = minutes[len(minutes) // 2]
+        common = {
+            "procedure_slug": slug,
+            "time": f"{median_minute // 60:02d}:{median_minute % 60:02d}",
+            "avg_duration_minutes": round(durations[len(durations) // 2] / 60),
+            "observations": len(obs),
+        }
+
+        def is_workday(d: str) -> bool:
+            return date.fromisoformat(d).weekday() < 5
+
+        if active_dates is None:
+            start = date.fromisoformat(dates[0])
+            candidates = {
+                (start + timedelta(days=i)).isoformat()
+                for i in range((today - start).days + 1)
+            }
+        else:
+            candidates = {d for d in active_dates if d >= dates[0]} | set(dates)
+        workdays = {d for d in candidates if is_workday(d) and d <= today.isoformat()}
+        ran = {d for d in dates if is_workday(d)}
+        if workdays and len(dates) >= self._min_observations:
+            ratio = len(ran) / len(workdays)
+            if ratio >= 0.7:
+                return RecurrencePattern(
+                    pattern="daily", confidence=min(ratio, 1.0), day=None, **common,
+                )
+
+        weekdays = Counter(date.fromisoformat(d).weekday() for d in dates)
+        weekday, count = weekdays.most_common(1)[0]
+        gaps = sorted(
+            (date.fromisoformat(b) - date.fromisoformat(a)).days
+            for a, b in zip(dates, dates[1:])
+        )
+        if gaps and count / len(dates) >= 0.6 and 6 <= gaps[len(gaps) // 2] <= 8:
+            return RecurrencePattern(
+                pattern="weekly", confidence=count / len(dates),
+                day=_WEEKDAY_NAMES[weekday], weekday=weekday, **common,
+            )
+        return None
+
     def _classify_recurrence(
         self, slug: str, occurrences: list[dict], total_days: int
     ) -> RecurrencePattern | None:
@@ -137,7 +225,7 @@ class PatternDetector:
                     dt = datetime.fromisoformat(
                         start.replace("Z", "+00:00")
                     )
-                    hours.append(dt.hour)
+                    hours.append(dt.astimezone().hour)  # local hour
                 except (ValueError, TypeError):
                     pass
 

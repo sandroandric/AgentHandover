@@ -27,6 +27,24 @@ def _sqlite_utc(moment: datetime) -> str:
     return moment.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
 
 
+def _local_day_bounds(date_str: str) -> tuple[str, str]:
+    """``(start, end)`` of the local calendar day *date_str* (YYYY-MM-DD)
+    as UTC text that compares with stored timestamps: rows of the day are
+    ``start <= timestamp < end``.
+
+    Local midnight is resolved with the zone rules in force on that day
+    (a DST change makes the day 23 or 25 hours long).  The bounds carry no
+    fraction or offset: every stored timestamp is UTC (``Z`` or
+    ``+00:00``), and a bare ``YYYY-MM-DDTHH:MM:SS`` sorts before any
+    timestamp of that second and after every earlier one.
+    """
+    day = datetime.strptime(date_str, "%Y-%m-%d")
+    start = day.astimezone(timezone.utc)
+    end = (day + timedelta(days=1)).astimezone(timezone.utc)
+    fmt = "%Y-%m-%dT%H:%M:%S"
+    return start.strftime(fmt), end.strftime(fmt)
+
+
 class WorkerDB:
     """Hybrid read/write connection to the daemon's SQLite database.
 
@@ -1046,19 +1064,19 @@ class WorkerDB:
         return self._rows_to_dicts(cur.fetchall())
 
     def get_annotated_events_for_date(self, date: str) -> list[dict]:
-        """Return all annotated events for a given date (YYYY-MM-DD).
+        """Return all annotated events of the local day *date* (YYYY-MM-DD).
 
         Used by the daily batch processor to aggregate a full day's
-        annotated activity into a summary.
+        annotated activity into a summary.  The day is the user's local
+        calendar day, ``[local midnight, next local midnight)``.
         """
         self._refresh_read_snapshot()
-        start = f"{date}T00:00:00.000000Z"
-        end = f"{date}T23:59:59.999999Z"
+        start, end = _local_day_bounds(date)
         cur = self._conn.execute(
             "SELECT * FROM events "
             "WHERE annotation_status = 'completed' "
             "  AND scene_annotation_json IS NOT NULL "
-            "  AND timestamp >= ? AND timestamp <= ? "
+            "  AND timestamp >= ? AND timestamp < ? "
             "ORDER BY timestamp ASC",
             (start, end),
         )
@@ -1097,10 +1115,16 @@ class WorkerDB:
         )
         return self._rows_to_dicts(cur.fetchall())
 
-    def _ensure_task_segments_table(
-        self, write_conn: "sqlite3.Connection",
-    ) -> None:
-        """Create the task_segments table if it doesn't exist."""
+    @staticmethod
+    def _ensure_task_segments_table(write_conn: "sqlite3.Connection") -> None:
+        """Create the task_segments table if it doesn't exist.
+
+        Segments are the segmenter's output, kept for 14 days
+        (:meth:`purge_task_segments`); passive discovery groups
+        ``workflow_observations``, not segments.  Tables from before v0.5
+        carried per-frame vectors in ``embeddings_json``; the column is
+        dropped (the vectors live in the vector KB).
+        """
         write_conn.execute(
             "CREATE TABLE IF NOT EXISTS task_segments ("
             "  segment_id TEXT PRIMARY KEY,"
@@ -1111,19 +1135,16 @@ class WorkerDB:
             "  apps_json TEXT NOT NULL DEFAULT '[]',"
             "  start_time TEXT,"
             "  end_time TEXT,"
-            "  sop_generated INTEGER NOT NULL DEFAULT 0,"
-            "  embeddings_json TEXT,"
             "  created_at TEXT NOT NULL DEFAULT "
             "    (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))"
             ")"
         )
-        # Add column if table already exists without it
-        try:
-            write_conn.execute(
-                "ALTER TABLE task_segments ADD COLUMN embeddings_json TEXT"
-            )
-        except sqlite3.OperationalError:
-            pass  # Column already exists
+        columns = {row[1] for row in write_conn.execute("PRAGMA table_info(task_segments)")}
+        if "embeddings_json" in columns:
+            try:
+                write_conn.execute("ALTER TABLE task_segments DROP COLUMN embeddings_json")
+            except sqlite3.OperationalError:  # SQLite < 3.35: clear it instead
+                write_conn.execute("UPDATE task_segments SET embeddings_json = NULL")
 
     def save_task_segment(
         self,
@@ -1134,24 +1155,11 @@ class WorkerDB:
         apps: list[str],
         start_time: str,
         end_time: str,
-        embeddings: list[list[float]] | None = None,
     ) -> bool:
-        """Persist a task segment from the segmenter.
-
-        Uses INSERT ... ON CONFLICT DO UPDATE to upsert metadata while
-        preserving ``sop_generated`` and ``created_at`` on existing rows.
-
-        *embeddings* — per-frame embedding vectors. Persisted so future
-        vector-KB / fine-tuning pipelines can reuse them without
-        recomputing via Ollama.
-        """
-        import json as _json
-
+        """Persist (upsert) a task segment from the segmenter."""
         db_path = self._get_writable_path()
         if not db_path:
             return False
-
-        embeddings_str = _json.dumps(embeddings) if embeddings else None
 
         write_conn = sqlite3.connect(db_path)
         try:
@@ -1160,8 +1168,8 @@ class WorkerDB:
             write_conn.execute(
                 "INSERT INTO task_segments "
                 "(segment_id, cluster_id, task_label, event_ids_json, "
-                " frame_count, apps_json, start_time, end_time, embeddings_json) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                " frame_count, apps_json, start_time, end_time) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(segment_id) DO UPDATE SET "
                 " cluster_id = excluded.cluster_id,"
                 " task_label = excluded.task_label,"
@@ -1169,18 +1177,16 @@ class WorkerDB:
                 " frame_count = excluded.frame_count,"
                 " apps_json = excluded.apps_json,"
                 " start_time = excluded.start_time,"
-                " end_time = excluded.end_time,"
-                " embeddings_json = excluded.embeddings_json",
+                " end_time = excluded.end_time",
                 (
                     segment_id,
                     cluster_id,
                     task_label,
-                    _json.dumps(event_ids),
+                    json.dumps(event_ids),
                     len(event_ids),
-                    _json.dumps(apps),
+                    json.dumps(apps),
                     start_time,
                     end_time,
-                    embeddings_str,
                 ),
             )
             write_conn.commit()
@@ -1191,69 +1197,207 @@ class WorkerDB:
         finally:
             write_conn.close()
 
-    def get_cluster_segments(
-        self, cluster_id: int,
-    ) -> list[dict]:
-        """Return all segments for a given cluster, ordered by start time."""
-        import json as _json
-
+    def get_task_segments(self) -> list[dict]:
+        """All kept task segments, oldest first."""
         self._ensure_once(self._ensure_task_segments_table)
-
         self._refresh_read_snapshot()
         try:
             cur = self._conn.execute(
-                "SELECT * FROM task_segments "
-                "WHERE cluster_id = ? AND sop_generated = 0 "
-                "ORDER BY start_time ASC",
-                (cluster_id,),
+                "SELECT segment_id, cluster_id, task_label, event_ids_json, "
+                "  frame_count, apps_json, start_time, end_time, created_at "
+                "FROM task_segments ORDER BY start_time ASC",
             )
             return self._rows_to_dicts(cur.fetchall())
         except sqlite3.OperationalError:
             return []
 
-    def mark_segment_sop_generated(self, segment_id: str) -> bool:
-        """Mark a segment as having had its SOP generated."""
+    def purge_task_segments(
+        self, max_age_days: int = 14, *, now: datetime | None = None,
+    ) -> int:
+        """Delete segments that ended more than *max_age_days* before *now*
+        (default: the wall clock).  Returns the number deleted."""
+        return self._delete_older_than(
+            self._ensure_task_segments_table,
+            "DELETE FROM task_segments WHERE datetime(end_time) < datetime(?)",
+            (now or datetime.now(timezone.utc)) - timedelta(days=max_age_days),
+        )
+
+    def _delete_older_than(
+        self,
+        ensure: "Callable[[sqlite3.Connection], None]",
+        sql: str,
+        cutoff: datetime,
+    ) -> int:
+        """Run the one-parameter DELETE *sql* with *cutoff* (UTC, in the
+        text ``datetime()`` returns) after *ensure* created its table."""
         db_path = self._get_writable_path()
         if not db_path:
-            return False
-
+            return 0
         write_conn = sqlite3.connect(db_path)
         try:
             write_conn.execute("PRAGMA busy_timeout = 5000;")
+            ensure(write_conn)
+            deleted = write_conn.execute(
+                sql, (cutoff.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),),
+            ).rowcount
+            write_conn.commit()
+            return deleted
+        except sqlite3.Error as exc:
+            logger.error("Purge failed (%s): %s", sql.split(" WHERE")[0], exc)
+            return 0
+        finally:
+            write_conn.close()
+
+    # ------------------------------------------------------------------
+    # Workflow observations: one row per work session.  The daemon's raw
+    # retention purges events, never this table, so an observation (its
+    # step signature, timing and extracted evidence) outlives its frames.
+    # ------------------------------------------------------------------
+
+    _OBSERVATION_COLUMNS = (
+        "obs_id", "workflow_key", "started_utc", "started_local_date",
+        "started_local_weekday", "started_local_minute", "duration_s",
+        "apps_json", "hosts_json", "step_sig_json", "evidence_json",
+        "source", "task_label", "event_ids_json", "promoted_slug",
+        "promoted_at",
+    )
+
+    @staticmethod
+    def _ensure_workflow_observations_table(write_conn: sqlite3.Connection) -> None:
+        write_conn.execute(
+            "CREATE TABLE IF NOT EXISTS workflow_observations ("
+            "  obs_id TEXT PRIMARY KEY,"
+            "  workflow_key TEXT NOT NULL,"
+            "  started_utc TEXT NOT NULL,"
+            "  started_local_date TEXT NOT NULL,"
+            "  started_local_weekday INTEGER NOT NULL,"
+            "  started_local_minute INTEGER NOT NULL,"
+            "  duration_s REAL NOT NULL,"
+            "  apps_json TEXT NOT NULL DEFAULT '[]',"
+            "  hosts_json TEXT NOT NULL DEFAULT '[]',"
+            "  step_sig_json TEXT NOT NULL DEFAULT '[]',"
+            "  evidence_json TEXT NOT NULL DEFAULT '{}',"
+            "  source TEXT NOT NULL DEFAULT 'passive',"
+            "  task_label TEXT NOT NULL DEFAULT '',"
+            "  event_ids_json TEXT NOT NULL DEFAULT '[]',"
+            "  promoted_slug TEXT,"
+            "  promoted_at TEXT"
+            ")"
+        )
+        write_conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_workflow_observations_started "
+            "ON workflow_observations(started_utc)"
+        )
+
+    def save_workflow_observation(self, obs: dict) -> bool:
+        """Upsert one observation (keyed on ``obs_id``).  A re-recorded
+        session updates its fields but keeps its promotion."""
+        db_path = self._get_writable_path()
+        if not db_path:
+            return False
+        cols = [c for c in self._OBSERVATION_COLUMNS if c not in ("promoted_slug", "promoted_at")]
+        write_conn = sqlite3.connect(db_path)
+        try:
+            write_conn.execute("PRAGMA busy_timeout = 5000;")
+            self._ensure_workflow_observations_table(write_conn)
             write_conn.execute(
-                "UPDATE task_segments SET sop_generated = 1 "
-                "WHERE segment_id = ?",
-                (segment_id,),
+                f"INSERT INTO workflow_observations ({', '.join(cols)}) "
+                f"VALUES ({', '.join('?' for _ in cols)}) "
+                "ON CONFLICT(obs_id) DO UPDATE SET "
+                + ", ".join(f"{c} = excluded.{c}" for c in cols if c != "obs_id"),
+                tuple(obs[c] for c in cols),
             )
             write_conn.commit()
             return True
-        except sqlite3.Error as exc:
-            logger.error("Failed to mark segment SOP generated: %s", exc)
+        except (sqlite3.Error, KeyError) as exc:
+            logger.error("Failed to save workflow observation: %s", exc)
             return False
         finally:
             write_conn.close()
 
-    def get_sop_pending_clusters(self) -> list[dict]:
-        """Return cluster IDs that have >= 2 segments without SOPs generated.
-
-        Used by the passive discovery pipeline to find clusters ready for
-        SOP generation.
-        """
-        self._ensure_once(self._ensure_task_segments_table)
-
+    def get_workflow_observations(
+        self,
+        *,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        obs_ids: list[str] | None = None,
+    ) -> list[dict]:
+        """Observations started in ``[since, until)`` (or those in
+        *obs_ids*), oldest first."""
+        self._ensure_once(self._ensure_workflow_observations_table)
         self._refresh_read_snapshot()
+        where: list[str] = []
+        params: list[str] = []
+        if since is not None:
+            where.append("started_utc >= ?")
+            params.append(_sqlite_utc(since))
+        if until is not None:
+            where.append("started_utc < ?")
+            params.append(_sqlite_utc(until))
+        if obs_ids is not None:
+            where.append(f"obs_id IN ({', '.join('?' for _ in obs_ids)})")
+            params += obs_ids
+        sql = f"SELECT {', '.join(self._OBSERVATION_COLUMNS)} FROM workflow_observations"
+        if where:
+            sql += " WHERE " + " AND ".join(where)
         try:
-            cur = self._conn.execute(
-                "SELECT cluster_id, task_label, COUNT(*) AS seg_count "
-                "FROM task_segments "
-                "WHERE sop_generated = 0 "
-                "GROUP BY cluster_id "
-                "HAVING seg_count >= 2 "
-                "ORDER BY seg_count DESC",
-            )
+            cur = self._conn.execute(sql + " ORDER BY started_utc ASC", params)
             return self._rows_to_dicts(cur.fetchall())
         except sqlite3.OperationalError:
             return []
+
+    def set_observations_promoted(
+        self, obs_ids: list[str], slug: str, *, promoted_at: datetime | None = None,
+    ) -> int:
+        """Attribute observations to the Skill *slug*.  With *promoted_at*
+        they are the ones that promoted it (counted by the review-queue
+        cap); without, later observations of an already promoted workflow."""
+        db_path = self._get_writable_path()
+        if not db_path or not obs_ids:
+            return 0
+        write_conn = sqlite3.connect(db_path)
+        try:
+            write_conn.execute("PRAGMA busy_timeout = 5000;")
+            self._ensure_workflow_observations_table(write_conn)
+            updated = write_conn.execute(
+                "UPDATE workflow_observations SET promoted_slug = ?, "
+                "  promoted_at = COALESCE(?, promoted_at) "
+                f"WHERE obs_id IN ({', '.join('?' for _ in obs_ids)})",
+                (slug, _sqlite_utc(promoted_at) if promoted_at else None, *obs_ids),
+            ).rowcount
+            write_conn.commit()
+            return updated
+        except sqlite3.Error as exc:
+            logger.error("Failed to mark observations promoted: %s", exc)
+            return 0
+        finally:
+            write_conn.close()
+
+    def count_promotions_since(self, since: datetime) -> int:
+        """Workflows promoted to a draft at or after *since*."""
+        self._ensure_once(self._ensure_workflow_observations_table)
+        self._refresh_read_snapshot()
+        try:
+            row = self._conn.execute(
+                "SELECT COUNT(DISTINCT promoted_slug) FROM workflow_observations "
+                "WHERE promoted_at >= ?",
+                (_sqlite_utc(since),),
+            ).fetchone()
+            return int(row[0]) if row else 0
+        except sqlite3.OperationalError:
+            return 0
+
+    def purge_unpromoted_observations(
+        self, max_age_days: int, *, now: datetime | None = None,
+    ) -> int:
+        """Delete observations older than *max_age_days* that never became
+        part of a Skill.  Promoted ones are the Skill's evidence and stay."""
+        return self._delete_older_than(
+            self._ensure_workflow_observations_table,
+            "DELETE FROM workflow_observations "
+            "WHERE promoted_slug IS NULL AND datetime(started_utc) < datetime(?)",
+            (now or datetime.now(timezone.utc)) - timedelta(days=max_age_days),
+        )
 
     # ------------------------------------------------------------------
     # Generated SOPs — track all generated SOPs with review status
