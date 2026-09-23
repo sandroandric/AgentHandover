@@ -100,7 +100,9 @@ def _step_evidence(evidence: object) -> dict:
     """A step's evidence pointers: ``frames`` (event ids) and
     ``dom_snapshot_ids``, each a list (empty when unknown), plus, when the
     cited frames recorded them, ``focused_fields`` (the Accessibility
-    focused element) and ``shell_commands`` (exact commands)."""
+    focused element) and ``shell_commands`` (exact commands), and
+    ``clipboard`` when the step's copy/paste wording was rewritten for want
+    of a clipboard event (``clipboard_grounding``)."""
     evidence = evidence if isinstance(evidence, dict) else {}
     result = {
         key: list(evidence.get(key) or [])
@@ -109,6 +111,8 @@ def _step_evidence(evidence: object) -> dict:
     for key in ("focused_fields", "shell_commands"):
         if evidence.get(key):
             result[key] = list(evidence[key])
+    if isinstance(evidence.get("clipboard"), dict):
+        result["clipboard"] = dict(evidence["clipboard"])
     return result
 
 

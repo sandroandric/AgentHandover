@@ -20,6 +20,7 @@ import re
 from datetime import timedelta
 from pathlib import Path
 
+from agenthandover_worker.clipboard_grounding import attach_clipboard_events, event_kind
 from agenthandover_worker.dom import url_host
 from agenthandover_worker.event_helpers import (
     display_name,
@@ -154,6 +155,10 @@ class FocusProcessor:
         self.differ = differ
         self.sop_generator = sop_generator
         self._last_rich_observations: list[list[dict]] = []
+        # The last session's copies (by the source frame) and every
+        # clipboard event of it, copies and pastes (Step 0b).
+        self._clipboard_map: dict[str, dict] = {}
+        self._clipboard_events: list[dict] = []
         # Keyframes of the last session that wait for annotate_remaining().
         self._remaining: list[dict] = []
         self._remaining_dir: str | Path = ""
@@ -443,23 +448,35 @@ class FocusProcessor:
         marker landed on a Gmail frame and the SOP generator wrote
         ``Copy from Gmail`` instead of ``Copy from Hacker News``.
 
+        Every clipboard event, copies and the browser's ``PasteDetected``
+        alike, is also kept in ``self._clipboard_events`` for the steps'
+        clipboard grounding (``clipboard_grounding``); paste events carry
+        no screenshot either and are removed as well.
+
         Returns the cleaned event list (DwellSnapshots only).
         """
-        self._clipboard_map: dict[str, dict] = {}
+        self._clipboard_map = {}
+        self._clipboard_events = []
 
         # Separate clipboard events from the rest
         clipboard_events: list[tuple[int, dict]] = []
         non_clipboard: list[tuple[int, dict]] = []
 
         for i, event in enumerate(events):
-            kind = self._extract_event_kind(event)
-            if kind == "ClipboardChange":
+            clip_kind = event_kind(event)
+            if clip_kind is not None:
+                self._clipboard_events.append({
+                    "kind": clip_kind,
+                    "timestamp": event.get("timestamp", ""),
+                    "event_id": event.get("id", ""),
+                })
+            if self._extract_event_kind(event) == "ClipboardChange":
                 clipboard_events.append((i, event))
-            else:
+            elif clip_kind is None:
                 non_clipboard.append((i, event))
 
         if not clipboard_events:
-            return events  # nothing to do
+            return [evt for _, evt in non_clipboard]
 
         # Build index of DwellSnapshot positions for quick lookup
         dwell_positions: list[tuple[int, str]] = []
@@ -811,6 +828,8 @@ class FocusProcessor:
         - click_targets: the Chrome clicks whose result this frame shows
           (each with ``page_dom_nodes``, the DOM of the page clicked on)
         - clipboard_context: the copy made from this frame, if any
+        - clipboard_events: the copies and pastes recorded since the
+          previous frame (``clipboard_grounding.attach_clipboard_events``)
         """
         timeline = []
 
@@ -855,11 +874,7 @@ class FocusProcessor:
                     dom_snapshot_id = dom_snaps[0].get("event_id")
 
             # Look up clipboard context attached in Step 0b
-            clipboard_ctx = (
-                self._clipboard_map.get(event_id)
-                if hasattr(self, "_clipboard_map")
-                else None
-            )
+            clipboard_ctx = self._clipboard_map.get(event_id)
 
             timeline.append({
                 "annotation": annotation,
@@ -878,6 +893,7 @@ class FocusProcessor:
 
         self._attach_clicks(db, timeline)
         self._attach_shell_commands(db, timeline)
+        attach_clipboard_events(timeline, self._clipboard_events)
 
         # Safety net: the first frame in a focus session must never carry a
         # diff — it is the clean starting point of the SOP.  Any diff stored

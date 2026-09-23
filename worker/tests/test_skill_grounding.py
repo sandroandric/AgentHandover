@@ -11,6 +11,12 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from agenthandover_worker.clipboard_grounding import (
+    attach_clipboard_events,
+    clipboard_note,
+    ground_clipboard_claims,
+)
+from agenthandover_worker.focus_processor import FocusProcessor
 from agenthandover_worker.focus_questioner import (
     ANSWER_ACCEPTED_GUESS,
     ANSWER_TYPED,
@@ -21,7 +27,8 @@ from agenthandover_worker.focus_questioner import (
 )
 from agenthandover_worker.ledger import derive_knowledge, validate_knowledge
 from agenthandover_worker.procedure_schema import sop_to_procedure, validate_procedure
-from agenthandover_worker.sop_generator import _vlm_sop_to_template
+from agenthandover_worker.skill_render import render_packet
+from agenthandover_worker.sop_generator import SOPGenerator, _build_focus_prompt, _vlm_sop_to_template
 from agenthandover_worker.sop_linter import lint_sop
 
 
@@ -192,3 +199,200 @@ def test_the_questions_file_carries_the_title_as_typed(tmp_path: Path) -> None:
     assert data["title"] == "Look up the IANA reserved domains page and note it"
     assert data["questions"][0]["step_indexes"] == [1]
     assert data["status"] == "pending"
+
+
+# ---------------------------------------------------------------------------
+# Clipboard grounding: copy/paste only where the clipboard recorded one
+# ---------------------------------------------------------------------------
+
+
+def _ts(second: int) -> str:
+    return f"2026-09-23T10:00:{second:02d}Z"
+
+
+def _timeline(clipboard: list[tuple[str, int]] | None) -> list[dict]:
+    """Four frames 10 s apart (Safari, Safari, TextEdit, TextEdit) and the
+    session's clipboard events ``(kind, second)``; None: no clipboard record
+    at all (a passive timeline)."""
+    frames = [
+        {"event_id": f"f{i}", "timestamp": _ts(i * 10),
+         "annotation": {"app": app, "task_context": {"what_doing": what}}, "diff": None}
+        for i, (app, what) in enumerate([
+            ("Safari", "Reading the IANA reserved domains page"),
+            ("Safari", "Reading the IANA reserved domains page"),
+            ("TextEdit", "copying text from the Example Domain page into TextEdit"),
+            ("TextEdit", "Typing in TextEdit"),
+        ])
+    ]
+    if clipboard is not None:
+        attach_clipboard_events(frames, [
+            {"kind": kind, "timestamp": _ts(second), "event_id": f"c{second}"}
+            for kind, second in clipboard
+        ])
+    return frames
+
+
+def _live_run_steps() -> list[dict]:
+    """The Skill's steps from the live run, citing the frames they came from."""
+    return [
+        {"step": "Copy the text regarding IANA reserved domains", "description":
+         "Select and copy the paragraph.", "parameters": {"verify": "The text is copied to the clipboard"},
+         "evidence": {"frames": ["f0", "f1"]}},
+        {"step": "Paste the copied text", "description": "Insert the previously copied text.",
+         "parameters": {"verify": "The text appears in the document"},
+         "evidence": {"frames": ["f2"]}},
+        {"step": "Save the document", "description": "Keep the note.",
+         "parameters": {"verify": "The title bar shows no edits"}, "evidence": {"frames": ["f3"]}},
+    ]
+
+
+def test_without_clipboard_events_copy_and_paste_are_rewritten() -> None:
+    steps = _live_run_steps()
+    rewritten = ground_clipboard_claims(steps, _timeline([]))
+    assert [r["step_index"] for r in rewritten] == [0, 1]
+    assert steps[0]["step"] == "Read the text regarding IANA reserved domains"
+    assert steps[0]["description"] == "Select and read the paragraph."
+    assert steps[0]["parameters"]["verify"] == "The text is read"
+    assert steps[1]["step"] == "Type the text"
+    assert steps[1]["description"] == "Insert the text."
+    assert steps[2]["step"] == "Save the document"
+    record = steps[1]["evidence"]["clipboard"]
+    assert record["recorded"] is False and record["claimed"] == ["copy", "paste"]
+    assert record["original"]["step"] == "Paste the copied text"
+    assert "clipboard" in record["reason"]
+    # The record survives into the procedure and the packet tells the agent.
+    proc = sop_to_procedure({"slug": "look-up", "title": "Look up", "steps": steps})
+    assert proc["steps"][1]["evidence"]["clipboard"] == record
+    packet = render_packet(proc, target="claude-skill")
+    assert packet.count("Unconfirmed: no ") == 2
+
+
+def test_a_recorded_copy_and_paste_keep_their_steps() -> None:
+    steps = _live_run_steps()
+    # Copied while f1 was on screen (recorded before f2), pasted before f3.
+    assert ground_clipboard_claims(steps, _timeline([("copy", 15), ("paste", 25)])) == []
+    assert steps[0]["step"].startswith("Copy") and steps[1]["step"].startswith("Paste")
+    # A paste outside the browser is not recorded; an earlier copy supports it.
+    steps = _live_run_steps()
+    assert ground_clipboard_claims(steps, _timeline([("copy", 15)])) == []
+
+
+def test_a_copy_outside_the_steps_window_does_not_count() -> None:
+    steps = _live_run_steps()
+    # The only copy was recorded with the last frame (f3): not while the
+    # Copy step (frames f0-f1, recorded up to f2) happened.  The Paste step
+    # (f2) is checked up to the frame after it, where the copy is.
+    rewritten = ground_clipboard_claims(steps, _timeline([("copy", 35)]))
+    assert [(r["step_index"], r["claimed"]) for r in rewritten] == [(0, ["copy"])]
+    assert steps[1]["step"] == "Paste the copied text"
+
+
+def test_a_paste_alone_leaves_the_copy_step_unsupported() -> None:
+    steps = _live_run_steps()
+    rewritten = ground_clipboard_claims(steps, _timeline([("paste", 25)]))
+    assert [(r["step_index"], r["claimed"]) for r in rewritten] == [(0, ["copy"]), (1, ["copy"])]
+    # The paste itself was recorded: "Paste" stays, "the copied" goes.
+    assert steps[1]["step"] == "Paste the text"
+
+
+def test_a_passive_timeline_is_left_alone() -> None:
+    steps = _live_run_steps()
+    assert ground_clipboard_claims(steps, _timeline(None)) == []
+    assert steps[0]["step"].startswith("Copy")
+
+
+def test_the_prompt_says_so_only_when_nothing_was_copied() -> None:
+    assert "no copy, cut or paste was recorded" in clipboard_note(_timeline([]))
+    assert clipboard_note(_timeline([("copy", 15)])) == ""
+    assert clipboard_note(_timeline(None)) == ""
+    prompt = _build_focus_prompt("Look up", _timeline([("paste", 25)]))
+    assert ">>> PASTE ACTION" in prompt
+    assert "CLIPBOARD:" not in prompt
+
+
+_LIVE_RUN_ANSWER = json.dumps({
+    "title": "Look up the IANA reserved domains page and note it",
+    "steps": [
+        {"action": "Copy the text regarding IANA reserved domains", "app": "Safari",
+         "description": "Select the paragraph.", "verify": "Copied", "frames": [1, 2]},
+        {"action": "Paste the copied text", "app": "TextEdit",
+         "description": "Into the note.", "verify": "The text shows", "frames": [3]},
+    ],
+    "variables": [],
+})
+
+
+def _generate(timeline: list[dict]) -> tuple[dict, list[str]]:
+    generator = SOPGenerator()
+    prompts: list[str] = []
+
+    def call(prompt: str, *, retry: bool = False, system: str | None = None):
+        prompts.append(prompt)
+        return _LIVE_RUN_ANSWER, 1.0
+
+    generator._call = call  # the model: the live run's answer, whatever the prompt
+    result = generator.generate_from_focus(timeline, "Look up the IANA reserved domains page and note it")
+    assert result.success, result.error
+    return result.sop, prompts
+
+
+def test_the_generator_grounds_the_models_copy_and_paste() -> None:
+    sop, prompts = _generate(_timeline([]))
+    assert "CLIPBOARD: no copy, cut or paste was recorded" in prompts[0]
+    assert [s["step"] for s in sop["steps"]] == [
+        "Read the text regarding IANA reserved domains", "Type the text",
+    ]
+    sop, prompts = _generate(_timeline([("copy", 15)]))
+    assert "CLIPBOARD:" not in prompts[0]
+    assert [s["step"] for s in sop["steps"]] == [
+        "Copy the text regarding IANA reserved domains", "Paste the copied text",
+    ]
+
+
+def test_the_focus_processor_keeps_every_clipboard_event() -> None:
+    processor = FocusProcessor(annotator=None, differ=None, sop_generator=None)
+    events = [
+        {"id": "f0", "timestamp": _ts(0), "kind_json": '{"type":"DwellSnapshot"}',
+         "window_json": '{"app_id":"com.apple.Safari","title":"IANA"}'},
+        {"id": "c1", "timestamp": _ts(5), "kind_json": json.dumps({
+            "type": "ClipboardChange", "content_types": ["public.utf8-plain-text"],
+            "byte_size": 12, "high_entropy": False, "content_hash": "ab"})},
+        {"id": "f1", "timestamp": _ts(10), "kind_json": '{"type":"DwellSnapshot"}',
+         "window_json": '{"app_id":"com.apple.TextEdit","title":"Note"}'},
+        {"id": "p1", "timestamp": _ts(12),
+         "kind_json": '{"type":"PasteDetected","matched_copy_hash":"ab"}'},
+    ]
+    kept = processor._attach_clipboard_context(events)
+    assert [e["id"] for e in kept] == ["f0", "f1"]
+    assert [(e["kind"], e["event_id"]) for e in processor._clipboard_events] == [
+        ("copy", "c1"), ("paste", "p1"),
+    ]
+    # Without any copy the paste is still kept (and dropped from the frames).
+    kept = processor._attach_clipboard_context([events[0], events[3]])
+    assert [e["id"] for e in kept] == ["f0"]
+    assert [e["kind"] for e in processor._clipboard_events] == ["paste"]
+
+
+def test_the_session_query_returns_the_browsers_pastes(tmp_path: Path) -> None:
+    """Neither kind of clipboard event carries the focus session id."""
+    import sqlite3
+
+    from agenthandover_worker.db import WorkerDB
+    from test_focus_processor import _create_test_db
+
+    db_path = _create_test_db(tmp_path)
+    rows = [
+        ("f0", _ts(0), '{"type":"DwellSnapshot"}', '{"focus_session_id": "s1"}'),
+        ("c1", _ts(5), '{"type":"ClipboardChange","content_types":[],"byte_size":3}', "{}"),
+        ("p1", _ts(7), '{"type":"PasteDetected","matched_copy_hash":null}', "{}"),
+        ("f1", _ts(10), '{"type":"DwellSnapshot"}', '{"focus_session_id": "s1"}'),
+        ("p2", _ts(40), '{"type":"PasteDetected","matched_copy_hash":null}', "{}"),
+    ]
+    with sqlite3.connect(db_path) as conn:
+        conn.executemany(
+            "INSERT INTO events (id, timestamp, kind_json, window_json, metadata_json) "
+            "VALUES (?, ?, ?, '{}', ?)", rows,
+        )
+    with WorkerDB(db_path) as db:
+        ids = [e["id"] for e in db.get_focus_session_events("s1")]
+    assert ids == ["f0", "c1", "p1", "f1"]  # p2 is after the session

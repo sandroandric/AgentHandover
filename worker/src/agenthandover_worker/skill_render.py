@@ -327,6 +327,11 @@ def _render_step(num: int, step: dict) -> list[str]:
     ):
         if value:
             lines.append(f"   {label}: {value}")
+    # The step claimed a copy or paste the clipboard did not record: its
+    # wording was rewritten; the agent is told so.
+    clipboard = (step.get("evidence") or {}).get("clipboard")
+    if isinstance(clipboard, dict) and clipboard.get("reason"):
+        lines.append(f"   Unconfirmed: {clipboard['reason']}")
     # Any other observed parameter (DOM-derived steps carry e.g. ``value``).
     params = step.get("parameters")
     if isinstance(params, dict):

@@ -183,9 +183,10 @@ class WorkerDB:
 
     def get_focus_session_events(self, session_id: str) -> list[dict]:
         """Return all events tagged with the given focus session ID,
-        PLUS any ClipboardChange events that occurred during the same
-        time window (clipboard events aren't tagged with session_id
-        because they're emitted from a separate monitor).
+        PLUS any ClipboardChange and PasteDetected events that occurred
+        during the same time window (clipboard events aren't tagged with
+        session_id: the pasteboard monitor and the browser extension emit
+        them outside the session's capture).
         """
         # Get tagged focus events
         cur = self._conn.execute(
@@ -207,7 +208,7 @@ class WorkerDB:
         # Fetch clipboard events in that window (they have empty metadata)
         cur2 = self._conn.execute(
             "SELECT * FROM events "
-            "WHERE json_extract(kind_json, '$.type') = 'ClipboardChange' "
+            "WHERE json_extract(kind_json, '$.type') IN ('ClipboardChange', 'PasteDetected') "
             "  AND timestamp >= ? AND timestamp <= ? "
             "  AND json_extract(metadata_json, '$.focus_session_id') IS NULL "
             "ORDER BY timestamp ASC",

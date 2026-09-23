@@ -21,6 +21,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from agenthandover_worker.clipboard_grounding import clipboard_note, ground_clipboard_claims
 from agenthandover_worker.confidence import compute_v2_confidence
 from agenthandover_worker.dom import select_anchor
 from agenthandover_worker.event_helpers import describe_focused_field, display_name
@@ -88,7 +89,7 @@ timeline of screen observations.  Generate a complete SOP from this \
 single demonstration.
 
 TIMELINE ({frame_count} frames):
-{timeline_text}
+{timeline_text}{clipboard_note}
 
 Generate a JSON SOP with this exact structure:
 {{
@@ -373,12 +374,15 @@ def _format_timeline_entry(
     *,
     focused_field: dict | None = None,
     shell_commands: list[dict] | None = None,
+    clipboard_events: list[dict] | None = None,
 ) -> str:
     """Format a single timeline entry for the SOP generation prompt.
 
     *focused_field* is the frame's focused element (:func:`event_helpers.
     focused_field`, read through Accessibility); *shell_commands* are the
-    commands the shell hook recorded since the previous frame.  Both are
+    commands the shell hook recorded since the previous frame, and
+    *clipboard_events* the copies and pastes (a paste is marked here; a
+    copy is marked by *clipboard_context* on its source frame).  All are
     recorded facts, rendered verbatim for the steps to quote.  The entry is
     redacted (:func:`redaction.redact`) before it goes into a prompt.
     """
@@ -503,14 +507,27 @@ def _format_timeline_entry(
             "a subsequent Paste step in the SOP)"
         )
 
+    # A paste the browser recorded since the previous frame.
+    pastes = [e for e in clipboard_events or [] if e.get("kind") == "paste"]
+    if pastes:
+        lines.append(
+            f"  >>> PASTE ACTION: User pasted{f' {len(pastes)} times' if len(pastes) > 1 else ''} "
+            "since the previous frame (recorded by the browser)"
+        )
+
     return redact("\n".join(lines))
 
 
 def _build_focus_prompt(
     title: str,
     timeline: list[dict],
+    *,
+    clipboard_note: str = "",
 ) -> str:
-    """Build the SOP generation prompt for a focus recording session."""
+    """Build the SOP generation prompt for a focus recording session.
+
+    *clipboard_note* is :func:`clipboard_grounding.clipboard_note` of the
+    session's whole timeline (the prompt's frames may be a sample)."""
     entries = []
     for i, frame in enumerate(timeline):
         annotation = frame.get("annotation", {})
@@ -522,6 +539,7 @@ def _build_focus_prompt(
             clipboard_context=clipboard_ctx,
             focused_field=frame.get("focused_field"),
             shell_commands=frame.get("shell_commands"),
+            clipboard_events=frame.get("clipboard_events"),
         ))
 
     timeline_text = "\n\n".join(entries)
@@ -530,6 +548,7 @@ def _build_focus_prompt(
         title=title,
         frame_count=len(timeline),
         timeline_text=timeline_text,
+        clipboard_note=clipboard_note,
     )
 
 
@@ -1544,7 +1563,9 @@ class SOPGenerator:
             meaningful = _smart_sample_focus(meaningful, max_frames)
 
         # Build prompt
-        prompt = _build_focus_prompt(title, meaningful)
+        prompt = _build_focus_prompt(
+            title, meaningful, clipboard_note=clipboard_note(timeline),
+        )
 
         # Call VLM with model-specific profile
         try:
@@ -1628,6 +1649,9 @@ class SOPGenerator:
             title_override=title,
             timeline=meaningful,
         )
+        # A copy or paste the clipboard did not record is not kept as one
+        # (checked against the whole timeline's clipboard events).
+        ground_clipboard_claims(template["steps"], timeline)
 
         # Enrich confidence with annotation data from the timeline
         annotations = [
