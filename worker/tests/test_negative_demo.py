@@ -95,7 +95,7 @@ class TestCancelClickMarksNegative:
             _make_event(
                 app_id=app,
                 kind="ClickIntent",
-                metadata={"element_text": "Open File"},
+                metadata={"target": {"innerText": "Open File"}},
                 timestamp=_ts(base),
             ),
             _make_event(
@@ -107,7 +107,7 @@ class TestCancelClickMarksNegative:
             _make_event(
                 app_id=app,
                 kind="ClickIntent",
-                metadata={"element_text": "Cancel"},
+                metadata={"target": {"innerText": "Cancel"}},
                 timestamp=_ts(base + timedelta(seconds=5)),
             ),
         ]
@@ -151,7 +151,7 @@ class TestDiscardChangesMarksNegative:
             _make_event(
                 app_id=app,
                 kind="ClickIntent",
-                metadata={"element_text": "Discard changes"},
+                metadata={"target": {"innerText": "Discard changes"}},
                 timestamp=_ts(base + timedelta(seconds=3)),
             ),
         ]
@@ -311,7 +311,7 @@ class TestCaseInsensitivePatterns:
                 _make_event(
                     app_id=app,
                     kind="ClickIntent",
-                    metadata={"element_text": variant},
+                    metadata={"target": {"innerText": variant}},
                     timestamp=_ts(base + timedelta(seconds=1)),
                 ),
             ]
@@ -322,3 +322,104 @@ class TestCaseInsensitivePatterns:
             assert events[1] in result.negative_events, (
                 f"Failed to detect cancel variant: {variant!r}"
             )
+
+
+# ------------------------------------------------------------------
+# 8. Only the clicked element's own label counts
+# ------------------------------------------------------------------
+
+
+def _browser_click(*, label: str, composed_path: list[str], bbox: list[int],
+                   timestamp: str, app_id: str = "com.google.Chrome",
+                   title: str = "Invoices") -> dict:
+    """A browser click in the daemon's stored shape: ClickIntent kind with
+    the target description, the extension payload as metadata."""
+    event = _make_event(
+        app_id=app_id,
+        kind="ClickIntent",
+        metadata={
+            "target": {
+                "tagName": "BUTTON",
+                "innerText": label,
+                "composedPath": composed_path,
+                "boundingBox": bbox,
+            },
+            "url": "https://app.example.com/invoices",
+            "title": title,
+            "nodes": [{"tag": "div", "class": "modal-backdrop"}],
+        },
+        timestamp=timestamp,
+    )
+    event["kind_json"] = json.dumps(
+        {"ClickIntent": {"target_description": f"{label}<BUTTON>"}}
+    )
+    event["window_json"] = json.dumps({"app_id": app_id, "title": title})
+    return event
+
+
+class TestLabelOnlyMatching:
+    def test_modal_backdrop_and_500_bbox_prune_nothing(self) -> None:
+        """A page with a 'modal-backdrop' class, 'close' and 'back' in its
+        DOM path and a bbox containing 500 is ordinary work."""
+        base = datetime(2026, 2, 16, 10, 0, 0, tzinfo=timezone.utc)
+        path = ["div.modal-backdrop", "div.close-on-escape", "a.back-link", "body"]
+        events = [
+            _browser_click(
+                label=f"Step {i}", composed_path=path, bbox=[500, 120, 80, 24],
+                timestamp=_ts(base + timedelta(seconds=i)),
+            )
+            for i in range(12)
+        ]
+        result = NegativeDemoPruner().prune(events)
+        assert result.negative_events == []
+        assert result.positive_events == events
+
+    def test_native_click_target_description(self) -> None:
+        """A native click names its target in kind_json only."""
+        base = datetime(2026, 2, 16, 10, 0, 0, tzinfo=timezone.utc)
+        app = "com.apple.TextEdit"
+        typing = _make_event(app_id=app, kind="FocusChange", timestamp=_ts(base))
+        dont_save = _make_event(app_id=app, timestamp=_ts(base + timedelta(seconds=2)))
+        dont_save["kind_json"] = json.dumps(
+            {"ClickIntent": {"target_description": "Don’t Save button"}}
+        )
+        result = NegativeDemoPruner().prune([typing, dont_save])
+        assert dont_save in result.negative_events
+        assert typing in result.negative_events
+
+    def test_labels_match_whole_words(self) -> None:
+        pruner = NegativeDemoPruner()
+        base = datetime(2026, 2, 16, 10, 0, 0, tzinfo=timezone.utc)
+        for label in ("Closed deals", "Cancellation policy", "Undone tasks", "Back"):
+            click = _browser_click(
+                label=label, composed_path=["body"], bbox=[0, 0, 1, 1],
+                timestamp=_ts(base),
+            )
+            assert pruner.prune([click]).negative_events == [], label
+        for label in ("Close", "Discard changes", "Dont save", "Revert"):
+            click = _browser_click(
+                label=label, composed_path=["body"], bbox=[0, 0, 1, 1],
+                timestamp=_ts(base),
+            )
+            assert pruner.prune([click]).negative_events == [click], label
+
+    def test_go_back_after_error_page(self) -> None:
+        base = datetime(2026, 2, 16, 10, 0, 0, tzinfo=timezone.utc)
+        error_page = _browser_click(
+            label="Retry", composed_path=["body"], bbox=[0, 0, 1, 1],
+            timestamp=_ts(base), title="404 Not Found",
+        )
+        go_back = _browser_click(
+            label="Go back", composed_path=["body"], bbox=[0, 0, 1, 1],
+            timestamp=_ts(base + timedelta(seconds=3)),
+        )
+        result = NegativeDemoPruner().prune([error_page, go_back])
+        assert result.prune_reasons[go_back["id"]] == "back_after_error"
+
+        # "Go back" after an ordinary page is navigation, not a mistake,
+        # even when the page's metadata mentions 500.
+        fine_page = _browser_click(
+            label="Retry", composed_path=["body"], bbox=[500, 500, 1, 1],
+            timestamp=_ts(base), title="Invoices",
+        )
+        assert NegativeDemoPruner().prune([fine_page, go_back]).negative_events == []

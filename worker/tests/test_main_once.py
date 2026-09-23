@@ -78,3 +78,65 @@ def test_once_runs_one_iteration_and_cleans_up(
     assert {
         signum: signal.getsignal(signum) for signum in handlers_before
     } == handlers_before
+
+
+def test_vector_kb_and_matcher_reach_their_consumers(
+    once_home: Path, tmp_db_path: Path, tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """main() builds the vector KB and the reasoner before the modules that
+    take them, and builds one ProcedureMatcher whatever the feature flags:
+    every consumer receives the live objects, not a forward-declared None."""
+    from agenthandover_worker.daily_processor import DailyBatchProcessor
+    from agenthandover_worker.procedure_matcher import ProcedureMatcher
+    from agenthandover_worker.procedure_writer import ProcedureWriter
+    from agenthandover_worker.session_linker import SessionLinker
+    from agenthandover_worker.task_segmenter import TaskSegmenter
+    from agenthandover_worker.vector_kb import VectorKB
+
+    # The embedding health check passes without a model server.
+    monkeypatch.setattr(
+        VectorKB, "compute_embeddings",
+        lambda self, texts, *, model=None: [[0.1, 0.2, 0.3] for _ in texts],
+    )
+    seen: dict[str, dict] = {}
+
+    def record(cls):
+        original = cls.__init__
+
+        def init(self, *args, **kwargs):
+            seen[cls.__name__] = kwargs
+            original(self, *args, **kwargs)
+
+        monkeypatch.setattr(cls, "__init__", init)
+
+    for cls in (DailyBatchProcessor, ProcedureMatcher, ProcedureWriter,
+                SessionLinker, TaskSegmenter):
+        record(cls)
+
+    config = worker_main._status_dir() / "config.toml"
+    if worker_main._platform.system() != "Darwin":
+        config = once_home / ".config" / "agenthandover" / "config.toml"
+    config.write_text(
+        config.read_text(encoding="utf-8")
+        + "\n[features]\ncontinuity_tracking = false\n",
+        encoding="utf-8",
+    )
+
+    worker_main.main([
+        "--once",
+        "--db-path", str(tmp_db_path),
+        "--sops-dir", str(tmp_path / "sops"),
+        "--knowledge-dir", str(tmp_path / "knowledge"),
+        "--adapter", "generic",
+        "--log-level", "ERROR",
+    ])
+
+    vector_kb = seen["ProcedureWriter"]["vector_kb"]
+    assert isinstance(vector_kb, VectorKB)
+    assert seen["ProcedureWriter"]["llm_reasoner"] is not None
+    assert seen["SessionLinker"]["vector_kb"] is vector_kb
+    assert seen["SessionLinker"]["llm_reasoner"] is not None
+    assert seen["TaskSegmenter"]["vector_kb"] is vector_kb
+    assert seen["ProcedureMatcher"]["vector_kb"] is vector_kb
+    assert isinstance(seen["DailyBatchProcessor"]["matcher"], ProcedureMatcher)

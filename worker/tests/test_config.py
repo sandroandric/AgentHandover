@@ -205,6 +205,43 @@ def test_skills_dir_missing_or_invalid_uses_default(tmp_path):
 # ---------------------------------------------------------------------------
 
 
+def test_export_adapter_defaults_to_openclaw(tmp_path):
+    assert load_config(tmp_path / "missing.toml").export.adapter == "openclaw"
+    cfg = load_config(_write(tmp_path, '[export]\njson_export = false\n'))
+    assert cfg.export.adapter == "openclaw"
+
+
+def test_export_adapter_from_config(tmp_path):
+    cfg = load_config(_write(
+        tmp_path, '[export]\nadapter = "all"\nclaude_skills_dir = "~/s"\n',
+    ))
+    assert cfg.export.adapter == "all"
+    assert cfg.export.skills_dir == Path.home() / "s"
+
+
+def test_unknown_export_adapter_keeps_the_default(tmp_path, caplog):
+    cfg = load_config(_write(tmp_path, '[export]\nadapter = "cursor"\n'))
+    assert cfg.export.adapter == "openclaw"
+    assert "adapter" in caplog.text
+
+
+def test_worker_adapter_flag_falls_back_to_config():
+    """``--adapter`` absent: main() takes ``[export] adapter`` (a pkg install writes "all")."""
+    from agenthandover_worker.main import _parse_args
+
+    assert _parse_args([]).adapter is None
+    assert _parse_args(["--adapter", "generic"]).adapter == "generic"
+
+
+def test_pkg_default_config_exports_through_every_adapter(tmp_path):
+    """The config.toml the pkg postinstall writes selects ``adapter = "all"``."""
+    script = (
+        Path(__file__).resolve().parents[2] / "resources" / "pkg" / "scripts" / "postinstall"
+    ).read_text(encoding="utf-8")
+    body = script.split("<< 'TOML'\n", 1)[1].split("\nTOML\n", 1)[0]
+    assert load_config(_write(tmp_path, body)).export.adapter == "all"
+
+
 def test_other_sections(tmp_path):
     cfg = load_config(_write(tmp_path, (
         '[llm]\nenhance_sops = false\nmax_enhancements_per_day = 5\nmodel = "m"\n'

@@ -465,4 +465,82 @@ describe('initSecureFieldDetection', () => {
     document.body.removeChild(anotherPassword);
     cleanup();
   });
+
+  it('stays secure when focus is on a password inside a shadow root', () => {
+    const onStateChange = vi.fn();
+    const cleanup = initSecureFieldDetection(vi.fn(), onStateChange);
+
+    const host = document.createElement('div');
+    const shadow = host.attachShadow({ mode: 'open' });
+    const pw = document.createElement('input');
+    pw.type = 'password';
+    shadow.appendChild(pw);
+    document.body.appendChild(host);
+
+    // composed: the event crosses the shadow boundary, retargeted to the host.
+    pw.dispatchEvent(new FocusEvent('focusin', { bubbles: true, composed: true }));
+    expect(onStateChange).toHaveBeenCalledWith(true);
+
+    document.body.removeChild(host);
+    cleanup();
+  });
+});
+
+describe('one-time codes, revealed passwords and shadow DOM', () => {
+  it('detects autocomplete="one-time-code"', () => {
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.setAttribute('autocomplete', 'one-time-code');
+    expect(isSecureField(input)).toBe(true);
+  });
+
+  it('detects autocomplete token lists (section-pay billing cc-csc)', () => {
+    const input = document.createElement('input');
+    input.setAttribute('autocomplete', 'section-pay billing cc-csc');
+    expect(isSecureField(input)).toBe(true);
+  });
+
+  it.each(['otp', 'mfa_code', 'twofa-2fa', 'totp', 'one-time-pin', 'verification-code',
+    'backup-code', 'recovery-code', 'cvc2'])('detects name="%s"', (name) => {
+    const input = document.createElement('input');
+    input.name = name;
+    expect(isSecureField(input)).toBe(true);
+  });
+
+  it('keeps a password secure after a show-password toggle to type="text"', () => {
+    const input = document.createElement('input');
+    input.type = 'password';
+    expect(isSecureField(input)).toBe(true);
+    input.type = 'text';
+    expect(isSecureField(input)).toBe(true);
+  });
+
+  it('detects a revealed password field by its name even if never seen as password', () => {
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.id = 'login-password-visible';
+    expect(isSecureField(input)).toBe(true);
+  });
+
+  it('detects secure textareas (backup codes) but not ordinary ones', () => {
+    const codes = document.createElement('textarea');
+    codes.name = 'recovery-codes';
+    expect(isSecureField(codes)).toBe(true);
+    expect(isSecureField(document.createElement('textarea'))).toBe(false);
+  });
+
+  it('deepActiveElement descends into open shadow roots', async () => {
+    const { deepActiveElement } = await import('../src/secure-field');
+    const host = document.createElement('div');
+    const shadow = host.attachShadow({ mode: 'open' });
+    const pw = document.createElement('input');
+    pw.type = 'password';
+    shadow.appendChild(pw);
+    document.body.appendChild(host);
+    pw.focus();
+    expect(document.activeElement).toBe(host);
+    expect(deepActiveElement()).toBe(pw);
+    expect(isSecureField(deepActiveElement())).toBe(true);
+    document.body.removeChild(host);
+  });
 });

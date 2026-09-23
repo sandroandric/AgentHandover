@@ -224,6 +224,24 @@ class TestUpsertBatch:
         count = kb.upsert_batch(items)
         assert count == 0
 
+    def test_model_change_reembeds_unchanged_text(self, kb: VectorKB):
+        """A stored vector from another model is stale even for the same text."""
+        items = [("annotation", "e1", "task one")]
+        assert kb.upsert_batch(items) == 1
+        assert kb.upsert("annotation", "e1", "task one") is False
+
+        kb.config.embedding_model = "other-model"
+        assert kb.upsert_batch(items) == 1
+        row = kb._conn.execute(
+            "SELECT model FROM vector_store WHERE id = ?",
+            (_vector_id("annotation", "e1"),),
+        ).fetchone()
+        assert row[0] == "other-model"
+        assert kb.upsert_batch(items) == 0
+
+        kb.config.embedding_model = "third-model"
+        assert kb.upsert("annotation", "e1", "task one") is True
+
     def test_batch_with_precomputed_embeddings(self, kb: VectorKB):
         items = [
             ("annotation", "e1", "task one"),

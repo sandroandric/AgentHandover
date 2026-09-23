@@ -25,6 +25,8 @@ from typing import Literal
 import yaml
 
 from agenthandover_worker import __version__
+from agenthandover_worker.event_helpers import display_name
+from agenthandover_worker.procedure_schema import procedure_steps, step_key
 
 Target = Literal[
     "claude-skill",
@@ -96,7 +98,7 @@ def allowed_tools(proc: dict) -> list[str]:
     ``apps_involved``.
     """
     apps = [a for a in proc.get("apps_involved") or [] if isinstance(a, str)]
-    apps += [_field(s, "app") for s in _steps(proc)]
+    apps += [_field(s, "app") for s in procedure_steps(proc)]
     tools = {"Read"}
     for app in apps:
         if app:
@@ -105,10 +107,6 @@ def allowed_tools(proc: dict) -> list[str]:
 
 
 # ---- Small readers -------------------------------------------------------
-
-
-def _steps(proc: dict) -> list[dict]:
-    return [s for s in proc.get("steps") or [] if isinstance(s, dict)]
 
 
 def _field(step: dict, key: str) -> str:
@@ -164,15 +162,26 @@ def slug_of(proc: dict) -> str:
     return str(proc.get("id") or proc.get("slug") or "unknown")
 
 
+def _goal(proc: dict) -> str:
+    """The synthesised goal, or "" when there is none."""
+    goal = proc.get("goal")
+    return goal.strip() if isinstance(goal, str) else ""
+
+
 def description(proc: dict) -> str:
     """One sentence: goal, description, task description, when to use, title.
 
     ``description`` is the procedure's own summary (``sop_to_procedure``
     fills it from the task description; the app edits it), so it wins
-    over the raw ``task_description``.
+    over the raw ``task_description``.  A goal the synthesiser marked
+    unclear ("Unclear — recipient not visible ...") does not describe the
+    Skill, so the next field is used instead.
     """
+    goal = _goal(proc)
+    if goal.lower().startswith("unclear"):
+        goal = ""
     for value in (
-        proc.get("goal"), proc.get("description"), proc.get("task_description"),
+        goal, proc.get("description"), proc.get("task_description"),
         _overview(proc).get("goal"),
     ):
         if isinstance(value, str) and value.strip():
@@ -281,8 +290,24 @@ def _section(heading: str, lines: list[str]) -> str | None:
     return "\n".join([f"## {heading}", "", *lines])
 
 
+def _anchor_line(step: dict) -> str:
+    """``link "Sign in" (`selector`)`` from the step's anchor, or the
+    legacy bare selector."""
+    anchor = step.get("anchor")
+    if isinstance(anchor, dict):
+        role = str(anchor.get("role") or "").strip()
+        name = str(anchor.get("name") or "").strip()
+        selector = str(anchor.get("selector") or "").strip()
+        label = " ".join(p for p in (role, f'"{name}"' if name else "") if p)
+        if selector:
+            return f"{label} (`{selector}`)" if label else f"`{selector}`"
+        if label:
+            return label
+    return f"`{step['selector']}`" if step.get("selector") else ""
+
+
 def _render_step(num: int, step: dict) -> list[str]:
-    step_id = step.get("step_id") or f"step_{num}"
+    step_id = step_key(step, num - 1)
     intent = str(
         step.get("action") or step.get("step") or step.get("description") or "Perform the action"
     ).strip()
@@ -290,14 +315,14 @@ def _render_step(num: int, step: dict) -> list[str]:
     detail = str(step.get("description") or "").strip()
     if detail and detail != intent:
         lines.append(f"   Detail: {detail}")
-    app = _field(step, "app")
+    app = display_name(_field(step, "app"))
     target = _field(step, "location") or _field(step, "target")
     for label, value in (
         ("App", app),
         ("Target", target),
         ("Input", _field(step, "input")),
         ("Verify", _field(step, "verify")),
-        ("Anchor", f"`{step['selector']}`" if step.get("selector") else ""),
+        ("Anchor", _anchor_line(step)),
     ):
         if value:
             lines.append(f"   {label}: {value}")
@@ -357,14 +382,17 @@ def body_sections(proc: dict) -> list[str]:
     sections: list[str | None] = []
 
     intro = [f"# {title}"]
+    goal = _goal(proc)
+    # The goal has its own section; the intro summarises from the other
+    # fields and repeats nothing the Goal section already says.
     summary = next(
         (
             v.strip()
             for v in (
-                proc.get("goal"), proc.get("description"),
-                proc.get("task_description"), _overview(proc).get("goal"),
+                proc.get("description"), proc.get("task_description"),
+                _overview(proc).get("goal"),
             )
-            if isinstance(v, str) and v.strip()
+            if isinstance(v, str) and v.strip() and v.strip() != goal
         ),
         "",
     )
@@ -374,6 +402,9 @@ def body_sections(proc: dict) -> list[str]:
     if outcome:
         intro += ["", f"Outcome: {outcome}"]
     sections.append("\n".join(intro))
+
+    # Goal: what the user is producing, ahead of how and when.
+    sections.append(_section("Goal", [goal] if goal else []))
 
     # Prerequisites
     prereqs: list[str] = []
@@ -413,8 +444,9 @@ def body_sections(proc: dict) -> list[str]:
         name = inp["name"]
         if _is_credential(inp):
             input_lines.append(
-                f"- `{name}` (credential): take it from your credential store at "
-                "run time; never write its value into files, messages or logs."
+                f"- `{name}` (credential) by reference (never in this file): take it "
+                "from your credential store at run time; never write its value into "
+                "files, messages or logs."
             )
             continue
         kind = str(inp.get("type") or "text")
@@ -439,7 +471,7 @@ def body_sections(proc: dict) -> list[str]:
 
     # Steps
     step_lines: list[str] = []
-    for num, step in enumerate(_steps(proc), 1):
+    for num, step in enumerate(procedure_steps(proc), 1):
         step_lines.extend(_render_step(num, step))
     sections.append(_section("Steps", step_lines or ["No steps were recorded."]))
 
@@ -482,8 +514,16 @@ def body_sections(proc: dict) -> list[str]:
     if isinstance(clar, dict):
         clar = [{"question": q, "answer": a} for q, a in clar.items()]
     for item in clar:
-        if isinstance(item, dict) and item.get("question") and item.get("answer"):
-            decisions.append(f"- The user answered \"{item['question']}\": {item['answer']}")
+        if not isinstance(item, dict) or not item.get("question"):
+            continue
+        answer = str(item.get("answer") or "").strip()
+        if answer and item.get("status") != "unanswered":
+            decisions.append(f"- The user answered \"{item['question']}\": {answer}")
+        else:
+            decisions.append(
+                f"- Open question the user did not answer: \"{item['question']}\" "
+                "Ask the user; do not guess."
+            )
     sections.append(_section("Decisions", decisions))
 
     # Guardrails
@@ -536,7 +576,10 @@ def body_sections(proc: dict) -> list[str]:
     sections.append(_section("Execution protocol", [
         "If you have access to the AgentHandover MCP server, report your progress:",
         f"1. Call `report_execution_start` with slug `{slug}` before starting.",
-        "2. Call `report_step_result` after each step.",
+        "2. Call `report_step_result` after each step with the id shown in"
+        " brackets (for example `step_1`). If you did something other than"
+        " the step says, set `status` to `deviated` and describe what you"
+        " did in `actual_action`.",
         "3. Call `report_execution_complete` when finished.",
         "",
         "This feedback improves the Skill for future runs.",

@@ -19,6 +19,7 @@ from agenthandover_worker.task_segmenter import (
     TaskSegmenter,
     _cluster_frames,
     _compute_embeddings,
+    _is_noise_frame,
     _cosine_similarity,
     _make_segment,
     _split_into_contiguous_segments,
@@ -434,6 +435,19 @@ class TestTaskSegmenterSegment:
         assert result.segments[0].frame_count == 2
 
     @patch("agenthandover_worker.task_segmenter._compute_embeddings", side_effect=_mock_embeddings)
+    def test_embedding_texts_carry_clustering_prefix(self, mock_embed):
+        """nomic-embed-text gets its clustering task prefix on every frame text."""
+        events = [
+            _make_event("e1", "2026-03-04T10:00:00Z", what_doing="Filing expense report"),
+            _make_event("e2", "2026-03-04T10:01:00Z", what_doing="Submitting expense form"),
+        ]
+        TaskSegmenter().segment(events)
+        texts = mock_embed.call_args.args[0]
+        assert len(texts) == 2
+        assert all(t.startswith("clustering: ") for t in texts)
+        assert texts[0].startswith("clustering: Filing expense report")
+
+    @patch("agenthandover_worker.task_segmenter._compute_embeddings", side_effect=_mock_embeddings)
     def test_mixed_workflow_and_noise(self, mock_embed):
         events = [
             _make_event("e1", "2026-03-04T10:00:00Z",
@@ -727,8 +741,26 @@ class TestProcessPassiveDiscovery:
             mock_writer.get_sops_dir.return_value = Path("/fake")
             mock_index = MagicMock()
 
+            # A procedure already learned for this task carries the
+            # evidence extracted from earlier observations.
+            from agenthandover_worker.knowledge_base import KnowledgeBase
+            from agenthandover_worker.procedure_schema import sop_to_procedure
+            kb = KnowledgeBase(root=Path(tempfile.mkdtemp()) / "knowledge")
+            kb.ensure_structure()
+            prior = sop_to_procedure(generated_sop_template(
+                "check_domain_availability", mode="passive",
+            ))
+            prior["id"] = "filing-expense-report"
+            prior_extracted = {
+                "timing_patterns": {"total_duration_seconds": 1260},
+                "domains": ["expensify.com"],
+            }
+            prior["evidence"]["extracted_evidence"] = prior_extracted
+            kb.save_procedure(prior)
+
             sops = _process_passive_discovery(
                 db,
+                knowledge_base=kb,
                 segmenter=segmenter,
                 sop_generator=mock_sop_gen,
                 openclaw_writer=mock_writer,
@@ -738,6 +770,10 @@ class TestProcessPassiveDiscovery:
             assert sops >= 1
             mock_sop_gen.generate_from_passive.assert_called_once()
             mock_writer.write_sop.assert_called()
+            # Prior-evidence enrichment ran: the new template carries the
+            # duration and domains accumulated by the earlier observation.
+            generated = mock_sop_gen.generate_from_passive.return_value.sop
+            assert generated["_extracted_evidence"] == prior_extracted
             db.close()
         finally:
             conn.close()
@@ -784,8 +820,13 @@ class TestProcessPassiveDiscovery:
             mock_writer.get_sops_dir.return_value = Path("/fake")
             mock_index = MagicMock()
 
+            from agenthandover_worker.knowledge_base import KnowledgeBase
+            kb = KnowledgeBase(root=Path(tempfile.mkdtemp()) / "knowledge")
+            kb.ensure_structure()
+
             sops = _process_passive_discovery(
                 db,
+                knowledge_base=kb,
                 segmenter=segmenter,
                 sop_generator=mock_sop_gen,
                 openclaw_writer=mock_writer,
@@ -970,3 +1011,25 @@ class TestStableClusterLabels:
         # call_count may be 1 (no new call) or at most 2 if hash differed
         for s in result.segments:
             assert s.task_label == "Expense Report Workflow"
+
+
+class TestIsNoiseFrame:
+    """The classifier's "unknown" defers to the annotator's is_workflow."""
+
+    @staticmethod
+    def _frame(activity_type: str, learnability: str, is_workflow: bool) -> AnnotatedFrame:
+        return AnnotatedFrame(
+            event_id="e1", timestamp="2026-03-04T10:00:00Z", annotation={},
+            is_workflow=is_workflow, activity_type=activity_type,
+            learnability=learnability,
+        )
+
+    def test_unknown_follows_is_workflow(self):
+        assert _is_noise_frame(self._frame("unknown", "context_only", True)) is False
+        assert _is_noise_frame(self._frame("unknown", "context_only", False)) is True
+
+    def test_classified_types(self):
+        assert _is_noise_frame(self._frame("entertainment", "ignore", True)) is True
+        assert _is_noise_frame(self._frame("work", "execution_relevant", False)) is False
+        assert _is_noise_frame(self._frame("work", "ignore", True)) is True
+        assert _is_noise_frame(self._frame("", "", False)) is True

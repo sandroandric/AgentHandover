@@ -1,24 +1,35 @@
 """Execution monitor — tracks agent execution of procedures.
 
-Observes agent-produced events and tracks execution success, failure, and
-deviation against known procedures stored in the KnowledgeBase.
+An agent reports a run through the MCP server (``report_execution_start``,
+``report_step_result``, ``report_execution_complete``); this module keeps
+each run as one row of the ``runs`` table in::
 
-Execution history is persisted to::
+    {kb_root}/observations/runs.db
 
-    {kb_root}/observations/executions.json
+A run is written when it starts and after every step, so the MCP server
+(one process per agent session) and the worker (which reads the table
+for trust suggestions and the query API) always see the same runs.
 
-using the same atomic write pattern (tmp+fsync+rename) as KnowledgeBase.
+Step ids are the ids the packet prints (``procedure_schema.step_key``).
+An agent may report a step by that id or by its position (``step_2``,
+``2``); both land on the same step.  At most one deviation is kept per
+step and run.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import re
+import sqlite3
 import uuid
-from dataclasses import asdict, dataclass, field
+from contextlib import closing
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
+
+from agenthandover_worker.procedure_schema import procedure_steps, step_key
 
 logger = logging.getLogger(__name__)
 
@@ -57,54 +68,111 @@ class ExecutionRecord:
     metadata: dict | None = None
 
 
-def _record_to_dict(record: ExecutionRecord) -> dict:
-    """Serialize an ExecutionRecord to a JSON-safe dict."""
-    d = asdict(record)
-    d["status"] = record.status.value
-    for step_dict, step_obj in zip(d["steps"], record.steps):
-        step_dict["status"] = step_obj.status.value
-    return d
+# A step the procedure did not list (the agent reported an unknown id).
+DYNAMIC_ACTION = "(dynamic)"
+
+RUNS_DB = "runs.db"
+_LEGACY_JSON = "executions.json"
+
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS runs (
+    execution_id    TEXT PRIMARY KEY,
+    procedure_slug  TEXT NOT NULL,
+    agent_id        TEXT NOT NULL,
+    status          TEXT NOT NULL,
+    started_at      TEXT NOT NULL,
+    completed_at    TEXT,
+    error           TEXT,
+    steps_json      TEXT NOT NULL,
+    deviations_json TEXT NOT NULL,
+    outcomes_json   TEXT NOT NULL,
+    metadata_json   TEXT
+);
+CREATE INDEX IF NOT EXISTS runs_by_slug ON runs (procedure_slug, started_at);
+"""
+
+# Two actions are the same when their normalised token sets overlap by at
+# least this Jaccard index ("Open Chrome and go to example.com" ==
+# "opened chrome, went to example.com"; "Click Submit" != "Press Enter").
+ACTION_SIMILARITY_THRESHOLD = 0.5
+
+_STOPWORDS = frozenset(
+    "a an the to on in into of and or for with from at by then this that it "
+    "its is be your my".split()
+)
 
 
-def _dict_to_record(d: dict) -> ExecutionRecord:
-    """Deserialize a dict into an ExecutionRecord."""
-    steps = []
-    for s in d.get("steps", []):
-        steps.append(ExecutionStep(
-            step_id=s["step_id"],
-            expected_action=s["expected_action"],
-            actual_action=s.get("actual_action"),
-            status=ExecutionStatus(s.get("status", "in_progress")),
-            started_at=s.get("started_at"),
-            completed_at=s.get("completed_at"),
-            deviation_detail=s.get("deviation_detail"),
-        ))
-    return ExecutionRecord(
-        execution_id=d["execution_id"],
-        procedure_slug=d["procedure_slug"],
-        agent_id=d["agent_id"],
-        status=ExecutionStatus(d["status"]),
-        started_at=d["started_at"],
-        completed_at=d.get("completed_at"),
-        steps=steps,
-        outcomes=d.get("outcomes", []),
-        deviations=d.get("deviations", []),
-        error=d.get("error"),
-        metadata=d.get("metadata"),
+def _action_tokens(text: str) -> set[str]:
+    tokens = set()
+    for tok in re.findall(r"[a-z0-9]+", text.lower()):
+        if tok in _STOPWORDS:
+            continue
+        # Light stemming so tense and plurals compare equal.
+        for suffix in ("ing", "ed", "es", "s"):
+            if len(tok) > len(suffix) + 2 and tok.endswith(suffix):
+                tok = tok[: -len(suffix)]
+                break
+        tokens.add(tok)
+    return tokens
+
+
+def actions_equivalent(expected: str, actual: str) -> bool:
+    """True when *actual* describes the same action as *expected*."""
+    a, b = _action_tokens(expected), _action_tokens(actual)
+    if not a or not b:
+        return expected.strip().lower() == actual.strip().lower()
+    return len(a & b) / len(a | b) >= ACTION_SIMILARITY_THRESHOLD
+
+
+def _ordinal(step_id: str) -> int | None:
+    """The 1-based position a step id names: ``step_2``, ``Step 2``, ``2``."""
+    text = step_id.strip().lower()
+    text = re.sub(r"^step[\s_\-#]*", "", text)
+    return int(text) if text.isdigit() else None
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _step_to_dict(step: ExecutionStep) -> dict:
+    return {
+        "step_id": step.step_id,
+        "expected_action": step.expected_action,
+        "actual_action": step.actual_action,
+        "status": step.status.value,
+        "started_at": step.started_at,
+        "completed_at": step.completed_at,
+        "deviation_detail": step.deviation_detail,
+    }
+
+
+def _dict_to_step(s: dict) -> ExecutionStep:
+    return ExecutionStep(
+        step_id=str(s["step_id"]),
+        expected_action=s["expected_action"],
+        actual_action=s.get("actual_action"),
+        status=ExecutionStatus(s.get("status", "in_progress")),
+        started_at=s.get("started_at"),
+        completed_at=s.get("completed_at"),
+        deviation_detail=s.get("deviation_detail"),
     )
 
 
-_EXECUTIONS_FILE = "executions.json"
-
-
 class ExecutionMonitor:
-    """Monitors agent execution of procedures and tracks outcomes."""
+    """Records agent runs of procedures in the ``runs`` table."""
 
     def __init__(self, knowledge_base) -> None:
         self._kb = knowledge_base
-        self._active_executions: dict[str, ExecutionRecord] = {}
-        self._history: list[ExecutionRecord] = []
-        self._load_history()
+        self._path = Path(knowledge_base.root) / "observations" / RUNS_DB
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        with closing(self._connect()) as conn, conn:
+            conn.executescript(_SCHEMA)
+        self._import_legacy_json()
+
+    @property
+    def db_path(self) -> Path:
+        return self._path
 
     # ------------------------------------------------------------------
     # Public API
@@ -113,27 +181,21 @@ class ExecutionMonitor:
     def start_execution(
         self, procedure_slug: str, agent_id: str = "unknown"
     ) -> str:
-        """Start monitoring an execution.  Returns execution_id (UUID)."""
+        """Start a run.  Returns its execution_id (UUID)."""
         execution_id = str(uuid.uuid4())
-        now = datetime.now(timezone.utc).isoformat()
-
-        # Build expected steps from the procedure in the KB
+        now = _now()
         procedure = self._kb.get_procedure(procedure_slug)
-        steps: list[ExecutionStep] = []
-        if procedure is not None:
-            raw_steps = procedure.get("steps", [])
-            for i, s in enumerate(raw_steps):
-                expected_action = (
-                    s.get("action")
-                    or s.get("step")
-                    or f"step_{i}"
-                )
-                steps.append(ExecutionStep(
-                    step_id=str(i),
-                    expected_action=expected_action,
-                    started_at=now,
-                ))
-
+        steps = [
+            ExecutionStep(
+                step_id=step_key(s, i),
+                expected_action=str(
+                    s.get("action") or s.get("step") or s.get("description")
+                    or step_key(s, i)
+                ),
+                started_at=now,
+            )
+            for i, s in enumerate(procedure_steps(procedure or {}))
+        ]
         record = ExecutionRecord(
             execution_id=execution_id,
             procedure_slug=procedure_slug,
@@ -142,7 +204,7 @@ class ExecutionMonitor:
             started_at=now,
             steps=steps,
         )
-        self._active_executions[execution_id] = record
+        self._save(record)
         logger.info(
             "Started execution %s for procedure %s (agent=%s, steps=%d)",
             execution_id, procedure_slug, agent_id, len(steps),
@@ -150,273 +212,312 @@ class ExecutionMonitor:
         return execution_id
 
     def record_step(
-        self, execution_id: str, step_id: str, actual_action: str
-    ) -> None:
-        """Record what the agent actually did for a step.
+        self,
+        execution_id: str,
+        step_id: str,
+        actual_action: str = "",
+        *,
+        deviated: bool = False,
+        notes: str = "",
+    ) -> ExecutionStep | None:
+        """Record the agent's report for one step; returns the matched step.
 
-        Compares with expected action from the procedure.  If the
-        execution_id is unknown, logs a warning and returns.
+        The step deviates when the agent says so (*deviated*) or when it
+        describes an action (*actual_action*) that is not equivalent to
+        the expected one.  An empty *actual_action* claims nothing about
+        what was done.  Returns ``None`` for an unknown or finished run.
         """
-        record = self._active_executions.get(execution_id)
+        record = self._load_active(execution_id, "record_step")
         if record is None:
-            logger.warning(
-                "record_step: unknown execution_id %s", execution_id
-            )
-            return
-
-        now = datetime.now(timezone.utc).isoformat()
-
-        # Find the matching step
+            return None
+        now = _now()
         step = self._find_step(record, step_id)
         if step is None:
-            # Dynamic step — agent did something we didn't expect
             step = ExecutionStep(
-                step_id=step_id,
-                expected_action="(dynamic)",
+                step_id=str(step_id).strip(),
+                expected_action=DYNAMIC_ACTION,
                 started_at=now,
             )
             record.steps.append(step)
 
-        step.actual_action = actual_action
+        step.actual_action = actual_action or None
         step.completed_at = now
         step.status = ExecutionStatus.COMPLETED
 
-        # Check for deviation: expected vs actual
-        if (
-            step.expected_action != "(dynamic)"
-            and not self._actions_equivalent(step.expected_action, actual_action)
-        ):
-            step.status = ExecutionStatus.DEVIATED
-            detail = (
-                f"Expected '{step.expected_action}', "
-                f"got '{actual_action}'"
-            )
-            step.deviation_detail = detail
-            record.deviations.append({
-                "step_id": step_id,
-                "detail": detail,
-                "at": now,
-            })
-            logger.info(
-                "Deviation in execution %s step %s: %s",
-                execution_id, step_id, detail,
-            )
+        mismatch = (
+            bool(actual_action)
+            and step.expected_action != DYNAMIC_ACTION
+            and not actions_equivalent(step.expected_action, actual_action)
+        )
+        if deviated or mismatch:
+            if notes:
+                detail = notes
+            elif actual_action:
+                detail = f"Expected '{step.expected_action}', got '{actual_action}'"
+            else:
+                detail = "The agent reported a deviation without details"
+            self._set_deviation(record, step, detail, now)
+        else:
+            # A later report for the same step supersedes an earlier one.
+            step.deviation_detail = None
+            record.deviations = [
+                d for d in record.deviations if d.get("step_id") != step.step_id
+            ]
+
+        self._save(record)
+        return step
 
     def record_deviation(
         self, execution_id: str, step_id: str, detail: str
     ) -> None:
         """Record a deviation from the expected procedure."""
-        record = self._active_executions.get(execution_id)
+        record = self._load_active(execution_id, "record_deviation")
         if record is None:
-            logger.warning(
-                "record_deviation: unknown execution_id %s", execution_id
-            )
             return
-
-        now = datetime.now(timezone.utc).isoformat()
-
+        now = _now()
         step = self._find_step(record, step_id)
-        if step is not None:
-            step.status = ExecutionStatus.DEVIATED
-            step.deviation_detail = detail
-
-        record.deviations.append({
-            "step_id": step_id,
-            "detail": detail,
-            "at": now,
-        })
-        logger.info(
-            "Deviation recorded for execution %s step %s: %s",
-            execution_id, step_id, detail,
-        )
+        if step is None:
+            step = ExecutionStep(
+                step_id=str(step_id).strip(),
+                expected_action=DYNAMIC_ACTION,
+                started_at=now,
+                completed_at=now,
+            )
+            record.steps.append(step)
+        self._set_deviation(record, step, detail, now)
+        self._save(record)
 
     def complete_execution(
         self,
         execution_id: str,
         outcomes: list[dict] | None = None,
     ) -> ExecutionRecord:
-        """Mark execution as completed, record outcomes, move to history."""
-        record = self._active_executions.get(execution_id)
-        if record is None:
-            raise KeyError(f"No active execution with id {execution_id}")
-
-        now = datetime.now(timezone.utc).isoformat()
-        record.status = ExecutionStatus.COMPLETED
-        record.completed_at = now
+        """Finish a run as completed (or deviated, when any step deviated)."""
+        record = self._require_active(execution_id)
+        record.status = (
+            ExecutionStatus.DEVIATED if record.deviations
+            else ExecutionStatus.COMPLETED
+        )
+        record.completed_at = _now()
         if outcomes:
             record.outcomes = outcomes
-
-        # If any step deviated, mark overall as DEVIATED
-        if record.deviations:
-            record.status = ExecutionStatus.DEVIATED
-
-        self._finalize(execution_id, record)
-        return record
+        return self._finalize(record)
 
     def fail_execution(
         self, execution_id: str, error: str
     ) -> ExecutionRecord:
-        """Mark execution as failed."""
-        record = self._active_executions.get(execution_id)
-        if record is None:
-            raise KeyError(f"No active execution with id {execution_id}")
-
-        now = datetime.now(timezone.utc).isoformat()
+        """Finish a run as failed."""
+        record = self._require_active(execution_id)
         record.status = ExecutionStatus.FAILED
-        record.completed_at = now
+        record.completed_at = _now()
         record.error = error
-
-        self._finalize(execution_id, record)
-        return record
+        return self._finalize(record)
 
     def abort_execution(self, execution_id: str) -> ExecutionRecord:
-        """Mark execution as aborted."""
-        record = self._active_executions.get(execution_id)
-        if record is None:
-            raise KeyError(f"No active execution with id {execution_id}")
-
-        now = datetime.now(timezone.utc).isoformat()
+        """Finish a run as aborted."""
+        record = self._require_active(execution_id)
         record.status = ExecutionStatus.ABORTED
-        record.completed_at = now
-
-        self._finalize(execution_id, record)
-        return record
+        record.completed_at = _now()
+        return self._finalize(record)
 
     def get_execution(self, execution_id: str) -> ExecutionRecord | None:
-        """Get an execution record by ID (active or history)."""
-        # Check active first
-        record = self._active_executions.get(execution_id)
-        if record is not None:
-            return record
-        # Check history
-        for rec in self._history:
-            if rec.execution_id == execution_id:
-                return rec
-        return None
+        """The run with *execution_id*, active or finished."""
+        with closing(self._connect()) as conn:
+            row = conn.execute(
+                "SELECT * FROM runs WHERE execution_id = ?", (execution_id,)
+            ).fetchone()
+        return self._row_to_record(row) if row else None
 
     def get_history(
         self,
         procedure_slug: str | None = None,
         limit: int = 50,
     ) -> list[ExecutionRecord]:
-        """Get execution history, optionally filtered by procedure.
-
-        Returns records ordered newest-first, capped at *limit*.
-        """
-        records = self._history
+        """Finished runs, newest first, optionally for one procedure."""
+        sql = "SELECT * FROM runs WHERE status != ?"
+        params: list = [ExecutionStatus.IN_PROGRESS.value]
         if procedure_slug is not None:
-            records = [
-                r for r in records
-                if r.procedure_slug == procedure_slug
-            ]
-        # newest first (by started_at)
-        records = sorted(records, key=lambda r: r.started_at, reverse=True)
-        return records[:limit]
+            sql += " AND procedure_slug = ?"
+            params.append(procedure_slug)
+        sql += " ORDER BY started_at DESC LIMIT ?"
+        params.append(limit)
+        with closing(self._connect()) as conn:
+            rows = conn.execute(sql, params).fetchall()
+        return [self._row_to_record(r) for r in rows]
 
     def get_success_rate(self, procedure_slug: str) -> dict:
-        """Get success/failure/deviation statistics for a procedure.
+        """Outcome counts over the finished runs of a procedure.
 
-        Returns::
-
-            {
-                "total": N,
-                "completed": N,
-                "failed": N,
-                "deviated": N,
-                "aborted": N,
-                "success_rate": float,
-            }
+        Returns ``total``, ``completed``, ``failed``, ``deviated``,
+        ``aborted``, ``deviations`` (deviated steps over all runs),
+        ``success_rate`` (completed / total), ``last_run`` and
+        ``last_failure`` (``completed_at`` timestamps or ``None``).
         """
-        relevant = [
-            r for r in self._history
-            if r.procedure_slug == procedure_slug
-        ]
-        total = len(relevant)
-        completed = sum(
-            1 for r in relevant if r.status == ExecutionStatus.COMPLETED
-        )
-        failed = sum(
-            1 for r in relevant if r.status == ExecutionStatus.FAILED
-        )
-        deviated = sum(
-            1 for r in relevant if r.status == ExecutionStatus.DEVIATED
-        )
-        aborted = sum(
-            1 for r in relevant if r.status == ExecutionStatus.ABORTED
-        )
-        success_rate = completed / total if total > 0 else 0.0
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                "SELECT status, completed_at, deviations_json FROM runs "
+                "WHERE procedure_slug = ? AND status != ?",
+                (procedure_slug, ExecutionStatus.IN_PROGRESS.value),
+            ).fetchall()
+        counts = {s.value: 0 for s in ExecutionStatus if s is not ExecutionStatus.IN_PROGRESS}
+        deviations = 0
+        last_run: str | None = None
+        last_failure: str | None = None
+        for row in rows:
+            counts[row["status"]] += 1
+            deviations += len(json.loads(row["deviations_json"]))
+            done = row["completed_at"]
+            if done and (last_run is None or done > last_run):
+                last_run = done
+            if row["status"] == ExecutionStatus.FAILED.value and done and (
+                last_failure is None or done > last_failure
+            ):
+                last_failure = done
+        total = len(rows)
         return {
             "total": total,
-            "completed": completed,
-            "failed": failed,
-            "deviated": deviated,
-            "aborted": aborted,
-            "success_rate": success_rate,
+            **counts,
+            "deviations": deviations,
+            "success_rate": counts["completed"] / total if total else 0.0,
+            "last_run": last_run,
+            "last_failure": last_failure,
         }
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _actions_equivalent(self, expected: str, actual: str) -> bool:
-        """Check if two action strings are equivalent.
-
-        Uses case-insensitive string comparison (existing behavior).
-        Can be extended to use embedding-based similarity in the future.
-        """
-        return expected.strip().lower() == actual.strip().lower()
-
     def _find_step(
         self, record: ExecutionRecord, step_id: str
     ) -> ExecutionStep | None:
-        """Find a step by step_id within a record."""
+        """The step *step_id* names: its exact id, else its position.
+
+        ``step_2``, ``Step 2`` and ``2`` all name the second step the
+        procedure listed (the packet numbers steps from 1).
+        """
+        wanted = str(step_id).strip()
         for step in record.steps:
-            if step.step_id == step_id:
+            if step.step_id == wanted:
                 return step
+        ordinal = _ordinal(wanted)
+        expected = [s for s in record.steps if s.expected_action != DYNAMIC_ACTION]
+        if ordinal is not None and 1 <= ordinal <= len(expected):
+            return expected[ordinal - 1]
         return None
 
-    def _finalize(
-        self, execution_id: str, record: ExecutionRecord
+    @staticmethod
+    def _set_deviation(
+        record: ExecutionRecord, step: ExecutionStep, detail: str, at: str
     ) -> None:
-        """Move a record from active to history and persist."""
-        del self._active_executions[execution_id]
-        self._history.append(record)
-        self._save_history()
+        """Mark *step* deviated; one deviation entry per step and run."""
+        step.status = ExecutionStatus.DEVIATED
+        step.deviation_detail = detail
+        record.deviations = [
+            d for d in record.deviations if d.get("step_id") != step.step_id
+        ]
+        record.deviations.append({
+            "step_id": step.step_id,
+            "detail": detail,
+            "actual_action": step.actual_action,
+            "at": at,
+        })
+        logger.info(
+            "Deviation in execution %s step %s: %s",
+            record.execution_id, step.step_id, detail,
+        )
+
+    def _load_active(self, execution_id: str, caller: str) -> ExecutionRecord | None:
+        record = self.get_execution(execution_id)
+        if record is None or record.status is not ExecutionStatus.IN_PROGRESS:
+            logger.warning("%s: no active execution %s", caller, execution_id)
+            return None
+        return record
+
+    def _require_active(self, execution_id: str) -> ExecutionRecord:
+        record = self.get_execution(execution_id)
+        if record is None or record.status is not ExecutionStatus.IN_PROGRESS:
+            raise KeyError(f"No active execution with id {execution_id}")
+        return record
+
+    def _finalize(self, record: ExecutionRecord) -> ExecutionRecord:
+        self._save(record)
         logger.info(
             "Execution %s finalized as %s",
-            execution_id, record.status.value,
+            record.execution_id, record.status.value,
+        )
+        return record
+
+    def _connect(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(str(self._path), timeout=10)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        return conn
+
+    def _save(self, record: ExecutionRecord) -> None:
+        with closing(self._connect()) as conn, conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO runs (execution_id, procedure_slug, "
+                "agent_id, status, started_at, completed_at, error, steps_json, "
+                "deviations_json, outcomes_json, metadata_json) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    record.execution_id,
+                    record.procedure_slug,
+                    record.agent_id,
+                    record.status.value,
+                    record.started_at,
+                    record.completed_at,
+                    record.error,
+                    json.dumps([_step_to_dict(s) for s in record.steps]),
+                    json.dumps(record.deviations),
+                    json.dumps(record.outcomes),
+                    json.dumps(record.metadata) if record.metadata is not None else None,
+                ),
+            )
+
+    @staticmethod
+    def _row_to_record(row: sqlite3.Row) -> ExecutionRecord:
+        return ExecutionRecord(
+            execution_id=row["execution_id"],
+            procedure_slug=row["procedure_slug"],
+            agent_id=row["agent_id"],
+            status=ExecutionStatus(row["status"]),
+            started_at=row["started_at"],
+            completed_at=row["completed_at"],
+            steps=[_dict_to_step(s) for s in json.loads(row["steps_json"])],
+            outcomes=json.loads(row["outcomes_json"]),
+            deviations=json.loads(row["deviations_json"]),
+            error=row["error"],
+            metadata=json.loads(row["metadata_json"]) if row["metadata_json"] else None,
         )
 
-    def _executions_path(self) -> Path:
-        """Path to the executions history file."""
-        return (
-            self._kb.root / "observations" / _EXECUTIONS_FILE
-        )
+    def _import_legacy_json(self) -> None:
+        """Move runs from v0.4's ``executions.json`` into the table, once.
 
-    def _load_history(self) -> None:
-        """Load execution history from {kb_root}/observations/executions.json."""
-        path = self._executions_path()
-        if not path.is_file():
-            self._history = []
+        The file is renamed to ``executions.json.imported`` afterwards so
+        the import never repeats and nothing is deleted.
+        """
+        legacy = self._path.parent / _LEGACY_JSON
+        if not legacy.is_file():
             return
         try:
-            with open(path) as f:
-                data = json.load(f)
-            records_raw = data.get("records", [])
-            self._history = [_dict_to_record(d) for d in records_raw]
-            logger.debug(
-                "Loaded %d execution records from %s",
-                len(self._history), path,
-            )
-        except (json.JSONDecodeError, OSError, KeyError) as exc:
-            logger.warning("Failed to load execution history: %s", exc)
-            self._history = []
-
-    def _save_history(self) -> None:
-        """Persist execution history to KB using atomic write."""
-        path = self._executions_path()
-        payload = {
-            "records": [_record_to_dict(r) for r in self._history],
-            "updated_at": datetime.now(timezone.utc).isoformat(),
-        }
-        self._kb.atomic_write_json(path, payload)
+            records = json.loads(legacy.read_text()).get("records", [])
+            for d in records:
+                self._save(ExecutionRecord(
+                    execution_id=d["execution_id"],
+                    procedure_slug=d["procedure_slug"],
+                    agent_id=d.get("agent_id", "unknown"),
+                    status=ExecutionStatus(d["status"]),
+                    started_at=d["started_at"],
+                    completed_at=d.get("completed_at"),
+                    steps=[_dict_to_step(s) for s in d.get("steps", [])],
+                    outcomes=d.get("outcomes", []),
+                    deviations=d.get("deviations", []),
+                    error=d.get("error"),
+                    metadata=d.get("metadata"),
+                ))
+        except (json.JSONDecodeError, OSError, KeyError, ValueError, AttributeError) as exc:
+            logger.warning("Could not import %s: %s", legacy, exc)
+            return
+        legacy.rename(legacy.with_name(_LEGACY_JSON + ".imported"))
+        logger.info("Imported %d run(s) from %s", len(records), legacy)

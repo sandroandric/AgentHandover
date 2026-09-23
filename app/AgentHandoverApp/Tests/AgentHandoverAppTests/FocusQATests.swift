@@ -265,6 +265,35 @@ final class FocusQATests: XCTestCase {
         XCTAssertNotEqual(file.status, "pending")
     }
 
+    // MARK: - Answers start empty; the guess is only a placeholder
+
+    func testAnswerBindingStartsEmptyNotTheModelsGuess() {
+        let question = FocusQuestion(index: 0, question: "Logged in?", category: "access",
+                                     context: "", default: "Assume a logged-in browser")
+        XCTAssertEqual(FocusQAView.answerText(for: question.index, in: [:]), "")
+        XCTAssertEqual(FocusQAView.placeholder(for: question), "Guess: Assume a logged-in browser")
+        XCTAssertEqual(FocusQAView.answerText(for: 0, in: [0: "Yes, via SSO"]), "Yes, via SSO")
+    }
+
+    func testPlaceholderWithoutAGuess() {
+        let question = FocusQuestion(index: 0, question: "Q?", category: "scope",
+                                     context: "", default: "  ")
+        XCTAssertEqual(FocusQAView.placeholder(for: question), "Your answer")
+    }
+
+    func testSubmittedAnswersOmitUntouchedAndBlankQuestions() {
+        let questions = [
+            FocusQuestion(index: 0, question: "A?", category: "scope", context: "", default: "guess A"),
+            FocusQuestion(index: 1, question: "B?", category: "scope", context: "", default: "guess B"),
+            FocusQuestion(index: 2, question: "C?", category: "scope", context: "", default: "guess C"),
+        ]
+        let submitted = FocusQAView.submittedAnswers(
+            for: questions, answers: [1: "  production  ", 2: "   "]
+        )
+        XCTAssertEqual(submitted, ["1": "production"])
+        XCTAssertFalse(submitted.values.contains { $0.hasPrefix("guess") })
+    }
+
     // MARK: - Edge Cases
 
     func testEmptyQuestionsArray() throws {

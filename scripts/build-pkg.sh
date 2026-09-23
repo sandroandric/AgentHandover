@@ -156,7 +156,7 @@ if [ -z "${CODESIGN_IDENTITY}" ]; then
     CODESIGN_IDENTITY=$(security find-identity -v -p codesigning 2>/dev/null \
         | grep "Developer ID Application" \
         | head -1 \
-        | sed 's/.*"\(Developer ID Application:.*\)"/\1/')
+        | sed 's/.*"\(Developer ID Application:.*\)"/\1/' || true)
 fi
 
 if [ -n "${CODESIGN_IDENTITY}" ]; then
@@ -243,7 +243,7 @@ if [ -z "${SIGN_IDENTITY}" ]; then
     SIGN_IDENTITY=$(security find-identity -v -p basic 2>/dev/null \
         | grep "Developer ID Installer" \
         | head -1 \
-        | sed 's/.*"\(Developer ID Installer:.*\)"/\1/')
+        | sed 's/.*"\(Developer ID Installer:.*\)"/\1/' || true)
 fi
 
 if [ -n "${SIGN_IDENTITY}" ]; then

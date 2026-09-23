@@ -15,7 +15,7 @@ from agenthandover_worker.knowledge_base import KnowledgeBase
 from agenthandover_worker.lifecycle_manager import LifecycleManager
 from agenthandover_worker.procedure_curator import ProcedureCurator
 from agenthandover_worker.procedure_schema import sop_to_procedure
-from agenthandover_worker.query_api import QueryAPIServer
+from agenthandover_worker.query_api import TOKEN_HEADER, QueryAPIServer
 from agenthandover_worker.staleness_detector import StalenessDetector
 from agenthandover_worker.trust_advisor import TrustAdvisor
 
@@ -43,14 +43,14 @@ def _get(port: int, path: str) -> tuple[int, dict]:
         return exc.code, body
 
 
-def _post(port: int, path: str, data: dict) -> tuple[int, dict]:
-    """Send a POST request with JSON body and return (status_code, json_body)."""
-    url = f"http://127.0.0.1:{port}{path}"
+def _post(srv: QueryAPIServer, path: str, data: dict) -> tuple[int, dict]:
+    """POST ``data`` as JSON with the server's token; return (status, json_body)."""
+    url = f"http://127.0.0.1:{srv.port}{path}"
     payload = json.dumps(data).encode("utf-8")
     req = urllib.request.Request(
         url,
         data=payload,
-        headers={"Content-Type": "application/json"},
+        headers={"Content-Type": "application/json", TOKEN_HEADER: srv.token},
         method="POST",
     )
     try:
@@ -263,7 +263,7 @@ class TestCurationActions:
         srv.start()
         time.sleep(0.1)
         try:
-            status, body = _post(port, "/curation/merge", {
+            status, body = _post(srv, "/curation/merge", {
                 "slug_a": "merge-target",
                 "slug_b": "merge-source",
             })
@@ -288,7 +288,7 @@ class TestCurationActions:
         srv.start()
         time.sleep(0.1)
         try:
-            status, body = _post(port, "/curation/promote", {
+            status, body = _post(srv, "/curation/promote", {
                 "slug": "promo-sop",
                 "to_state": "draft",
                 "reason": "Manual promotion for testing",
@@ -313,7 +313,7 @@ class TestCurationActions:
         srv.start()
         time.sleep(0.1)
         try:
-            status, body = _post(port, "/curation/archive", {
+            status, body = _post(srv, "/curation/archive", {
                 "slug": "archive-me",
                 "reason": "No longer relevant",
             })
@@ -337,7 +337,7 @@ class TestCurationActions:
         time.sleep(0.1)
         try:
             # Dismiss the merge
-            status, body = _post(port, "/curation/dismiss-merge", {
+            status, body = _post(srv, "/curation/dismiss-merge", {
                 "slug_a": "proc-x",
                 "slug_b": "proc-y",
             })

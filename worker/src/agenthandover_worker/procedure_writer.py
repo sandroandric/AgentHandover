@@ -22,6 +22,63 @@ from agenthandover_worker.procedure_schema import (
 logger = logging.getLogger(__name__)
 
 
+# What an agent run writes onto a procedure (``skill_improver``).
+_EXECUTION_FIELDS = ("execution_stats", "execution_confidence", "observed_alternatives")
+
+
+def carry_run_history(new_proc: dict, existing: dict) -> dict:
+    """Carry the agent-run record and staleness history of *existing* over.
+
+    The agent-run fields (``execution_stats``, ``execution_confidence``,
+    ``observed_alternatives``), ``staleness.last_confirmed``, the drift
+    signals and the confidence trend (with *new_proc*'s confidence
+    appended when it differs from the last entry).  Mutates and returns
+    *new_proc*.
+    """
+    if new_proc is existing:
+        return new_proc
+    for key in _EXECUTION_FIELDS:
+        if key in existing:
+            new_proc[key] = existing[key]
+    old_staleness = existing.get("staleness") or {}
+    staleness = new_proc.setdefault("staleness", {})
+    trend = list(old_staleness.get("confidence_trend", []))
+    new_conf = round(new_proc.get("confidence_avg", 0.0), 4)
+    if new_conf > 0 and (not trend or trend[-1] != new_conf):
+        trend.append(new_conf)
+    staleness["confidence_trend"] = trend
+    staleness["drift_signals"] = old_staleness.get("drift_signals", [])
+    staleness["last_confirmed"] = old_staleness.get("last_confirmed")
+    return new_proc
+
+
+def merge_existing_procedure(
+    new_proc: dict, existing: dict, *, keep_lifecycle: bool = True,
+) -> dict:
+    """Carry what accumulated on *existing* over to its regeneration *new_proc*.
+
+    Kept from *existing*: everything :func:`carry_run_history` keeps, plus
+    evidence, constraints, recurrence, branches, expected outcomes,
+    compiled outputs, the lifecycle history and, unless *keep_lifecycle*
+    is false, the lifecycle state.  Everything else comes from
+    *new_proc*.  Mutates and returns *new_proc*.
+    """
+    if new_proc is existing:
+        return new_proc
+    for key in ("evidence", "constraints", "recurrence"):
+        if key in existing:
+            new_proc[key] = existing[key]
+    new_proc["branches"] = existing.get("branches", [])
+    new_proc["expected_outcomes"] = existing.get("expected_outcomes", [])
+    new_proc["compiled_outputs"] = existing.get("compiled_outputs", {})
+    new_proc["lifecycle_history"] = existing.get("lifecycle_history", [])
+    if keep_lifecycle:
+        new_proc["lifecycle_state"] = existing.get("lifecycle_state", "observed")
+    carry_run_history(new_proc, existing)
+    new_proc.setdefault("staleness", {})["last_observed"] = datetime.now(timezone.utc).isoformat()
+    return new_proc
+
+
 class ProcedureWriter:
     """Convert SOP templates → v3 procedures → knowledge base."""
 
@@ -81,6 +138,12 @@ class ProcedureWriter:
                 errors,
             )
 
+        # A regeneration keeps what accumulated on the existing procedure
+        # (evidence, trust, lifecycle, agent runs).
+        existing = self._kb.get_procedure(procedure.get("id", ""))
+        if existing is not None:
+            merge_existing_procedure(procedure, existing)
+
         # Save to knowledge base
         path = self._kb.save_procedure(procedure)
 
@@ -121,84 +184,6 @@ class ProcedureWriter:
             "Wrote procedure '%s' from %s session %s",
             slug, source, source_id,
         )
-        return path
-
-    def update_procedure(
-        self,
-        slug: str,
-        new_template: dict,
-        *,
-        source: str = "passive",
-        source_id: str = "",
-        event_count: int = 0,
-        duration_minutes: int = 0,
-    ) -> Path:
-        """Update an existing procedure with a new SOP template.
-
-        Merges the new template's data while preserving existing
-        evidence, staleness history, and constraints.
-
-        Returns the path to the updated procedure file.
-        """
-        existing = self._kb.get_procedure(slug)
-
-        # Convert new template to v3
-        new_template.setdefault("source", source)
-        new_proc = sop_to_procedure(new_template)
-
-        # Enrich environment
-        self._enrich_environment(new_proc, new_template)
-
-        if existing is not None:
-            # Preserve accumulated data from the existing procedure
-            new_proc["evidence"] = existing.get("evidence", new_proc["evidence"])
-            new_proc["constraints"] = existing.get("constraints", new_proc["constraints"])
-            new_proc["recurrence"] = existing.get("recurrence", new_proc["recurrence"])
-
-            # Merge staleness: keep history, update last_observed
-            old_staleness = existing.get("staleness", {})
-            new_proc["staleness"]["confidence_trend"] = old_staleness.get(
-                "confidence_trend", []
-            )
-            # Append new confidence to trend
-            new_conf = new_proc.get("confidence_avg", 0.0)
-            if new_conf > 0:
-                new_proc["staleness"]["confidence_trend"].append(
-                    round(new_conf, 4)
-                )
-            new_proc["staleness"]["last_observed"] = (
-                datetime.now(timezone.utc).isoformat()
-            )
-            new_proc["staleness"]["drift_signals"] = old_staleness.get(
-                "drift_signals", []
-            )
-
-            # Preserve branches from existing
-            new_proc["branches"] = existing.get("branches", [])
-            new_proc["expected_outcomes"] = existing.get("expected_outcomes", [])
-
-            # Preserve lifecycle state and history
-            new_proc["lifecycle_state"] = existing.get("lifecycle_state", "observed")
-            new_proc["lifecycle_history"] = existing.get("lifecycle_history", [])
-            new_proc["compiled_outputs"] = existing.get("compiled_outputs", {})
-
-        # Save
-        path = self._kb.save_procedure(new_proc)
-
-        # Add evidence
-        if source_id:
-            self._evidence.add_observation(
-                slug,
-                ObservationEvidence(
-                    date=datetime.now(timezone.utc).strftime("%Y-%m-%d"),
-                    type=source,
-                    duration_minutes=duration_minutes,
-                    session_id=source_id,
-                    event_count=event_count,
-                ),
-            )
-
-        logger.info("Updated procedure '%s'", slug)
         return path
 
     # ------------------------------------------------------------------

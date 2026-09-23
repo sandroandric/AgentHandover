@@ -83,14 +83,14 @@ impl Default for WarnLimiter {
 
 static TIMEOUT_WARNINGS: WarnLimiter = WarnLimiter::new();
 
-/// `<data dir>/observation.sock`, served by ObservationServer.swift.
+/// `<data dir>/sockets/observation.sock`, served by ObservationServer.swift.
 pub fn observation_socket_path() -> PathBuf {
-    crate::status::data_dir().join("observation.sock")
+    crate::status::socket_dir().join("observation.sock")
 }
 
-/// `<data dir>/capture.sock`, served by ScreenCaptureServer.swift.
+/// `<data dir>/sockets/capture.sock`, served by ScreenCaptureServer.swift.
 pub fn capture_socket_path() -> PathBuf {
-    crate::status::data_dir().join("capture.sock")
+    crate::status::socket_dir().join("capture.sock")
 }
 
 fn parse_response(line: &str) -> Result<ObservationSnapshot, SnapshotError> {

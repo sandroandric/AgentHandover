@@ -97,7 +97,7 @@ atomic_writes = true
 auto_approve = false
 
 [export]
-adapter = "openclaw"           # "openclaw" or "generic"
+adapter = "openclaw"           # "openclaw", "generic", "skill-md", "claude-skill" or "all"
 json_export = false            # also write .json alongside .md
 # generic_output_dir = "~/Library/Application Support/agenthandover/sops"
 # claude_skills_dir = "~/.claude/skills"   # where Claude Code skills are written

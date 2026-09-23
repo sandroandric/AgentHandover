@@ -76,9 +76,36 @@ export interface DomNode {
   isShadowRoot?: boolean;
 }
 
-/** Sent when a DOM snapshot is captured (initial, dwell, scroll, or on-demand). */
+/** One element of the anchor set. */
+export interface DomAnchor {
+  tag: string;
+  /** Input type (`email`, `checkbox`, ...) for `<input>`. */
+  type?: string;
+  id?: string;
+  role?: string;
+  /** Accessible name: aria-label, aria-labelledby, `<label>`, placeholder, title or text. */
+  name?: string;
+  ariaLabel?: string;
+  testId?: string;
+  href?: string;
+  /** Visible text, one line. */
+  text?: string;
+  /** Typed value of the interacted field, only with `captureInputValues`
+   *  (never a password). */
+  value?: string;
+  /** Composed-path CSS selector from the chain's outermost element. */
+  selector: string;
+  /** True on the element the user interacted with. */
+  interacted?: boolean;
+}
+
+/** Sent when a DOM snapshot is captured (initial, dwell, scroll, or on-demand).
+ *  Carries the anchor set and text digest of `captureSnapshot`
+ *  (dom-capture.ts), not the viewport tree. */
 export interface DomSnapshotPayload {
-  nodes: DomNode[];
+  anchors: DomAnchor[];
+  digest: string;
+  truncated: boolean;
   url: string;
   tabId: number;
   captureReason: 'dwell' | 'scroll' | 'request' | 'initial';

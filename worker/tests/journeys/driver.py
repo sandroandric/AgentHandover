@@ -122,10 +122,29 @@ class JourneyWorker:
         kb = KnowledgeBase(root=Path(knowledge_dir))
         kb.ensure_structure()
         self.knowledge_base = kb
+
+        self.vlm_queue = wm.VLMFallbackQueue()
+        llm_reasoner = LLMReasoner(
+            config=ReasoningConfig(ollama_host=host), vlm_queue=self.vlm_queue,
+        )
+        # Vector KB with main()'s health check (unavailable -> None),
+        # built before its consumers as main() builds it.
+        self.vector_kb = None
+        vector_kb = VectorKB(self.db_path, VectorKBConfig(ollama_host=host))
+        try:
+            embedding = vector_kb.compute_embeddings(["health check"])
+        except (ConnectionError, OllamaError):
+            embedding = None
+        if embedding and embedding[0]:
+            self.vector_kb = vector_kb
+        else:
+            vector_kb.close()
+
         self.lifecycle_manager = LifecycleManager(kb)
         self.procedure_writer = ProcedureWriter(
             kb=kb, evidence=EvidenceTracker(knowledge_base=kb),
-            lifecycle_manager=self.lifecycle_manager, vector_kb=None, llm_reasoner=None,
+            lifecycle_manager=self.lifecycle_manager, vector_kb=self.vector_kb,
+            llm_reasoner=llm_reasoner,
         )
         self.kb_export_adapter = KnowledgeBaseExportAdapter(kb)
         pz_cfg = PrivacyZoneConfig()
@@ -144,20 +163,16 @@ class JourneyWorker:
         if features.activity_classification:
             self.activity_classifier = ActivityClassifier(
                 profile=kb.get_profile(), policy=UserPolicy(kb),
+                llm_reasoner=llm_reasoner,
             )
         self.constraint_manager = ConstraintManager(kb)
 
-        self.vlm_queue = wm.VLMFallbackQueue()
-        llm_reasoner = LLMReasoner(
-            config=ReasoningConfig(ollama_host=host), vlm_queue=self.vlm_queue,
-        )
-        if self.activity_classifier is not None:
-            self.activity_classifier._llm_reasoner = llm_reasoner
         self.trust_advisor = TrustAdvisor(kb)
+        self.procedure_matcher = ProcedureMatcher(kb=kb, vector_kb=self.vector_kb)
         self.continuity_tracker = None
         if features.continuity_tracking:
             self.continuity_tracker = ContinuityTracker(
-                kb=kb, matcher=ProcedureMatcher(kb=kb, vector_kb=None),
+                kb=kb, matcher=self.procedure_matcher,
             )
         self.variant_detector = VariantDetector()
         self.evidence_normalizer = EvidenceNormalizer(variant_detector=self.variant_detector)
@@ -232,7 +247,7 @@ class JourneyWorker:
                     timeout_seconds=vlm_cfg.annotation_timeout_seconds,
                 ),
                 image_embedder=None,
-                vector_kb=None,
+                vector_kb=self.vector_kb,
             )
             self.scene_annotator.preload()
             self.frame_differ = wm.FrameDiffer(
@@ -250,22 +265,10 @@ class JourneyWorker:
                 config=wm.SegmenterConfig(ollama_host=host),
                 llm_reasoner=llm_reasoner,
                 cluster_label_store=kb.root / "observations" / "cluster_labels.json",
-                vector_kb=None,
+                vector_kb=self.vector_kb,
             )
         self.activity_searcher = ActivitySearcher(db_path=self.db_path)
         self.sop_auto_approve = cfg.sop.auto_approve
-
-        # Vector KB with main()'s health check: unavailable -> None.
-        self.vector_kb = None
-        vector_kb = VectorKB(self.db_path, VectorKBConfig(ollama_host=host))
-        try:
-            embedding = vector_kb.compute_embeddings(["health check"])
-        except (ConnectionError, OllamaError):
-            embedding = None
-        if embedding and embedding[0]:
-            self.vector_kb = vector_kb
-        else:
-            vector_kb.close()
 
         self.db = wm.WorkerDB(self.db_path)
         self.v2_schema_ok = (
@@ -449,6 +452,7 @@ class JourneyWorker:
         ):
             passive_sops = wm._process_passive_discovery(
                 db,
+                knowledge_base=self.knowledge_base,
                 segmenter=self.task_segmenter,
                 sop_generator=self.sop_generator,
                 sop_auto_approve=self.sop_auto_approve,

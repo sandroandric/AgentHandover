@@ -8,6 +8,15 @@ search over VLM annotations.
 The server binds to ``127.0.0.1`` only (no external access) and runs
 in a daemon thread so it can be started alongside the worker process.
 
+Binding to loopback does not keep a web page out: a browser will send a
+cross-site POST to ``127.0.0.1`` (CSRF), and a DNS-rebound hostname lets
+a page read GET responses.  So every request must carry the loopback
+``Host`` this server is bound to and no ``Origin`` header (browsers set
+one on cross-site and on every POST request), and every POST must carry
+``X-AgentHandover-Token``: a random token kept in ``query-api-token``
+(mode 0600) in the data directory, which only the user's own processes
+can read.
+
 Usage::
 
     from agenthandover_worker.knowledge_base import KnowledgeBase
@@ -22,12 +31,16 @@ Usage::
 
 from __future__ import annotations
 
+import hmac
 import http.server
 import json
 import logging
+import os
 import re
+import secrets
 import threading
 from dataclasses import asdict
+from pathlib import Path
 from typing import Any
 
 from agenthandover_worker import __version__
@@ -35,11 +48,76 @@ from agenthandover_worker.knowledge_base import KnowledgeBase
 
 logger = logging.getLogger(__name__)
 
+
+def procedure_export_paths(kb: KnowledgeBase, slug: str) -> dict[str, str]:
+    """Where *slug* has been exported, by target; only files that exist.
+
+    The Claude Code path is the one ``ClaudeSkillWriter`` and
+    ``agent_connect.connect_claude_code`` write:
+    ``<[export] claude_skills_dir>/<slugify(slug)>/SKILL.md``.
+    """
+    from pathlib import Path
+
+    from agenthandover_worker.config import load_config
+    from agenthandover_worker.skill_render import slugify
+
+    apprentice = Path.home() / ".openclaw" / "workspace" / "memory" / "apprentice"
+    candidates = {
+        "knowledge_base": kb.root / "procedures" / f"{slug}.json",
+        "openclaw": apprentice / "sops" / f"sop.{slug}.md",
+        "skill_md": apprentice / "skills" / f"SKILL.{slug}.md",
+        "claude_skill": load_config().export.skills_dir / slugify(slug) / "SKILL.md",
+    }
+    return {name: str(path) for name, path in candidates.items() if path.is_file()}
+
+
 # URL patterns
 _PROCEDURE_SLUG_RE = re.compile(r"^/procedures/([a-zA-Z0-9_-]+)$")
 _CONTEXT_NAME_RE = re.compile(r"^/context/([a-zA-Z0-9_-]+)$")
 _DAILY_DATE_RE = re.compile(r"^/daily/(\d{4}-\d{2}-\d{2})$")
 _BUNDLE_SLUG_RE = re.compile(r"^/bundle/([a-zA-Z0-9_-]+)$")
+
+TOKEN_HEADER = "X-AgentHandover-Token"
+TOKEN_FILE = "query-api-token"
+
+
+def load_or_create_token(path: Path) -> str:
+    """Return the API token stored at ``path``, creating it (mode 0600) if absent.
+
+    The token is created atomically and exclusively (written to a private
+    temp file, then hard-linked into place), so two processes starting
+    together agree on one token.  An existing file readable by anyone but
+    its owner is tightened to 0600; an empty or unreadable one is replaced.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    for _ in range(3):
+        try:
+            fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        except FileNotFoundError:
+            fd = -1
+        if fd >= 0:
+            with os.fdopen(fd, "r", encoding="utf-8") as fh:
+                if os.fstat(fh.fileno()).st_mode & 0o077:
+                    os.fchmod(fh.fileno(), 0o600)
+                token = fh.read().strip()
+            if token:
+                return token
+            path.unlink(missing_ok=True)
+        token = secrets.token_urlsafe(32)
+        tmp = path.with_name(f".{path.name}.{os.getpid()}.{secrets.token_hex(4)}")
+        tfd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            with os.fdopen(tfd, "w", encoding="utf-8") as fh:
+                fh.write(token + "\n")
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.link(tmp, path)
+            return token
+        except FileExistsError:
+            continue  # another process won the race: read its token
+        finally:
+            tmp.unlink(missing_ok=True)
+    raise RuntimeError(f"could not create or read the API token at {path}")
 
 
 def _compute_freshness(proc: dict) -> float:
@@ -67,9 +145,38 @@ class QueryAPIHandler(http.server.BaseHTTPRequestHandler):
     # GET dispatcher
     # ------------------------------------------------------------------
 
+    def _reject_untrusted(self, *, require_token: bool) -> bool:
+        """Send 403 and return True unless the request is from a local client.
+
+        A request is refused when its ``Host`` is not the loopback address
+        this server is bound to (DNS rebinding), when it carries an
+        ``Origin`` (a browser page), or, for POST, when it lacks the token.
+        """
+        port = self.server.server_address[1]
+        host = (self.headers.get("Host") or "").strip().lower()
+        if host not in (f"127.0.0.1:{port}", f"localhost:{port}"):
+            self._send_error(403, "Forbidden: Host must be 127.0.0.1:%d" % port)
+            return True
+        if self.headers.get("Origin") is not None:
+            self._send_error(403, "Forbidden: browser requests are not accepted")
+            return True
+        if require_token:
+            sent = self.headers.get(TOKEN_HEADER) or ""
+            expected: str = self.server.api_token  # type: ignore[attr-defined]
+            if not hmac.compare_digest(sent.encode(), expected.encode()):
+                self._send_error(
+                    403,
+                    f"Forbidden: missing or wrong {TOKEN_HEADER} header "
+                    f"(the token is in {TOKEN_FILE} in the data directory)",
+                )
+                return True
+        return False
+
     def do_GET(self) -> None:  # noqa: N802
         """Route GET requests to the appropriate handler."""
         path = self.path.split("?")[0]  # strip query string
+        if self._reject_untrusted(require_token=False):
+            return
 
         try:
             if path == "/health":
@@ -141,6 +248,8 @@ class QueryAPIHandler(http.server.BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         """Route POST requests to the appropriate handler."""
         path = self.path.split("?")[0]
+        if self._reject_untrusted(require_token=True):
+            return
 
         try:
             if path == "/search":
@@ -444,25 +553,7 @@ class QueryAPIHandler(http.server.BaseHTTPRequestHandler):
             except Exception:
                 pass
 
-        # Build export paths
-        export_paths = {}
-        # Check known export locations
-        from pathlib import Path
-        kb_path = kb.root / "procedures" / f"{slug}.json"
-        if kb_path.is_file():
-            export_paths["knowledge_base"] = str(kb_path)
-
-        openclaw_path = Path.home() / ".openclaw" / "workspace" / "memory" / "apprentice" / "sops" / f"sop.{slug}.md"
-        if openclaw_path.is_file():
-            export_paths["openclaw"] = str(openclaw_path)
-
-        skill_md_path = Path.home() / ".openclaw" / "workspace" / "memory" / "apprentice" / "skills" / f"SKILL.{slug}.md"
-        if skill_md_path.is_file():
-            export_paths["skill_md"] = str(skill_md_path)
-
-        claude_skill_path = Path.home() / ".claude" / "skills" / slug / "SKILL.md"
-        if claude_skill_path.is_file():
-            export_paths["claude_skill"] = str(claude_skill_path)
+        export_paths = procedure_export_paths(kb, slug)
 
         # Execution history
         exec_monitor = getattr(self.server, "execution_monitor", None)
@@ -888,6 +979,9 @@ class QueryAPIServer:
         Optional RuntimeValidator for ``/validate/{slug}`` endpoint.
     ops_telemetry:
         Optional OpsTelemetry for ``/health/detailed`` and ``/telemetry/trend`` endpoints.
+    token_path:
+        File holding the POST token (created 0600 if absent).  ``None``
+        keeps a random token in memory only (tests read ``token``).
     """
 
     def __init__(
@@ -902,7 +996,10 @@ class QueryAPIServer:
         runtime_validator: Any = None,
         ops_telemetry: Any = None,
         vector_kb: Any = None,
+        token_path: Path | None = None,
     ) -> None:
+        self._token_path = token_path
+        self._token: str | None = None
         self._knowledge_base = knowledge_base
         self._port = port
         self._activity_searcher = activity_searcher
@@ -923,10 +1020,17 @@ class QueryAPIServer:
             logger.warning("QueryAPIServer is already running")
             return
 
+        self._token = (
+            load_or_create_token(self._token_path)
+            if self._token_path is not None
+            else secrets.token_urlsafe(32)
+        )
         self._httpd = http.server.HTTPServer(
             ("127.0.0.1", self._port),
             QueryAPIHandler,
         )
+        self._port = self._httpd.server_address[1]  # resolves port=0
+        self._httpd.api_token = self._token  # type: ignore[attr-defined]
         # Attach knowledge base and searcher to the server instance
         # so the handler can access them via self.server
         self._httpd.knowledge_base = self._knowledge_base  # type: ignore[attr-defined]
@@ -965,6 +1069,11 @@ class QueryAPIServer:
     def is_running(self) -> bool:
         """Return True if the server is currently running."""
         return self._running
+
+    @property
+    def token(self) -> str | None:
+        """The token POST requests must send (set once the server started)."""
+        return self._token
 
     @property
     def port(self) -> int:

@@ -71,6 +71,19 @@ struct MenuBarView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
 
+                // Screen capture stalled (ScreenCaptureServer recycled its path)
+                if let stallLine = appState.captureStallStatus {
+                    HStack(spacing: 4) {
+                        Image(systemName: "exclamationmark.triangle")
+                            .font(.system(size: 9))
+                        Text(stallLine)
+                            .font(.system(size: 10))
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .foregroundColor(.orange)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+
                 // Footer: services + quit
                 footerSection
             }
@@ -645,11 +658,20 @@ struct MenuBarView: View {
                     Text(agent.name)
                         .font(.system(size: 12))
                     Spacer()
-                    if agent.isConnected {
+                    if agent.isBusy {
+                        ProgressView()
+                            .controlSize(.mini)
+                    } else if agent.isConnected {
                         Text("Connected")
                             .font(.system(size: 10))
                             .foregroundColor(.green)
                     } else {
+                        if let failure = agent.failure {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .font(.system(size: 10))
+                                .foregroundColor(.orange)
+                                .help(failure)
+                        }
                         Button("Connect") {
                             agentDetector.connect(agent)
                         }

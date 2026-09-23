@@ -13,7 +13,7 @@ Trust levels (ascending capability):
 5. autonomous
 
 Suggestions are persisted at ``{kb_root}/observations/trust_suggestions.json``.
-Execution stats are read from ``{kb_root}/observations/executions.json``.
+Execution stats are read from the ``runs`` table (``execution_monitor``).
 """
 
 from __future__ import annotations
@@ -54,8 +54,12 @@ class TrustAdvisor:
         knowledge_base: KnowledgeBase,
         min_observations: int = 3,
         min_success_rate: float = 0.90,
+        execution_monitor=None,
     ) -> None:
+        from agenthandover_worker.execution_monitor import ExecutionMonitor
+
         self._kb = knowledge_base
+        self._monitor = execution_monitor or ExecutionMonitor(knowledge_base)
         self._min_observations = min_observations
         self._min_success_rate = min_success_rate
         self._suggestions: list[TrustSuggestion] = []
@@ -208,26 +212,17 @@ class TrustAdvisor:
         return proc.get("constraints", {}).get("trust_level", "observe")
 
     def _get_execution_stats(self, slug: str) -> dict:
-        """Read execution stats for a procedure from executions.json.
+        """Finished agent runs of *slug*, from the ``runs`` table.
 
-        Returns a dict with keys: ``total``, ``successes``, ``failures``,
-        ``last_failure``.  Returns zeros if no stats are available.
+        Returns ``total``, ``successes`` (completed without deviation),
+        ``failures`` and ``last_failure``.
         """
-        path = self._kb.root / "observations" / "executions.json"
-        if not path.is_file():
-            return {"total": 0, "successes": 0, "failures": 0, "last_failure": None}
-        try:
-            with open(path) as f:
-                data = json.load(f)
-        except (json.JSONDecodeError, OSError):
-            return {"total": 0, "successes": 0, "failures": 0, "last_failure": None}
-
-        proc_stats = data.get("procedures", {}).get(slug, {})
+        stats = self._monitor.get_success_rate(slug)
         return {
-            "total": proc_stats.get("total", 0),
-            "successes": proc_stats.get("successes", 0),
-            "failures": proc_stats.get("failures", 0),
-            "last_failure": proc_stats.get("last_failure", None),
+            "total": stats["total"],
+            "successes": stats["completed"],
+            "failures": stats["failed"],
+            "last_failure": stats["last_failure"],
         }
 
     def _load_suggestions(self) -> None:

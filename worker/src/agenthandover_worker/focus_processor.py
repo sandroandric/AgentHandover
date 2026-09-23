@@ -13,8 +13,11 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import timedelta
 from pathlib import Path
 
+from agenthandover_worker.dom import url_host
+from agenthandover_worker.event_helpers import display_name, parse_json_field, parse_timestamp
 from agenthandover_worker.scene_annotator import SceneAnnotator
 from agenthandover_worker.frame_differ import FrameDiffer
 from agenthandover_worker.sop_generator import SOPGenerator, GeneratedSOP
@@ -23,6 +26,9 @@ logger = logging.getLogger(__name__)
 
 # Annotation statuses the focus path does not re-annotate.
 _ANNOTATION_DONE = ("completed", "skipped", "missing_screenshot")
+
+# How far (seconds) a DOM snapshot or click may lie from a frame to join it.
+_DOM_TOLERANCE_SEC = 5.0
 
 
 class FocusProcessor:
@@ -262,29 +268,17 @@ class FocusProcessor:
 
     def _is_own_event(self, event: dict) -> bool:
         """Check whether an event originates from AgentHandover's own UI."""
-        window_json_raw = event.get("window_json", "")
-        if not window_json_raw:
+        window = parse_json_field(event, "window_json")
+        if not window:
             return False
 
-        try:
-            window = (
-                json.loads(window_json_raw)
-                if isinstance(window_json_raw, str)
-                else window_json_raw
-            )
-        except (json.JSONDecodeError, TypeError):
-            return False
-
-        if not isinstance(window, dict):
-            return False
-
-        app_name = str(window.get("app_name", "")).lower()
-        bundle_id = str(window.get("app_bundle_id", "")).lower()
+        # ``app_id`` is ``pid:<pid>:<owner name>`` or a bundle id.
+        app_id = str(window.get("app_id", "")).lower()
         title = str(window.get("title", "")).lower()
 
         # Check app name / bundle ID
         for pattern in self._OWN_APP_PATTERNS:
-            if pattern in app_name or pattern in bundle_id:
+            if pattern in app_id:
                 return True
 
         # Check window title
@@ -373,23 +367,9 @@ class FocusProcessor:
             source_location = ""
             for orig_idx, evt in non_clipboard:
                 if evt.get("id", "") == target_id:
-                    win_raw = evt.get("window_json", "")
-                    try:
-                        win = (
-                            json.loads(win_raw)
-                            if isinstance(win_raw, str)
-                            else win_raw
-                        )
-                        if isinstance(win, dict):
-                            source_app = str(
-                                win.get("app_name", "")
-                                or win.get("app_bundle_id", "")
-                            )
-                            source_location = str(
-                                win.get("title", "") or win.get("url", "")
-                            )
-                    except (json.JSONDecodeError, TypeError):
-                        pass
+                    win = parse_json_field(evt, "window_json")
+                    source_app = display_name(win.get("app_id"))
+                    source_location = str(win.get("title") or "")
                     break
             if source_app:
                 clip_meta["source_app"] = source_app
@@ -433,7 +413,7 @@ class FocusProcessor:
 
     @staticmethod
     def _extract_clipboard_meta(event: dict) -> dict | None:
-        """Extract clipboard metadata (content_types, byte_size) from an event.
+        """Extract clipboard metadata (content_types, byte_size, preview) from an event.
 
         ClipboardChange events serialize the payload inside ``kind_json``,
         not ``metadata_json``.  The daemon writes it as::
@@ -444,6 +424,7 @@ class FocusProcessor:
                 "byte_size": N,
                 "high_entropy": bool,
                 "content_hash": "...",
+                "content_preview": "...",   # optional
             }
 
         This was historically read from ``metadata_json``, which is always
@@ -473,6 +454,11 @@ class FocusProcessor:
             meta["high_entropy"] = parsed["high_entropy"]
         if parsed.get("content_hash"):
             meta["content_hash"] = parsed["content_hash"]
+        # The copied text itself (present when the daemon's
+        # ``enable_clipboard_preview`` is on): what the Copy/Paste steps
+        # must name.
+        if parsed.get("content_preview"):
+            meta["content_preview"] = str(parsed["content_preview"])
         return meta
 
     # ------------------------------------------------------------------
@@ -620,6 +606,10 @@ class FocusProcessor:
         - diff: parsed frame diff dict (or None)
         - timestamp: ISO timestamp string
         - app: application name
+        - event_id: the frame's event id (the step evidence points at it)
+        - host, dom_nodes, dom_snapshot_id: the DOM snapshot joined by host
+        - click_targets: the Chrome clicks made on this frame's page
+        - clipboard_context: the copy made from this frame, if any
         """
         timeline = []
 
@@ -647,17 +637,21 @@ class FocusProcessor:
                 except (json.JSONDecodeError, TypeError):
                     pass
 
-            # Try to find a DOM snapshot near this event
+            # The Chrome extension's DOM snapshot closest to this frame on
+            # the same host.  The annotation's location may carry a scheme
+            # or not ("news.ycombinator.com/item?id=1").
             dom_nodes = None
-            location = annotation.get("location", "")
-            if location and location.startswith("http"):
+            dom_snapshot_id = None
+            host = url_host(annotation.get("location", ""))
+            if host:
                 dom_snaps = db.get_dom_snapshots_near_timestamp(  # type: ignore[union-attr]
                     fresh.get("timestamp", ""),
-                    location,
-                    tolerance_sec=5.0,
+                    host,
+                    tolerance_sec=_DOM_TOLERANCE_SEC,
                 )
                 if dom_snaps:
                     dom_nodes = dom_snaps[0].get("nodes")
+                    dom_snapshot_id = dom_snaps[0].get("event_id")
 
             # Look up clipboard context attached in Step 0b
             clipboard_ctx = (
@@ -670,11 +664,16 @@ class FocusProcessor:
                 "annotation": annotation,
                 "diff": diff,
                 "dom_nodes": dom_nodes,
+                "dom_snapshot_id": dom_snapshot_id,
+                "host": host,
+                "click_targets": [],
                 "timestamp": fresh.get("timestamp", ""),
                 "app": annotation.get("app", ""),
                 "event_id": event_id,
                 "clipboard_context": clipboard_ctx,
             })
+
+        self._attach_clicks(db, timeline)
 
         # Safety net: the first frame in a focus session must never carry a
         # diff — it is the clean starting point of the SOP.  Any diff stored
@@ -684,3 +683,40 @@ class FocusProcessor:
             timeline[0]["diff"] = None
 
         return timeline
+
+    @staticmethod
+    def _attach_clicks(db: object, timeline: list[dict]) -> None:
+        """Give each frame the Chrome clicks made on its page.
+
+        Extension events carry no ``focus_session_id``, so they are found by
+        time.  A click belongs to the last frame at or before it when that
+        frame shows the click's host (the page the user clicked on);
+        otherwise, when the page came on screen with the click itself (an
+        app switch into Chrome), to the first frame after it on that host
+        within the DOM tolerance.  A click no frame shows is left out.
+        """
+        timed = [
+            (when, frame) for frame in timeline
+            if (when := parse_timestamp(frame.get("timestamp"))) is not None
+        ]
+        if not timed:
+            return
+        slack = timedelta(seconds=_DOM_TOLERANCE_SEC)
+        clicks = db.get_click_intents(  # type: ignore[union-attr]
+            (timed[0][0] - slack).isoformat(), (timed[-1][0] + slack).isoformat(),
+        )
+        for click in clicks:
+            when = parse_timestamp(click.get("timestamp"))
+            host = url_host(click.get("url"))
+            if when is None or not host:
+                continue
+            before = [frame for t, frame in timed if t <= when]
+            owner = before[-1] if before and before[-1].get("host") == host else None
+            if owner is None:
+                owner = next(
+                    (frame for t, frame in timed
+                     if when < t <= when + slack and frame.get("host") == host),
+                    None,
+                )
+            if owner is not None:
+                owner["click_targets"].append(click)

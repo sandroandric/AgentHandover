@@ -24,7 +24,7 @@ from pathlib import Path
 
 from agenthandover_worker import trigger_spool
 from agenthandover_worker.clipboard_linker import ClipboardLinker
-from agenthandover_worker.config import load_config
+from agenthandover_worker.config import EXPORT_ADAPTERS, load_config
 from agenthandover_worker.confidence import ConfidenceScorer, is_native_app_context
 from agenthandover_worker.db import WorkerDB
 from agenthandover_worker.episode_builder import EpisodeBuilder
@@ -54,17 +54,11 @@ logger = logging.getLogger("agenthandover_worker")
 
 # Default paths assume a single-user system. Use --db-path and --sops-dir
 # CLI args to override for multi-user or containerized deployments.
-# Must match the daemon's default — see crates/daemon/src/main.rs.
 import platform as _platform
 
-if _platform.system() == "Darwin":
-    DEFAULT_DB_PATH = (
-        Path.home() / "Library" / "Application Support" / "agenthandover" / "events.db"
-    )
-else:
-    DEFAULT_DB_PATH = Path.home() / ".local" / "share" / "agenthandover" / "events.db"
+from agenthandover_worker.paths import DEFAULT_DB_PATH, KNOWLEDGE_BASE_DIR, data_dir
+
 DEFAULT_SOPS_DIR = Path.home() / ".openclaw" / "workspace" / "memory" / "apprentice"
-KNOWLEDGE_BASE_DIR = Path.home() / ".agenthandover" / "knowledge"
 POLL_INTERVAL_SECONDS = 2.0
 VLM_REJECT_THRESHOLD = 0.60
 
@@ -464,9 +458,9 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--adapter",
-        choices=["openclaw", "generic", "skill-md", "claude-skill", "all"],
-        default="openclaw",
-        help="SOP export adapter (default: openclaw)",
+        choices=list(EXPORT_ADAPTERS),
+        default=None,
+        help="SOP export adapter (default: [export] adapter in config.toml, else openclaw)",
     )
     parser.add_argument(
         "--json-export",
@@ -539,9 +533,7 @@ def _next_poll_interval(
 
 def _status_dir() -> Path:
     """Return the standard data directory for status/PID files."""
-    if _platform.system() == "Darwin":
-        return Path.home() / "Library" / "Application Support" / "agenthandover"
-    return Path.home() / ".local" / "share" / "agenthandover"
+    return data_dir()
 
 
 def _atomic_write_result(path: Path, data: dict) -> None:
@@ -778,9 +770,10 @@ def _refresh_claude_commands(
 ) -> None:
     """Make Claude Code see exactly the agent_ready procedures.
 
-    Regenerates the /ah-{slug} commands from the agent_ready procedures
-    in the knowledge base (removing the rest), then removes exported
-    Skills whose procedure is no longer agent_ready.  *commands_dir* and
+    Writes ``<skills>/<slug>/SKILL.md`` for every agent_ready procedure
+    in the knowledge base, removes exported Skills whose procedure is no
+    longer agent_ready, and rewrites the ``agenthandover-list`` command
+    that points at them (``agent_connect.connect_claude_code``).  *commands_dir* and
     *skills_dir* override ``~/.claude/commands`` and the configured
     Skills root.  Never raises: a failed refresh must not undo the
     lifecycle change or approval that asked for it.
@@ -791,7 +784,7 @@ def _refresh_claude_commands(
             commands_dir=commands_dir,
             skills_dir=skills_dir if skills_dir is not None else load_config().export.skills_dir,
         )
-        logger.info("Refreshed Claude Code slash commands and Skills")
+        logger.info("Refreshed Claude Code Skills")
     except Exception:
         logger.warning("Failed to refresh Claude Code commands", exc_info=True)
 
@@ -1795,6 +1788,15 @@ def _process_focus_sessions_v2(
         procedure_dict["title"] = title  # User's focus session title, not VLM's guess
         procedure_dict["source"] = "focus"
         procedure_dict["lifecycle_state"] = "draft"  # Focus recordings start as draft, not observed
+        # A re-recording of an existing Skill is a new draft, but keeps
+        # its evidence, trust, lifecycle history and agent-run record.
+        if knowledge_base is not None:
+            from agenthandover_worker.procedure_writer import merge_existing_procedure
+            existing_proc = knowledge_base.get_procedure(slug)
+            if existing_proc is not None:
+                merge_existing_procedure(
+                    procedure_dict, existing_proc, keep_lifecycle=False,
+                )
         if behavioral_synthesizer is not None:
             try:
                 # Prefer the rich per-frame observations stashed by the
@@ -2191,14 +2193,16 @@ def _check_focus_answers(
     procedure_dict = pending.get("procedure", {})
     title = sop_template.get("title", procedure_dict.get("title", "Untitled"))
 
-    # Parse and merge answers
+    # Parse and merge answers.  A skipped Q&A still merges: every
+    # question is recorded as unanswered rather than dropped.
     qa_result = parse_qa_result_from_file(questions_data)
-    if qa_result is not None and focus_questioner is not None and qa_result.answers:
+    if qa_result is not None and focus_questioner is not None and qa_result.questions:
         try:
             procedure_dict = focus_questioner.merge_answers(procedure_dict, qa_result)
             logger.info(
-                "Focus v2 '%s': merged %d answer(s) into procedure",
-                title, len(qa_result.answers),
+                "Focus v2 '%s': merged %d answer(s) into procedure (%d question(s))",
+                title, sum(1 for a in qa_result.answers.values() if a.strip()),
+                len(qa_result.questions),
             )
         except Exception:
             logger.debug(
@@ -2213,9 +2217,14 @@ def _check_focus_answers(
     if db is not None and not db.update_sop_json(slug, procedure_dict):
         logger.warning("No review record for '%s' to merge Q&A answers into", slug)
 
-    # Save enriched procedure to KB (answers merged)
+    # Save enriched procedure to KB (answers merged), keeping any agent
+    # runs reported while the questions were open.
     if knowledge_base is not None:
         try:
+            from agenthandover_worker.procedure_writer import carry_run_history
+            existing_proc = knowledge_base.get_procedure(slug)
+            if existing_proc is not None:
+                carry_run_history(procedure_dict, existing_proc)
             knowledge_base.save_procedure(procedure_dict)
             logger.info("Saved Q&A-enriched procedure '%s' to KB", slug)
             _embed_procedure(vector_kb, procedure_dict)
@@ -2243,7 +2252,7 @@ def _check_focus_answers(
     # Clean up Q&A files
     clear_focus_qa_files(state_dir)
 
-    # Refresh Claude Code slash commands with the new/updated procedure
+    # Refresh the Claude Code Skills with the new/updated procedure
     _refresh_claude_commands()
 
     logger.info(
@@ -2256,6 +2265,7 @@ def _check_focus_answers(
 def _process_passive_discovery(
     db: "WorkerDB",
     *,
+    knowledge_base: "KnowledgeBase",
     segmenter: "TaskSegmenter",
     sop_generator: "SOPGenerator",
     openclaw_writer: "SOPExportAdapter",
@@ -2494,16 +2504,19 @@ def _process_passive_discovery(
             task_label[:60], len(demonstrations),
         )
 
-        # Load evidence from prior procedure if it exists
+        # Load evidence from prior procedure if it exists.  The generated
+        # SOP is titled with task_label and slugged by _generate_slug, so
+        # the same call names the procedure an earlier run wrote.
         _prior_evidence: dict | None = None
         try:
-            from agenthandover_worker.sop_format import slugify
-            _candidate_slug = slugify(task_label) if task_label else ""
+            _candidate_slug = _generate_slug(task_label) if task_label else ""
             if _candidate_slug:
                 _prior_proc = knowledge_base.get_procedure(_candidate_slug)
                 if _prior_proc is not None:
-                    _prior_evidence = _prior_proc.get("extracted_evidence")
-        except Exception:
+                    _prior_evidence = (
+                        _prior_proc.get("evidence") or {}
+                    ).get("extracted_evidence")
+        except (OSError, KeyError, ValueError):
             logger.debug("Failed to load prior evidence for '%s'", task_label[:60], exc_info=True)
 
         # Use enriched generation if variant data available
@@ -4060,6 +4073,9 @@ def main(argv: list[str] | None = None) -> None:
     # One read of config.toml for the whole worker run.
     cfg = load_config()
     vlm_cfg = cfg.vlm
+    if args.adapter is None:
+        args.adapter = cfg.export.adapter
+    logger.info("Export adapter: %s", args.adapter)
 
     # Config validation
     try:
@@ -4077,11 +4093,55 @@ def main(argv: list[str] | None = None) -> None:
         [k for k, v in vars(features).items() if not v] or "all enabled",
     )
 
-    # Forward declarations — these are initialized later but referenced
-    # by module constructors. Python 3.14 requires locals to be assigned
-    # before any use in the same function scope.
+    # Shared LLM reasoning utility — must be created before modules that use it.
+    # VLMFallbackQueue is imported at module level (line 40) — do NOT re-import
+    # it here, that shadows the module-level binding and makes Python treat
+    # VLMFallbackQueue as local to this whole main() function (same class of
+    # bug as the FocusProcessor regression caught by hikoae in issue #1).
+    # LLMReasoner stays as a local import because it's not at module level —
+    # the worker/llm_reasoning module is deliberately loaded lazily here.
+    vlm_queue = VLMFallbackQueue()
+    from agenthandover_worker.llm_reasoning import LLMReasoner, ReasoningConfig
+    llm_reasoner = LLMReasoner(
+        config=ReasoningConfig(ollama_host=vlm_cfg.ollama_host),
+        vlm_queue=vlm_queue,
+    )
+
+    # Initialize vector KB for semantic search and embedding storage
     vector_kb = None
-    llm_reasoner = None
+    try:
+        from agenthandover_worker.vector_kb import VectorKB, VectorKBConfig
+        vkb_config = VectorKBConfig(
+            ollama_host=vlm_cfg.ollama_host,
+        )
+        vector_kb = VectorKB(args.db_path, vkb_config)
+        # Health check: verify embedding model is available
+        try:
+            test_emb = vector_kb.compute_embeddings(["health check"])
+            if test_emb and test_emb[0]:
+                logger.info(
+                    "Vector KB ready (model=%s, dim=%d, vectors=%d)",
+                    vkb_config.embedding_model, len(test_emb[0]),
+                    vector_kb.count(),
+                )
+            else:
+                logger.warning(
+                    "Vector KB model '%s' returned empty embeddings — "
+                    "run 'ollama pull %s' to enable semantic search",
+                    vkb_config.embedding_model, vkb_config.embedding_model,
+                )
+                vector_kb.close()
+                vector_kb = None
+        except (ConnectionError, OllamaError):
+            logger.warning(
+                "Vector KB model '%s' not available — "
+                "run 'ollama pull %s' to enable semantic search",
+                vkb_config.embedding_model, vkb_config.embedding_model,
+            )
+            vector_kb.close()
+            vector_kb = None
+    except Exception:
+        logger.debug("Vector KB initialization failed — semantic search disabled", exc_info=True)
 
     evidence_tracker = EvidenceTracker(knowledge_base=knowledge_base)
     lifecycle_manager = LifecycleManager(knowledge_base)
@@ -4106,7 +4166,6 @@ def main(argv: list[str] | None = None) -> None:
     except Exception:
         logger.debug("Privacy zone config parsing failed, using defaults", exc_info=True)
     privacy_checker = PrivacyZoneChecker(config=_pz_cfg)
-    daily_processor = DailyBatchProcessor(knowledge_base=knowledge_base)
     staleness_detector = StalenessDetector(knowledge_base)
     profile_builder = ProfileBuilder(knowledge_base)
     activity_classifier = None
@@ -4115,27 +4174,10 @@ def main(argv: list[str] | None = None) -> None:
         activity_classifier = ActivityClassifier(
             profile=knowledge_base.get_profile(),
             policy=user_policy,
+            llm_reasoner=llm_reasoner,
         )
     pattern_detector = PatternDetector(knowledge_base)
     constraint_manager = ConstraintManager(knowledge_base)
-
-    # Shared LLM reasoning utility — must be created before modules that use it.
-    # VLMFallbackQueue is imported at module level (line 40) — do NOT re-import
-    # it here, that shadows the module-level binding and makes Python treat
-    # VLMFallbackQueue as local to this whole main() function (same class of
-    # bug as the FocusProcessor regression caught by hikoae in issue #1).
-    # LLMReasoner stays as a local import because it's not at module level —
-    # the worker/llm_reasoning module is deliberately loaded lazily here.
-    vlm_queue = VLMFallbackQueue()
-    from agenthandover_worker.llm_reasoning import LLMReasoner, ReasoningConfig
-    llm_reasoner = LLMReasoner(
-        config=ReasoningConfig(ollama_host=vlm_cfg.ollama_host),
-        vlm_queue=vlm_queue,
-    )
-
-    # Wire LLM reasoner into activity classifier (created before reasoner)
-    if activity_classifier is not None:
-        activity_classifier._llm_reasoner = llm_reasoner
 
     # Phase 4: Execution monitoring, correction detection, trust advisor
     runtime_validator = None
@@ -4143,15 +4185,18 @@ def main(argv: list[str] | None = None) -> None:
         runtime_validator = RuntimeValidator(knowledge_base)
     execution_monitor = ExecutionMonitor(knowledge_base)
     correction_detector = CorrectionDetector(knowledge_base, llm_reasoner=llm_reasoner)
-    trust_advisor = TrustAdvisor(knowledge_base)
+    trust_advisor = TrustAdvisor(knowledge_base, execution_monitor=execution_monitor)
     session_linker = SessionLinker(knowledge_base, llm_reasoner=llm_reasoner, vector_kb=vector_kb)
     digest_generator = DigestGenerator(knowledge_base)
+    procedure_matcher = ProcedureMatcher(kb=knowledge_base, vector_kb=vector_kb)
+    daily_processor = DailyBatchProcessor(
+        knowledge_base=knowledge_base, matcher=procedure_matcher,
+    )
     continuity_tracker = None
     if features.continuity_tracking:
-        procedure_matcher_obj = ProcedureMatcher(kb=knowledge_base, vector_kb=vector_kb)
         continuity_tracker = ContinuityTracker(
             kb=knowledge_base,
-            matcher=procedure_matcher_obj,
+            matcher=procedure_matcher,
         )
 
     # Phase 4: Variant detection and evidence normalization
@@ -4547,7 +4592,7 @@ def main(argv: list[str] | None = None) -> None:
     query_api_server = None
     try:
         if cfg.knowledge.query_api_enabled:
-            from agenthandover_worker.query_api import QueryAPIServer
+            from agenthandover_worker.query_api import TOKEN_FILE, QueryAPIServer
             from agenthandover_worker.procedure_verifier import ProcedureVerifier
             procedure_verifier = ProcedureVerifier(knowledge_base, runtime_validator=runtime_validator)
             bundle_compiler = BundleCompiler(
@@ -4568,12 +4613,14 @@ def main(argv: list[str] | None = None) -> None:
                 runtime_validator=runtime_validator,
                 ops_telemetry=ops_telemetry,
                 vector_kb=vector_kb,
+                token_path=_status_dir() / TOKEN_FILE,
             )
             query_api_server.start()
             logger.info(
-                "Query API server started on 127.0.0.1:%d (localhost-only, no auth). "
+                "Query API server started on 127.0.0.1:%d (localhost-only; POST "
+                "requires the X-AgentHandover-Token header from %s). "
                 "Set knowledge.query_api_enabled = false in config.toml to disable.",
-                _api_port,
+                _api_port, TOKEN_FILE,
             )
         else:
             logger.info("Query API server disabled (knowledge.query_api_enabled = false)")
@@ -4630,41 +4677,6 @@ def main(argv: list[str] | None = None) -> None:
         v2_annotations_today=total_v2_annotations,
         v2_diffs_today=total_v2_diffs,
     )
-
-    # Initialize vector KB for semantic search and embedding storage
-    vector_kb = None
-    try:
-        from agenthandover_worker.vector_kb import VectorKB, VectorKBConfig
-        vkb_config = VectorKBConfig(
-            ollama_host=vlm_cfg.ollama_host,
-        )
-        vector_kb = VectorKB(args.db_path, vkb_config)
-        # Health check: verify embedding model is available
-        try:
-            test_emb = vector_kb.compute_embeddings(["health check"])
-            if test_emb and test_emb[0]:
-                logger.info(
-                    "Vector KB ready (model=%s, dim=%d, vectors=%d)",
-                    vkb_config.embedding_model, len(test_emb[0]),
-                    vector_kb.count(),
-                )
-            else:
-                logger.warning(
-                    "Vector KB model '%s' returned empty embeddings — "
-                    "run 'ollama pull %s' to enable semantic search",
-                    vkb_config.embedding_model, vkb_config.embedding_model,
-                )
-                vector_kb = None
-        except (ConnectionError, OllamaError):
-            logger.warning(
-                "Vector KB model '%s' not available — "
-                "run 'ollama pull %s' to enable semantic search",
-                vkb_config.embedding_model, vkb_config.embedding_model,
-            )
-            vector_kb.close()
-            vector_kb = None
-    except Exception:
-        logger.debug("Vector KB initialization failed — semantic search disabled", exc_info=True)
 
     with WorkerDB(args.db_path) as db:
         logger.info("Connected to database, entering main loop")
@@ -5062,6 +5074,7 @@ def main(argv: list[str] | None = None) -> None:
                         try:
                             pd_sops = _process_passive_discovery(
                                 db,
+                                knowledge_base=knowledge_base,
                                 segmenter=task_segmenter,
                                 sop_generator=sop_generator,
                                 openclaw_writer=sop_writer,

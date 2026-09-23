@@ -288,9 +288,11 @@ fn start_worker_launchd() -> Result<()> {
              1. Re-run the pkg installer:\n\
                 sudo installer -pkg AgentHandover-*.pkg -target /\n\
              \n\
-             2. Or manually copy the plist from the pkg-shipped template:\n\
-                cp /usr/local/lib/agenthandover/launchd/com.agenthandover.worker.plist \\\n\
-                  ~/Library/LaunchAgents/\n\
+             2. Or install the pkg-shipped template yourself, with its log \
+             directory filled in:\n\
+                sed \"s|__AH_LOG_DIR__|$HOME/Library/Application Support/agenthandover/logs|g\" \\\n\
+                  /usr/local/lib/agenthandover/launchd/com.agenthandover.worker.plist \\\n\
+                  > ~/Library/LaunchAgents/com.agenthandover.worker.plist\n\
              \n\
              3. Then: agenthandover start worker",
             plist

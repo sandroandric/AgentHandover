@@ -30,6 +30,9 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_OLLAMA_HOST = "http://localhost:11434"
 
+# ``[export] adapter`` values (the worker's ``--adapter`` choices).
+EXPORT_ADAPTERS = ("openclaw", "generic", "skill-md", "claude-skill", "all")
+
 
 def config_path() -> Path:
     """Where ``config.toml`` lives on this platform (it may not exist)."""
@@ -121,6 +124,10 @@ class FeaturesConfig:
 class ExportConfig:
     """``[export]``."""
 
+    # Which writers the worker exports through (``--adapter`` overrides).
+    # A pkg install writes ``adapter = "all"``; a missing key keeps the
+    # daemon's default, ``openclaw``.
+    adapter: str = "openclaw"
     # Root for ClaudeSkillWriter; ``~`` is expanded.
     claude_skills_dir: Path | None = None  # None: ~/.claude/skills
 
@@ -311,13 +318,22 @@ def _idle_jobs(values: dict) -> IdleJobsConfig:
 
 
 def _export(values: dict) -> ExportConfig:
+    adapter = values.get("adapter", ExportConfig.adapter)
+    if adapter not in EXPORT_ADAPTERS:
+        logger.warning(
+            "[export] adapter = %r is not one of %s; using %r",
+            adapter, ", ".join(EXPORT_ADAPTERS), ExportConfig.adapter,
+        )
+        adapter = ExportConfig.adapter
     configured = values.get("claude_skills_dir")
     if not configured:
-        return ExportConfig()
+        return ExportConfig(adapter=adapter)
     if not isinstance(configured, str):
         logger.warning(
             "[export] claude_skills_dir = %r is not a path; using the default",
             configured,
         )
-        return ExportConfig()
-    return ExportConfig(claude_skills_dir=Path(configured).expanduser())
+        return ExportConfig(adapter=adapter)
+    return ExportConfig(
+        adapter=adapter, claude_skills_dir=Path(configured).expanduser(),
+    )

@@ -270,6 +270,11 @@ struct SOPDetailView: View {
                 // --- Enriched procedure data ---
                 procedureEnrichmentSections(json)
 
+                // --- What agents' runs of this Skill reported ---
+                if let runs = SkillRunSummary(procedure: json) {
+                    agentRunsSection(runs)
+                }
+
                 // Steps
                 if let steps = json["steps"] as? [[String: Any]], !steps.isEmpty {
                     VStack(alignment: .leading, spacing: 10) {
@@ -631,6 +636,58 @@ struct SOPDetailView: View {
                     }
                 }
             }
+        }
+    }
+
+    // MARK: - Agent runs
+
+    /// "Ran N times · M deviations", and the steps where agents did
+    /// something else (open questions for the user).
+    private func agentRunsSection(_ runs: SkillRunSummary) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            sectionHeader("Agent runs", icon: "play.circle", color: .blue)
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text(runs.headline)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundColor(darkNavy.opacity(0.85))
+                if runs.runs > 0 {
+                    Text("\(runs.completedRuns) as written · \(runs.deviatedRuns) with deviations · \(runs.failedRuns) failed")
+                        .font(.system(size: 11))
+                        .foregroundColor(darkNavy.opacity(0.55))
+                }
+                if let last = runs.lastRun, !last.isEmpty {
+                    Text("Last run: \(last)")
+                        .font(.system(size: 11))
+                        .foregroundColor(darkNavy.opacity(0.5))
+                        .textSelection(.enabled)
+                }
+
+                if !runs.openQuestions.isEmpty {
+                    Text("Open questions")
+                        .font(.system(size: 12, weight: .bold))
+                        .foregroundColor(warmOrange)
+                        .padding(.top, 4)
+                    ForEach(Array(runs.openQuestions.enumerated()), id: \.offset) { _, question in
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(question.stepLabel)
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundColor(darkNavy.opacity(0.75))
+                                .fixedSize(horizontal: false, vertical: true)
+                            Text(question.prompt)
+                                .font(.system(size: 12))
+                                .foregroundColor(darkNavy.opacity(0.65))
+                                .textSelection(.enabled)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                }
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(RoundedRectangle(cornerRadius: cardRadius).fill(lightGray))
+            .overlay(RoundedRectangle(cornerRadius: cardRadius).stroke(darkNavy.opacity(0.12), lineWidth: contraBorder))
         }
     }
 

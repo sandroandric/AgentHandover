@@ -43,6 +43,8 @@ _REQUIRED_FIELDS = (
 
 # Optional v3 sections with their default factories
 _V3_SECTIONS = {
+    # What the user is producing, from behavioral synthesis; "" when unknown.
+    "goal": str,
     "inputs": list,
     "outputs": list,
     "environment": dict,
@@ -75,6 +77,31 @@ _V3_SECTIONS = {
     "execution_stats": dict,
     "observed_alternatives": list,
 }
+
+
+def step_key(step: dict, index: int) -> str:
+    """The id of the step at 0-based *index*: its ``step_id``, else ``step_<n>``.
+
+    The one definition shared by the packet (which prints it in brackets),
+    the MCP server's ``expected_steps`` and the execution monitor, so an
+    agent reporting the id it was shown lands on that step.
+    """
+    return str(step.get("step_id") or f"step_{index + 1}")
+
+
+def procedure_steps(proc: dict) -> list[dict]:
+    """The procedure's steps that are dicts (the only ones with an id)."""
+    return [s for s in proc.get("steps") or [] if isinstance(s, dict)]
+
+
+def _step_evidence(evidence: object) -> dict:
+    """A step's evidence pointers: ``frames`` (event ids) and
+    ``dom_snapshot_ids``, each a list (empty when unknown)."""
+    evidence = evidence if isinstance(evidence, dict) else {}
+    return {
+        key: list(evidence.get(key) or [])
+        for key in ("frames", "dom_snapshot_ids")
+    }
 
 
 def _confidence_label(score: float) -> str:
@@ -141,6 +168,11 @@ def sop_to_procedure(sop_template: dict) -> dict:
             "input": step.get("input") or p.get("input", ""),
             "verify": step.get("verify") or p.get("verify", ""),
             "selector": step.get("selector"),
+            # The clicked element's anchor ({role, name, selector}) and the
+            # frames / DOM snapshots the step was written from; empty lists
+            # mean unknown.
+            "anchor": step.get("anchor"),
+            "evidence": _step_evidence(step.get("evidence")),
             "parameters": p,
             "confidence": step.get("confidence", 0.0),
             "on_failure": step.get("on_failure", {
@@ -161,14 +193,17 @@ def sop_to_procedure(sop_template: dict) -> dict:
         inp: dict = {
             "name": var.get("name", ""),
             "type": var.get("type", "string"),
-            "required": True,
+            "required": bool(var.get("required", True)),
             "default": var.get("default"),
         }
         if "description" in var:
             inp["description"] = var["description"]
         # A sensitive variable is a credential: renderers name it and tell
         # the agent to take the value from its credential store.
-        if var.get("sensitive") or var.get("type") == "password":
+        if (
+            var.get("sensitive") or var.get("credential") or var.get("is_credential")
+            or var.get("type") == "password"
+        ):
             inp["credential"] = True
         if "example" in var:
             inp["example"] = var["example"]
@@ -178,6 +213,8 @@ def sop_to_procedure(sop_template: dict) -> dict:
             inp["max"] = var["max"]
         if "choices" in var:
             inp["choices"] = var["choices"]
+        if "validation" in var:
+            inp["validation"] = var["validation"]
         inputs.append(inp)
 
     now_iso = datetime.now(timezone.utc).isoformat()
@@ -285,6 +322,8 @@ def sop_to_procedure(sop_template: dict) -> dict:
     }
 
     # Carry over optional v2 fields
+    if sop_template.get("goal"):
+        procedure["goal"] = sop_template["goal"]
     if sop_template.get("task_description"):
         procedure["task_description"] = sop_template["task_description"]
     if sop_template.get("execution_overview"):
@@ -355,6 +394,17 @@ def validate_procedure(data: dict) -> list[str]:
                     continue
                 if "action" not in step:
                     errors.append(f"steps[{i}] missing required field: action")
+                anchor = step.get("anchor")
+                if anchor is not None and not isinstance(anchor, dict):
+                    errors.append(f"steps[{i}].anchor must be a dict or null")
+                ev = step.get("evidence")
+                if ev is not None and not (
+                    isinstance(ev, dict)
+                    and all(isinstance(ev.get(k, []), list) for k in ("frames", "dom_snapshot_ids"))
+                ):
+                    errors.append(
+                        f"steps[{i}].evidence must be a dict of frames and dom_snapshot_ids lists"
+                    )
                 # Validate on_failure if present
                 if "on_failure" in step:
                     of = step["on_failure"]

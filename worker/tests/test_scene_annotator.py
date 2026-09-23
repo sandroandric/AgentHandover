@@ -1025,12 +1025,12 @@ class TestScreenshotLifecycle:
         config = AnnotationConfig(stale_skip_count=3)
         annotator = SceneAnnotator(config)
         annotator._stale.consecutive_non_workflow = 3
-        annotator._stale.last_app = "com.example.app"
+        annotator._stale.last_app = "Example"
         annotator._stale.last_location = "Same title"
         event = _event_for(
             img,
             window_json=json.dumps(
-                {"app_bundle_id": "com.example.app", "title": "Same title"}
+                {"app_id": "pid:42:Example", "title": "Same title"}
             ),
         )
 

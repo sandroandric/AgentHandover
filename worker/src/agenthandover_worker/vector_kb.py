@@ -178,6 +178,19 @@ class VectorKB:
     # Storage: upsert
     # ------------------------------------------------------------------
 
+    def _is_current(self, vid: str, thash: str) -> bool:
+        """True if *vid* holds a vector of this text from the configured model.
+
+        A vector from another embedding model lives in a different space,
+        so a model change re-embeds even when the text is unchanged.
+        """
+        row = self._conn.execute(
+            "SELECT text_hash, model FROM vector_store WHERE id = ?", (vid,),
+        ).fetchone()
+        return bool(
+            row and row[0] == thash and row[1] == self.config.embedding_model
+        )
+
     def upsert(
         self,
         source_type: str,
@@ -194,12 +207,7 @@ class VectorKB:
         vid = _vector_id(source_type, source_id)
         thash = _text_hash(text)
 
-        # Check if unchanged
-        cur = self._conn.execute(
-            "SELECT text_hash FROM vector_store WHERE id = ?", (vid,),
-        )
-        row = cur.fetchone()
-        if row and row[0] == thash:
+        if self._is_current(vid, thash):
             return False  # unchanged
 
         # Compute embedding if not provided
@@ -261,13 +269,7 @@ class VectorKB:
         # Filter unchanged items by text_hash
         to_embed: list[tuple[int, str, str, str]] = []  # (idx, stype, sid, text)
         for i, (stype, sid, text) in enumerate(items):
-            vid = _vector_id(stype, sid)
-            thash = _text_hash(text)
-            cur = self._conn.execute(
-                "SELECT text_hash FROM vector_store WHERE id = ?", (vid,),
-            )
-            row = cur.fetchone()
-            if row and row[0] == thash:
+            if self._is_current(_vector_id(stype, sid), _text_hash(text)):
                 continue  # unchanged
             to_embed.append((i, stype, sid, text))
 

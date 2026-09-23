@@ -5,40 +5,165 @@ struct DetectedAgent: Identifiable {
     let id: String
     let name: String
     let icon: String
+    /// The file pairing writes (for Claude Code: the CLI, which owns its config).
     let configPath: URL
     var isConnected: Bool
+    /// Why the last Connect did not end connected; shown in the menu.
+    var failure: String? = nil
+    /// A Connect or a Claude Code probe is running.
+    var isBusy: Bool = false
+}
+
+/// Claude Code keeps its MCP servers in its own config; the supported way
+/// to change and read it is the `claude` CLI (`claude mcp add` /
+/// `claude mcp list`).
+struct ClaudeCodeCLI {
+    enum ServerState: Equatable {
+        case absent
+        /// Registered, but Claude Code's health check could not start it.
+        case failing
+        case connected
+        /// The CLI could not be run or failed; the message says why.
+        case unknown(String)
+    }
+
+    static let serverName = "agenthandover"
+
+    let binary: String
+    var timeout: TimeInterval = 120
+
+    /// `$AH_CLAUDE_BIN`, else the usual install locations (a GUI app has no
+    /// shell `PATH`).  Nil when Claude Code's CLI is not installed.
+    static func resolve(
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        home: URL = FileManager.default.homeDirectoryForCurrentUser
+    ) -> String? {
+        if let override = environment["AH_CLAUDE_BIN"], !override.isEmpty {
+            return override
+        }
+        let candidates = [
+            home.appendingPathComponent(".claude/local/claude").path,
+            home.appendingPathComponent(".local/bin/claude").path,
+            "/opt/homebrew/bin/claude",
+            "/usr/local/bin/claude",
+            home.appendingPathComponent(".npm-global/bin/claude").path,
+        ]
+        return candidates.first { FileManager.default.isExecutableFile(atPath: $0) }
+    }
+
+    /// Our server's state in `claude mcp list` output.  A line looks like
+    /// `agenthandover: /usr/local/bin/agenthandover-mcp  - ✓ Connected`.
+    static func parseList(_ output: String) -> ServerState {
+        for line in output.split(separator: "\n", omittingEmptySubsequences: true) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard trimmed.hasPrefix("\(serverName):") else { continue }
+            let status = trimmed.components(separatedBy: " - ").last ?? ""
+            return status.contains("Connected") && !status.contains("Failed") ? .connected : .failing
+        }
+        return .absent
+    }
+
+    func state() -> ServerState {
+        let result = run(["mcp", "list"])
+        guard result.status == 0 else { return .unknown(result.output) }
+        return Self.parseList(result.output)
+    }
+
+    /// Registers the server at user scope; nil on success, else the error.
+    func add(mcpCommand: String) -> String? {
+        let result = run([
+            "mcp", "add", "--scope", "user", "--transport", "stdio",
+            Self.serverName, "--", mcpCommand,
+        ])
+        return result.status == 0 ? nil : result.output
+    }
+
+    func remove() {
+        _ = run(["mcp", "remove", "--scope", "user", Self.serverName])
+    }
+
+    /// Runs the CLI and returns its exit status and combined output.
+    func run(_ arguments: [String]) -> (status: Int32, output: String) {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: binary)
+        process.arguments = arguments
+        // The npm install is a `#!/usr/bin/env node` script: give it the
+        // PATH a login shell would have.
+        var environment = ProcessInfo.processInfo.environment
+        let binDir = URL(fileURLWithPath: binary).deletingLastPathComponent().path
+        environment["PATH"] = ([binDir, "/opt/homebrew/bin", "/usr/local/bin"]
+            + (environment["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin").split(separator: ":").map(String.init))
+            .joined(separator: ":")
+        process.environment = environment
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+        process.standardInput = FileHandle.nullDevice
+        do {
+            try process.run()
+        } catch {
+            return (-1, "could not run \(binary): \(error.localizedDescription)")
+        }
+        let deadline = DispatchWorkItem { if process.isRunning { process.terminate() } }
+        DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: deadline)
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        deadline.cancel()
+        let output = String(data: data, encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return (process.terminationStatus, output)
+    }
 }
 
 class AgentDetector: ObservableObject {
     @Published var agents: [DetectedAgent] = []
 
-    private var mcpEntry: [String: Any] {
-        // Use the full path to the MCP server binary so agents can find it
-        // even if the venv bin dir is not in PATH.
+    private let home: URL
+    private let claude: ClaudeCodeCLI?
+    private let mcpCommand: String
+    private let work = DispatchQueue(label: "com.agenthandover.agent-detector")
+
+    init(
+        home: URL = FileManager.default.homeDirectoryForCurrentUser,
+        claudeBinary: String? = ClaudeCodeCLI.resolve(),
+        mcpCommand: String = AgentDetector.defaultMCPCommand()
+    ) {
+        self.home = home
+        self.claude = claudeBinary.map { ClaudeCodeCLI(binary: $0) }
+        self.mcpCommand = mcpCommand
+    }
+
+    /// The full path of the MCP server binary, so agents find it even when
+    /// the venv bin dir is not in their PATH.
+    static func defaultMCPCommand() -> String {
         let candidates = [
             "/usr/local/bin/agenthandover-mcp",
             "/usr/local/lib/agenthandover/venv/bin/agenthandover-mcp",
         ]
-        let resolved = candidates.first { FileManager.default.isExecutableFile(atPath: $0) }
+        return candidates.first { FileManager.default.isExecutableFile(atPath: $0) }
             ?? "agenthandover-mcp" // bare name as last resort
-        return ["command": resolved]
     }
 
-    func detect() {
+    /// Lists installed agents.  File-based states are read now; Claude
+    /// Code's comes from `claude mcp list`, which health-checks every
+    /// server, so it runs off the main thread and `completion` is called
+    /// on the main thread once it is known.
+    func detect(completion: (() -> Void)? = nil) {
         var detected: [DetectedAgent] = []
-        let home = FileManager.default.homeDirectoryForCurrentUser
         let fm = FileManager.default
 
-        // Claude Code — installed if ~/.claude/ exists
+        // Claude Code — installed if its CLI or ~/.claude/ exists.
         let claudeDir = home.appendingPathComponent(".claude")
-        let claudeConfig = claudeDir.appendingPathComponent("settings.json")
-        if fm.fileExists(atPath: claudeDir.path) {
+        if claude != nil || fm.fileExists(atPath: claudeDir.path) {
+            let previous = agents.first { $0.id == "claude-code" }
             detected.append(DetectedAgent(
                 id: "claude-code",
                 name: "Claude Code",
                 icon: "terminal",
-                configPath: claudeConfig,
-                isConnected: isAgentConnected(at: claudeConfig)
+                configPath: URL(fileURLWithPath: claude?.binary ?? claudeDir.path),
+                isConnected: previous?.isConnected ?? false,
+                failure: previous?.failure,
+                isBusy: claude != nil
             ))
         }
 
@@ -51,7 +176,7 @@ class AgentDetector: ObservableObject {
                 name: "Cursor",
                 icon: "cursorarrow.click",
                 configPath: cursorConfig,
-                isConnected: isAgentConnected(at: cursorConfig)
+                isConnected: Self.hasServer(in: cursorConfig, keyPath: ["mcpServers"])
             ))
         }
 
@@ -64,7 +189,7 @@ class AgentDetector: ObservableObject {
                 name: "Windsurf",
                 icon: "wind",
                 configPath: windsurfConfig,
-                isConnected: isAgentConnected(at: windsurfConfig)
+                isConnected: Self.hasServer(in: windsurfConfig, keyPath: ["mcpServers"])
             ))
         }
 
@@ -76,82 +201,171 @@ class AgentDetector: ObservableObject {
                 name: "Codex",
                 icon: "chevron.left.forwardslash.chevron.right",
                 configPath: codexConfig,
-                isConnected: isAgentConnected(at: codexConfig)
+                isConnected: Self.hasServer(in: codexConfig, keyPath: ["mcpServers"])
             ))
         }
 
-        // OpenClaw — installed if ~/.openclaw/ exists
+        // OpenClaw — installed if ~/.openclaw/ exists.  Its config file is
+        // ~/.openclaw/openclaw.json, with MCP servers under mcp.servers.
         let openclawDir = home.appendingPathComponent(".openclaw")
         if fm.fileExists(atPath: openclawDir.path) {
-            let openclawConfig = openclawDir.appendingPathComponent("workspace")
+            let openclawConfig = openclawDir.appendingPathComponent("openclaw.json")
             detected.append(DetectedAgent(
                 id: "openclaw",
                 name: "OpenClaw",
                 icon: "pawprint.fill",
                 configPath: openclawConfig,
-                isConnected: fm.fileExists(atPath: openclawConfig.path)
+                isConnected: Self.hasServer(in: openclawConfig, keyPath: ["mcp", "servers"])
             ))
         }
 
         agents = detected
+        refreshClaudeCode(completion: completion)
     }
 
-    func connect(_ agent: DetectedAgent) {
-        guard let idx = agents.firstIndex(where: { $0.id == agent.id }) else { return }
+    func connect(_ agent: DetectedAgent, completion: (() -> Void)? = nil) {
+        guard agents.contains(where: { $0.id == agent.id }) else { completion?(); return }
 
+        switch agent.id {
+        case "claude-code":
+            guard let claude else {
+                update("claude-code") {
+                    $0.failure = "Claude Code's command-line tool was not found. Install it, then click Connect again."
+                }
+                completion?()
+                return
+            }
+            update("claude-code") { $0.isBusy = true; $0.failure = nil }
+            let command = mcpCommand
+            work.async { [weak self] in
+                if case .failing = claude.state() { claude.remove() }
+                let addError = claude.add(mcpCommand: command)
+                let state = claude.state()
+                DispatchQueue.main.async {
+                    self?.update("claude-code") {
+                        $0.isBusy = false
+                        $0.isConnected = state == .connected
+                        if let addError {
+                            $0.failure = "claude mcp add failed: \(addError)"
+                        } else if state != .connected {
+                            $0.failure = Self.describe(state, command: command)
+                        } else {
+                            $0.failure = nil
+                        }
+                    }
+                    completion?()
+                }
+            }
+        case "openclaw":
+            write(agent, keyPath: ["mcp", "servers"])
+            completion?()
+        default:
+            write(agent, keyPath: ["mcpServers"])
+            completion?()
+        }
+    }
+
+    // MARK: - Claude Code
+
+    private func refreshClaudeCode(completion: (() -> Void)?) {
+        guard let claude, agents.contains(where: { $0.id == "claude-code" }) else {
+            completion?()
+            return
+        }
+        let command = mcpCommand
+        work.async { [weak self] in
+            let state = claude.state()
+            DispatchQueue.main.async {
+                self?.update("claude-code") {
+                    $0.isBusy = false
+                    $0.isConnected = state == .connected
+                    if state == .failing { $0.failure = Self.describe(state, command: command) }
+                }
+                completion?()
+            }
+        }
+    }
+
+    private static func describe(_ state: ClaudeCodeCLI.ServerState, command: String) -> String {
+        switch state {
+        case .connected: return ""
+        case .absent: return "Claude Code does not list the AgentHandover MCP server."
+        case .failing: return "Claude Code could not start \(command)."
+        case .unknown(let message): return "claude mcp list failed: \(message)"
+        }
+    }
+
+    // MARK: - JSON config files
+
+    /// Adds our server under `keyPath` in the agent's JSON config.  A file
+    /// that exists but is not plain JSON is never rewritten.
+    private func write(_ agent: DetectedAgent, keyPath: [String]) {
         do {
-            var config = readConfig(at: agent.configPath) ?? [:]
-            var servers = config["mcpServers"] as? [String: Any] ?? [:]
-            servers["agenthandover"] = mcpEntry
-            config["mcpServers"] = servers
-            try writeConfig(config, to: agent.configPath)
-            agents[idx].isConnected = true
+            var config: [String: Any] = [:]
+            if FileManager.default.fileExists(atPath: agent.configPath.path) {
+                let data = try Data(contentsOf: agent.configPath)
+                guard let parsed = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                    throw PairingError.notAnObject(agent.configPath.path)
+                }
+                config = parsed
+            }
+            config = Self.setting(config, keyPath: keyPath, value: ["command": mcpCommand])
+            try FileManager.default.createDirectory(
+                at: agent.configPath.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            let data = try JSONSerialization.data(
+                withJSONObject: config,
+                options: [.prettyPrinted, .sortedKeys]
+            )
+            try data.write(to: agent.configPath, options: .atomic)
+            update(agent.id) { $0.isConnected = true; $0.failure = nil }
         } catch {
-            print("Failed to connect \(agent.name): \(error)")
+            let message = "\(agent.configPath.path) was not changed: it is not plain JSON "
+                + "(\(error.localizedDescription)). Add the server \"\(ClaudeCodeCLI.serverName)\" "
+                + "with command \(mcpCommand) by hand."
+            update(agent.id) { $0.failure = message }
         }
     }
 
-    func disconnect(_ agent: DetectedAgent) {
-        guard let idx = agents.firstIndex(where: { $0.id == agent.id }) else { return }
-
-        do {
-            var config = readConfig(at: agent.configPath) ?? [:]
-            var servers = config["mcpServers"] as? [String: Any] ?? [:]
-            servers.removeValue(forKey: "agenthandover")
-            config["mcpServers"] = servers
-            try writeConfig(config, to: agent.configPath)
-            agents[idx].isConnected = false
-        } catch {
-            print("Failed to disconnect \(agent.name): \(error)")
+    private enum PairingError: LocalizedError {
+        case notAnObject(String)
+        var errorDescription: String? {
+            switch self {
+            case .notAnObject(let path): return "\(path) is not a JSON object"
+            }
         }
     }
 
-    private func isAgentConnected(at path: URL) -> Bool {
-        guard let config = readConfig(at: path),
-              let servers = config["mcpServers"] as? [String: Any] else {
-            return false
+    private static func setting(_ object: [String: Any], keyPath: [String], value: Any) -> [String: Any] {
+        guard let key = keyPath.first else { return object }
+        var result = object
+        if keyPath.count == 1 {
+            var servers = result[key] as? [String: Any] ?? [:]
+            servers[ClaudeCodeCLI.serverName] = value
+            result[key] = servers
+        } else {
+            let child = result[key] as? [String: Any] ?? [:]
+            result[key] = setting(child, keyPath: Array(keyPath.dropFirst()), value: value)
         }
-        return servers["agenthandover"] != nil
+        return result
     }
 
-    private func readConfig(at path: URL) -> [String: Any]? {
-        guard FileManager.default.fileExists(atPath: path.path),
-              let data = try? Data(contentsOf: path),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            return nil
+    /// Whether the config at `path` lists our server under `keyPath`.
+    /// JSON5 (comments, trailing commas) is accepted for reading.
+    static func hasServer(in path: URL, keyPath: [String]) -> Bool {
+        guard let data = try? Data(contentsOf: path),
+              var node = try? JSONSerialization.jsonObject(with: data, options: [.json5Allowed]) as? [String: Any]
+        else { return false }
+        for key in keyPath {
+            guard let child = node[key] as? [String: Any] else { return false }
+            node = child
         }
-        return json
+        return node[ClaudeCodeCLI.serverName] != nil
     }
 
-    private func writeConfig(_ config: [String: Any], to path: URL) throws {
-        try FileManager.default.createDirectory(
-            at: path.deletingLastPathComponent(),
-            withIntermediateDirectories: true
-        )
-        let data = try JSONSerialization.data(
-            withJSONObject: config,
-            options: [.prettyPrinted, .sortedKeys]
-        )
-        try data.write(to: path, options: .atomic)
+    private func update(_ id: String, _ change: (inout DetectedAgent) -> Void) {
+        guard let idx = agents.firstIndex(where: { $0.id == id }) else { return }
+        change(&agents[idx])
     }
 }

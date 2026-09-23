@@ -27,9 +27,9 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
-logger = logging.getLogger(__name__)
+from agenthandover_worker.paths import KNOWLEDGE_BASE_DIR as DEFAULT_KNOWLEDGE_DIR
 
-DEFAULT_KNOWLEDGE_DIR = Path.home() / ".agenthandover" / "knowledge"
+logger = logging.getLogger(__name__)
 
 # Sub-directory names
 _PROCEDURES_DIR = "procedures"

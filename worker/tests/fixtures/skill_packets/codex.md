@@ -1,8 +1,12 @@
 ### Check Domain Availability
 
-Find out whether a domain is free to register and what it costs.
+Check whether a domain name is available for purchase on Namecheap and note its price.
 
 Outcome: The user knows whether the domain is available and what it costs.
+
+#### Goal
+
+Find out whether a domain is free to register and what it costs.
 
 #### Prerequisites
 
@@ -20,7 +24,7 @@ Outcome: The user knows whether the domain is available and what it costs.
 #### Inputs
 
 - `domain_name` (text, required): Domain to check (example `example.com`)
-- `namecheap_password` (credential): take it from your credential store at run time; never write its value into files, messages or logs.
+- `namecheap_password` (credential) by reference (never in this file): take it from your credential store at run time; never write its value into files, messages or logs.
 
 Steps refer to inputs as `{{name}}`.
 
@@ -81,7 +85,7 @@ When producing text for this workflow, match the user's writing style:
 
 If you have access to the AgentHandover MCP server, report your progress:
 1. Call `report_execution_start` with slug `check-domain-availability` before starting.
-2. Call `report_step_result` after each step.
+2. Call `report_step_result` after each step with the id shown in brackets (for example `step_1`). If you did something other than the step says, set `status` to `deviated` and describe what you did in `actual_action`.
 3. Call `report_execution_complete` when finished.
 
 This feedback improves the Skill for future runs.

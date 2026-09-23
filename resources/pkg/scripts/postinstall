@@ -48,8 +48,7 @@ chown -R "${CONSOLE_USER}" "${DATA_DIR}"
 mkdir -p "${LAUNCH_AGENTS}"
 cp "${LIB_DIR}/launchd/com.agenthandover.worker.plist" "${LAUNCH_AGENTS}/"
 sed -i '' \
-    -e "s|/tmp/com.agenthandover.worker.stdout.log|${LOG_DIR}/worker.stdout.log|" \
-    -e "s|/tmp/com.agenthandover.worker.stderr.log|${LOG_DIR}/worker.stderr.log|" \
+    -e "s|__AH_LOG_DIR__|${LOG_DIR}|g" \
     -e "s|/usr/local/lib/agenthandover|${LIB_DIR}|g" \
     "${LAUNCH_AGENTS}/com.agenthandover.worker.plist"
 chown "${CONSOLE_USER}" "${LAUNCH_AGENTS}/com.agenthandover.worker.plist"
@@ -75,7 +74,7 @@ retention_days_raw = 14
 retention_days_episodes = 90
 
 [export]
-adapter = "openclaw"
+adapter = "all"
 json_export = false
 
 [embedding]
