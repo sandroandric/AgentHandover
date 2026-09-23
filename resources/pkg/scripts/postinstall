@@ -290,6 +290,10 @@ fi
 rm -f "${APP_DR_FILE}"
 
 if [ "${NO_SERVICES}" != "1" ]; then
+    # An upgrade leaves the app's defaults alone: observingPaused (the
+    # user's Observe Me / Stop Observing choice) and hasCompletedOnboarding
+    # are how the new app resumes what the user had once the grants are
+    # back (OnboardingProgress.launchAction). Only a fresh install resets.
     if [ "${IS_FRESH}" -eq 1 ]; then
         # Clear the stale pre-v0.2.1 daemon TCC identity so users only see
         # AgentHandover in System Settings. Fresh installs only: on an

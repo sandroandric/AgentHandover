@@ -109,4 +109,22 @@ final class FocusSignalTests: XCTestCase {
         )
         XCTAssertEqual(FocusRecordState(signal: signal), .idle)
     }
+
+    /// Start from the menu when the daemon would not start: the recording
+    /// is taken back, and only that one.
+    func testDiscardRemovesOnlyThatRecordingSession() throws {
+        let started = try FocusSignal.start(title: "Send weekly report", in: dir)
+        FocusSignal.discard(sessionID: "another-session", in: dir)
+        XCTAssertEqual(FocusSignal.read(in: dir), started)
+
+        FocusSignal.discard(sessionID: started.session_id, in: dir)
+        XCTAssertNil(FocusSignal.read(in: dir))
+    }
+
+    func testDiscardLeavesAStoppedSessionForTheWorker() throws {
+        let started = try FocusSignal.start(title: "Send weekly report", in: dir)
+        try FocusSignal.stop(in: dir)
+        FocusSignal.discard(sessionID: started.session_id, in: dir)
+        XCTAssertEqual(FocusSignal.read(in: dir)?.status, "stopped")
+    }
 }

@@ -41,14 +41,28 @@ struct FocusQuestionsFile {
     answers: HashMap<String, String>,
 }
 
+/// What `focus start` says when the daemon is not running: the recording
+/// would capture nothing.
+pub(crate) const NOT_OBSERVING: &str = "AgentHandover is not observing, so a focus recording would capture nothing.\n\
+Start it first: click the AgentHandover menu bar icon and choose \"Observe Me\" or \
+\"Record a Focus Session\" (or, with the app running, run: agenthandover start daemon).\n\
+Then run this command again.";
+
 /// Start a focus recording session.
 ///
 /// Generates a UUID, writes `focus-session.json` with `status: "recording"`.
+/// Refuses (exit code 1) when the daemon is not running.
 pub fn start(title: &str) -> Result<()> {
-    let state_dir = data_dir();
+    start_in(&data_dir(), title, super::service::is_daemon_running())
+}
+
+fn start_in(state_dir: &std::path::Path, title: &str, daemon_running: bool) -> Result<()> {
+    if !daemon_running {
+        anyhow::bail!(NOT_OBSERVING);
+    }
 
     // Check for existing active session
-    if let Some(existing) = read_focus_signal(&state_dir) {
+    if let Some(existing) = read_focus_signal(state_dir) {
         if existing.is_recording() {
             println!(
                 "{}",
@@ -71,7 +85,7 @@ pub fn start(title: &str) -> Result<()> {
         status: FocusSessionStatus::Recording,
     };
 
-    write_focus_signal(&state_dir, &signal)?;
+    write_focus_signal(state_dir, &signal)?;
 
     println!("{} Focus recording started", "●".red());
     println!("  Title:      {}", title.bold());
@@ -314,4 +328,42 @@ fn write_questions_file(
     std::fs::rename(&tmp, path)?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commands::service::daemon_running_at;
+
+    #[test]
+    fn start_without_a_running_daemon_refuses_and_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = start_in(dir.path(), "Send weekly report", false).unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains("not observing"), "{text}");
+        assert!(text.contains("Observe Me"), "{text}");
+        assert!(text.contains("agenthandover start daemon"), "{text}");
+        assert!(read_focus_signal(dir.path()).is_none());
+    }
+
+    #[test]
+    fn start_with_a_running_daemon_writes_a_recording_signal() {
+        let dir = tempfile::tempdir().unwrap();
+        start_in(dir.path(), "Send weekly report", true).unwrap();
+        let signal = read_focus_signal(dir.path()).unwrap();
+        assert!(signal.is_recording());
+        assert_eq!(signal.title, "Send weekly report");
+    }
+
+    #[test]
+    fn no_pid_file_or_a_pid_that_is_not_the_daemon_is_not_running() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("daemon.pid");
+        assert!(!daemon_running_at(&pid_file));
+        // This test process is alive but is not ah-observer.
+        std::fs::write(&pid_file, std::process::id().to_string()).unwrap();
+        assert!(!daemon_running_at(&pid_file));
+        std::fs::write(&pid_file, "not a pid").unwrap();
+        assert!(!daemon_running_at(&pid_file));
+    }
 }

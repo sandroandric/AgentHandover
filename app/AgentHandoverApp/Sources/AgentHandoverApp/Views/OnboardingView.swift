@@ -7,11 +7,13 @@ import SwiftUI
 struct OnboardingView: View {
     @EnvironmentObject var appState: AppState
     @State private var currentStep = 0
-    @State private var extensionPath: String = ""
+    /// `agenthandover doctor --extension-json` (nil until read, or without
+    /// the CLI): the same check doctor's "Browser extension" line makes.
+    @State private var extensionReport: ExtensionReport? = nil
+    @State private var extensionChecked = false
     @State private var chromeOpenError: String? = nil
     @State private var vlmPullInProgress = false
     @State private var vlmPullOutput = ""
-    @State private var serviceStartFailed = false
 
     // Cloud VLM state
     enum VLMMode: String, CaseIterable {
@@ -82,14 +84,8 @@ struct OnboardingView: View {
     @State private var vlmStatusMessage = ""
     @State private var hasSeededVLMFromConfig = false
 
-    // Focus recording from onboarding
-    @State private var firstRecordingTitle: String = ""
-
     // Clipboard copy feedback
     @State private var pathCopied = false
-
-    // Record button pulse
-    @State private var recordPulse = false
 
     /// Called when onboarding completes (sets hasCompletedOnboarding).
     var onComplete: (() -> Void)?
@@ -170,7 +166,7 @@ struct OnboardingView: View {
         }
         .onAppear {
             OnboardingProgress.save(step: currentStep, in: .standard)
-            resolveExtensionPath()
+            refreshExtensionReport()
             seedVLMStateFromConfigIfNeeded()
             refreshVLMSetupState(force: currentStep == 6)
             if currentStep >= 7 {
@@ -190,10 +186,17 @@ struct OnboardingView: View {
             } else {
                 ServiceController.removeNativeMessagingHostManifest()
             }
+            if newStep == 7 {
+                refreshExtensionReport()
+            }
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             if currentStep == 6 {
                 refreshVLMSetupState(force: true)
+            }
+            // Back from the browser's extensions page.
+            if currentStep == 7 {
+                refreshExtensionReport()
             }
         }
     }
@@ -330,7 +333,7 @@ struct OnboardingView: View {
             case 7:
                 // Browser extension -- optional
                 HStack(spacing: 12) {
-                    if !appState.extensionConnected {
+                    if !extensionInstalled {
                         contraButton("Skip", style: .outlined) {
                             withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) { currentStep += 1 }
                         }
@@ -2089,14 +2092,30 @@ struct OnboardingView: View {
                 )
 
                 if appState.extensionConnected {
-                    extensionConnectedView
-                } else if !extensionPath.isEmpty {
-                    extensionReadyView
+                    extensionConnectedView(title: "Browser extension connected!")
                 } else {
-                    extensionNotFoundView
+                    switch extensionReport?.status {
+                    case .installed(let browsers):
+                        extensionConnectedView(title: "Installed in \(browsers.joined(separator: ", "))")
+                    case .turnedOff(let browser):
+                        extensionTurnedOffView(browser: browser)
+                    case .notLoaded(let path):
+                        extensionReadyView(path: path)
+                    case .notBuilt:
+                        extensionNotFoundView
+                    case nil:
+                        if extensionChecked {
+                            extensionNotFoundView
+                        } else {
+                            ProgressView("Checking your browsers\u{2026}")
+                                .controlSize(.small)
+                        }
+                    }
                 }
 
-                Text("We recommend setting up the extension now. It won't be detected here -- just proceed with Next once installed, or Skip to set it up later.")
+                Text(extensionInstalled
+                     ? "It works in the background: nothing else to do here."
+                     : "We recommend setting up the extension now. This screen checks your browsers again when you come back to it; or Skip and set it up later.")
                     .font(.system(size: 11))
                     .foregroundColor(darkNavy.opacity(0.5))
                     .multilineTextAlignment(.center)
@@ -2116,14 +2135,81 @@ struct OnboardingView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
 
-    // Extension already connected
-    private var extensionConnectedView: some View {
+    /// Loaded in a browser (doctor's check) or talking to the daemon.
+    private var extensionInstalled: Bool {
+        if appState.extensionConnected { return true }
+        if case .installed = extensionReport?.status { return true }
+        return false
+    }
+
+    /// Re-run doctor's extension check off the main thread.
+    private func refreshExtensionReport() {
+        DispatchQueue.global(qos: .userInitiated).async {
+            let report = findCLIBinary().flatMap { ExtensionReport.load(cliPath: $0) }
+            DispatchQueue.main.async {
+                extensionReport = report
+                extensionChecked = true
+            }
+        }
+    }
+
+    // Loaded in a browser, but switched off there
+    private func extensionTurnedOffView(browser: String) -> some View {
+        VStack(spacing: 12) {
+            Image(systemName: "puzzlepiece.extension.fill")
+                .font(.system(size: 26, weight: .medium))
+                .foregroundColor(warmOrange)
+
+            Text("Installed in \(browser), but switched off")
+                .font(.system(size: 15, weight: .bold, design: .rounded))
+                .foregroundColor(darkNavy)
+
+            Text("Switch AgentHandover on in \(browser)\u{2019}s extensions page.")
+                .font(bodyFont)
+                .foregroundColor(darkNavy.opacity(0.6))
+                .multilineTextAlignment(.center)
+
+            Button {
+                openBrowserExtensionsPage()
+            } label: {
+                Text("Open Extensions Page")
+                    .font(.system(size: 12, weight: .bold, design: .rounded))
+                    .foregroundColor(darkNavy)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 7)
+                    .background(
+                        RoundedRectangle(cornerRadius: contraRadius)
+                            .stroke(darkNavy, lineWidth: contraBorder)
+                    )
+            }
+            .buttonStyle(.plain)
+
+            if let error = chromeOpenError {
+                Text(error)
+                    .font(captionFont)
+                    .foregroundColor(.red)
+            }
+        }
+        .padding(24)
+        .frame(maxWidth: .infinity)
+        .background(
+            RoundedRectangle(cornerRadius: contraRadius)
+                .fill(warmOrange.opacity(0.05))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: contraRadius)
+                .stroke(warmOrange, lineWidth: contraBorder)
+        )
+    }
+
+    // Extension installed or connected
+    private func extensionConnectedView(title: String) -> some View {
         VStack(spacing: 12) {
             Image(systemName: "checkmark.circle.fill")
                 .font(.system(size: 32, weight: .medium))
                 .foregroundColor(brightGreen)
 
-            Text("Browser extension connected!")
+            Text(title)
                 .font(.system(size: 15, weight: .bold, design: .rounded))
                 .foregroundColor(darkNavy)
 
@@ -2145,7 +2231,7 @@ struct OnboardingView: View {
     }
 
     // Extension files found -- Load Unpacked flow
-    private var extensionReadyView: some View {
+    private func extensionReadyView(path extensionPath: String) -> some View {
         VStack(alignment: .leading, spacing: 14) {
             // Status header
             HStack(spacing: 8) {
@@ -2363,23 +2449,24 @@ struct OnboardingView: View {
             }
             .padding(24)
             .frame(maxWidth: .infinity)
+            // Setup's own palette (white card, navy text), not system
+            // colours that turn dark in Dark Mode under navy text.
             .background(
                 RoundedRectangle(cornerRadius: contraRadius)
-                    .fill(Color(nsColor: .controlBackgroundColor))
+                    .fill(Color.white)
             )
             .overlay(
                 RoundedRectangle(cornerRadius: contraRadius)
-                    .stroke(Color.primary.opacity(0.2), lineWidth: contraBorder)
+                    .stroke(darkNavy.opacity(0.2), lineWidth: contraBorder)
             )
 
-            // Single CTA: close onboarding and show menu bar
+            // Single CTA: close setup (onComplete closes the window). A
+            // menu bar extra's menu cannot be opened from code, so the
+            // button says what it does and the line below says where to go.
             Button {
                 onComplete?()
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                    NSApplication.shared.keyWindow?.close()
-                }
             } label: {
-                Text("Open Menu Bar")
+                Text("Finish Setup")
                     .font(.system(size: 15, weight: .bold, design: .rounded))
                     .padding(.horizontal, 32)
                     .padding(.vertical, 13)
@@ -2395,9 +2482,9 @@ struct OnboardingView: View {
                 Image(systemName: "menubar.rectangle")
                     .font(.system(size: 10))
                     .foregroundColor(darkNavy.opacity(0.3))
-                Text("You can start anytime from the menu bar icon")
+                Text("Then start from the AgentHandover icon in your menu bar, top right")
                     .font(captionFont)
-                    .foregroundColor(darkNavy.opacity(0.35))
+                    .foregroundColor(darkNavy.opacity(0.5))
             }
         }
     }
@@ -2441,123 +2528,7 @@ struct OnboardingView: View {
         }
     }
 
-    // MARK: - Actions
-
-    private func startServicesOnly() {
-        DispatchQueue.global(qos: .userInitiated).async {
-            let ok = ServiceController.startAll()
-            DispatchQueue.main.async {
-                if ok {
-                    onComplete?()
-                    NSApplication.shared.keyWindow?.close()
-                } else {
-                    serviceStartFailed = true
-                }
-            }
-        }
-    }
-
-    private func startServicesAndRecord() {
-        let title = firstRecordingTitle.trimmingCharacters(in: .whitespacesAndNewlines)
-
-        // Write focus signal BEFORE starting services (daemon picks it up on first loop).
-        // If it fails the recording won't start, but services still come up
-        // and the user can start a recording from the menu bar.
-        try? FocusSignal.start(title: title, in: FocusSignal.defaultDirectory)
-
-        // Start services on background thread to avoid freezing the UI
-        DispatchQueue.global(qos: .userInitiated).async {
-            let ok = ServiceController.startAll()
-            DispatchQueue.main.async {
-                if ok {
-                    onComplete?()
-                    NSApplication.shared.keyWindow?.close()
-                } else {
-                    serviceStartFailed = true
-                }
-            }
-        }
-    }
-
     // MARK: - Helpers
-
-    private func resolveExtensionPath() {
-        // 1. Check installed paths (pkg + Homebrew opt symlinks)
-        let installedPaths: [String] = [
-            "/usr/local/lib/agenthandover/extension",
-            "/usr/local/opt/agenthandover/libexec/extension",
-            "/opt/homebrew/opt/agenthandover/libexec/extension",
-        ]
-
-        for candidate in installedPaths {
-            let manifestPath = (candidate as NSString).appendingPathComponent("manifest.json")
-            if FileManager.default.fileExists(atPath: manifestPath) {
-                extensionPath = candidate
-                return
-            }
-        }
-
-        // 2. Resolve Homebrew Cellar path by following the CLI binary symlink.
-        //    This covers cases where the opt symlink is broken or not yet created.
-        //    Pattern: /usr/local/bin/agenthandover -> .../Cellar/agenthandover/HEAD-xxx/bin/agenthandover
-        //             -> .../Cellar/agenthandover/HEAD-xxx/libexec/extension/
-        let cliBinaryPaths = ["/usr/local/bin/agenthandover", "/opt/homebrew/bin/agenthandover"]
-        for binaryPath in cliBinaryPaths {
-            let url = URL(fileURLWithPath: binaryPath)
-            let resolved = url.resolvingSymlinksInPath().path
-                .components(separatedBy: "/")
-            if !resolved.isEmpty {
-                if let binIdx = resolved.lastIndex(of: "bin") {
-                    let prefix = resolved[..<binIdx].joined(separator: "/")
-                    let cellarExt = prefix + "/libexec/extension"
-                    if FileManager.default.fileExists(atPath: cellarExt + "/manifest.json") {
-                        extensionPath = cellarExt
-                        return
-                    }
-                }
-            }
-        }
-
-        // 3. Check for dev/source build by walking ancestors from the app binary
-        //    AND from the CLI binary to find extension/dist relative to repo root.
-        var searchRoots: [URL] = []
-
-        // From the running app binary
-        if let execPath = Bundle.main.executableURL {
-            searchRoots.append(execPath.deletingLastPathComponent())
-        }
-
-        // From the CLI binary
-        if let cliPath = findCLIBinary() {
-            searchRoots.append(URL(fileURLWithPath: cliPath).deletingLastPathComponent())
-        }
-
-        // Also check common source build locations
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        let commonPaths = [
-            "\(home)/Desktop/openmimic/extension/dist",
-            "\(home)/Projects/AgentHandover/extension/dist",
-            "\(home)/Developer/AgentHandover/extension/dist",
-        ]
-        for path in commonPaths {
-            if FileManager.default.fileExists(atPath: path + "/manifest.json") {
-                extensionPath = path
-                return
-            }
-        }
-
-        for root in searchRoots {
-            var dir = root
-            for _ in 0..<8 {
-                let candidate = dir.appendingPathComponent("extension/dist").path
-                if FileManager.default.fileExists(atPath: candidate + "/manifest.json") {
-                    extensionPath = candidate
-                    return
-                }
-                dir = dir.deletingLastPathComponent()
-            }
-        }
-    }
 
     /// Find the agenthandover CLI binary on the system.
     private func findCLIBinary() -> String? {
@@ -2600,33 +2571,6 @@ struct OnboardingView: View {
         }
 
         chromeOpenError = "Could not open a supported browser. Open Chrome, Brave, or Edge extensions page manually."
-    }
-
-    private func copyPathAndOpenChrome() {
-        chromeOpenError = nil
-
-        // Copy extension path to clipboard
-        let pasteboard = NSPasteboard.general
-        pasteboard.clearContents()
-        let copied = pasteboard.setString(extensionPath, forType: .string)
-        if !copied {
-            chromeOpenError = "Failed to copy path to clipboard."
-            return
-        }
-
-        // Open chrome://extensions via /usr/bin/open -a "Google Chrome"
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-        process.arguments = ["-a", "Google Chrome", "chrome://extensions"]
-        do {
-            try process.run()
-            process.waitUntilExit()
-            if process.terminationStatus != 0 {
-                chromeOpenError = "Could not open Chrome. Is Google Chrome installed?"
-            }
-        } catch {
-            chromeOpenError = "Could not open Chrome: \(error.localizedDescription)"
-        }
     }
 
     private func isOllamaInstalled() -> Bool {

@@ -83,6 +83,20 @@ enum FocusSignal {
         return signal
     }
 
+    /// Takes back a recording that never captured anything (the daemon
+    /// did not start): removes the signal if it is still that session
+    /// recording, so no empty session is stopped and processed.
+    static func discard(sessionID: String, in dir: URL) {
+        guard let signal = read(in: dir),
+              signal.session_id == sessionID,
+              signal.status == "recording" else { return }
+        try? FileManager.default.removeItem(at: dir.appendingPathComponent(fileName))
+    }
+
+    /// What the menu says when Start could not start observation.
+    static let daemonDidNotStart =
+        "Observation could not start, so nothing was recorded. Check the menu's status, or run: agenthandover logs daemon"
+
     /// Parses the signal's `started_at`: the CLI writes RFC 3339 with
     /// fractional seconds and an offset (chrono's `to_rfc3339`), the app
     /// writes whole seconds with `Z`.

@@ -1,6 +1,22 @@
 import Foundation
 import SwiftUI
 
+/// Tells whether a file was written, created or removed since the last
+/// look, from its modification date: a stat, so it can run every couple
+/// of seconds.
+struct FileStamp {
+    /// Nil before the first look; `.some(nil)` when the file was missing.
+    private var last: Date??
+
+    /// True on the first look and whenever the file changed since.
+    mutating func changed(_ url: URL) -> Bool {
+        let modified = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date
+        defer { last = .some(modified) }
+        guard let last else { return true }
+        return last != modified
+    }
+}
+
 /// Overall service health derived from daemon + worker status.
 enum ServiceHealth: String {
     case healthy   // Both running, no issues
@@ -223,6 +239,13 @@ final class AppState: ObservableObject {
     // MARK: - Polling
 
     private var pollTimer: Timer?
+    private var quickTimer: Timer?
+    private var focusQuestionsStamp = FileStamp()
+    /// Called when both grants are present after one of them was missing
+    /// (set by the app delegate; see `OnboardingProgress.regrantAction`).
+    var onPermissionsGranted: (() -> Void)?
+    /// Both grants at the previous `checkPermissions`; nil before the first.
+    private var grantedAtLastCheck: Bool?
     /// Set by `servicesStarting()`, cleared once health leaves `.starting`.
     private var startedAt: Date?
     private var startupTimer: Timer?
@@ -262,12 +285,33 @@ final class AppState: ObservableObject {
                 self?.refreshStatus()
             }
         }
+        // Two cheap checks every couple of seconds: new focus questions
+        // (the Q&A shows within seconds, not at the next 30 s poll) and
+        // grants switched on in System Settings.
+        quickTimer?.invalidate()
+        quickTimer = Timer.scheduledTimer(withTimeInterval: Self.quickCheckInterval, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.quickCheck()
+            }
+        }
         refreshStatus()
     }
 
     func stopPolling() {
         pollTimer?.invalidate()
         pollTimer = nil
+        quickTimer?.invalidate()
+        quickTimer = nil
+    }
+
+    nonisolated static let quickCheckInterval: TimeInterval = 2.0
+
+    /// Re-reads focus-questions.json when it changed, and the grants.
+    func quickCheck() {
+        if focusQuestionsStamp.changed(statusDir.appendingPathComponent("focus-questions.json")) {
+            readFocusQuestions()
+        }
+        checkPermissions()
     }
 
     // MARK: - Status Reading
@@ -474,8 +518,25 @@ final class AppState: ObservableObject {
     // MARK: - Permissions
 
     private func checkPermissions() {
-        accessibilityGranted = PermissionChecker.isAccessibilityGranted()
-        screenRecordingGranted = PermissionChecker.isScreenRecordingGranted()
+        let accessibility = PermissionChecker.isAccessibilityGranted()
+        let screenRecording = PermissionChecker.isScreenRecordingGranted()
+        if accessibilityGranted != accessibility { accessibilityGranted = accessibility }
+        if screenRecordingGranted != screenRecording { screenRecordingGranted = screenRecording }
+        let now = accessibility && screenRecording
+        // Compared with this function's previous reading, not with the
+        // published flags: the permission screens set those themselves.
+        let before = grantedAtLastCheck
+        grantedAtLastCheck = now
+        if Self.grantsReturned(before: before, now: now) {
+            onPermissionsGranted?()
+        }
+    }
+
+    /// Both grants are present now and one was missing at the previous
+    /// check. The first check (`before` nil) is not a return: a launch
+    /// with the grants in place is the launch's business.
+    nonisolated static func grantsReturned(before: Bool?, now: Bool) -> Bool {
+        before == false && now
     }
 
     // MARK: - Helpers

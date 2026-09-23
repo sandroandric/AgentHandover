@@ -33,9 +33,14 @@ fn daemon_pid_file() -> std::path::PathBuf {
 
 /// Check whether the daemon is currently running by looking up its pid file
 /// and verifying the pid is actually ``ah-observer`` (not a recycled pid).
-fn is_daemon_running() -> bool {
-    let pid_file = daemon_pid_file();
-    let pid_str = match std::fs::read_to_string(&pid_file) {
+pub fn is_daemon_running() -> bool {
+    daemon_running_at(&daemon_pid_file())
+}
+
+/// `is_daemon_running` for the pid file at `pid_file` (the same check as
+/// the app's `ServiceController.isDaemonRunning`).
+pub fn daemon_running_at(pid_file: &std::path::Path) -> bool {
+    let pid_str = match std::fs::read_to_string(pid_file) {
         Ok(s) => s,
         Err(_) => return false,
     };

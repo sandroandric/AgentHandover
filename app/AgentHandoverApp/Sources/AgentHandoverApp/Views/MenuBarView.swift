@@ -18,6 +18,8 @@ struct MenuBarView: View {
     // the clock for the elapsed time.
     @State private var newSessionTitle: String = ""
     @State private var showTitlePrompt = false
+    /// Why the last Start did not record (shown in the title prompt).
+    @State private var focusStartError: String?
     @State private var now = Date()
     @State private var showMoreActions = false
     @State private var wasPausedBeforeFocus = false
@@ -477,10 +479,18 @@ struct MenuBarView: View {
                         .padding(.top, 2)
                     }
 
+                    if let focusStartError {
+                        Text(focusStartError)
+                            .font(.system(size: 10))
+                            .foregroundColor(.red)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+
                     HStack {
                         Button("Cancel") {
                             showTitlePrompt = false
                             newSessionTitle = ""
+                            focusStartError = nil
                         }
                         .font(.system(size: 11))
                         .foregroundColor(.secondary)
@@ -876,16 +886,18 @@ struct MenuBarView: View {
     private func startFocusSession(title: String) {
         // Remember user's paused state so we restore it after recording
         wasPausedBeforeFocus = appState.userStopped
+        focusStartError = nil
 
         // Write focus signal BEFORE starting daemon so it picks up the
         // session on its first event loop iteration — no missed events.
+        let signal: FocusSessionSignalFile
         do {
-            try FocusSignal.start(
+            signal = try FocusSignal.start(
                 title: title.trimmingCharacters(in: .whitespacesAndNewlines),
                 in: appState.statusDir
             )
         } catch {
-            print("Failed to write focus-session.json: \(error)")
+            focusStartError = "Could not start the recording: \(error.localizedDescription)"
             return
         }
         appState.readFocusSession()
@@ -895,8 +907,21 @@ struct MenuBarView: View {
 
         // Always ensure daemon is running (startDaemon is a no-op if already alive)
         // Then resume capture in case daemon was paused.
+        let dir = appState.statusDir
         DispatchQueue.global(qos: .userInitiated).async {
-            ServiceController.startDaemon()
+            guard ServiceController.startDaemon() else {
+                // Nothing would be captured: take the recording back and
+                // say so, instead of a timer counting an empty session.
+                DispatchQueue.main.async {
+                    FocusSignal.discard(sessionID: signal.session_id, in: dir)
+                    appState.readFocusSession()
+                    newSessionTitle = signal.title
+                    showTitlePrompt = true
+                    focusStartError = FocusSignal.daemonDidNotStart
+                    appState.refreshStatus()
+                }
+                return
+            }
             // Give the daemon a moment to bind its control socket
             Thread.sleep(forTimeInterval: 0.5)
             // Resume capture so the observer loop emits events during recording,

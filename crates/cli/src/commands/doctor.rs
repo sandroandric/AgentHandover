@@ -8,7 +8,7 @@ use agenthandover_common::observation::{
 
 use agenthandover_common::status::AutomationConsent;
 use agenthandover_common::tiers;
-use crate::{machine, ollama, paths};
+use crate::{browser_extension, machine, ollama, paths};
 
 /// Detect which install channel produced this AgentHandover installation.
 fn detect_install_channel() -> &'static str {
@@ -200,9 +200,27 @@ pub fn run() -> Result<()> {
     // venv means the worker cannot run at all, so it is a failure.
     check_venv(&mut counts, channel);
 
-    // Check 13: Chrome extension (optional — not all users need it)
-    if paths::find_any_extension_path().is_some() {
-        check_pass(&mut counts, "Browser extension");
+    // Check 13: Browser extension (optional — not all users need it):
+    // loaded in a browser profile, not merely built on disk.
+    let extension = browser_extension::Report::gather();
+    let enabled: Vec<String> = extension
+        .installed_in
+        .iter()
+        .filter(|i| i.enabled)
+        .map(|i| format!("{} ({})", i.browser, i.profile))
+        .collect();
+    if !enabled.is_empty() {
+        check_pass(&mut counts, &format!("Browser extension (in {})", enabled.join(", ")));
+    } else if let Some(off) = extension.installed_in.first() {
+        let hint = format!("turned off in {}: switch it on in its extensions page", off.browser);
+        check_skip(&mut counts, "Browser extension", &hint);
+    } else if let Some(path) = &extension.build_path {
+        let hint = format!(
+            "not loaded in a browser: open chrome://extensions, turn on Developer mode, \
+             click Load unpacked and choose {}",
+            path.display()
+        );
+        check_skip(&mut counts, "Browser extension", &hint);
     } else {
         let hint = match channel {
             "pkg" => "Re-run .pkg installer to repair",
@@ -350,6 +368,13 @@ pub fn run() -> Result<()> {
     if counts.failures > 0 {
         anyhow::bail!("{} doctor check(s) failed", counts.failures);
     }
+    Ok(())
+}
+
+/// `agenthandover doctor --extension-json`: whether the browser extension
+/// is built and which browser profiles have it (what the app's setup shows).
+pub fn print_extension_json() -> Result<()> {
+    println!("{}", serde_json::to_string_pretty(&browser_extension::Report::gather())?);
     Ok(())
 }
 
@@ -853,9 +878,9 @@ fn check_native_messaging_manifest() -> bool {
 
     // Verify allowed_origins contains expected extension ID
     let origins = parsed.get("allowed_origins").and_then(|v| v.as_array());
-    let expected_origin = "chrome-extension://jpemkdcihaijkolbkankcldmiimmmnfo/";
+    let expected_origin = format!("chrome-extension://{}/", browser_extension::EXTENSION_ID);
     let has_origin = origins
-        .map(|arr| arr.iter().any(|v| v.as_str() == Some(expected_origin)))
+        .map(|arr| arr.iter().any(|v| v.as_str() == Some(expected_origin.as_str())))
         .unwrap_or(false);
     if !has_origin {
         println!(
