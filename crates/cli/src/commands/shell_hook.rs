@@ -61,10 +61,11 @@ _agenthandover_json() {{
 _agenthandover_preexec() {{
   [[ $1 == ' '* ]] && return 0
   [[ -d ${{_agenthandover_shell_log:h}} ]] || return 0
-  local cwd cmd
+  local cwd cmd term
   _agenthandover_json "$PWD"; cwd=$REPLY
   _agenthandover_json "$1"; cmd=$REPLY
-  print -r -- "{{\"ts\":$EPOCHREALTIME,\"cwd\":\"$cwd\",\"cmd\":\"$cmd\"}}" >> "$_agenthandover_shell_log"
+  _agenthandover_json "$TERM_PROGRAM"; term=$REPLY
+  print -r -- "{{\"ts\":$EPOCHREALTIME,\"cwd\":\"$cwd\",\"cmd\":\"$cmd\",\"term\":\"$term\"}}" >> "$_agenthandover_shell_log"
 }}
 
 add-zsh-hook preexec _agenthandover_preexec
@@ -209,6 +210,7 @@ mod tests {
             .arg(&script)
             .current_dir(&work)
             .env("HOME", dir.path())
+            .env("TERM_PROGRAM", "iTerm.app")
             .status()
             .unwrap();
         assert!(status.success());
@@ -224,6 +226,8 @@ mod tests {
             cwd
         );
         assert!(lines[0]["ts"].as_f64().unwrap() > 1.7e9);
+        // The terminal, so the daemon can apply its privacy zone.
+        assert!(lines.iter().all(|l| l["term"] == "iTerm.app"));
     }
 
     #[test]

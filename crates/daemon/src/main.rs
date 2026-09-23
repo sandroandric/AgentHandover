@@ -520,6 +520,7 @@ async fn main() -> Result<()> {
         tx.clone(),
         shutdown_tx.subscribe(),
         Arc::clone(&capture_paused),
+        app_config.privacy.zones.clone(),
     ));
 
     // Create artifact store for screenshot capture.

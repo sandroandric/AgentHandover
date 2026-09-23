@@ -6,9 +6,16 @@
 //! previous pass moved aside, so an append that was in flight during the
 //! rename has a whole pass to land.  Commands become `ShellCommand` events;
 //! the storage writer's redactor runs on them like on every event.
+//!
+//! A command is content, so `[privacy.zones]` applies to it as to a frame:
+//! it is kept only when the terminal it ran in (the hook's
+//! `$TERM_PROGRAM`) is in a full-observation zone at the command's local
+//! time.  Lines from a hook installed before `term` was recorded carry no
+//! terminal, so only the auto-pause windows apply to them.
 
+use crate::observer::privacy_zones::{PrivacyZones, Zone};
 use agenthandover_common::event::{Event, EventKind};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Local, Utc};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 use tracing::warn;
@@ -31,6 +38,8 @@ pub struct ShellEntry {
     pub timestamp: DateTime<Utc>,
     pub cwd: String,
     pub command: String,
+    /// The terminal's `$TERM_PROGRAM` ("" when the hook did not record it).
+    pub terminal: String,
 }
 
 #[derive(Deserialize)]
@@ -38,6 +47,8 @@ struct RawEntry {
     ts: f64,
     cwd: String,
     cmd: String,
+    #[serde(default)]
+    term: String,
 }
 
 /// Parse one log line; None for a malformed line.
@@ -52,7 +63,31 @@ pub fn parse_line(line: &str) -> Option<ShellEntry> {
         timestamp: DateTime::from_timestamp(secs, nanos)?,
         cwd: raw.cwd,
         command: raw.cmd,
+        terminal: raw.term,
     })
+}
+
+/// The macOS app name of a `$TERM_PROGRAM` value, as privacy-zone patterns
+/// name apps; an unknown value is returned as is.
+pub fn terminal_app_name(term_program: &str) -> &str {
+    match term_program {
+        "Apple_Terminal" => "Terminal",
+        "iTerm.app" => "iTerm2",
+        "vscode" => "Code",
+        "WarpTerminal" => "Warp",
+        "ghostty" => "Ghostty",
+        "WezTerm" => "WezTerm",
+        "Hyper" => "Hyper",
+        "Tabby" => "Tabby",
+        other => other,
+    }
+}
+
+/// Whether `[privacy.zones]` lets `entry` be recorded: its terminal must be
+/// in a full-observation zone at the command's local time.
+pub fn zone_allows(zones: &PrivacyZones, entry: &ShellEntry) -> bool {
+    let local = entry.timestamp.with_timezone(&Local).time();
+    zones.zone(terminal_app_name(&entry.terminal), "", None, local) == Zone::Full
 }
 
 /// Return the commands moved aside by the previous pass (deleting that
@@ -119,9 +154,11 @@ pub async fn run_shell_ingest(
     tx: tokio::sync::mpsc::Sender<crate::observer::event_loop::ObserverMessage>,
     mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
     capture_paused: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    zones_config: agenthandover_common::config::PrivacyZonesConfig,
 ) {
     use crate::observer::event_loop::ObserverMessage;
     let log = shell_log_path(&data_dir);
+    let zones = PrivacyZones::new(&zones_config);
     let mut interval = tokio::time::interval(INGEST_INTERVAL);
     loop {
         tokio::select! {
@@ -138,7 +175,13 @@ pub async fn run_shell_ingest(
                     tracing::debug!(count = entries.len(), "Shell log: capture paused, commands dropped");
                     continue;
                 }
-                for entry in entries {
+                let total = entries.len();
+                let kept: Vec<ShellEntry> =
+                    entries.into_iter().filter(|e| zone_allows(&zones, e)).collect();
+                if kept.len() < total {
+                    tracing::debug!(dropped = total - kept.len(), "Shell log: commands in a privacy zone dropped");
+                }
+                for entry in kept {
                     if tx.send(ObserverMessage::Event { event: to_event(entry) }).await.is_err() {
                         return;
                     }
@@ -162,6 +205,37 @@ mod tests {
         assert_eq!(entry.timestamp.to_rfc3339(), "2026-09-21T14:13:20.250+00:00");
         assert_eq!(entry.cwd, r#"/Users/me/my "repo""#);
         assert_eq!(entry.command, "git commit -m \"x\"\necho y");
+        assert_eq!(entry.terminal, "", "a hook from before `term` was recorded");
+        let with_term = parse_line(r#"{"ts":1790000000,"cwd":"/","cmd":"ls","term":"iTerm.app"}"#).unwrap();
+        assert_eq!(with_term.terminal, "iTerm.app");
+    }
+
+    fn entry_at(term: &str, local_hh_mm: (u32, u32)) -> ShellEntry {
+        let when = Local::now()
+            .date_naive()
+            .and_hms_opt(local_hh_mm.0, local_hh_mm.1, 0)
+            .unwrap()
+            .and_local_timezone(Local)
+            .earliest()
+            .unwrap()
+            .with_timezone(&Utc);
+        ShellEntry { timestamp: when, cwd: "/".into(), command: "ls".into(), terminal: term.into() }
+    }
+
+    #[test]
+    fn privacy_zones_apply_to_shell_commands() {
+        let zones = PrivacyZones::new(&agenthandover_common::config::PrivacyZonesConfig {
+            blocked: vec!["iTerm2".into()],
+            metadata_only: vec!["Warp".into()],
+            auto_pause: vec!["12:00-13:00".into()],
+            ..Default::default()
+        });
+        assert!(zone_allows(&zones, &entry_at("Apple_Terminal", (10, 0))));
+        assert!(!zone_allows(&zones, &entry_at("iTerm.app", (10, 0))), "blocked app");
+        assert!(!zone_allows(&zones, &entry_at("WarpTerminal", (10, 0))), "a command is content");
+        assert!(!zone_allows(&zones, &entry_at("Apple_Terminal", (12, 30))), "auto-pause");
+        assert!(!zone_allows(&zones, &entry_at("", (12, 30))), "old hook: auto-pause still applies");
+        assert!(zone_allows(&zones, &entry_at("", (10, 0))));
     }
 
     #[test]
