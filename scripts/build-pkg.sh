@@ -26,8 +26,16 @@ mkdir -p "${PKG_ROOT}/Applications"
 # must be invisible to TCC's bundle scan.
 DAEMON_EXEC="${PKG_ROOT}/usr/local/lib/agenthandover/ah-observer"
 
-# Copy binaries
+# Copy binaries. This script packages; it does not build the Rust binaries.
 echo "Staging binaries..."
+for bin in agenthandover agenthandover-daemon; do
+    if [ ! -f "${REPO_ROOT}/target/universal-release/${bin}" ]; then
+        echo "FATAL: ${REPO_ROOT}/target/universal-release/${bin} is missing." >&2
+        echo "  build-pkg.sh packages prebuilt binaries. Run 'just package-pkg' (builds" >&2
+        echo "  everything, then packages) or 'just build-daemon build-cli' first." >&2
+        exit 1
+    fi
+done
 cp "${REPO_ROOT}/target/universal-release/agenthandover" "${PKG_ROOT}/usr/local/bin/"
 # Cargo produces agenthandover-daemon; install as ah-observer to avoid
 # macOS TCC caching the old "agenthandover-daemon" identity.

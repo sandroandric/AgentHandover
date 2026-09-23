@@ -114,10 +114,14 @@ ERR
 }
 
 # Run a command as the install user: directly when we already are that user
-# (unprivileged run), through sudo when the installer runs as root.
+# (unprivileged run), through sudo when the installer runs as root. The
+# script's PATH is passed on explicitly (sudo substitutes secure_path when
+# sudoers sets one), so a
+# command resolves the same way in both modes; the install test harness
+# relies on that to put stand-ins first on the PATH.
 as_user() {
     if [ "$(id -u)" -eq 0 ]; then
-        sudo -H -u "${CONSOLE_USER}" "$@"
+        sudo -H -u "${CONSOLE_USER}" /usr/bin/env "PATH=${PATH}" "$@"
     else
         "$@"
     fi

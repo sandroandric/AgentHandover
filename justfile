@@ -118,8 +118,9 @@ test-extension:
 test-install:
     bash tests/install/test_install.sh
 
-# Package .pkg installer
-package-pkg: build-all build-app
+# Package .pkg installer: build-pkg.sh needs the Rust binaries prebuilt; it
+# builds the app itself and copies the worker source.
+package-pkg: build-daemon build-cli build-extension
     #!/usr/bin/env bash
     set -euo pipefail
     bash scripts/build-pkg.sh

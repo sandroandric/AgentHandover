@@ -38,6 +38,19 @@ for _ in 1 2 3 4 5; do
 done
 pkill -x -u "${CONSOLE_UID}" "${APP_PROCESS}" 2>/dev/null || true
 
+# Remember the installed app's designated requirement (the code identity
+# TCC ties Accessibility and Screen Recording grants to). postinstall
+# compares it with the new app's: when an upgrade changes it (an unsigned
+# or re-signed build), macOS keeps showing AgentHandover switched ON while
+# the grant no longer applies, so postinstall resets both.
+APP_DR_FILE="${LIB_DIR}/.app-designated-requirement"
+rm -f "${APP_DR_FILE}"
+if [ -d "${APP_PATH}" ]; then
+    mkdir -p "${LIB_DIR}"
+    codesign -dr - "${APP_PATH}" 2>/dev/null > "${APP_DR_FILE}" \
+        || echo "unreadable" > "${APP_DR_FILE}"
+fi
+
 if [ "${NO_SERVICES}" != "1" ]; then
     # Stop the daemon launchd job left by pre-v0.2.1 installs (the daemon
     # is app-launched now) and the worker, using bootout (the deprecated
