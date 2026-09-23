@@ -275,6 +275,11 @@ struct SOPDetailView: View {
                     agentRunsSection(runs)
                 }
 
+                // --- What was learned, slot by slot ---
+                if let ledger = SkillLedger(procedure: json) {
+                    ledgerSection(ledger)
+                }
+
                 // Steps
                 if let steps = json["steps"] as? [[String: Any]], !steps.isEmpty {
                     VStack(alignment: .leading, spacing: 10) {
@@ -688,6 +693,55 @@ struct SOPDetailView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(RoundedRectangle(cornerRadius: cardRadius).fill(lightGray))
             .overlay(RoundedRectangle(cornerRadius: cardRadius).stroke(darkNavy.opacity(0.12), lineWidth: contraBorder))
+        }
+    }
+
+    // MARK: - Learning ledger
+
+    /// One line per slot: known from N runs / you told me / still unknown.
+    private func ledgerSection(_ ledger: SkillLedger) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            sectionHeader("What I know", icon: "brain", color: brightGreen)
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text(ledger.headline)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundColor(darkNavy.opacity(0.85))
+                ForEach(ledger.slots, id: \.key) { slot in
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Image(systemName: ledgerIcon(slot.status))
+                            .font(.system(size: 11))
+                            .foregroundColor(ledgerColor(slot.status))
+                        Text(slot.label)
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundColor(darkNavy.opacity(0.8))
+                        Text(slot.line)
+                            .font(.system(size: 12))
+                            .foregroundColor(darkNavy.opacity(0.55))
+                    }
+                }
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(RoundedRectangle(cornerRadius: cardRadius).fill(lightGray))
+            .overlay(RoundedRectangle(cornerRadius: cardRadius).stroke(darkNavy.opacity(0.12), lineWidth: contraBorder))
+        }
+    }
+
+    private func ledgerIcon(_ status: String) -> String {
+        switch status {
+        case "known": return "checkmark.circle.fill"
+        case "hypothesis": return "questionmark.circle"
+        default: return "circle.dashed"
+        }
+    }
+
+    private func ledgerColor(_ status: String) -> Color {
+        switch status {
+        case "known": return brightGreen
+        case "hypothesis": return warmOrange
+        default: return darkNavy.opacity(0.35)
         }
     }
 
