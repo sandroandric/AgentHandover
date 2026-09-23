@@ -18,7 +18,10 @@ use uuid::Uuid;
 
 use super::capture_policy::{ocr_words, CapturePolicy, CaptureTrigger, FrameDecision};
 use super::privacy_zones::{PrivacyZones, Zone};
-use crate::observation::{snapshot_at_async, WarnLimiter, SNAPSHOT_TIMEOUT};
+use crate::observation::{
+    focused_element_at_async, snapshot_at_async, ObservationSnapshot, SleepRecord, WarnLimiter,
+    SNAPSHOT_TIMEOUT,
+};
 use crate::capture::dhash;
 
 /// Messages sent from the observer to the storage writer.
@@ -61,6 +64,9 @@ pub struct ObserverConfig {
     /// Data dir holding the focus-recording signal and the browser
     /// transition file.
     pub state_dir: PathBuf,
+    /// `[privacy] capture_input_values`: whether the focused element's
+    /// `AXValue` is read (never for a secure field).
+    pub capture_input_values: bool,
 }
 
 impl Default for ObserverConfig {
@@ -80,6 +86,7 @@ impl Default for ObserverConfig {
             observation_socket: agenthandover_common::observation::observation_socket_path(),
             capture_socket: agenthandover_common::observation::capture_socket_path(),
             state_dir: agenthandover_common::status::data_dir(),
+            capture_input_values: false,
         }
     }
 }
@@ -117,6 +124,7 @@ pub async fn run_observer_loop(
 
     let mut last_window_title: Option<String> = None;
     let mut last_app_id: Option<String> = None;
+    let mut last_sleep: Option<SleepRecord> = None;
     let mut policy = CapturePolicy::new(
         config.screenshot_max_per_minute,
         config.focus_screenshot_max_per_minute,
@@ -259,6 +267,27 @@ pub async fn run_observer_loop(
                     w
                 });
 
+                // 3b. A sleep the app saw since the last tick is a boundary:
+                // no episode or task segment may span it.
+                if let Some(sleep) = new_sleep(&last_sleep, &observation) {
+                    let mut event = make_event(
+                        EventKind::SystemSleep {
+                            slept_at: sleep.slept_at,
+                            woke_at: sleep.woke_at,
+                        },
+                        &None,
+                        &display_topology,
+                        &primary_display_id,
+                        None,
+                    );
+                    // Ordered before anything captured after the wake.
+                    event.timestamp = sleep.woke_at;
+                    tag_focus_session(&mut event, &active_focus_session_id);
+                    let _ = tx.send(ObserverMessage::Event { event }).await;
+                    info!(slept_at = %sleep.slept_at, woke_at = %sleep.woke_at, "System sleep boundary");
+                    last_sleep = Some(sleep);
+                }
+
                 // 4. Collect this tick's transitions, cheapest first.
                 let mut transitions: Vec<CaptureTrigger> = Vec::new();
                 let current_title = observed_window.as_ref().map(|w| w.title.clone());
@@ -396,6 +425,10 @@ pub async fn run_observer_loop(
                     &primary_display_id,
                     cursor_global_px.clone(),
                 );
+                // Every kept frame (a click, app switch, focus-recording
+                // tick, ...) carries what had focus when it was taken.
+                event.focused_element =
+                    focused_element_for(&observation, &config, &snapshot_warnings).await;
                 if let Some(path) = kept.screenshot_path {
                     event.metadata["screenshot_path"] =
                         serde_json::Value::String(path.to_string_lossy().to_string());
@@ -706,6 +739,7 @@ fn make_event(
         artifact_ids: vec![],
         metadata: serde_json::json!({}),
         display_ids_spanned,
+        focused_element: None,
     }
 }
 
@@ -772,6 +806,35 @@ fn detect_spanning_displays(
     }
 }
 
+/// The sleep in `observation` when it is not the one `last` already
+/// reported.
+fn new_sleep(last: &Option<SleepRecord>, observation: &ObservationSnapshot) -> Option<SleepRecord> {
+    let sleep = observation.last_sleep.clone()?;
+    (last.as_ref() != Some(&sleep)).then_some(sleep)
+}
+
+/// The focused element for a kept frame, read by the app over the
+/// configured observation socket; None when the app has no Accessibility
+/// grant or did not answer (warned through `warnings`).
+async fn focused_element_for(
+    observation: &ObservationSnapshot,
+    config: &ObserverConfig,
+    warnings: &WarnLimiter,
+) -> Option<FocusedElement> {
+    if !observation.accessibility_granted {
+        return None;
+    }
+    focused_element_at_async(
+        &config.observation_socket,
+        config.capture_input_values,
+        SNAPSHOT_TIMEOUT,
+        warnings,
+    )
+    .await
+    .ok()
+    .flatten()
+}
+
 /// Tag an event with the active focus session ID, if any.
 fn tag_focus_session(event: &mut Event, focus_session_id: &Option<String>) {
     if let Some(ref session_id) = focus_session_id {
@@ -801,6 +864,10 @@ fn redact_event(event: &mut Event, redactor: &Redactor) {
                 *hash = redactor.redact(hash);
             }
         }
+        EventKind::ShellCommand { cwd, command } => {
+            *cwd = redactor.redact(cwd);
+            *command = redactor.redact(command);
+        }
         EventKind::NavigationChange { url, title } => {
             *url = redactor.redact(url);
             *title = redactor.redact(title);
@@ -813,12 +880,32 @@ fn redact_event(event: &mut Event, redactor: &Redactor) {
         | EventKind::WindowTitleChange
         | EventKind::DwellSnapshot
         | EventKind::ScrollReadSnapshot
-        | EventKind::SecureFieldFocus => {}
+        | EventKind::SecureFieldFocus
+        | EventKind::SystemSleep { .. } => {}
     }
 
     // Redact window title
     if let Some(ref mut win) = event.window {
         win.title = redactor.redact(&win.title);
+    }
+
+    // Redact every text the focused element carries
+    if let Some(ref mut element) = event.focused_element {
+        let redact = |text: &mut Option<String>| {
+            if let Some(t) = text {
+                *t = redactor.redact(t);
+            }
+        };
+        redact(&mut element.title);
+        redact(&mut element.description);
+        redact(&mut element.value);
+        redact(&mut element.column_header);
+        redact(&mut element.document);
+        redact(&mut element.url);
+        for ancestor in &mut element.ancestors {
+            redact(&mut ancestor.title);
+            redact(&mut ancestor.description);
+        }
     }
 
     // Redact metadata_json string values recursively
@@ -871,7 +958,97 @@ mod tests {
             artifact_ids: vec![],
             metadata: serde_json::json!({}),
             display_ids_spanned: None,
+            focused_element: None,
         }
+    }
+
+    #[test]
+    fn test_redact_event_focused_element_texts() {
+        let redactor = Redactor::new();
+        let mut event = make_test_event_with_kind(EventKind::DwellSnapshot);
+        event.focused_element = Some(FocusedElement {
+            role: "AXTextField".into(),
+            title: Some("Token".into()),
+            value: Some("ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijkl".into()),
+            ancestors: vec![AxAncestor {
+                role: "AXGroup".into(),
+                description: Some("password: hunter2".into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+
+        redact_event(&mut event, &redactor);
+
+        let element = event.focused_element.unwrap();
+        assert_eq!(element.title.as_deref(), Some("Token"));
+        assert_eq!(element.value.as_deref(), Some("[REDACTED_GITHUB_TOKEN]"));
+        assert!(!element.ancestors[0].description.as_ref().unwrap().contains("hunter2"));
+    }
+
+    #[test]
+    fn test_redact_event_shell_command() {
+        let redactor = Redactor::new();
+        let mut event = make_test_event_with_kind(EventKind::ShellCommand {
+            cwd: "/Users/me/app".into(),
+            command: "curl -u me:ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijkl https://api.example.com/x".into(),
+        });
+        redact_event(&mut event, &redactor);
+        match event.kind {
+            EventKind::ShellCommand { cwd, command } => {
+                assert_eq!(cwd, "/Users/me/app");
+                assert!(!command.contains("ghp_ABCDEFGHIJ"), "{command}");
+                assert!(command.starts_with("curl -u me:"), "the rest of the command stays: {command}");
+            }
+            other => panic!("kind changed: {other:?}"),
+        }
+    }
+
+    fn snapshot_with_sleep(sleep: Option<SleepRecord>) -> ObservationSnapshot {
+        let mut snapshot: ObservationSnapshot = serde_json::from_value(serde_json::json!({
+            "accessibility_granted": true,
+            "screen_recording_granted": true,
+            "secure_field_focused": false,
+            "focused_window": null,
+            "display_topology": [],
+            "cursor_global_px": null,
+        }))
+        .unwrap();
+        snapshot.last_sleep = sleep;
+        snapshot
+    }
+
+    #[test]
+    fn test_new_sleep_reports_each_sleep_once() {
+        let at = |h: u32| chrono::TimeZone::with_ymd_and_hms(&Utc, 2026, 9, 21, h, 0, 0).unwrap();
+        let first = SleepRecord { slept_at: at(1), woke_at: at(7) };
+        let second = SleepRecord { slept_at: at(12), woke_at: at(13) };
+
+        assert_eq!(new_sleep(&None, &snapshot_with_sleep(None)), None, "never slept");
+        assert_eq!(new_sleep(&None, &snapshot_with_sleep(Some(first.clone()))), Some(first.clone()));
+        assert_eq!(
+            new_sleep(&Some(first.clone()), &snapshot_with_sleep(Some(first.clone()))),
+            None,
+            "already reported"
+        );
+        assert_eq!(
+            new_sleep(&Some(first), &snapshot_with_sleep(Some(second.clone()))),
+            Some(second)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_no_focused_element_without_accessibility() {
+        let mut snapshot = snapshot_with_sleep(None);
+        snapshot.accessibility_granted = false;
+        // The socket is never consulted without the grant.
+        let config = ObserverConfig {
+            observation_socket: PathBuf::from("/nonexistent/observation.sock"),
+            capture_input_values: true,
+            ..ObserverConfig::default()
+        };
+        let warnings = WarnLimiter::new();
+        assert!(focused_element_for(&snapshot, &config, &warnings).await.is_none());
     }
 
     #[test]
@@ -997,6 +1174,7 @@ mod tests {
             artifact_ids: vec![],
             metadata: serde_json::json!({}),
             display_ids_spanned: None,
+            focused_element: None,
         };
 
         // Should not panic with no window

@@ -75,6 +75,12 @@ enum Commands {
         /// max_quality); default: the config's tier, else the RAM's
         #[arg(long)]
         tier: Option<String>,
+        /// Install the opt-in zsh hook that records the commands you run
+        #[arg(long, conflicts_with = "shell_remove")]
+        shell: bool,
+        /// Remove the zsh hook
+        #[arg(long)]
+        shell_remove: bool,
     },
     /// Run pre-flight checks
     Doctor,
@@ -241,7 +247,9 @@ fn main() -> Result<()> {
             SopsAction::Retry { failure_id } => commands::sops::retry(&failure_id),
         },
         Commands::Watch => commands::watch::run(),
-        Commands::Setup { check, extension, vlm, tier } => {
+        Commands::Setup { shell: true, .. } => commands::shell_hook::run(false),
+        Commands::Setup { shell_remove: true, .. } => commands::shell_hook::run(true),
+        Commands::Setup { check, extension, vlm, tier, .. } => {
             commands::setup::run(check, extension, vlm, tier.as_deref())
         }
         Commands::Doctor => commands::doctor::run(),

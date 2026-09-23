@@ -54,6 +54,8 @@ pub enum ExtensionMessageType {
     DwellSnapshot,
     ScrollSnapshot,
     SecureFieldStatus,
+    /// A `paste` DOM event (Cmd-V, Edit > Paste, context menu).
+    Paste,
     /// The active tab committed a navigation (`tabs.onUpdated`).
     NavigationChange,
     /// A form was submitted in a page (content-script `submit` listener).
@@ -521,6 +523,8 @@ fn convert_to_event(msg: &ExtensionMessage) -> Option<Event> {
         ExtensionMessageType::DwellSnapshot => EventKind::DwellSnapshot,
         ExtensionMessageType::ScrollSnapshot => EventKind::ScrollReadSnapshot,
         ExtensionMessageType::SecureFieldStatus => EventKind::SecureFieldFocus,
+        // The pasted content's hash is added by `capture::paste::resolve_paste`.
+        ExtensionMessageType::Paste => EventKind::PasteDetected { matched_copy_hash: None },
         ExtensionMessageType::NavigationChange => EventKind::NavigationChange {
             url: url.clone(),
             title: title.clone().unwrap_or_default(),
@@ -573,6 +577,7 @@ fn convert_to_event(msg: &ExtensionMessage) -> Option<Event> {
         artifact_ids: vec![],
         metadata,
         display_ids_spanned: None,
+        focused_element: None,
     })
 }
 
@@ -710,6 +715,25 @@ mod tests {
             }
             other => panic!("expected ClickIntent, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_convert_paste() {
+        let msg: ExtensionMessage = serde_json::from_value(serde_json::json!({
+            "type": "paste",
+            "seq": 7,
+            "timestamp": "2026-01-01T00:00:00Z",
+            "payload": {
+                "target": {"tagName": "TEXTAREA", "ariaLabel": "Comment"},
+                "tabId": 3,
+                "url": "https://tracker.example.com/issues/12?draft=1",
+            },
+        }))
+        .unwrap();
+        let event = convert_to_event(&msg).unwrap();
+        assert_eq!(event.kind, EventKind::PasteDetected { matched_copy_hash: None });
+        assert_eq!(event.metadata["url"], "https://tracker.example.com/issues/12");
+        assert_eq!(event.metadata["target"]["ariaLabel"], "Comment");
     }
 
     #[test]

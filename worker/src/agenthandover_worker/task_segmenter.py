@@ -372,15 +372,29 @@ def _timestamp_to_epoch(ts: str) -> float:
         return 0.0
 
 
+def _sleep_starts(sleep_boundaries: list[tuple[str, str]] | None) -> list[float]:
+    """Epoch seconds at which each ``(slept_at, woke_at)`` sleep began."""
+    return sorted(
+        epoch for slept_at, _ in sleep_boundaries or []
+        if (epoch := _timestamp_to_epoch(slept_at))
+    )
+
+
+def _sleep_between(start: float, end: float, sleep_starts: list[float]) -> bool:
+    """True when the Mac went to sleep at or after *start* and before *end*."""
+    return any(start <= s < end for s in sleep_starts)
+
+
 def _split_into_contiguous_segments(
     frames: list[AnnotatedFrame],
     cluster_id: int,
     max_gap_seconds: int = 1800,
+    sleep_starts: list[float] | None = None,
 ) -> list[TaskSegment]:
     """Split a cluster's frames into contiguous time segments.
 
-    Two consecutive frames with > max_gap_seconds between them
-    form separate segments (indicating an interruption).
+    Two consecutive frames with > max_gap_seconds between them, or with a
+    system sleep between them (*sleep_starts*), form separate segments.
     """
     if not frames:
         return []
@@ -396,8 +410,11 @@ def _split_into_contiguous_segments(
         curr_epoch = _timestamp_to_epoch(sorted_frames[i].timestamp)
 
         gap = curr_epoch - prev_epoch if prev_epoch and curr_epoch else 0
+        slept = bool(prev_epoch and curr_epoch) and _sleep_between(
+            prev_epoch, curr_epoch, sleep_starts or [],
+        )
 
-        if gap > max_gap_seconds:
+        if gap > max_gap_seconds or slept:
             # Gap too large — start new segment
             seg = _make_segment(current_frames, cluster_id, len(segments))
             segments.append(seg)
@@ -670,16 +687,20 @@ class TaskSegmenter:
     def segment(
         self,
         events: list[dict],
+        sleep_boundaries: list[tuple[str, str]] | None = None,
     ) -> SegmentationResult:
         """Run the full segmentation pipeline on a batch of annotated events.
 
         Args:
             events: List of event dicts from the DB with completed
                 annotations (scene_annotation_json, frame_diff_json).
+            sleep_boundaries: ``(slept_at, woke_at)`` of each system sleep
+                (``WorkerDB.get_sleep_boundaries``); no segment spans one.
 
         Returns:
             SegmentationResult with task segments grouped by cluster.
         """
+        sleep_starts = _sleep_starts(sleep_boundaries)
         result = SegmentationResult(total_frames_processed=len(events))
 
         if not events:
@@ -760,7 +781,7 @@ class TaskSegmenter:
         except (ConnectionError, OllamaError) as exc:
             logger.warning("Embedding failed (Ollama not reachable): %s", exc)
             # Fall back to app-based clustering (no embeddings)
-            return self._fallback_app_clustering(frames, result)
+            return self._fallback_app_clustering(frames, result, sleep_starts)
 
         # Step 3: Cluster by embedding similarity
         clusters = _cluster_frames(frames, self.config.similarity_threshold)
@@ -782,6 +803,7 @@ class TaskSegmenter:
             segs = _split_into_contiguous_segments(
                 cluster_frames, cluster_id,
                 self.config.stitch_max_gap_seconds,
+                sleep_starts,
             )
             # Step 5: Group segments by cluster for SOP generation
             result.segments.extend(segs)
@@ -816,8 +838,12 @@ class TaskSegmenter:
         self,
         segments: list[TaskSegment],
         all_frames: list[AnnotatedFrame],
+        sleep_boundaries: list[tuple[str, str]] | None = None,
     ) -> list[TaskSegment]:
         """Post-process segments to classify and merge interruptions.
+
+        Segments separated by a system sleep (*sleep_boundaries*, as for
+        :meth:`segment`) are never merged, whatever the gap.
 
         Rules:
         - Brief interrupt (<60s): Absorb into parent segment. A 30s Slack check
@@ -837,6 +863,7 @@ class TaskSegmenter:
         # Sort segments by start_time for chronological processing
         sorted_segs = sorted(segments, key=lambda s: _timestamp_to_epoch(s.start_time))
 
+        sleep_starts = _sleep_starts(sleep_boundaries)
         brief_max = self.config.brief_interrupt_max_seconds
         pause_max = self.config.pause_max_minutes * 60  # convert to seconds
         related_max = self.config.related_interrupt_max_seconds
@@ -881,6 +908,11 @@ class TaskSegmenter:
                     continue
 
                 gap_seconds = start_b - end_a
+
+                if _sleep_between(end_a, start_b, sleep_starts):
+                    # The Mac slept in between: separate sessions.
+                    i += 1
+                    continue
 
                 if gap_seconds <= 0:
                     # Overlapping or adjacent — just merge
@@ -1178,6 +1210,7 @@ class TaskSegmenter:
         self,
         frames: list[AnnotatedFrame],
         result: SegmentationResult,
+        sleep_starts: list[float] | None = None,
     ) -> SegmentationResult:
         """Fallback clustering by app name when embeddings are unavailable.
 
@@ -1199,6 +1232,7 @@ class TaskSegmenter:
             segs = _split_into_contiguous_segments(
                 app_frames, cluster_id,
                 self.config.stitch_max_gap_seconds,
+                sleep_starts,
             )
             result.segments.extend(segs)
             result.clusters.setdefault(cluster_id, []).extend(segs)

@@ -24,6 +24,7 @@ from pathlib import Path
 
 from agenthandover_worker import trigger_spool
 from agenthandover_worker.clipboard_linker import ClipboardLinker
+from agenthandover_worker.event_helpers import focused_field
 from agenthandover_worker.config import EXPORT_ADAPTERS, load_config
 from agenthandover_worker.confidence import ConfidenceScorer, is_native_app_context
 from agenthandover_worker.db import WorkerDB
@@ -2511,8 +2512,9 @@ def _process_passive_discovery(
         "Passive discovery: processing %d annotated events", len(events),
     )
 
-    # Step 2: Run segmentation
-    seg_result = segmenter.segment(events)
+    # Step 2: Run segmentation.  No segment spans a system sleep.
+    sleep_boundaries = db.get_sleep_boundaries(since=events[0].get("timestamp"))
+    seg_result = segmenter.segment(events, sleep_boundaries=sleep_boundaries)
 
     if not seg_result.segments:
         logger.info(
@@ -2537,7 +2539,7 @@ def _process_passive_discovery(
     if all_frames:
         try:
             seg_result.segments = segmenter.classify_interruptions(
-                seg_result.segments, all_frames,
+                seg_result.segments, all_frames, sleep_boundaries=sleep_boundaries,
             )
             # Rebuild cluster dict after merging
             seg_result.clusters = {}
@@ -2630,11 +2632,18 @@ def _process_passive_discovery(
                         )
                     except (_json.JSONDecodeError, TypeError):
                         pass
-                timeline.append({
+                frame = {
                     "annotation": annotation,
                     "diff": diff,
                     "timestamp": ev.get("timestamp", ""),
-                })
+                }
+                # The focused field read through Accessibility (a native
+                # app's cell or field, its label and, if captured, value).
+                ev_field = focused_field(ev)
+                if ev_field:
+                    frame["focused_field"] = ev_field
+                    frame["event_id"] = ev.get("id", "")
+                timeline.append(frame)
             if timeline:
                 demonstrations.append(timeline)
                 segment_ids.append(seg_row["segment_id"])

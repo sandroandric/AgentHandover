@@ -24,6 +24,7 @@ export type ExtensionMessageType =
   | 'dwell_snapshot'
   | 'scroll_snapshot'
   | 'secure_field_status'
+  | 'paste'
   | 'navigation_change'
   | 'form_submit';
 

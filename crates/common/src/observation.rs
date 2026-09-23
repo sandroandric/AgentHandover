@@ -12,7 +12,9 @@
 //! ([`snapshot`], [`snapshot_at`]) serve synchronous callers: the daemon's
 //! health and control replies, and `agenthandover doctor`.
 
-use crate::event::{CursorPosition, DisplayInfo, WindowInfo};
+use crate::event::{CursorPosition, DisplayInfo, FocusedElement, WindowInfo};
+use chrono::{DateTime, Utc};
+use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -34,6 +36,17 @@ pub struct ObservationSnapshot {
     pub focused_window: Option<WindowInfo>,
     pub display_topology: Vec<DisplayInfo>,
     pub cursor_global_px: Option<CursorPosition>,
+    /// The most recent sleep the app saw (NSWorkspace `willSleep` then
+    /// `didWake`), None until the Mac has slept while the app ran.
+    #[serde(default)]
+    pub last_sleep: Option<SleepRecord>,
+}
+
+/// One sleep of the Mac, as the app's NSWorkspace observer recorded it.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct SleepRecord {
+    pub slept_at: DateTime<Utc>,
+    pub woke_at: DateTime<Utc>,
 }
 
 /// Why a snapshot request failed. The message names the failing step so
@@ -91,12 +104,31 @@ pub fn capture_socket_path() -> PathBuf {
     crate::status::socket_dir().join("capture.sock")
 }
 
-fn parse_response(line: &str) -> Result<ObservationSnapshot, SnapshotError> {
+fn parse_response<T: DeserializeOwned>(line: &str) -> Result<T, SnapshotError> {
     let line = line.trim();
     if line.is_empty() {
         return Err(SnapshotError::BadResponse("empty reply".to_string()));
     }
     serde_json::from_str(line).map_err(|e| SnapshotError::BadResponse(e.to_string()))
+}
+
+/// The observation server's reply to a `focused_element` request.
+#[derive(Debug, Deserialize)]
+struct FocusedElementReply {
+    focused_element: Option<FocusedElement>,
+}
+
+/// The `focused_element` request line.  `capture_values` carries
+/// `[privacy] capture_input_values`: without it the app reads no `AXValue`.
+fn focused_element_request(capture_values: bool) -> Vec<u8> {
+    let mut line = serde_json::json!({
+        "command": "focused_element",
+        "capture_values": capture_values,
+    })
+    .to_string()
+    .into_bytes();
+    line.push(b'\n');
+    line
 }
 
 /// Async snapshot from the observation server at `path`.
@@ -112,6 +144,63 @@ pub async fn snapshot_at_async(
     timeout: Duration,
     limiter: &WarnLimiter,
 ) -> Result<ObservationSnapshot, SnapshotError> {
+    request_at_async(
+        path,
+        SNAPSHOT_REQUEST,
+        "snapshot",
+        "nothing is captured until the app answers",
+        timeout,
+        limiter,
+    )
+    .await
+}
+
+/// The focused UI element from the observation server at `path` (None when
+/// nothing is focused, the element is a secure field, or Accessibility is
+/// not granted).  Bounded like [`snapshot_at_async`].
+#[cfg(unix)]
+pub async fn focused_element_at_async(
+    path: &Path,
+    capture_values: bool,
+    timeout: Duration,
+    limiter: &WarnLimiter,
+) -> Result<Option<FocusedElement>, SnapshotError> {
+    let request = focused_element_request(capture_values);
+    let reply: FocusedElementReply = request_at_async(
+        path,
+        &request,
+        "focused element",
+        "frames are kept without it",
+        timeout,
+        limiter,
+    )
+    .await?;
+    Ok(reply.focused_element)
+}
+
+#[cfg(not(unix))]
+pub async fn focused_element_at_async(
+    _path: &Path,
+    _capture_values: bool,
+    _timeout: Duration,
+    _limiter: &WarnLimiter,
+) -> Result<Option<FocusedElement>, SnapshotError> {
+    Err(SnapshotError::Io(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "observation socket requires a Unix platform",
+    )))
+}
+
+/// One request line to the observation server and its one-line JSON reply.
+#[cfg(unix)]
+async fn request_at_async<T: DeserializeOwned>(
+    path: &Path,
+    request: &[u8],
+    what: &str,
+    consequence: &str,
+    timeout: Duration,
+    limiter: &WarnLimiter,
+) -> Result<T, SnapshotError> {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
     let round_trip = async {
@@ -119,7 +208,7 @@ pub async fn snapshot_at_async(
             .await
             .map_err(|e| ("connect", SnapshotError::Io(e)))?;
         stream
-            .write_all(SNAPSHOT_REQUEST)
+            .write_all(request)
             .await
             .map_err(|e| ("send request", SnapshotError::Io(e)))?;
         let mut response = String::new();
@@ -131,7 +220,7 @@ pub async fn snapshot_at_async(
     };
 
     let (step, err) = match tokio::time::timeout(timeout, round_trip).await {
-        Ok(Ok(snapshot)) => return Ok(snapshot),
+        Ok(Ok(reply)) => return Ok(reply),
         Ok(Err(failure)) => failure,
         Err(_) => ("wait for reply", SnapshotError::Timeout(timeout)),
     };
@@ -144,8 +233,8 @@ pub async fn snapshot_at_async(
             socket = %path.display(),
             step,
             error = %err,
-            "Observation snapshot unavailable (step: {step}); nothing is captured \
-             until the app answers (warning repeats at most every {WARN_INTERVAL_SECS} s)"
+            "Observation {what} unavailable (step: {step}); {consequence} \
+             (warning repeats at most every {WARN_INTERVAL_SECS} s)"
         );
     }
     Err(err)
@@ -352,6 +441,80 @@ mod tests {
             .expect("snapshot");
         assert!(snapshot.screen_recording_granted);
         assert!(!snapshot.secure_field_focused);
+    }
+
+    /// Serve one request with `reply`, returning the request line.
+    fn serve_one_async(
+        listener: tokio::net::UnixListener,
+        reply: &'static str,
+    ) -> tokio::task::JoinHandle<String> {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut reader = BufReader::new(stream);
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            let stream = reader.get_mut();
+            stream.write_all(reply.as_bytes()).await.unwrap();
+            stream.write_all(b"\n").await.unwrap();
+            line
+        })
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn focused_element_request_carries_the_value_flag_and_parses_the_reply() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("observation.sock");
+        let server = serve_one_async(
+            tokio::net::UnixListener::bind(&path).unwrap(),
+            r#"{"focused_element":{"role":"AXCell","value":"42","column_header":"Qty","ancestors":[{"role":"AXRow","index":2},{"role":"AXTable","title":"Orders"}]}}"#,
+        );
+
+        let element = focused_element_at_async(&path, true, SNAPSHOT_TIMEOUT, &WarnLimiter::new())
+            .await
+            .expect("reply")
+            .expect("an element");
+        assert_eq!(element.role, "AXCell");
+        assert_eq!(element.value.as_deref(), Some("42"));
+        assert_eq!(element.column_header.as_deref(), Some("Qty"));
+        assert_eq!(element.ancestors[0].index, Some(2));
+        assert_eq!(element.ancestors[1].title.as_deref(), Some("Orders"));
+
+        let request: serde_json::Value =
+            serde_json::from_str(&server.await.unwrap()).unwrap();
+        assert_eq!(request["command"], "focused_element");
+        assert_eq!(request["capture_values"], true);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn no_focused_element_is_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("observation.sock");
+        let server = serve_one_async(
+            tokio::net::UnixListener::bind(&path).unwrap(),
+            r#"{"focused_element":null}"#,
+        );
+        let element = focused_element_at_async(&path, false, SNAPSHOT_TIMEOUT, &WarnLimiter::new())
+            .await
+            .expect("reply");
+        assert!(element.is_none());
+        let request: serde_json::Value =
+            serde_json::from_str(&server.await.unwrap()).unwrap();
+        assert_eq!(request["capture_values"], false);
+    }
+
+    #[test]
+    fn snapshot_parses_last_sleep_and_tolerates_its_absence() {
+        let with: ObservationSnapshot = parse_response(
+            r#"{"accessibility_granted":true,"screen_recording_granted":true,"secure_field_focused":false,"focused_window":null,"display_topology":[],"cursor_global_px":null,"last_sleep":{"slept_at":"2026-09-20T22:10:00Z","woke_at":"2026-09-21T07:02:30Z"}}"#,
+        )
+        .unwrap();
+        let sleep = with.last_sleep.expect("last_sleep");
+        assert_eq!(sleep.slept_at.to_rfc3339(), "2026-09-20T22:10:00+00:00");
+        assert_eq!(sleep.woke_at.to_rfc3339(), "2026-09-21T07:02:30+00:00");
+
+        let without: ObservationSnapshot = parse_response(REPLY_OK).unwrap();
+        assert!(without.last_sleep.is_none());
     }
 
     #[tokio::test(flavor = "current_thread")]

@@ -3,13 +3,14 @@ import Foundation
 /// Unix socket server that serves observation metadata to the daemon.
 ///
 /// Protocol:
-/// - Client sends: `{"command":"snapshot"}\n`
-/// - Server responds: JSON snapshot + newline
+/// - Client sends: `{"command":"snapshot"}\n`, or
+///   `{"command":"focused_element","capture_values":<bool>}\n`
+/// - Server responds: the JSON snapshot, or `{"focused_element":...}`, + newline
 ///
 /// Peers are the daemon and the CLI (`agenthandover doctor`); see
 /// `PeerPolicy`. Requests are answered one at a time on a serial queue.
 final class ObservationServer {
-    private let observationService = ObservationService()
+    private let observationService = ObservationService(sleepMonitor: .started())
     private let socketPath: String
     private let policy: PeerPolicy
     private let handlerQueue = DispatchQueue(
@@ -63,20 +64,50 @@ final class ObservationServer {
             return
         }
 
-        guard command == "snapshot" else {
+        guard var data = Self.reply(to: command, request: json, service: observationService)
+        else {
             sendError(fd, message: "unknown command: \(command)")
-            return
-        }
-
-        guard var data = try? JSONEncoder().encode(observationService.snapshot()) else {
-            sendError(fd, message: "encode failed")
             return
         }
         data.append(UInt8(ascii: "\n"))
         sendAll(fd, data)
     }
 
+    /// The encoded reply to `command`, nil for an unknown command.
+    /// `focused_element` reads `AXValue` only when the request's
+    /// `capture_values` is true (`[privacy] capture_input_values`).
+    static func reply(
+        to command: String, request: [String: Any], service: ObservationService
+    ) -> Data? {
+        let encoder = JSONEncoder()
+        switch command {
+        case "snapshot":
+            return try? encoder.encode(service.snapshot())
+        case "focused_element":
+            let captureValues = request["capture_values"] as? Bool ?? false
+            return try? encoder.encode(FocusedElementReply(
+                focusedElement: service.focusedElement(captureValues: captureValues)))
+        default:
+            return nil
+        }
+    }
+
     private func sendError(_ fd: Int32, message: String) {
         sendAll(fd, ScreenCaptureServer.encodeErrorResponse(message))
+    }
+}
+
+/// Reply to `{"command":"focused_element"}`; `focused_element` is JSON null
+/// when there is none.
+struct FocusedElementReply: Encodable {
+    let focusedElement: ObservationFocusedElement?
+
+    enum CodingKeys: String, CodingKey {
+        case focusedElement = "focused_element"
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(focusedElement, forKey: .focusedElement)
     }
 }

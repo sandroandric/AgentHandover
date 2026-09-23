@@ -10,6 +10,7 @@
  *   4. Expose hook points that future modules plug into:
  *        - DOM snapshot capture  (dom-capture)
  *        - Click intent tracking (click-capture)
+ *        - Paste tracking        (paste-capture)
  *        - Dwell / scroll-read   (dwell)
  *        - Secure field detection (secure-field)
  *        - Form submissions      (form-submit)
@@ -17,6 +18,7 @@
 
 import { captureSnapshot, noteInteraction } from './dom-capture';
 import { initClickCapture } from './click-capture';
+import { initPasteCapture } from './paste-capture';
 import { initFormSubmitCapture } from './form-submit';
 import { initSecureFieldDetection } from './secure-field';
 import { initDwellTracker, type DwellConfig } from './dwell-tracker';
@@ -250,6 +252,22 @@ sendToBackground('content_ready', {
     destroy() {
       cleanupClick?.();
       cleanupClick = null;
+    },
+  });
+}
+
+// --- Paste Capture (the daemon links each paste to its copy) ---
+{
+  let cleanupPaste: (() => void) | null = null;
+
+  registerModule({
+    name: 'paste-capture',
+    init() {
+      cleanupPaste = initPasteCapture(guardedSend);
+    },
+    destroy() {
+      cleanupPaste?.();
+      cleanupPaste = null;
     },
   });
 }

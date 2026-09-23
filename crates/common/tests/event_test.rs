@@ -30,6 +30,7 @@ fn test_event_creation_and_serialization() {
         artifact_ids: vec![],
         metadata: serde_json::json!({}),
         display_ids_spanned: None,
+        focused_element: None,
     };
 
     let json = serde_json::to_string(&event).unwrap();
@@ -51,10 +52,12 @@ fn test_event_kind_variants() {
         EventKind::PasteDetected { matched_copy_hash: Some("abc123".into()) },
         EventKind::SecureFieldFocus,
         EventKind::AppSwitch { from_app: "Safari".into(), to_app: "Terminal".into() },
+        EventKind::ShellCommand { cwd: "/Users/me/app".into(), command: "cargo test -p storage".into() },
+        EventKind::SystemSleep { slept_at: Utc::now(), woke_at: Utc::now() },
     ];
     for kind in &kinds {
         let json = serde_json::to_string(kind).unwrap();
         let _: EventKind = serde_json::from_str(&json).unwrap();
     }
-    assert_eq!(kinds.len(), 9);
+    assert_eq!(kinds.len(), 11);
 }

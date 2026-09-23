@@ -29,6 +29,7 @@ fn make_test_event() -> Event {
         artifact_ids: vec![],
         metadata: serde_json::json!({}),
         display_ids_spanned: None,
+        focused_element: None,
     }
 }
 
@@ -60,7 +61,7 @@ fn test_schema_version() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join("test_ver.db");
     let store = EventStore::open(&db_path).unwrap();
-    assert_eq!(store.schema_version(), 4);
+    assert_eq!(store.schema_version(), 5);
 }
 
 #[test]
@@ -131,7 +132,7 @@ fn test_v004_drops_dom_trees_older_than_the_retention_window() {
     }
 
     let store = EventStore::open(&db_path).unwrap();
-    assert_eq!(store.schema_version(), 4);
+    assert_eq!(store.schema_version(), 5);
     let metadata = |id: &str| -> serde_json::Value {
         let text: String = store
             .connection()
@@ -144,4 +145,103 @@ fn test_v004_drops_dom_trees_older_than_the_retention_window() {
     assert_eq!(old["url"], "https://a.example/", "the rest of the row stays");
     assert!(metadata("new-tree")["nodes"].is_array(), "tree inside the window stays");
     assert_eq!(metadata("old-anchors")["digest"], "x");
+}
+
+#[test]
+fn test_focused_element_round_trips_through_its_column() {
+    let tmp = TempDir::new().unwrap();
+    let store = EventStore::open(&tmp.path().join("focused.db")).unwrap();
+
+    let mut event = make_test_event();
+    event.kind = EventKind::DwellSnapshot;
+    event.focused_element = Some(FocusedElement {
+        role: "AXCell".into(),
+        value: Some("1,250.00".into()),
+        column_header: Some("Amount".into()),
+        document: Some("file:///Users/me/Q3.xlsx".into()),
+        ancestors: vec![AxAncestor {
+            role: "AXRow".into(),
+            title: Some("Row 4".into()),
+            index: Some(3),
+            ..Default::default()
+        }],
+        ..Default::default()
+    });
+    store.insert_event(&event).unwrap();
+
+    let column: String = store
+        .connection()
+        .query_row(
+            "SELECT focused_element_json FROM events WHERE id = ?1",
+            [event.id.to_string()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let stored: serde_json::Value = serde_json::from_str(&column).unwrap();
+    assert_eq!(stored["role"], "AXCell");
+    assert_eq!(stored["column_header"], "Amount");
+    assert_eq!(stored["ancestors"][0]["index"], 3);
+    assert!(stored.get("subrole").is_none(), "absent fields are not written");
+
+    let fetched = store.get_event(event.id).unwrap().unwrap();
+    assert_eq!(fetched.focused_element, event.focused_element);
+
+    // An event without one stores NULL.
+    let plain = make_test_event();
+    store.insert_event(&plain).unwrap();
+    let null: Option<String> = store
+        .connection()
+        .query_row(
+            "SELECT focused_element_json FROM events WHERE id = ?1",
+            [plain.id.to_string()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(null.is_none());
+}
+
+#[test]
+fn test_v005_adds_the_column_to_a_v4_database() {
+    let tmp = TempDir::new().unwrap();
+    let db_path = tmp.path().join("v4.db");
+    {
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        for sql in [
+            include_str!("../src/migrations/v001_initial.sql"),
+            include_str!("../src/migrations/v002_add_display_ids_spanned.sql"),
+            include_str!("../src/migrations/v003_add_scene_annotation.sql"),
+            include_str!("../src/migrations/v004_drop_old_dom_trees.sql"),
+        ] {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.pragma_update(None, "user_version", 4).unwrap();
+    }
+    let store = EventStore::open(&db_path).unwrap();
+    assert_eq!(store.schema_version(), 5);
+    store.insert_event(&make_test_event()).unwrap();
+}
+
+#[test]
+fn test_has_copy_since_matches_a_recent_clipboard_change() {
+    let tmp = TempDir::new().unwrap();
+    let store = EventStore::open(&tmp.path().join("copy.db")).unwrap();
+
+    let mut copy = make_test_event();
+    copy.timestamp = Utc::now() - chrono::Duration::minutes(5);
+    copy.kind = EventKind::ClipboardChange {
+        content_types: vec!["public.utf8-plain-text".into()],
+        byte_size: 11,
+        high_entropy: false,
+        content_hash: "hash-a".into(),
+        content_preview: None,
+    };
+    store.insert_event(&copy).unwrap();
+
+    let since = Utc::now() - chrono::Duration::minutes(30);
+    assert!(store.has_copy_since("hash-a", since).unwrap());
+    assert!(!store.has_copy_since("hash-b", since).unwrap());
+    // A copy older than the window does not match.
+    assert!(!store
+        .has_copy_since("hash-a", Utc::now() - chrono::Duration::minutes(1))
+        .unwrap());
 }

@@ -268,7 +268,8 @@ class TestClipboardLinkerIntegration:
         content_hash = hashlib.sha256(b"test content").hexdigest()
 
         # Clipboard events use the real daemon format: kind_json carries
-        # {"type": "<kind>", "content_hash": ..., "byte_size": ...}.
+        # {"type": "ClipboardChange", "content_hash": ...} and
+        # {"type": "PasteDetected", "matched_copy_hash": ...}.
         # metadata_json holds unrelated fields and is {} for clipboard
         # events in production.  (Historical bug caught 2026-04-10: this
         # fixture previously wrote to metadata_json, which matched the
@@ -295,9 +296,7 @@ class TestClipboardLinkerIntegration:
                 "timestamp": _ts(base + timedelta(minutes=2)),
                 "kind_json": json.dumps({
                     "type": "PasteDetected",
-                    "content_hash": content_hash,
-                    "target_app": "com.apple.TextEdit",
-                    "byte_size": 12,
+                    "matched_copy_hash": content_hash,
                 }),
                 "window_json": json.dumps({"app_id": "com.apple.Terminal", "title": "Terminal"}),
                 "metadata_json": "{}",

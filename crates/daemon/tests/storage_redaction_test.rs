@@ -35,6 +35,7 @@ fn clipboard_event(preview: &str) -> Event {
         artifact_ids: vec![],
         metadata: json!({}),
         display_ids_spanned: None,
+        focused_element: None,
     }
 }
 

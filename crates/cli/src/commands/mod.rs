@@ -6,6 +6,7 @@ pub mod logs;
 pub mod search;
 pub mod service;
 pub mod setup;
+pub mod shell_hook;
 pub mod sops;
 pub mod status;
 pub mod uninstall;

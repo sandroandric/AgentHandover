@@ -21,7 +21,12 @@ from datetime import timedelta
 from pathlib import Path
 
 from agenthandover_worker.dom import url_host
-from agenthandover_worker.event_helpers import display_name, parse_json_field, parse_timestamp
+from agenthandover_worker.event_helpers import (
+    display_name,
+    focused_field,
+    parse_json_field,
+    parse_timestamp,
+)
 from agenthandover_worker.scene_annotator import SceneAnnotator, as_compact, page_for_event
 from agenthandover_worker.frame_differ import FrameDiffer
 from agenthandover_worker.sop_generator import SOPGenerator, GeneratedSOP
@@ -843,9 +848,12 @@ class FocusProcessor:
                 "app": annotation.get("app", ""),
                 "event_id": event_id,
                 "clipboard_context": clipboard_ctx,
+                "focused_field": focused_field(fresh),
+                "shell_commands": [],
             })
 
         self._attach_clicks(db, timeline)
+        self._attach_shell_commands(db, timeline)
 
         # Safety net: the first frame in a focus session must never carry a
         # diff — it is the clean starting point of the SOP.  Any diff stored
@@ -855,6 +863,35 @@ class FocusProcessor:
             timeline[0]["diff"] = None
 
         return timeline
+
+    @staticmethod
+    def _attach_shell_commands(db: object, timeline: list[dict]) -> None:
+        """Give each frame the shell commands run since the previous frame.
+
+        ``ShellCommand`` events carry no ``focus_session_id`` (the daemon
+        ingests the hook's log in batches), so they are found by time: from
+        the session's first frame (less the DOM tolerance, for a command
+        typed just before the first capture) to its last frame.  A command
+        belongs to the first frame at or after it, the screen that shows
+        its result.
+        """
+        timed = [
+            (when, frame) for frame in timeline
+            if (when := parse_timestamp(frame.get("timestamp"))) is not None
+        ]
+        if not timed:
+            return
+        slack = timedelta(seconds=_DOM_TOLERANCE_SEC)
+        commands = db.get_shell_commands(  # type: ignore[union-attr]
+            (timed[0][0] - slack).isoformat(), timed[-1][0].isoformat(),
+        )
+        for command in commands:
+            when = parse_timestamp(command.get("timestamp"))
+            if when is None:
+                continue
+            owner = next((frame for t, frame in timed if t >= when), None)
+            if owner is not None:
+                owner["shell_commands"].append(command)
 
     @staticmethod
     def _attach_clicks(db: object, timeline: list[dict]) -> None:

@@ -96,12 +96,18 @@ def procedure_steps(proc: dict) -> list[dict]:
 
 def _step_evidence(evidence: object) -> dict:
     """A step's evidence pointers: ``frames`` (event ids) and
-    ``dom_snapshot_ids``, each a list (empty when unknown)."""
+    ``dom_snapshot_ids``, each a list (empty when unknown), plus, when the
+    cited frames recorded them, ``focused_fields`` (the Accessibility
+    focused element) and ``shell_commands`` (exact commands)."""
     evidence = evidence if isinstance(evidence, dict) else {}
-    return {
+    result = {
         key: list(evidence.get(key) or [])
         for key in ("frames", "dom_snapshot_ids")
     }
+    for key in ("focused_fields", "shell_commands"):
+        if evidence.get(key):
+            result[key] = list(evidence[key])
+    return result
 
 
 def _confidence_label(score: float) -> str:
