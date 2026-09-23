@@ -84,6 +84,50 @@ final class ModelTiersTests: XCTestCase {
         XCTAssertEqual(ModelTierTable.applyVLMBlock(block, to: ""), "\n" + block)
     }
 
+    /// The remote-model writer once stripped `model =` and `mode =` from
+    /// every section, deleting e.g. the embedding model.
+    func testRemoteBlockEditsOnlyTheVLMSection() {
+        let config = """
+        [vlm]
+        mode = "local"
+        model = "old-remote"
+        keep_alive = "30m"
+
+        [embedding]
+        model = "nomic-embed-text"
+
+        [privacy]
+        mode = "strict"
+
+        """
+        let block = ModelTierTable.remoteVLMBlock(
+            provider: "openai", model: "gpt-5-mini", apiKeyEnv: "OPENAI_API_KEY"
+        )
+        let updated = ModelTierTable.applyVLMBlock(
+            block, to: config, managedKeys: ModelTierTable.remoteKeys
+        )
+        XCTAssertEqual(updated, """
+        [vlm]
+        mode = "remote"
+        provider = "openai"
+        model = "gpt-5-mini"
+        api_key_env = "OPENAI_API_KEY"
+        keep_alive = "30m"
+
+        [embedding]
+        model = "nomic-embed-text"
+
+        [privacy]
+        mode = "strict"
+
+        """)
+        // Saving twice leaves one copy of each key.
+        XCTAssertEqual(
+            ModelTierTable.applyVLMBlock(block, to: updated, managedKeys: ModelTierTable.remoteKeys),
+            updated
+        )
+    }
+
     func testAnEmptyTableIsAnError() {
         let json = #"{"schema_version": 1, "minimum_ollama_version_for_gemma4": "0.34.0", "embedding_model": "e", "model_sizes_gb": {}, "tiers": []}"#
         XCTAssertThrowsError(try ModelTierTable.decode(Data(json.utf8)))

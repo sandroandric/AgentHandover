@@ -142,11 +142,21 @@ struct ModelTierTable: Decodable {
             + "annotation_model = \"\(annotationModel)\"\nsop_model = \"\(sopModel)\"\n"
     }
 
+    /// The `[vlm]` lines of a remote (API) model choice.
+    static let remoteKeys = ["mode", "provider", "model", "api_key_env"]
+
+    static func remoteVLMBlock(provider: String, model: String, apiKeyEnv: String) -> String {
+        "[vlm]\nmode = \"remote\"\nprovider = \"\(provider)\"\n"
+            + "model = \"\(model)\"\napi_key_env = \"\(apiKeyEnv)\"\n"
+    }
+
     /// `config` with the managed keys of `[vlm]` replaced by `block`'s
-    /// (right after the header, other `[vlm]` keys kept), or `block`
-    /// appended when there is no `[vlm]` section: the same edit as
-    /// `agenthandover setup` (`tiers::apply_vlm_block`).
-    static func applyVLMBlock(_ block: String, to config: String) -> String {
+    /// (right after the header, other `[vlm]` keys and every other section
+    /// kept), or `block` appended when there is no `[vlm]` section: the
+    /// same edit as `agenthandover setup` (`tiers::apply_vlm_block`).
+    static func applyVLMBlock(
+        _ block: String, to config: String, managedKeys: [String] = managedKeys
+    ) -> String {
         var lines = config.components(separatedBy: "\n").map { $0 + "\n" }
         // The piece after the last "\n" has no terminator (and is dropped when empty).
         let last = lines.removeLast().dropLast()

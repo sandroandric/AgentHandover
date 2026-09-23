@@ -1931,40 +1931,16 @@ struct OnboardingView: View {
 
         try? FileManager.default.createDirectory(at: configDir, withIntermediateDirectories: true)
 
-        // Read existing config or start fresh
-        var content = (try? String(contentsOf: configPath, encoding: .utf8)) ?? ""
-
-        // Strip any existing remote-mode keys from [vlm] section to avoid
-        // duplicates on repeated saves.  Then insert the new values.
-        let remoteKeys = ["mode", "provider", "model", "api_key_env"]
-        for key in remoteKeys {
-            // Match lines like: mode = "remote"  or  provider = "openai"
-            // (with optional leading whitespace and any quoted value)
-            let pattern = "(?m)^[ \\t]*\(key)[ \\t]*=[ \\t]*\"[^\"]*\"[ \\t]*\\n?"
-            if let regex = try? NSRegularExpression(pattern: pattern) {
-                let range = NSRange(content.startIndex..., in: content)
-                content = regex.stringByReplacingMatches(
-                    in: content, range: range, withTemplate: ""
-                )
-            }
-        }
-
-        let newFields = "mode = \"remote\"\nprovider = \"\(provider)\"\nmodel = \"\(model)\"\napi_key_env = \"\(apiKeyEnv)\"\n"
-
-        if content.contains("[vlm]") {
-            if let vlmRange = content.range(of: "[vlm]") {
-                let afterVlm = content[vlmRange.upperBound...]
-                if let nextSection = afterVlm.range(of: "\n[") {
-                    content.insert(contentsOf: "\n" + newFields, at: nextSection.lowerBound)
-                } else {
-                    content += "\n" + newFields
-                }
-            }
-        } else {
-            content += "\n[vlm]\n" + newFields
-        }
-
-        try? content.write(to: configPath, atomically: true, encoding: .utf8)
+        // Only [vlm] is edited: a "model =" in another section (the
+        // embedding model, say) belongs to that section.
+        let current = (try? String(contentsOf: configPath, encoding: .utf8)) ?? ""
+        let block = ModelTierTable.remoteVLMBlock(
+            provider: provider, model: model, apiKeyEnv: apiKeyEnv
+        )
+        let updated = ModelTierTable.applyVLMBlock(
+            block, to: current, managedKeys: ModelTierTable.remoteKeys
+        )
+        try? updated.write(to: configPath, atomically: true, encoding: .utf8)
     }
 
     // MARK: - Screen 8: Browser Extension (Optional, Load Unpacked, WHITE BACKGROUND)
