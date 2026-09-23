@@ -89,6 +89,10 @@ _ID_SEGMENT = re.compile(
     )$""",
     re.X | re.I,
 )
+# An issue key (Jira ``PROJ-101``, Linear ``ENG-42``): an upper-case project
+# key of any length, a dash, a number.  Case-sensitive, so a slug such as
+# ``release-2024`` still names its page.
+_ISSUE_KEY = re.compile(r"^[A-Z][A-Z0-9]{1,9}-\d+$")
 
 
 # ---------------------------------------------------------------------------
@@ -99,7 +103,8 @@ _ID_SEGMENT = re.compile(
 def template_path(path: str) -> str:
     """*path* with record ids replaced by ``{id}``."""
     return "/".join(
-        "{id}" if seg and _ID_SEGMENT.match(seg) else seg for seg in path.split("/")
+        "{id}" if seg and (_ID_SEGMENT.match(seg) or _ISSUE_KEY.match(seg)) else seg
+        for seg in path.split("/")
     )
 
 

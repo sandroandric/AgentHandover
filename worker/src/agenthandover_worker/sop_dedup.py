@@ -187,13 +187,24 @@ def _url_to_domain(text: str) -> str:
         return ""
 
 
-def _extract_action_verbs(sop: dict) -> set[str]:
-    """Extract normalized action verbs from SOP steps.
+def _verb_stem(word: str) -> str:
+    """*word* lowercased, its ``-ing`` and final silent ``e`` dropped, so
+    the model's gerunds ("Reviewing Jira board", "Updating status") and a
+    recorded step's imperative ("Review the board", "Update status") meet
+    on one form (``review``, ``updat``).  A doubled final consonant left by
+    ``-ing`` is undoubled (``running`` -> ``run``) except l, s and z
+    (``filling`` -> ``fill``)."""
+    w = word.lower()
+    if len(w) > 5 and w.endswith("ing"):
+        w = w[:-3]
+        if len(w) > 3 and w[-1] == w[-2] and w[-1] not in "lsz":
+            w = w[:-1]
+    return w[:-1] if len(w) > 3 and w.endswith("e") else w
 
-    Takes the first word of each step description, lowercased.
-    Maps common synonyms to canonical forms.
-    """
-    _VERB_MAP = {
+
+# Synonyms mapped to one canonical verb, keyed by stem.
+_VERB_MAP: dict[str, str] = {
+    _verb_stem(verb): canonical for verb, canonical in {
         "navigate": "open",
         "go": "open",
         "visit": "open",
@@ -219,19 +230,27 @@ def _extract_action_verbs(sop: dict) -> set[str]:
         "filter": "select",
         "wait": "wait",
         "pause": "wait",
-    }
+    }.items()
+}
 
+
+def normalize_verb(word: str) -> str:
+    """The canonical form of an action verb: its stem (:func:`_verb_stem`),
+    with synonyms mapped to one verb (``navigate`` -> ``open``).  The one
+    verb normalisation for SOP fingerprints and the procedure matcher."""
+    stem = _verb_stem(word)
+    return _VERB_MAP.get(stem, stem)
+
+
+def _extract_action_verbs(sop: dict) -> set[str]:
+    """Extract normalized action verbs from SOP steps: the first word of
+    each step description, through :func:`normalize_verb`."""
     verbs: set[str] = set()
     for step in sop.get("steps", []):
         action = step.get("step", step.get("action", ""))
-        if not action:
+        if not isinstance(action, str) or not action.strip():
             continue
-        # First word, lowercased
-        first_word = action.strip().split()[0].lower() if action.strip() else ""
-        if first_word:
-            canonical = _VERB_MAP.get(first_word, first_word)
-            verbs.add(canonical)
-
+        verbs.add(normalize_verb(action.strip().split()[0]))
     return verbs
 
 

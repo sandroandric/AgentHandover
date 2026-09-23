@@ -68,6 +68,10 @@ class TestSignatures:
         ("https://x.io/runs/3f2b9c1e-8a4d-4c2b-9e1f-0a1b2c3d4e5f/logs", "x.io/runs/{id}/logs"),
         ("https://github.com/org/repo/commit/9fceb02d0ae598e95dc970b74767f19372d61af8", "github.com/org/repo/commit/{id}"),
         ("https://acme.io/invoices/INV-2044", "acme.io/invoices/{id}"),
+        # Issue keys: each morning's tickets differ, the workflow does not.
+        ("https://jira.atlassian.net/browse/PROJ-101", "jira.atlassian.net/browse/{id}"),
+        ("https://linear.app/acme/issue/ENG-42/fix-login", "linear.app/acme/issue/{id}/fix-login"),
+        ("https://acme.io/blog/release-2024", "acme.io/blog/release-2024"),
         ("https://mail.google.com/mail/u/0/#inbox/FMfcgz", "mail.google.com/mail/u/{id}"),
         # A document's own key names the document: two documents stay two.
         ("https://docs.google.com/document/d/1hQ4hiringPlan/edit", "docs.google.com/document/d/1hQ4hiringPlan/edit"),

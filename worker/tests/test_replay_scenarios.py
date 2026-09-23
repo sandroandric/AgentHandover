@@ -242,11 +242,19 @@ class TestRecurrence:
     """Recurrence detection finds daily patterns."""
 
     @pytest.mark.xfail(strict=True, reason=(
-        "measured on the production path (WP-M4): the daily batch splits each "
-        "standup into a Zoom task and a Jira task, and ProcedureMatcher scores "
-        "neither >= 0.50 against daily-standup (the verb map leaves 'opening' / "
-        "'reviewing' unnormalised), so no day observes the procedure; the "
-        "recurrence came only from hand-written matched_procedure summaries"
+        "re-owned by WP-F5 (diagnosed 2026-09-23): the daily batch splits each "
+        "standup by app into a Zoom task and a Jira task, and ProcedureMatcher "
+        "scores each half against the whole recorded daily-standup Skill: 0.20 "
+        "(Zoom) and 0.44 (Jira, after WP-F5's gerund normalisation made "
+        "'Reviewing' meet 'Review') against the 0.50 threshold, so no day "
+        "observes the Skill.  WP-M3's observation log keeps each morning as "
+        "one session and, once WP-F5 templated Jira issue keys (PROJ-101 -> "
+        "{id}), groups the five mornings and detects the daily recurrence "
+        "(test_observation_log_sees_the_daily_standup), but it reaches only "
+        "Skills promoted from mining (promoted_slug); nothing links a "
+        "recorded Skill to its passive observation group.  Owner: the "
+        "follow-up that links workflow_observations groups to recorded "
+        "Skills (reported by WP-F5 to the lead)"
     ))
     def test_daily_pattern_detected(self, tmp_path: Path) -> None:
         scenario = _load("multi_day_recurring_standup")
@@ -264,6 +272,53 @@ class TestRecurrence:
         assert metrics["recall"] > 0.0, (
             f"No recurrence patterns detected: {metrics}"
         )
+
+    def test_observation_log_sees_the_daily_standup(self) -> None:
+        """The same five mornings through WP-M3's observation log: one work
+        session per morning (Zoom and Jira together, as the user did them),
+        one workflow group, recurrence daily at the standup's time.
+
+        The fixture predates the compact annotation, so its
+        ``visual_context.active_app`` / ``location`` are lifted to the
+        top-level ``app`` / ``location`` the annotator writes today."""
+        import json
+        from datetime import date
+
+        from agenthandover_worker import workflow_mining
+        from agenthandover_worker.pattern_detector import PatternDetector
+
+        events = []
+        for event in ReplayRunner(_load("multi_day_recurring_standup"))._prepare_events_for_daily_processor():
+            ann = json.loads(event["scene_annotation_json"])
+            visual = ann.get("visual_context", {})
+            ann["app"] = visual.get("active_app", "")
+            ann["location"] = visual.get("location", "")
+            events.append({**event, "scene_annotation_json": json.dumps(ann)})
+
+        sessions = workflow_mining.split_sessions(events)
+        by_id = {e["id"]: e for e in events}
+        observations = [
+            workflow_mining.build_observation(s, [by_id[f.event_id] for f in s])
+            for s in sessions
+        ]
+        assert len(observations) == 5
+        assert all(
+            {step[0] for step in json.loads(o["step_sig_json"])} == {"zoom", "chrome"}
+            for o in observations
+        )
+        groups = workflow_mining.group_observations(observations)
+        assert [len(g.observations) for g in groups] == [5]
+
+        dates = {o["started_local_date"] for o in observations}
+        pattern = PatternDetector(
+            None, min_observations=workflow_mining.MIN_OBSERVATIONS,
+        ).detect_from_observations(
+            groups[0].observations, today=date.fromisoformat(max(dates)),
+            active_dates=dates, slug="daily-standup",
+        )
+        assert pattern is not None and pattern.pattern == "daily"
+        assert pattern.observations == 5
+        assert pattern.avg_duration_minutes == 15
 
 
 # ---------------------------------------------------------------------------

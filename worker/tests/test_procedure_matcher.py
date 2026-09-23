@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from agenthandover_worker.knowledge_base import KnowledgeBase
-from agenthandover_worker.procedure_matcher import ProcedureMatcher, _VERB_MAP
+from agenthandover_worker.procedure_matcher import ProcedureMatcher
 from agenthandover_worker.procedure_schema import sop_to_procedure
 from agenthandover_worker.task_segmenter import AnnotatedFrame, TaskSegment
 
@@ -331,6 +331,27 @@ class TestVerbNormalization:
         assert "type" not in verbs
         assert "press" not in verbs
         assert "check" not in verbs
+
+    def test_gerund_intent_meets_the_recorded_imperative(self, kb):
+        """The model writes intents as gerunds ("Reviewing Jira board");
+        a recorded Skill's steps are imperatives ("Review the Jira sprint
+        board").  Both reach the same verb, so the verb component counts."""
+        from agenthandover_worker.daily_processor import TaskBoundary
+        from agenthandover_worker.sop_dedup import compute_fingerprint
+
+        boundary = TaskBoundary(
+            start_time="2026-03-10T09:05:00Z", end_time="2026-03-10T09:15:00Z",
+            duration_minutes=10, intent="Updating Jira status", apps=["Chrome"],
+            urls=["https://jira.atlassian.net/browse/PROJ-101"], event_ids=["e1"],
+            is_complete=True,
+        )
+        fp = ProcedureMatcher(kb)._boundary_to_fingerprint(boundary)
+        proc_fp = compute_fingerprint({"steps": [
+            {"action": "Join the daily standup meeting"},
+            {"action": "Review the Jira sprint board"},
+            {"action": "Update Jira ticket status"},
+        ]})
+        assert set(fp["action_verbs"]) <= set(proc_fp["action_verbs"])
 
 
 class TestDomainExtraction:
