@@ -71,6 +71,12 @@ enum Commands {
         /// Set up VLM only
         #[arg(long)]
         vlm: bool,
+        /// Install the opt-in zsh hook that records the commands you run
+        #[arg(long, conflicts_with = "shell_remove")]
+        shell: bool,
+        /// Remove the zsh hook
+        #[arg(long)]
+        shell_remove: bool,
     },
     /// Run pre-flight checks
     Doctor,
@@ -226,7 +232,9 @@ fn main() -> Result<()> {
             SopsAction::Retry { failure_id } => commands::sops::retry(&failure_id),
         },
         Commands::Watch => commands::watch::run(),
-        Commands::Setup { check, extension, vlm } => commands::setup::run(check, extension, vlm),
+        Commands::Setup { shell: true, .. } => commands::shell_hook::run(false),
+        Commands::Setup { shell_remove: true, .. } => commands::shell_hook::run(true),
+        Commands::Setup { check, extension, vlm, .. } => commands::setup::run(check, extension, vlm),
         Commands::Doctor => commands::doctor::run(),
         Commands::Uninstall { purge_data } => commands::uninstall::run(purge_data),
         Commands::Focus { action } => match action {

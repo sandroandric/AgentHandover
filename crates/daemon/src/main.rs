@@ -505,6 +505,14 @@ async fn main() -> Result<()> {
         })
     };
 
+    // Ingest the opt-in shell hook's log (`agenthandover setup --shell`).
+    let shell_handle = tokio::spawn(agenthandover_daemon::shell::run_shell_ingest(
+        agenthandover_common::status::data_dir(),
+        tx.clone(),
+        shutdown_tx.subscribe(),
+        Arc::clone(&capture_paused),
+    ));
+
     // Create artifact store for screenshot capture.
     // Key is derived from machine-specific data so each installation gets
     // a unique encryption key, while remaining deterministic on the same machine.
@@ -534,6 +542,7 @@ async fn main() -> Result<()> {
     health_handle.abort();
     maint_handle.abort();
     control_handle.abort();
+    shell_handle.abort();
     #[cfg(target_os = "macos")]
     clipboard_handle.abort();
 

@@ -24,6 +24,12 @@ pub fn run(purge_data: bool) -> Result<()> {
         }
     }
 
+    // Step 2b: Remove the opt-in zsh hook (`agenthandover setup --shell`)
+    let zshrc = super::shell_hook::zshrc_path();
+    if super::shell_hook::remove(&agenthandover_common::status::data_dir(), &zshrc)? {
+        println!("  Removed the shell hook from {}", zshrc.display());
+    }
+
     // Step 3: Remove native messaging host manifest from all supported browsers
     let manifest_name = "com.agenthandover.host.json";
     let mut nm_removed = false;
