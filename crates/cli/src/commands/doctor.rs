@@ -245,6 +245,11 @@ pub fn run() -> Result<()> {
     .and_then(|s| s.app_state_consent);
     print_findings(&mut counts, &app_state_findings(read_app_state, consent.as_ref()));
 
+    // Check 15c: a config still pinning its tier's earlier default models
+    // (tiers.json `previous_defaults`): the tier migration the installer
+    // and the worker run at startup did not happen or failed.
+    print_findings(&mut counts, &tier_migration_findings(&config_str));
+
     // Check 16: Required models pulled
     //
     // The models depend on the RAM tier (tiers.json), so a hard-coded
@@ -426,6 +431,42 @@ fn app_state_findings(
         level: Level::Warn,
         title: format!("Reading open documents: {} app(s) not granted", lines.len()),
         lines,
+    }]
+}
+
+/// A warning when `[vlm]` (local mode) pins one of its tier's earlier
+/// default model pairs: the upgrade's tier migration
+/// (`model_profiles.migrate_vlm_block`) did not move it to the tier's
+/// current models.  Nothing otherwise.
+fn tier_migration_findings(config_str: &str) -> Vec<machine::Finding> {
+    let field = |key: &str| read_config_string_field(config_str, "vlm", key);
+    if field("mode").is_some_and(|m| m != "local") {
+        return vec![];
+    }
+    let (Some(id), Some(annotation), Some(sop)) =
+        (field("tier"), field("annotation_model"), field("sop_model"))
+    else {
+        return vec![];
+    };
+    let Some(tier) = tiers::table().get(&id) else {
+        return vec![];
+    };
+    if !tier.is_previous_default(&annotation, &sop) {
+        return vec![];
+    }
+    vec![machine::Finding {
+        level: machine::Level::Warn,
+        title: format!(
+            "Config pins the {} tier's earlier models ({annotation} + {sop})",
+            tier.label
+        ),
+        lines: vec![
+            format!(
+                "The {} tier now runs {} + {}; the upgrade did not update config.toml.",
+                tier.label, tier.annotation_model, tier.sop_model
+            ),
+            format!("Fix: agenthandover setup --tier {}", tier.id),
+        ],
     }]
 }
 
@@ -946,6 +987,42 @@ mod tests {
             Warn
         };
         assert_eq!(level(""), expected);
+    }
+
+    #[test]
+    fn a_config_on_a_tiers_earlier_models_warns_with_the_fix() {
+        let old = "[vlm]\nmode = \"local\"\ntier = \"recommended\"\n\
+                   annotation_model = \"qwen3.5:4b\"\nsop_model = \"gemma4:12b-it-qat\"\n";
+        let findings = tier_migration_findings(old);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].level, machine::Level::Warn);
+        assert_eq!(
+            findings[0].title,
+            "Config pins the Recommended tier's earlier models (qwen3.5:4b + gemma4:12b-it-qat)"
+        );
+        assert_eq!(
+            findings[0].lines,
+            [
+                "The Recommended tier now runs qwen3.5:4b + qwen3.5:4b; the upgrade did not \
+                 update config.toml.",
+                "Fix: agenthandover setup --tier recommended",
+            ]
+        );
+        // No mode key means local.
+        assert_eq!(tier_migration_findings(&old.replace("mode = \"local\"\n", "")).len(), 1);
+
+        // Migrated, customised, remote, another or unknown tier, no pins: silent.
+        for config in [
+            old.replace("gemma4:12b-it-qat", "qwen3.5:4b"),
+            old.replace("gemma4:12b-it-qat", "gemma4:31b-it-qat"),
+            old.replace("\"local\"", "\"remote\""),
+            old.replace("\"recommended\"", "\"performance\""),
+            old.replace("\"recommended\"", "\"huge\""),
+            old.replace("sop_model = \"gemma4:12b-it-qat\"\n", ""),
+            String::new(),
+        ] {
+            assert!(tier_migration_findings(&config).is_empty(), "{config}");
+        }
     }
 
     #[test]

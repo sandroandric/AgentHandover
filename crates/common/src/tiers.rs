@@ -26,6 +26,30 @@ pub struct Tier {
     /// The SOP model's A/B arm (`[vlm] sop_ab = true`); empty when none.
     #[serde(default)]
     pub ab_sop_model: String,
+    /// The tier's earlier default models (`PREVIOUS_TIER_DEFAULTS` in the
+    /// worker), which a shipped writer may have pinned in a config.
+    #[serde(default)]
+    pub previous_defaults: Vec<ModelPair>,
+}
+
+/// An `(annotation_model, sop_model)` pair.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct ModelPair {
+    pub annotation_model: String,
+    pub sop_model: String,
+}
+
+impl Tier {
+    /// True when `annotation_model` + `sop_model` are one of this tier's
+    /// earlier defaults (not its current one): a config still pinning them
+    /// missed the worker's tier migration.
+    pub fn is_previous_default(&self, annotation_model: &str, sop_model: &str) -> bool {
+        (annotation_model, sop_model) != (self.annotation_model.as_str(), self.sop_model.as_str())
+            && self
+                .previous_defaults
+                .iter()
+                .any(|p| p.annotation_model == annotation_model && p.sop_model == sop_model)
+    }
 }
 
 /// The whole of `tiers.json`.
@@ -237,6 +261,36 @@ mod tests {
         // Idempotent.
         let once = apply_vlm_block(&fixture("input.toml"), tier);
         assert_eq!(apply_vlm_block(&once, tier), once);
+    }
+
+    /// The worker's tier migration (`model_profiles.migrate_vlm_block`)
+    /// makes the same edit as `setup --tier`: a config on the 16 GB tier's
+    /// pre-WP-F6 models becomes recommended-migrated.toml.
+    #[test]
+    fn apply_matches_the_migration_fixture() {
+        let tier = table().get("recommended").unwrap();
+        assert_eq!(
+            apply_vlm_block(&fixture("recommended-previous.toml"), tier),
+            fixture("recommended-migrated.toml")
+        );
+    }
+
+    #[test]
+    fn previous_defaults_come_from_tiers_json() {
+        let recommended = table().get("recommended").unwrap();
+        assert_eq!(
+            recommended.previous_defaults,
+            [ModelPair {
+                annotation_model: "qwen3.5:4b".into(),
+                sop_model: "gemma4:12b-it-qat".into()
+            }]
+        );
+        assert!(recommended.is_previous_default("qwen3.5:4b", "gemma4:12b-it-qat"));
+        assert!(!recommended.is_previous_default("qwen3.5:4b", "qwen3.5:4b"));
+        assert!(!recommended.is_previous_default("qwen3.5:4b", "gemma4:31b-it-qat"));
+        for id in ["standard", "performance", "max_quality"] {
+            assert!(table().get(id).unwrap().previous_defaults.is_empty(), "{id}");
+        }
     }
 
     #[test]
