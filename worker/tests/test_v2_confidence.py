@@ -146,7 +146,7 @@ class TestScoreAnnotationQuality:
         ann = {
             "app": "Chrome",
             "location": "https://example.com",
-            "visible_content": {"headings": ["Title"]},
+            "key_text": {"typed_text": "Title"},
             "ui_state": {"active_element": "input"},
             "task_context": {"what_doing": "filling form"},
         }
@@ -157,7 +157,7 @@ class TestScoreAnnotationQuality:
         ann = {
             "app": "Chrome",
             "location": "https://example.com",
-            # Missing visible_content, ui_state, task_context
+            # Missing key_text, ui_state, task_context
         }
         score = _score_annotation_quality([ann])
         assert 0.0 < score < 1.0
@@ -167,7 +167,7 @@ class TestScoreAnnotationQuality:
         ann = {
             "app": "Chrome",
             "location": "",
-            "visible_content": {},
+            "key_text": {},
             "ui_state": {},
             "task_context": {},
         }
@@ -180,7 +180,7 @@ class TestScoreAnnotationQuality:
         full = {
             "app": "Chrome",
             "location": "https://example.com",
-            "visible_content": {"h": ["x"]},
+            "key_text": {"urls": ["x"]},
             "ui_state": {"a": "b"},
             "task_context": {"what_doing": "x"},
         }

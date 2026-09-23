@@ -28,14 +28,15 @@ class ModelProfile:
     model: str
     family: str  # "qwen3.5", "gemma4"
 
-    # Annotation settings (vision, JSON extraction).  The output is
-    # constrained by the annotation JSON schema, so temperature 0 keeps it
-    # deterministic.  ``ann_num_predict`` bounds the 21-leaf schema with its
-    # capped lists (typical output 300-500 tokens); ``ann_num_ctx`` holds
-    # the <=1,700-token prompt plus image and the output with headroom.
+    # Annotation settings (text-first JSON extraction, vision when needed).
+    # The output is constrained by the annotation JSON schema, so
+    # temperature 0 keeps it deterministic.  ``ann_num_predict`` bounds the
+    # compact 12-leaf schema with its capped lists (typical output ~120
+    # tokens); ``ann_num_ctx`` holds the <=1,700-token prompt, an image on
+    # a vision call, and the output with headroom.
     ann_system: str = ""
     ann_temperature: float = 0.0
-    ann_num_predict: int = 600
+    ann_num_predict: int = 300
     ann_num_ctx: int = 4096
     ann_top_k: int = 40
     ann_top_p: float = 0.95

@@ -67,7 +67,7 @@ max_compute_minutes_per_day = 20
 # QAT (Gemma 4 16/24/48GB tiers) requires Ollama 0.30.6+.  The 8GB Qwen
 # tier works on older Ollama.  Settings per model are auto-tuned via
 # model_profiles.py.
-annotation_model = "qwen3.5:2b"   # model for per-frame annotation
+annotation_model = "qwen3.5:4b"   # model for per-frame annotation (text first; every tier)
 sop_model = "qwen3.5:4b"          # model for SOP generation
 annotation_enabled = true          # enable continuous scene annotation pipeline
 stale_skip_count = 3               # skip after N consecutive non-workflow same-app frames

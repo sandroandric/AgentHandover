@@ -383,11 +383,11 @@ class TestTimelineEvidence:
         assert "verbatim" in out
         assert 'typed="updates"' in out
 
-    def test_renders_urls_and_values(self):
+    def test_renders_urls_and_screen_text(self):
         obs = [[
             self._make_rich_frame(
                 urls=["https://news.ycombinator.com"],
-                visible_values=["Top 10 HN stories", "by time"],
+                screen_text="Top 10 HN stories\nby time",
             )
         ]]
         out = BehavioralSynthesizer._format_timeline_evidence(obs)
@@ -439,7 +439,7 @@ class TestTimelineEvidence:
                 "app": "Comet",
                 "location": "https://news.ycombinator.com",
                 "urls": ["https://news.ycombinator.com"],
-                "visible_values": ["Story 1", "Story 2"],
+                "screen_text": "Story 1\nStory 2",
             },
         ]]
         prompt = synth._build_prompt(_make_procedure(), rich_obs)
