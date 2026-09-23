@@ -17,10 +17,12 @@ Key features:
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import re
 import sqlite3
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -144,6 +146,17 @@ def _calculate_active_minutes(timestamps: list[str]) -> int:
     return int(total_seconds / 60)
 
 
+def _locked(method):
+    """Run an ActivitySearcher method while holding the instance lock."""
+
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with self._lock:
+            return method(self, *args, **kwargs)
+
+    return wrapper
+
+
 class ActivitySearcher:
     """Full-text + structured search over VLM annotations.
 
@@ -164,7 +177,11 @@ class ActivitySearcher:
             raise FileNotFoundError(f"Database file does not exist: {resolved}")
 
         self._db_path = str(resolved)
-        self._conn = sqlite3.connect(self._db_path)
+        # One connection shared by the worker loop and the query API's
+        # HTTP thread; every public method holds ``_lock`` so the two never
+        # interleave (and two index fills cannot insert duplicate rows).
+        self._lock = threading.RLock()
+        self._conn = sqlite3.connect(self._db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA busy_timeout = 5000;")
 
@@ -181,6 +198,7 @@ class ActivitySearcher:
     # Public API
     # ------------------------------------------------------------------
 
+    @_locked
     def search(
         self,
         query: str,
@@ -289,6 +307,7 @@ class ActivitySearcher:
 
         return results
 
+    @_locked
     def session_recall(
         self,
         *,
@@ -392,6 +411,7 @@ class ActivitySearcher:
             apps_used=list(apps_seen.keys()),
         )
 
+    @_locked
     def close(self) -> None:
         """Close the underlying database connection."""
         try:
@@ -479,6 +499,7 @@ class ActivitySearcher:
         logger.info("Populated FTS5 index with %d new entries", len(batch))
         return len(batch)
 
+    @_locked
     def refresh_index(self) -> int:
         """Re-scan events and add any new annotations to the FTS5 index.
 
