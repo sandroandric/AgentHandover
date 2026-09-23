@@ -70,13 +70,18 @@ def _paused_session(state_dir, db) -> dict:
     return proc
 
 
-def _app_writes(state_dir, *, status: str, answers: dict | None = None) -> None:
-    """The app's FocusQAView write-back: status, plus the non-blank answers."""
+def _app_writes(
+    state_dir, *, status: str, answers: dict | None = None, sources: dict | None = None,
+) -> None:
+    """The app's FocusQAView write-back: status, plus the non-blank answers
+    and where each came from (``FocusQAView.answeredFile``)."""
     path = state_dir / FOCUS_QUESTIONS_FILE
     data = json.loads(path.read_text(encoding="utf-8"))
     data["status"] = status
     if answers is not None:
         data["answers"] = answers
+    if sources is not None:
+        data["answer_sources"] = sources
     path.write_text(json.dumps(data), encoding="utf-8")
 
 
@@ -141,7 +146,8 @@ def test_a_blank_field_is_unanswered_and_a_typed_answer_is_kept(
     fixture = events_db("focus_dailynews", rebase_to=clock.now())
     journey = worker(fixture, adapter="claude-skill")
     _paused_session(temp_home.data_dir, journey.db)
-    # The app omits the untouched first field (FocusQAView.submittedAnswers).
+    # The user cleared the first field: the app leaves it out
+    # (FocusQAView.submission); an older app wrote no answer_sources.
     _app_writes(temp_home.data_dir, status="answered", answers={"1": "The first row"})
     _merge_then_approve(journey, temp_home.data_dir)
 
@@ -151,3 +157,37 @@ def test_a_blank_field_is_unanswered_and_a_typed_answer_is_kept(
     ) in packet
     assert OPEN_LOGIN_QUESTION in packet
     assert "Assume" not in packet
+
+
+def test_a_guess_submitted_as_is_stays_a_guess(
+    events_db, worker, clock, temp_home, kb_root,
+) -> None:
+    """The app pre-fills each field with the guess (WP-Q1): Submit with the
+    first untouched and the second typed over records an accepted guess and
+    an answer; the ledger keeps the guess a hypothesis and the packet tells
+    the agent to confirm it."""
+    fixture = events_db("focus_dailynews", rebase_to=clock.now())
+    journey = worker(fixture, adapter="claude-skill")
+    _paused_session(temp_home.data_dir, journey.db)
+    _app_writes(
+        temp_home.data_dir, status="answered",
+        answers={"0": GUESSES[0], "1": "The first row"},
+        sources={"0": "accepted_guess", "1": "typed"},
+    )
+    _merge_then_approve(journey, temp_home.data_dir)
+
+    stored = json.loads((kb_root / "procedures" / f"{SLUG}.json").read_text(encoding="utf-8"))
+    assert [(c["status"], c["source"]) for c in stored["agent_clarifications"]] == [
+        ("answered", "accepted_guess"), ("answered", "typed"),
+    ]
+    knowledge = stored["knowledge"]
+    assert knowledge["inputs"]["status"] == "hypothesis"  # access: the kept guess
+    assert knowledge["inputs"]["evidence"] == [{"kind": "answer", "id": "agent_clarifications.0"}]
+    assert knowledge["decisions"]["status"] == "known"  # decision_logic: typed
+
+    packet = _packet(journey)
+    assert (
+        "- Unconfirmed: the user let this guess stand for "
+        "\"Is the user already logged in to Namecheap?\": " + GUESSES[0]
+    ) in packet
+    assert "- The user answered \"Which search result is the exact match?\": The first row" in packet

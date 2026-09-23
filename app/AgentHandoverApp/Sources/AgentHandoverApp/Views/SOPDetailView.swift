@@ -497,7 +497,10 @@ struct SOPDetailView: View {
                         VStack(alignment: .leading, spacing: 12) {
                             ForEach(Array(clarifications.enumerated()), id: \.offset) { _, qa in
                                 let question = qa["question"] as? String ?? ""
-                                let answer   = qa["answer"]   as? String ?? ""
+                                let text     = qa["answer"]   as? String ?? ""
+                                // The model's guess, submitted unchanged, is marked as such.
+                                let answer = text.isEmpty || (qa["source"] as? String) != "accepted_guess"
+                                    ? text : "\(text) (guess you kept)"
                                 if !question.isEmpty {
                                     VStack(alignment: .leading, spacing: 4) {
                                         HStack(alignment: .top, spacing: 6) {

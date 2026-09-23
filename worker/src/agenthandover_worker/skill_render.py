@@ -523,7 +523,13 @@ def body_sections(proc: dict) -> list[str]:
         if not isinstance(item, dict) or not item.get("question"):
             continue
         answer = str(item.get("answer") or "").strip()
-        if answer and item.get("status") != "unanswered":
+        if answer and item.get("status") != "unanswered" and item.get("source") == "accepted_guess":
+            # The model's guess, left as it was: not the user's own words.
+            decisions.append(
+                f"- Unconfirmed: the user let this guess stand for \"{item['question']}\": "
+                f"{answer}. Confirm it with the user before relying on it."
+            )
+        elif answer and item.get("status") != "unanswered":
             decisions.append(f"- The user answered \"{item['question']}\": {answer}")
         else:
             decisions.append(
