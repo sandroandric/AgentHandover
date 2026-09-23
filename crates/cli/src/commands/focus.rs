@@ -83,6 +83,7 @@ fn start_in(state_dir: &std::path::Path, title: &str, daemon_running: bool) -> R
         title: title.to_string(),
         started_at: Utc::now().to_rfc3339(),
         status: FocusSessionStatus::Recording,
+        stopped_at: None,
     };
 
     write_focus_signal(state_dir, &signal)?;
@@ -99,11 +100,15 @@ fn start_in(state_dir: &std::path::Path, title: &str, daemon_running: bool) -> R
 
 /// Stop the active focus recording session.
 ///
-/// Reads the existing signal, sets `status: "stopped"`, and prints the session ID.
+/// Reads the existing signal, sets `status: "stopped"` and `stopped_at`
+/// (the worker times its empty-session wait from it), and prints the
+/// session ID.
 pub fn stop() -> Result<()> {
-    let state_dir = data_dir();
+    stop_in(&data_dir())
+}
 
-    let mut signal = match read_focus_signal(&state_dir) {
+fn stop_in(state_dir: &std::path::Path) -> Result<()> {
+    let mut signal = match read_focus_signal(state_dir) {
         Some(s) => s,
         None => {
             println!("{}", "No active focus session found.".dimmed());
@@ -124,7 +129,8 @@ pub fn stop() -> Result<()> {
     }
 
     signal.status = FocusSessionStatus::Stopped;
-    write_focus_signal(&state_dir, &signal)?;
+    signal.stopped_at = Some(Utc::now().to_rfc3339());
+    write_focus_signal(state_dir, &signal)?;
 
     println!("{} Focus recording stopped", "■".green());
     println!("  Title:      {}", signal.title.bold());
@@ -353,6 +359,28 @@ mod tests {
         let signal = read_focus_signal(dir.path()).unwrap();
         assert!(signal.is_recording());
         assert_eq!(signal.title, "Send weekly report");
+    }
+
+    #[test]
+    fn stop_writes_stopped_at_and_keeps_the_session() {
+        let dir = tempfile::tempdir().unwrap();
+        start_in(dir.path(), "Send weekly report", true).unwrap();
+        let started = read_focus_signal(dir.path()).unwrap();
+        assert_eq!(started.stopped_at, None);
+
+        let before = Utc::now();
+        stop_in(dir.path()).unwrap();
+        let stopped = read_focus_signal(dir.path()).unwrap();
+        assert!(stopped.is_stopped());
+        assert_eq!(stopped.session_id, started.session_id);
+        assert_eq!(stopped.started_at, started.started_at);
+        let at = chrono::DateTime::parse_from_rfc3339(stopped.stopped_at.as_deref().unwrap())
+            .unwrap();
+        assert!(at >= before - chrono::Duration::seconds(1));
+
+        // A second stop leaves the first stop time alone.
+        stop_in(dir.path()).unwrap();
+        assert_eq!(read_focus_signal(dir.path()).unwrap().stopped_at, stopped.stopped_at);
     }
 
     #[test]

@@ -99,6 +99,9 @@ struct FocusSessionSignalFile: Codable, Equatable {
     let title: String
     let started_at: String
     var status: String
+    /// Set on stop (ISO 8601); absent while recording and in signals from
+    /// older writers. Left out of the JSON when nil.
+    var stopped_at: String? = nil
 }
 
 /// A single question from focus-questions.json
@@ -241,6 +244,7 @@ final class AppState: ObservableObject {
     private var pollTimer: Timer?
     private var quickTimer: Timer?
     private var focusQuestionsStamp = FileStamp()
+    private var focusResultStamp = FileStamp()
     /// Called when both grants are present after one of them was missing
     /// (set by the app delegate; see `OnboardingProgress.regrantAction`).
     var onPermissionsGranted: (() -> Void)?
@@ -306,10 +310,14 @@ final class AppState: ObservableObject {
 
     nonisolated static let quickCheckInterval: TimeInterval = 2.0
 
-    /// Re-reads focus-questions.json when it changed, and the grants.
+    /// Re-reads focus-questions.json and focus-result.json when they
+    /// changed, and the grants.
     func quickCheck() {
         if focusQuestionsStamp.changed(statusDir.appendingPathComponent("focus-questions.json")) {
             readFocusQuestions()
+        }
+        if focusResultStamp.changed(statusDir.appendingPathComponent(FocusResult.fileName)) {
+            readFocusSession()
         }
         checkPermissions()
     }
@@ -387,12 +395,24 @@ final class AppState: ObservableObject {
         extensionConnected = false
     }
 
-    /// Re-reads focus-session.json. Called on every status refresh and each
+    /// Re-reads focus-session.json and focus-result.json. Called on every
+    /// status refresh, when focus-result.json changes, and each
     /// second while the popover is open, so a session started or stopped
     /// from the CLI shows up without waiting for the 30 s poll.
     func readFocusSession() {
-        let state = FocusRecordState(signal: FocusSignal.read(in: statusDir))
+        let state = FocusRecordState(
+            signal: FocusSignal.read(in: statusDir),
+            result: FocusResult.read(in: statusDir)
+        )
         if state != focusState { focusState = state }
+    }
+
+    /// The menu's Dismiss on "Nothing was recorded": deletes the worker's
+    /// focus-result.json for that session.
+    func dismissFocusResult() {
+        guard case .nothingRecorded(let sessionId, _) = focusState else { return }
+        FocusResult.dismiss(sessionID: sessionId, in: statusDir)
+        readFocusSession()
     }
 
     private func readFocusQuestions() {

@@ -35,6 +35,12 @@ pub struct FocusSessionSignal {
     pub started_at: String,
     /// Current status.
     pub status: FocusSessionStatus,
+    /// When the session was stopped (ISO 8601), written by `focus stop`
+    /// and the app's stop.  The worker times its empty-session grace from
+    /// it (falling back to the file's mtime).  Optional both ways: a signal
+    /// without it parses, and it is left out of the JSON when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stopped_at: Option<String>,
 }
 
 impl FocusSessionSignal {
@@ -119,6 +125,7 @@ mod tests {
             title: "Expense report filing".to_string(),
             started_at: "2026-02-23T10:00:00Z".to_string(),
             status: FocusSessionStatus::Recording,
+            stopped_at: None,
         }
     }
 
@@ -222,6 +229,7 @@ mod tests {
             title: "Expense report filing".to_string(),
             started_at: "2026-02-23T14:30:00Z".to_string(),
             status: FocusSessionStatus::Recording,
+            stopped_at: None,
         };
         write_focus_signal(tmp.path(), &signal).unwrap();
 
@@ -268,5 +276,48 @@ mod tests {
 
         // Invalid status should fail deserialization
         assert!(serde_json::from_str::<FocusSessionStatus>("\"paused\"").is_err());
+    }
+    /// A signal without `stopped_at` (older CLI or app, or still
+    /// recording) parses, and writing it back does not add the key.
+    #[test]
+    fn test_signal_without_stopped_at_parses_and_stays_without_it() {
+        let json = r#"{"session_id":"s1","title":"t","started_at":"2026-09-23T10:00:00Z","status":"recording"}"#;
+        let parsed: FocusSessionSignal = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.stopped_at, None);
+        let written = serde_json::to_value(&parsed).unwrap();
+        assert!(written.get("stopped_at").is_none(), "{written}");
+    }
+
+    /// A signal the app stopped (whole seconds, `Z`) parses with its
+    /// `stopped_at`, and a read-modify-write keeps it for the worker.
+    #[test]
+    fn test_stopped_at_from_the_app_parses_and_round_trips() {
+        let tmp = TempDir::new().unwrap();
+        let json = r#"{
+  "session_id" : "s2",
+  "started_at" : "2026-09-23T10:00:00Z",
+  "status" : "stopped",
+  "stopped_at" : "2026-09-23T10:05:00Z",
+  "title" : "Send weekly report"
+}"#;
+        std::fs::write(tmp.path().join(FOCUS_SESSION_FILE), json).unwrap();
+        let read = read_focus_signal(tmp.path()).unwrap();
+        assert!(read.is_stopped());
+        assert_eq!(read.stopped_at.as_deref(), Some("2026-09-23T10:05:00Z"));
+
+        write_focus_signal(tmp.path(), &read).unwrap();
+        let raw: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(tmp.path().join(FOCUS_SESSION_FILE)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(raw["stopped_at"], "2026-09-23T10:05:00Z");
+    }
+
+    /// Fields this build does not know are ignored, not a parse failure.
+    #[test]
+    fn test_unknown_fields_are_ignored() {
+        let json = r#"{"session_id":"s3","title":"t","started_at":"x","status":"stopped","stopped_at":null,"extra":1}"#;
+        let parsed: FocusSessionSignal = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.stopped_at, None);
     }
 }

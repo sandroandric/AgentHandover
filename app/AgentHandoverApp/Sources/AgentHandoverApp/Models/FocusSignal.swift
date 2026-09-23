@@ -2,18 +2,30 @@ import Foundation
 
 /// What the popover shows for focus recording, derived only from
 /// `focus-session.json`: the one signal the CLI (`agenthandover focus
-/// start/stop`), the app, the daemon and the worker all share. The popover
-/// keeps no recording state of its own, so a session started or stopped
-/// from either side shows the same way in both.
+/// start/stop`), the app, the daemon and the worker all share, plus the
+/// worker's `focus-result.json` for a session that ended with nothing to
+/// analyze. The popover keeps no recording state of its own, so a session
+/// started or stopped from either side shows the same way in both.
 enum FocusRecordState: Equatable {
     case idle
     case recording(sessionId: String, title: String, startedAt: Date?)
     /// Stopped, waiting for the worker to turn it into a draft.
     case processing(title: String)
+    /// The worker closed the session without events (observation was off);
+    /// shown until the user dismisses it.
+    case nothingRecorded(sessionId: String, title: String)
 
-    init(signal: FocusSessionSignalFile?) {
+    /// A recording signal always wins, so an old result never hides a new
+    /// session. A stopped signal shows the result only when the result is
+    /// for that same session (the worker writes the result, then removes
+    /// the signal); otherwise that session is still being analyzed.
+    init(signal: FocusSessionSignalFile?, result: FocusResultFile? = nil) {
+        var nothingRecorded: FocusRecordState?
+        if let result, result.status == FocusResult.nothingRecordedStatus {
+            nothingRecorded = .nothingRecorded(sessionId: result.session_id, title: result.title)
+        }
         guard let signal else {
-            self = .idle
+            self = nothingRecorded ?? .idle
             return
         }
         switch signal.status {
@@ -24,10 +36,53 @@ enum FocusRecordState: Equatable {
                 startedAt: FocusSignal.parseTimestamp(signal.started_at)
             )
         case "stopped":
-            self = .processing(title: signal.title)
+            if let nothingRecorded, result?.session_id == signal.session_id {
+                self = nothingRecorded
+            } else {
+                self = .processing(title: signal.title)
+            }
         default:
-            self = .idle
+            self = nothingRecorded ?? .idle
         }
+    }
+
+    /// The menu's line for a session that recorded nothing; nil otherwise.
+    var nothingRecordedMessage: String? {
+        guard case .nothingRecorded(_, let title) = self else { return nil }
+        return "Nothing was recorded for '\(title)': observation was off during this session"
+    }
+}
+
+/// Decoded `focus-result.json`, written by the worker
+/// (`_close_empty_focus_session`) when a stopped focus session had no
+/// events; the worker then removes `focus-session.json`. The worker removes
+/// this file only when it next processes a session with events, so the
+/// menu's Dismiss deletes it.
+struct FocusResultFile: Codable, Equatable {
+    let session_id: String
+    let title: String
+    let status: String
+    let message: String
+    let stopped_at: String?
+    let closed_at: String
+}
+
+enum FocusResult {
+    static let fileName = "focus-result.json"
+    static let nothingRecordedStatus = "nothing_recorded"
+
+    static func read(in dir: URL) -> FocusResultFile? {
+        guard let data = try? Data(contentsOf: dir.appendingPathComponent(fileName)) else {
+            return nil
+        }
+        return try? JSONDecoder().decode(FocusResultFile.self, from: data)
+    }
+
+    /// Removes the result the user dismissed; a result for another session
+    /// (written after the menu was drawn) is left alone.
+    static func dismiss(sessionID: String, in dir: URL) {
+        guard let result = read(in: dir), result.session_id == sessionID else { return }
+        try? FileManager.default.removeItem(at: dir.appendingPathComponent(fileName))
     }
 }
 
@@ -71,14 +126,16 @@ enum FocusSignal {
 
     /// Stops the session that is recording, whoever started it: the session
     /// id, title and start time stay exactly as written (the daemon tagged
-    /// the session's events with that id), only the status changes.
-    /// Returns nil when nothing is recording.
+    /// the session's events with that id); the status changes and
+    /// `stopped_at` is set (the worker times its empty-session wait from
+    /// it). Returns nil when nothing is recording.
     @discardableResult
-    static func stop(in dir: URL) throws -> FocusSessionSignalFile? {
+    static func stop(in dir: URL, now: Date = Date()) throws -> FocusSessionSignalFile? {
         guard var signal = read(in: dir), signal.status == "recording" else {
             return nil
         }
         signal.status = "stopped"
+        signal.stopped_at = ISO8601DateFormatter().string(from: now)
         try write(signal, in: dir)
         return signal
     }

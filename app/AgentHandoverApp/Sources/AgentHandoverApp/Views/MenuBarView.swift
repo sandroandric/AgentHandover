@@ -561,6 +561,34 @@ struct MenuBarView: View {
                     RoundedRectangle(cornerRadius: cardRadius)
                         .stroke(Color.purple.opacity(0.15), lineWidth: 1)
                 )
+            } else if let nothingRecordedMessage = appState.focusState.nothingRecordedMessage {
+                // The worker closed the stopped session without events
+                // (focus-result.json): say so instead of "Analyzing".
+                HStack(alignment: .top, spacing: 10) {
+                    Image(systemName: "exclamationmark.circle")
+                        .font(.system(size: 14))
+                        .foregroundColor(warmOrange)
+
+                    Text(nothingRecordedMessage)
+                        .font(.system(size: 12, weight: .medium))
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    Spacer(minLength: 4)
+
+                    Button("Dismiss") { appState.dismissFocusResult() }
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                        .buttonStyle(.plain)
+                }
+                .padding(12)
+                .background(
+                    RoundedRectangle(cornerRadius: cardRadius)
+                        .fill(warmOrange.opacity(0.05))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: cardRadius)
+                        .stroke(warmOrange.opacity(0.3), lineWidth: 1)
+                )
             } else {
                 // Record button with idle pulse
                 Button(action: { showTitlePrompt = true }) {
