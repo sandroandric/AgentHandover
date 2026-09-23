@@ -265,33 +265,116 @@ final class FocusQATests: XCTestCase {
         XCTAssertNotEqual(file.status, "pending")
     }
 
-    // MARK: - Answers start empty; the guess is only a placeholder
+    // MARK: - Answers start with the guess; submitted as is, it is an accepted guess
 
-    func testAnswerBindingStartsEmptyNotTheModelsGuess() {
-        let question = FocusQuestion(index: 0, question: "Logged in?", category: "access",
-                                     context: "", default: "Assume a logged-in browser")
-        XCTAssertEqual(FocusQAView.answerText(for: question.index, in: [:]), "")
-        XCTAssertEqual(FocusQAView.placeholder(for: question), "Guess: Assume a logged-in browser")
-        XCTAssertEqual(FocusQAView.answerText(for: 0, in: [0: "Yes, via SSO"]), "Yes, via SSO")
-    }
+    private static let questions = [
+        FocusQuestion(index: 0, question: "Does the IANA page need a login?", category: "access",
+                      context: "No login step was recorded", default: "Assume the page is public",
+                      step_indexes: []),
+        FocusQuestion(index: 1, question: "How often do you do this?", category: "scope",
+                      context: "One run was recorded", default: "Every day", step_indexes: [0]),
+        FocusQuestion(index: 2, question: "How do you know the note is right?",
+                      category: "verification", context: "No check was recorded",
+                      default: "The note shows the domains", step_indexes: [2]),
+    ]
 
-    func testPlaceholderWithoutAGuess() {
-        let question = FocusQuestion(index: 0, question: "Q?", category: "scope",
-                                     context: "", default: "  ")
-        XCTAssertEqual(FocusQAView.placeholder(for: question), "Your answer")
-    }
+    private static let pending = FocusQuestionsFile(
+        session_id: "83f40b9b",
+        slug: "look-up-the-iana-reserved-domains-page-and-note-it",
+        questions: questions,
+        status: "pending",
+        answers: nil,
+        title: "Look up the IANA reserved domains page and note it"
+    )
 
-    func testSubmittedAnswersOmitUntouchedAndBlankQuestions() {
-        let questions = [
-            FocusQuestion(index: 0, question: "A?", category: "scope", context: "", default: "guess A"),
-            FocusQuestion(index: 1, question: "B?", category: "scope", context: "", default: "guess B"),
-            FocusQuestion(index: 2, question: "C?", category: "scope", context: "", default: "guess C"),
-        ]
-        let submitted = FocusQAView.submittedAnswers(
-            for: questions, answers: [1: "  production  ", 2: "   "]
+    func testFieldsStartWithTheGuessAsEditableText() {
+        let answers = FocusQAView.initialAnswers(for: Self.questions)
+        XCTAssertEqual(FocusQAView.answerText(for: 0, in: answers), "Assume the page is public")
+        XCTAssertEqual(
+            FocusQAView.answerNote(for: Self.questions[0], answers: answers),
+            "AgentHandover's guess: submitted as is, it stays a guess."
         )
-        XCTAssertEqual(submitted, ["1": "production"])
-        XCTAssertFalse(submitted.values.contains { $0.hasPrefix("guess") })
+        let noGuess = FocusQuestion(index: 3, question: "Q?", category: "scope", context: "", default: "  ")
+        XCTAssertNil(FocusQAView.initialAnswers(for: [noGuess])[3])
+        XCTAssertEqual(FocusQAView.answerNote(for: noGuess, answers: [:]), "Left open: your agent will ask.")
+        XCTAssertNil(FocusQAView.answerNote(for: Self.questions[1], answers: [1: "Weekly"]))
+    }
+
+    func testSubmitRecordsAcceptedGuessesTypedAnswersAndClearedFields() {
+        var answers = FocusQAView.initialAnswers(for: Self.questions)
+        answers[1] = "  Once a week, on Mondays "  // typed over the guess
+        answers[2] = "   "                           // cleared
+        let submitted = FocusQAView.submission(for: Self.questions, answers: answers)
+        XCTAssertEqual(submitted.answers, ["0": "Assume the page is public", "1": "Once a week, on Mondays"])
+        XCTAssertEqual(submitted.sources, ["0": "accepted_guess", "1": "typed"])
+    }
+
+    func testUntouchedSubmitIsNotUnanswered() {
+        // The live run: Submit without touching the pre-filled fields.
+        let submitted = FocusQAView.submission(
+            for: Self.questions, answers: FocusQAView.initialAnswers(for: Self.questions)
+        )
+        XCTAssertEqual(submitted.answers.count, 3)
+        XCTAssertEqual(Set(submitted.sources.values), ["accepted_guess"])
+    }
+
+    /// The worker's reader parses the same file
+    /// (`worker/tests/test_skill_grounding.py`, `ANSWERED_FILE`).
+    func testSubmitWritesTheSharedFixture() throws {
+        var answers = FocusQAView.initialAnswers(for: Self.questions)
+        answers[1] = "Once a week, on Mondays"
+        answers[2] = ""
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let written = try encoder.encode(FocusQAView.answeredFile(Self.pending, answers: answers))
+
+        let fixture = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()  // AgentHandoverAppTests
+            .deletingLastPathComponent()  // Tests
+            .deletingLastPathComponent()  // AgentHandoverApp
+            .deletingLastPathComponent()  // app
+            .deletingLastPathComponent()  // repo root
+            .appendingPathComponent("worker/tests/fixtures/focus_questions_answered.json")
+        let expected = try JSONSerialization.jsonObject(with: Data(contentsOf: fixture)) as? NSDictionary
+        let actual = try JSONSerialization.jsonObject(with: written) as? NSDictionary
+        XCTAssertEqual(actual, expected)
+
+        // The worker's fields (title, step indexes) survive the app's rewrite.
+        let decoded = try JSONDecoder().decode(FocusQuestionsFile.self, from: Data(contentsOf: fixture))
+        XCTAssertEqual(decoded.title, Self.pending.title)
+        XCTAssertEqual(decoded.questions.map { $0.step_indexes ?? [] }, [[], [0], [2]])
+        let rewritten = try JSONSerialization.jsonObject(with: encoder.encode(decoded)) as? NSDictionary
+        XCTAssertEqual(rewritten, expected)
+    }
+
+    // MARK: - Title as typed
+
+    func testTitleIsShownAsTheUserTypedIt() {
+        XCTAssertEqual(FocusQAView.displayTitle(for: Self.pending),
+                       "Look up the IANA reserved domains page and note it")
+        var older = Self.pending
+        older.title = nil  // a file from a worker before WP-Q1
+        XCTAssertEqual(FocusQAView.displayTitle(for: older),
+                       "Look up the iana reserved domains page and note it")
+    }
+
+    // MARK: - Notification
+
+    func testNotificationNamesTheCountAndTheTitle() {
+        XCTAssertEqual(FocusQuestionsNotice.title(for: Self.pending),
+                       "3 questions about 'Look up the IANA reserved domains page and note it'")
+        let one = FocusQuestionsFile(session_id: "s1", slug: "x", questions: [Self.questions[0]],
+                                     status: "pending", answers: nil, title: "Check the inbox")
+        XCTAssertTrue(FocusQuestionsNotice.title(for: one).hasPrefix("1 question about"))
+    }
+
+    func testOneNotificationPerSession() {
+        XCTAssertTrue(FocusQuestionsNotice.isNew(Self.pending, lastNotified: nil))
+        XCTAssertTrue(FocusQuestionsNotice.isNew(Self.pending, lastNotified: "older-session"))
+        XCTAssertFalse(FocusQuestionsNotice.isNew(Self.pending, lastNotified: "83f40b9b"))
+        let empty = FocusQuestionsFile(session_id: "s2", slug: "x", questions: [],
+                                       status: "pending", answers: nil)
+        XCTAssertFalse(FocusQuestionsNotice.isNew(empty, lastNotified: nil))
     }
 
     // MARK: - Edge Cases

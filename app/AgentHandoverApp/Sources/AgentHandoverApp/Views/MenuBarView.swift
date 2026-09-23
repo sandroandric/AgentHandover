@@ -95,12 +95,6 @@ struct MenuBarView: View {
                 delegate.showOnboarding()
             }
         }
-        // Auto-open Q&A window when new questions appear.
-        .onReceive(NotificationCenter.default.publisher(for: .focusQuestionsReady)) { _ in
-            if questionsActuallyPending {
-                openAndActivate("focus-qa")
-            }
-        }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             if let pendingPermission = openedPermissionSettings {
                 openedPermissionSettings = nil
@@ -326,7 +320,7 @@ struct MenuBarView: View {
         VStack(spacing: 6) {
             // Focus Q&A pending
             if questionsActuallyPending {
-                Button(action: { openAndActivate("focus-qa") }) {
+                Button(action: { delegate.showFocusQA() }) {
                     HStack(spacing: 10) {
                         ZStack {
                             Circle()
@@ -958,7 +952,6 @@ struct MenuBarView: View {
         "workflows": "Workflows",
         "daily-digest": "Daily Digest",
         "micro-review": "Review Queue",
-        "focus-qa": "Focus Q&A",
         "faq": "FAQ",
     ]
 

@@ -91,21 +91,33 @@ struct FocusQuestion: Codable, Identifiable {
     let question: String
     let category: String
     let context: String
+    /// The model's guess: the answer field starts with it.
     let `default`: String
+    /// The steps (0-based) the question is about; kept so the worker reads
+    /// them back from the answered file.
+    var step_indexes: [Int]? = nil
 
     var id: Int { index }
 }
 
-/// Decoded focus-questions.json
+/// Decoded focus-questions.json (written by the worker's
+/// `write_focus_questions`, answered here, read back by its
+/// `parse_qa_result_from_file`).
 struct FocusQuestionsFile: Codable {
     let session_id: String
     let slug: String
     let questions: [FocusQuestion]
     var status: String
+    /// Question index -> the answer; a cleared field is left out.
     var answers: [String: String]?
+    /// The session title as the user typed it.
+    var title: String? = nil
+    /// Question index -> `typed` or `accepted_guess` (the pre-filled
+    /// guess submitted unchanged), one per entry of `answers`.
+    var answer_sources: [String: String]? = nil
 
     enum CodingKeys: String, CodingKey {
-        case session_id, slug, questions, status, answers
+        case session_id, slug, questions, status, answers, title, answer_sources
     }
 }
 
@@ -349,26 +361,11 @@ final class AppState: ObservableObject {
         }
 
         if file.status == "pending" {
-            let wasAvailable = focusQuestionsAvailable
             focusQuestionsAvailable = true
             focusQuestionsSlug = file.slug
-            // Auto-open Q&A window ONCE when questions first appear
-            if !wasAvailable {
-                DispatchQueue.main.async {
-                    NSApp.activate(ignoringOtherApps: true)
-                    if let app = NSApp as? NSApplication {
-                        for window in app.windows {
-                            if window.title == "Focus Q&A" {
-                                window.makeKeyAndOrderFront(nil)
-                                window.orderFrontRegardless()
-                                return
-                            }
-                        }
-                    }
-                    // Window not open yet — post notification for SwiftUI to open it
-                    NotificationCenter.default.post(name: .focusQuestionsReady, object: nil)
-                }
-            }
+            // Once per session: a notification when the user allowed them,
+            // else the Q&A window itself (FocusQuestionsNotifier).
+            FocusQuestionsNotifier.shared.questionsReady(file)
         } else {
             focusQuestionsAvailable = false
             focusQuestionsSlug = ""
@@ -502,8 +499,4 @@ final class AppState: ObservableObject {
     private func isProcessRunning(pid: UInt32) -> Bool {
         kill(Int32(pid), 0) == 0
     }
-}
-
-extension Notification.Name {
-    static let focusQuestionsReady = Notification.Name("focusQuestionsReady")
 }

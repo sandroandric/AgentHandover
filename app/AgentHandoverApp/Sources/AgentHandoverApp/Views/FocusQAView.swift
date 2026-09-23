@@ -5,14 +5,21 @@ import SwiftUI
 /// When the Python worker generates clarifying questions after a focus
 /// recording, this view displays them and writes answers back to
 /// `focus-questions.json` for the worker to consume.
+///
+/// Each answer field starts with the model's guess as editable text.
+/// Submitted unchanged it is an accepted guess (the worker keeps it a
+/// hypothesis); edited it is the user's answer; cleared, the question stays
+/// open.
 struct FocusQAView: View {
     @EnvironmentObject var appState: AppState
-    @Environment(\.dismiss) private var dismiss
+    /// Closes the window (the app delegate hosts it).
+    var onDone: () -> Void = {}
 
     @State private var questionsFile: FocusQuestionsFile?
     @State private var answers: [Int: String] = [:]
     @State private var writeError: String?
     @State private var didSubmit = false
+    @State private var offerNotifications = false
 
     // Contra design tokens (system-adaptive)
     private let darkNavy = Color.primary
@@ -39,6 +46,7 @@ struct FocusQAView: View {
         }
         .onAppear {
             loadQuestions()
+            FocusQuestionsNotifier.shared.canAsk { offerNotifications = $0 }
         }
     }
 
@@ -90,11 +98,11 @@ struct FocusQAView: View {
                         .foregroundColor(warmOrange)
                 }
 
-                Text(displayTitle(for: file.slug))
+                Text(Self.displayTitle(for: file))
                     .font(.system(size: 18, weight: .bold, design: .rounded))
                     .foregroundColor(darkNavy)
 
-                Text("Answer these questions so your agent can execute this workflow reliably.")
+                Text("Each answer starts with AgentHandover's guess. Keep it, change it, or clear it to leave the question open.")
                     .font(.system(size: 13))
                     .foregroundColor(darkNavy.opacity(0.5))
                     .multilineTextAlignment(.center)
@@ -164,7 +172,7 @@ struct FocusQAView: View {
                     .padding(.leading, 4)
             }
 
-            TextField(Self.placeholder(for: question), text: answerBinding(for: question.index))
+            TextField("Your answer", text: answerBinding(for: question.index), axis: .vertical)
                 .textFieldStyle(.plain)
                 .font(.system(size: 13))
                 .padding(.horizontal, 12)
@@ -175,6 +183,13 @@ struct FocusQAView: View {
                     RoundedRectangle(cornerRadius: cardRadius)
                         .stroke(darkNavy.opacity(0.15), lineWidth: contraBorder)
                 )
+
+            if let note = Self.answerNote(for: question, answers: answers) {
+                Text(note)
+                    .font(.system(size: 11))
+                    .foregroundColor(darkNavy.opacity(0.5))
+                    .padding(.leading, 4)
+            }
         }
         .padding(14)
         .background(
@@ -225,6 +240,38 @@ struct FocusQAView: View {
     // MARK: - Footer
 
     private var footer: some View {
+        VStack(spacing: 10) {
+            if offerNotifications {
+                notificationOffer
+            }
+            footerButtons
+        }
+        .padding(.horizontal, 24)
+        .padding(.vertical, 16)
+    }
+
+    /// The one place the app asks for notification permission: here, where
+    /// the user sees what they are for.
+    private var notificationOffer: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "bell")
+                .font(.system(size: 12))
+                .foregroundColor(darkNavy.opacity(0.5))
+            Text("Get a notification when the next recording's questions are ready.")
+                .font(.system(size: 12))
+                .foregroundColor(darkNavy.opacity(0.6))
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer()
+            Button("Notify me") {
+                FocusQuestionsNotifier.shared.requestAuthorization { _ in
+                    offerNotifications = false
+                }
+            }
+            .font(.system(size: 12, weight: .medium))
+        }
+    }
+
+    private var footerButtons: some View {
         HStack {
             Button("Skip All") {
                 writeSkipped()
@@ -264,8 +311,6 @@ struct FocusQAView: View {
             }
             .buttonStyle(.plain)
         }
-        .padding(.horizontal, 24)
-        .padding(.vertical, 16)
     }
 
     // MARK: - Data Loading
@@ -280,40 +325,75 @@ struct FocusQAView: View {
         }
 
         questionsFile = file
+        answers = Self.initialAnswers(for: file.questions)
     }
 
     // MARK: - Answers
 
-    /// The value an answer field starts with and shows: only what the user
-    /// typed.  The model's guess is the placeholder, never the value, so an
-    /// untouched field is submitted as unanswered rather than as the guess.
+    static let typed = "typed"
+    static let acceptedGuess = "accepted_guess"
+
+    private static func guess(of question: FocusQuestion) -> String {
+        question.default.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// What the answer fields start with: each question's guess, as text
+    /// the user can keep, edit or clear.
+    static func initialAnswers(for questions: [FocusQuestion]) -> [Int: String] {
+        var result: [Int: String] = [:]
+        for question in questions where !guess(of: question).isEmpty {
+            result[question.index] = guess(of: question)
+        }
+        return result
+    }
+
+    /// The text an answer field shows.
     static func answerText(for index: Int, in answers: [Int: String]) -> String {
         answers[index] ?? ""
     }
 
-    /// Placeholder for a question's answer field: the model's guess, labelled
-    /// as a guess, or a generic hint when the model made none.
-    static func placeholder(for question: FocusQuestion) -> String {
-        let guess = question.default.trimmingCharacters(in: .whitespacesAndNewlines)
-        return guess.isEmpty ? "Your answer" : "Guess: \(guess)"
+    /// The line under a field: what submitting it will record.
+    static func answerNote(for question: FocusQuestion, answers: [Int: String]) -> String? {
+        let text = answerText(for: question.index, in: answers)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if text.isEmpty {
+            return "Left open: your agent will ask."
+        }
+        if text == guess(of: question) {
+            return "AgentHandover's guess: submitted as is, it stays a guess."
+        }
+        return nil
     }
 
-    /// The answers written back to the worker: the non-blank text the user
-    /// typed, keyed by question index.  A question left blank is omitted and
-    /// the worker records it as unanswered.
-    static func submittedAnswers(
+    /// The answers written back to the worker, keyed by question index, and
+    /// where each came from: the guess submitted unchanged is
+    /// `accepted_guess`, anything else non-blank is `typed`.  A cleared
+    /// field is left out, and the worker records its question unanswered.
+    static func submission(
         for questions: [FocusQuestion],
         answers: [Int: String]
-    ) -> [String: String] {
-        var result: [String: String] = [:]
+    ) -> (answers: [String: String], sources: [String: String]) {
+        var texts: [String: String] = [:]
+        var sources: [String: String] = [:]
         for question in questions {
             let text = answerText(for: question.index, in: answers)
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-            if !text.isEmpty {
-                result[String(question.index)] = text
-            }
+            guard !text.isEmpty else { continue }
+            let key = String(question.index)
+            texts[key] = text
+            sources[key] = text == guess(of: question) ? acceptedGuess : typed
         }
-        return result
+        return (texts, sources)
+    }
+
+    /// The file Submit writes: *file* answered with *answers*.
+    static func answeredFile(_ file: FocusQuestionsFile, answers: [Int: String]) -> FocusQuestionsFile {
+        var answered = file
+        let submitted = submission(for: file.questions, answers: answers)
+        answered.status = "answered"
+        answered.answers = submitted.answers
+        answered.answer_sources = submitted.sources
+        return answered
     }
 
     private func answerBinding(for index: Int) -> Binding<String> {
@@ -326,17 +406,14 @@ struct FocusQAView: View {
     // MARK: - Write Back
 
     private func writeAnswered() {
-        guard var file = questionsFile else { return }
+        guard let file = questionsFile else { return }
         writeError = nil
 
-        file.status = "answered"
-        file.answers = Self.submittedAnswers(for: file.questions, answers: answers)
-
-        if writeFile(file) {
+        if writeFile(Self.answeredFile(file, answers: answers)) {
             didSubmit = true
             appState.focusQuestionsAvailable = false
             appState.focusQuestionsSlug = ""
-            dismiss()
+            onDone()
         }
     }
 
@@ -350,7 +427,7 @@ struct FocusQAView: View {
             didSubmit = true
             appState.focusQuestionsAvailable = false
             appState.focusQuestionsSlug = ""
-            dismiss()
+            onDone()
         }
     }
 
@@ -381,10 +458,14 @@ struct FocusQAView: View {
 
     // MARK: - Helpers
 
-    /// Convert a slug like "check-gmail-inbox" to "Check Gmail Inbox".
-    private func displayTitle(for slug: String) -> String {
-        slug.split(separator: "-")
-            .map { $0.prefix(1).uppercased() + $0.dropFirst() }
-            .joined(separator: " ")
+    /// The session title as the user typed it ("Look up the IANA
+    /// reserved domains page"); for a file from an older worker, the slug
+    /// with spaces and only its first letter capitalised (capitalising every
+    /// word turned "IANA" into "Iana").
+    static func displayTitle(for file: FocusQuestionsFile) -> String {
+        let title = (file.title ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        if !title.isEmpty { return title }
+        let words = file.slug.replacingOccurrences(of: "-", with: " ")
+        return words.prefix(1).uppercased() + words.dropFirst()
     }
 }

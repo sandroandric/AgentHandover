@@ -46,13 +46,6 @@ struct AgentHandoverApp: App {
         .defaultSize(width: 640, height: 680)
         .windowResizability(.contentMinSize)
 
-        Window("Focus Q&A", id: "focus-qa") {
-            FocusQAView()
-                .environmentObject(delegate.sharedAppState)
-        }
-        .defaultSize(width: 560, height: 620)
-        .windowResizability(.contentMinSize)
-
         Window("FAQ", id: "faq") {
             FAQView()
         }
@@ -65,10 +58,11 @@ struct AgentHandoverApp: App {
 ///
 /// Owns the single shared `AppState` so both onboarding (opened from
 /// applicationDidFinishLaunching) and the menu bar use the same instance.
-final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, ObservableObject {
     @Published var pendingOnboarding = false
     var hasTriggeredOnboarding = false
     private var onboardingWindow: NSWindow?
+    private var focusQAWindow: NSWindow?
 
     /// Single shared AppState used by onboarding, menu bar, and all windows.
     @MainActor let sharedAppState = AppState()
@@ -104,6 +98,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         // Always start capture + observation servers so the daemon can
         // request screenshots at any point — during onboarding or after.
         startRuntimeBridges()
+        // Focus questions: a notification opens them (FocusQuestionsNotifier).
+        MainActor.assumeIsolated {
+            FocusQuestionsNotifier.shared.openQuestions = { [weak self] in self?.showFocusQA() }
+            FocusQuestionsNotifier.shared.start()
+        }
         // [privacy] read_app_state: macOS asks per app, from here, the
         // first time the user switches to one (see AppStateReading).
         AppStateConsentAsker.shared.start()
@@ -218,6 +217,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
 
     func hideFromDock() {
         NSApp.setActivationPolicy(.accessory)
+    }
+
+    /// The Q&A window for a focus recording's questions, from the menu,
+    /// the notification or the questions appearing.  A menu bar app's
+    /// window does not take the keyboard until the app is a regular,
+    /// active app: without that, clicking an answer field did nothing.
+    @MainActor
+    func showFocusQA() {
+        NSApp.setActivationPolicy(.regular)
+        NSApp.activate(ignoringOtherApps: true)
+        if let window = focusQAWindow {
+            window.makeKeyAndOrderFront(nil)
+            return
+        }
+        let view = FocusQAView(onDone: { [weak self] in self?.focusQAWindow?.close() })
+            .environmentObject(sharedAppState)
+        let window = NSWindow(contentViewController: NSHostingController(rootView: view))
+        window.title = "Focus Q&A"
+        window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
+        window.setContentSize(NSSize(width: 560, height: 620))
+        window.center()
+        window.isReleasedWhenClosed = false
+        window.delegate = self
+        focusQAWindow = window
+        window.makeKeyAndOrderFront(nil)
+        window.orderFrontRegardless()
+    }
+
+    /// The Q&A window closed: back to a menu bar app unless another window
+    /// is open.
+    func windowWillClose(_ notification: Notification) {
+        guard let window = notification.object as? NSWindow, window === focusQAWindow else { return }
+        focusQAWindow = nil
+        let others = NSApp.windows.contains {
+            $0 !== window && $0.isVisible && $0.styleMask.contains(.titled)
+        }
+        if !others { hideFromDock() }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
