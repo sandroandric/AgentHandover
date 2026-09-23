@@ -96,6 +96,28 @@ class TestDerivation:
         )
         assert derive_knowledge(proc)["inputs"]["status"] == "known"
 
+    def test_passively_mined_observations_are_instances(self) -> None:
+        """A passive draft carries pointers into workflow_observations
+        (``workflow_mining.observation_pointers``: ``obs_id``, no
+        ``session_id``); each one is an observed instance."""
+        proc = sop_to_procedure({
+            "slug": "payout-recon", "title": "Payout reconciliation",
+            "task_description": "Reconcile the Stripe payouts.",
+            "steps": [{"step": "Open the payouts"}],
+            "variables": [{"name": "payout_date", "type": "date"}],
+            "observations": [
+                {"obs_id": f"obs-{i}", "timestamp": "2026-09-1%dT09:00:00Z" % i,
+                 "date": "2026-09-1%d" % i, "duration_s": 600, "source": "passive"}
+                for i in (1, 2, 3)
+            ],
+        })
+        ledger = derive_knowledge(proc)
+        assert ledger["goal"]["evidence"] == [
+            {"kind": "instance", "id": f"obs-{i}"} for i in (1, 2, 3)
+        ]
+        assert ledger["inputs"]["status"] == "known"
+        assert validate_knowledge(ledger) == []
+
     def test_trigger_from_an_observed_recurrence(self) -> None:
         proc = _recorded()
         proc["recurrence"]["pattern"] = "weekly"

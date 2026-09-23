@@ -13,7 +13,8 @@ Stored on the procedure as ``proc["knowledge"]``::
         "status":     "known" | "hypothesis" | "unknown",
         "value_ref":  "<dotted path into the procedure>" | None,
         "evidence":   [{"kind": "frame" | "instance" | "answer" | "run",
-                        "id": "<event id | session id | clarification path | run id>"}],
+                        "id": "<event id | session or observation id"
+                              " | clarification path | run id>"}],
         "source":     "observation" | "contrast" | "divergence" | "user"
                       | "agent" | None,
         "updated_at": "<ISO-8601 UTC>",
@@ -149,12 +150,14 @@ def _dedup(items: list[dict]) -> list[dict]:
 
 
 def _instances(proc: dict) -> list[dict]:
-    """One ``instance`` pointer per observed session of this procedure."""
+    """One ``instance`` pointer per observed session of this procedure: a
+    focus recording's ``session_id``, or a passively mined work session's
+    ``obs_id`` (its row in ``workflow_observations``)."""
     observations = (proc.get("evidence") or {}).get("observations") or []
     return _dedup([
-        {"kind": "instance", "id": str(obs["session_id"])}
+        {"kind": "instance", "id": str(obs.get("session_id") or obs["obs_id"])}
         for obs in observations
-        if isinstance(obs, dict) and obs.get("session_id")
+        if isinstance(obs, dict) and (obs.get("session_id") or obs.get("obs_id"))
     ])
 
 
