@@ -166,6 +166,7 @@ class FocusProcessor:
         events: list[dict],
         *,
         screenshots_dir: str | Path = "",
+        saved: GeneratedSOP | None = None,
     ) -> GeneratedSOP:
         """Process a completed focus session end-to-end.
 
@@ -182,6 +183,10 @@ class FocusProcessor:
             title: User-provided task name.
             events: Raw event dicts from the DB (already filtered by session_id).
             screenshots_dir: Directory containing screenshot JPEGs.
+            saved: the session's SOP generated before a restart (its saved
+                draft): steps 1-3 run again (no model call for frames
+                already annotated), step 4 returns it instead of generating
+                it again.
 
         Returns:
             GeneratedSOP with the template dict (or error).
@@ -246,7 +251,10 @@ class FocusProcessor:
         )
         if ann_stats["deferred"]:
             # Ollama is unreachable: keep the session (rows pending,
-            # screenshots kept) and retry on a later tick.
+            # screenshots kept) and retry on a later tick.  Its leftover
+            # keyframes wait for the Skill: annotated before the retry,
+            # they would delay it and change its frames' context.
+            self._remaining = []
             return GeneratedSOP(
                 sop={}, success=False, deferred=True,
                 error="Annotation deferred: Ollama unavailable",
@@ -284,8 +292,17 @@ class FocusProcessor:
             ]
         ]
 
-        # Step 4: Generate SOP
-        return self.sop_generator.generate_from_focus(timeline, title)
+        # Step 4: Generate SOP (its first call switches Ollama to the
+        # generation model, ``ModelScheduler.enter_generation``)
+        if saved is not None:
+            logger.info("Focus v2: resuming '%s' from its saved SOP draft", title)
+            return saved
+        result = self.sop_generator.generate_from_focus(timeline, title)
+        if result.deferred:
+            # The session is retried on a later tick; its leftover
+            # keyframes still wait for the Skill.
+            self._remaining = []
+        return result
 
     @staticmethod
     def _build_pre_analysis_obs(frame: dict) -> dict:
@@ -628,9 +645,10 @@ class FocusProcessor:
     def annotate_remaining(self, db: object) -> dict:
         """Annotate the last session's keyframes that the SOP did not need.
 
-        Called once the session's Skill is written (or its generation has
-        failed), so they never delay it.  Frames Ollama cannot take now
-        stay pending with their screenshots.
+        Called in the annotation phase of the tick after the session's
+        Skill is written (or its generation has failed), so they never
+        delay it and never sit between two generation calls.  Frames Ollama
+        cannot take now stay pending with their screenshots.
         """
         rest, self._remaining = self._remaining, []
         if not rest or not self.annotator.ready():

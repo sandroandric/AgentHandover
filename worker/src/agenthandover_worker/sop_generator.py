@@ -19,13 +19,14 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
 from agenthandover_worker.confidence import compute_v2_confidence
 from agenthandover_worker.dom import select_anchor
 from agenthandover_worker.event_helpers import describe_focused_field, display_name
 from agenthandover_worker.json_extract import extract_json
 from agenthandover_worker.model_profiles import STANDARD_TIER
+from agenthandover_worker.model_scheduler import before_generation_call
 from agenthandover_worker.ollama import OllamaClient
 from agenthandover_worker.redaction import redact
 from agenthandover_worker.scene_annotator import as_compact
@@ -1420,6 +1421,15 @@ def _call_ollama(
     return response.text, response.elapsed
 
 
+def _deferred(exc: ConnectionError) -> GeneratedSOP:
+    """The result of a generation Ollama could not serve: unreachable, or a
+    model that failed to load (HTTP 5xx, "timed out waiting for
+    llama-server to start").  Nothing is consumed; the caller retries later."""
+    return GeneratedSOP(
+        sop={}, success=False, deferred=True, error=f"VLM connection failed: {exc}",
+    )
+
+
 def sop_system_prompt(profile_system: str = "") -> str:
     """The SOP system prompt: the profile's nudge (if any) followed by the
     quality rules in ``SOP_SYSTEM_PROMPT``, which always apply."""
@@ -1442,6 +1452,9 @@ class SOPGenerator:
 
     def __init__(self, config: SOPGeneratorConfig | None = None) -> None:
         self.config = config or SOPGeneratorConfig()
+        # Set by ``ModelScheduler.register``: switches Ollama to the
+        # generation model before a call (see ``before_generation_call``).
+        self.before_call: Callable[[], bool] | None = None
 
     def _call(
         self, prompt: str, *, retry: bool = False, system: str | None = None,
@@ -1456,6 +1469,7 @@ class SOPGenerator:
         """
         from agenthandover_worker.model_profiles import get_profile
 
+        before_generation_call(self)
         profile = get_profile(self.config.model)
         return _call_ollama(
             model=self.config.model,
@@ -1519,12 +1533,7 @@ class SOPGenerator:
             raw_response, elapsed = self._call(prompt)
         except ConnectionError as exc:
             # Ollama unreachable: keep the session for a later retry.
-            return GeneratedSOP(
-                sop={},
-                success=False,
-                deferred=True,
-                error=f"VLM connection failed: {exc}",
-            )
+            return _deferred(exc)
         except Exception as exc:
             return GeneratedSOP(
                 sop={},
@@ -1548,6 +1557,8 @@ class SOPGenerator:
                 )
                 elapsed += elapsed2
                 vlm_sop = _parse_sop_response(raw_response2)
+            except ConnectionError as exc:
+                return _deferred(exc)
             except Exception:
                 pass
 
@@ -1578,6 +1589,8 @@ class SOPGenerator:
                 )
                 elapsed += elapsed3
                 vlm_sop = _parse_sop_response(raw_response3)
+            except ConnectionError as exc:
+                return _deferred(exc)
             except Exception:
                 pass
 
@@ -1660,6 +1673,8 @@ class SOPGenerator:
         # Call VLM
         try:
             raw_response, elapsed = self._call(prompt)
+        except ConnectionError as exc:
+            return _deferred(exc)
         except Exception as exc:
             return GeneratedSOP(
                 sop={},
@@ -1683,6 +1698,8 @@ class SOPGenerator:
                 )
                 elapsed += elapsed2
                 vlm_sop = _parse_sop_response(raw_response2)
+            except ConnectionError as exc:
+                return _deferred(exc)
             except Exception:
                 pass
 
@@ -1789,6 +1806,8 @@ class SOPGenerator:
         # Call VLM
         try:
             raw_response, elapsed = self._call(prompt)
+        except ConnectionError as exc:
+            return _deferred(exc)
         except Exception as exc:
             return GeneratedSOP(
                 sop={}, success=False,
@@ -1809,6 +1828,8 @@ class SOPGenerator:
                 )
                 elapsed += elapsed2
                 vlm_sop = _parse_sop_response(raw_response2)
+            except ConnectionError as exc:
+                return _deferred(exc)
             except Exception:
                 pass
 

@@ -164,6 +164,9 @@ Steps refer to inputs as `{{name}}`.
 - Choose by: Selects specific high-interest technical topics from the available feed, skipping unrelated items.
   - Example: Selects 'SQLite's WAL mode, explained with diagrams' from the Hacker News feed (Frame 1) but skips 'The quiet death of the RSS reader, and its return' (Frame 1).
   - Example: Selects the GitHub project 'HTTP cassette recorder' (Frame 15) instead of other potential links.
+- Open question the user did not answer: "Is the 'Daily news - 15 Sep' note already open in the Notes app, or do I need to create it if it doesn't exist?" Ask the user; do not guess.
+- Open question the user did not answer: "What specific text should I type for the summaries in Steps 7, 9, and 11 since only generic descriptions ('SQLite WAL mode', 'quantised models', 'cassette recorder') are provided?" Ask the user; do not guess.
+- Open question the user did not answer: "Are there any other articles currently visible on the Hacker News homepage that should be collected before clicking the specific SQLite link?" Ask the user; do not guess.
 
 ## Guardrails
 

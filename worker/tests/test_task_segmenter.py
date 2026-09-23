@@ -801,6 +801,84 @@ class TestProcessPassiveDiscovery:
             db_path.unlink(missing_ok=True)
 
     @patch("agenthandover_worker.task_segmenter._compute_embeddings", side_effect=_mock_embeddings)
+    def test_a_model_that_fails_to_load_defers_the_pass(self, mock_embed):
+        """WP-C9: Ollama could not load the SOP model (HTTP 500, "timed out
+        waiting for llama-server to start"): no failure is recorded and the
+        workflow's observations stay unpromoted, so the next pass offers
+        the workflow for review again."""
+        conn, db_path = _make_test_db()
+        try:
+            from datetime import datetime, timedelta, timezone
+
+            from agenthandover_worker import workflow_mining
+            from agenthandover_worker.db import WorkerDB
+            from agenthandover_worker.knowledge_base import KnowledgeBase
+            from agenthandover_worker.main import _process_passive_discovery
+            from agenthandover_worker.sop_generator import GeneratedSOP, SOPGenerator
+
+            _now = datetime.now(timezone.utc)
+            # Three work sessions of one workflow (as in
+            # test_full_pipeline_generates_sop): ready for review.
+            steps = [
+                ("https://expensify.com/reports", "Filing expense report", ""),
+                ("https://expensify.com/report/R123", "Filing expense report", "$42.00"),
+            ]
+            for session, hours_ago in enumerate((5, 3, 1)):
+                for i, (location, what, typed) in enumerate(steps):
+                    ann = json.dumps({
+                        "app": "Chrome",
+                        "location": location,
+                        "task_context": {"what_doing": what, "is_workflow": True},
+                        "key_text": {"typed_text": typed},
+                    })
+                    dt = _now - timedelta(hours=hours_ago, minutes=-i)
+                    conn.execute(
+                        "INSERT INTO events "
+                        "(id, timestamp, annotation_status, scene_annotation_json) "
+                        "VALUES (?, ?, 'completed', ?)",
+                        (f"e{session}{i}", dt.strftime("%Y-%m-%dT%H:%M:%SZ"), ann),
+                    )
+            conn.commit()
+            db = WorkerDB(db_path)
+            mock_sop_gen = MagicMock(spec=SOPGenerator)
+            mock_sop_gen.generate_from_passive.return_value = GeneratedSOP(
+                sop={}, success=False, deferred=True,
+                error="VLM connection failed: timed out waiting for llama-server to start",
+            )
+            kb = KnowledgeBase(root=Path(tempfile.mkdtemp()) / "knowledge")
+            kb.ensure_structure()
+            mock_writer = MagicMock()
+
+            sops = _process_passive_discovery(
+                db,
+                knowledge_base=kb,
+                segmenter=TaskSegmenter(config=SegmenterConfig(
+                    stitch_max_gap_seconds=1800, default_window_hours=24,
+                )),
+                sop_generator=mock_sop_gen,
+                openclaw_writer=mock_writer,
+                index_generator=MagicMock(),
+                now=_now,
+            )
+
+            assert sops == 0
+            mock_sop_gen.generate_from_passive.assert_called_once()
+            assert db.get_failed_generations() == []
+            observations = db.get_workflow_observations()
+            assert len(observations) == 3
+            assert {o["promoted_slug"] for o in observations} == {None}
+            assert workflow_mining.review_candidates(db, now=_now), (
+                "the workflow must stay ready for the next pass"
+            )
+            assert db.get_generated_sops() == []
+            mock_writer.write_sop.assert_not_called()
+            mock_writer.write_procedure.assert_not_called()
+            db.close()
+        finally:
+            conn.close()
+            db_path.unlink(missing_ok=True)
+
+    @patch("agenthandover_worker.task_segmenter._compute_embeddings", side_effect=_mock_embeddings)
     def test_no_sop_with_single_demonstration(self, mock_embed):
         """Only 1 demonstration = no SOP generated."""
         conn, db_path = _make_test_db()

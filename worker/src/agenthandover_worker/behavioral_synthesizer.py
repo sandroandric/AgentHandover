@@ -21,10 +21,11 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Callable
 
 from agenthandover_worker.json_extract import extract_json
 from agenthandover_worker.model_profiles import STANDARD_TIER
+from agenthandover_worker.model_scheduler import before_generation_call
 from agenthandover_worker.ollama import OllamaClient
 from agenthandover_worker.redaction import redact
 
@@ -274,6 +275,9 @@ class BehavioralSynthesizer:
     ) -> None:
         self.config = config or SynthesizerConfig()
         self._vlm_queue = vlm_queue
+        # Set by ``ModelScheduler.register``: switches Ollama to the
+        # generation model before a call (see ``before_generation_call``).
+        self.before_call: Callable[[], bool] | None = None
         # KB is used to inject user profile (tools/accounts/working hours)
         # into the synthesis prompt so the model reasons about WHO the user
         # is, not an abstract "user".  Optional — falls back to observation-
@@ -331,8 +335,9 @@ class BehavioralSynthesizer:
 
         # Call VLM with model-specific profile
         from agenthandover_worker.model_profiles import get_profile
-        profile = get_profile(self.config.model)
         try:
+            before_generation_call(self)
+            profile = get_profile(self.config.model)
             raw_response, elapsed = _call_ollama_text(
                 model=self.config.model,
                 prompt=prompt,

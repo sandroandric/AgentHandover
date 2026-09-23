@@ -34,6 +34,8 @@ from dataclasses import dataclass, field
 
 import pytest
 
+from journeys.cassette import CASSETTE_DIR, load_entries
+
 
 MAX_ANNOTATED = 60
 MAX_MODEL_SECONDS = 600
@@ -119,6 +121,29 @@ def test_compute_volatile_hour_annotates_at_most_60_frames(
     assert stats["cache_hits"] > stats["annotated"], stats
 
 
+# The activity classifier's call the volatile hour repeats 28 times, as
+# the worker makes it since WP-C9 (annotation model, num_ctx 4096,
+# num_predict 16).  Its only recording (WP-C9's) includes a 146 s model
+# load, which the replay publishes on every one of the 28 calls; recorded
+# with the model resident, it costs under a second.
+COLD_CLASSIFIER_KEY = "0901961c0f16ce7a1755d49d8727b724889b6cc98cbc14f31331fd5ef707d98f"
+_COLD_LOAD_SECONDS = 10
+
+
+def _recorded_load_seconds(key: str) -> float:
+    entry = load_entries(CASSETTE_DIR / "passive_volatile_hour.jsonl").get(key)
+    return (entry["response"].get("load_duration") or 0) / 1e9 if entry else 0.0
+
+
+@pytest.mark.skipif(
+    _recorded_load_seconds(COLD_CLASSIFIER_KEY) >= _COLD_LOAD_SECONDS,
+    reason=(
+        f"cassettes/passive_volatile_hour.jsonl entry {COLD_CLASSIFIER_KEY} was "
+        "recorded with a cold model load (146 s load_duration, replayed on each "
+        "of its 28 calls): delete that entry and re-record it with AH_RECORD=1 "
+        "on the test Mac with qwen3.5:4b resident"
+    ),
+)
 def test_compute_volatile_hour_spends_at_most_600_model_seconds(
     events_db, worker, clock, temp_home, cassette,
 ) -> None:

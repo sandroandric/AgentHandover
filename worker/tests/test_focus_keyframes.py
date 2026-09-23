@@ -191,3 +191,53 @@ class TestSessionOrder:
             "SELECT COUNT(*) FROM events WHERE annotation_status = 'pending'"
         ).fetchone()[0] == 90
         conn.close()
+
+    def test_a_deferred_session_leaves_no_keyframes_for_the_annotation_phase(self, tmp_path):
+        """A session deferred mid-annotation or at its SOP call is retried
+        whole on a later tick: the next annotation phase's
+        ``annotate_remaining`` must not annotate its other keyframes first
+        (they would delay the Skill and change its frames' context)."""
+        from agenthandover_worker.scene_annotator import AnnotationResult
+        from agenthandover_worker.sop_generator import GeneratedSOP
+
+        db_path = _create_test_db(tmp_path)
+        screenshots = tmp_path / "shots"
+        screenshots.mkdir()
+        _insert(db_path, [
+            _frame(i, title=f"Page {i // 10}", ocr=f"page {i // 10} line {i}")
+            for i in range(100)
+        ], screenshots)
+
+        annotator = _make_mock_annotator()
+        annotate = annotator.annotate_event.side_effect
+        annotator.annotate_event.side_effect = lambda event, **kw: (
+            AnnotationResult(event_id=event["id"], status="deferred")
+            if event["id"] == "f0" else annotate(event, **kw)
+        )
+        generator = _make_mock_sop_generator()
+        processor = FocusProcessor(annotator, _make_mock_differ(), generator)
+
+        with WorkerDB(db_path) as db:
+            result = processor.process_session(
+                db, "s1", "Task", db.get_focus_session_events("s1"),
+                screenshots_dir=str(screenshots),
+            )
+            assert result.deferred
+            calls = annotator.annotate_event.call_count
+            assert processor.annotate_remaining(db)["annotated"] == 0
+            assert annotator.annotate_event.call_count == calls
+            generator.generate_from_focus.assert_not_called()
+
+            # Annotation comes back; the SOP model does not load.
+            annotator.annotate_event.side_effect = annotate
+            generator.generate_from_focus.side_effect = lambda timeline, title: GeneratedSOP(
+                sop={}, success=False, deferred=True, error="VLM connection failed",
+            )
+            result = processor.process_session(
+                db, "s1", "Task", db.get_focus_session_events("s1"),
+                screenshots_dir=str(screenshots),
+            )
+            assert result.deferred
+            calls = annotator.annotate_event.call_count
+            assert processor.annotate_remaining(db)["annotated"] == 0
+            assert annotator.annotate_event.call_count == calls

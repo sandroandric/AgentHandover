@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "basis": "Annotator qwen3.5:4b on every tier; Skills and synthesis on the largest model the RAM holds. Measured on a 16 GB Mac with Ollama 0.34.2: gemma4:12b-it-qat takes 40+ s per annotated frame (11 s image prefill + 30 s decode) against a 3 s budget; qwen3.5:4b (3.4 GB) and gemma4:12b-it-qat (7.2 GB) stay resident together.",
+  "basis": "Annotator qwen3.5:4b on every tier; Skills and synthesis on the largest model the RAM holds. Measured on a 16 GB Mac with Ollama 0.34.2: gemma4:12b-it-qat takes 40+ s per annotated frame (11 s image prefill + 30 s decode) against a 3 s budget. With ordinary apps open, qwen3.5:4b (3.4 GB) and gemma4:12b-it-qat (7.2 GB) do not fit together, so the worker loads one at a time: annotation first, then Skills.",
   "minimum_ollama_version_for_gemma4": "0.34.0",
   "embedding_model": "nomic-embed-text",
   "model_sizes_gb": {

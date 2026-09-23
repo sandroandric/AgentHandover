@@ -11,21 +11,29 @@ the loop body's processors in the loop's order:
    failed query, search, recall, trust accept / dismiss, staleness
    reviewed, lifecycle promote, merge, drift reviewed, lifecycle dismiss,
    export) and, when a trigger was consumed, the curation queue refresh;
-2. the stale focus-session sweep, then ``_process_focus_sessions_v2``
-   (or the v1 path when the v2 pipeline is off);
+2. the stale focus-session sweep;
 3. ``run_pipeline`` over one ``EventRetryGuard`` batch of unprocessed
    events, marking them processed and persisting VLM jobs;
-4. ``_process_annotations`` within main()'s hourly and daily
-   ``AnnotationBudget`` (rolled on the clock) and ``_process_diffs``,
-   charged to it;
-5. ``_process_passive_discovery`` every 2 hours of *clock* time (the timer
-   starts when the worker is built, as main() seeds it at loop entry)
-   while no focus session is pending, charged to the budget;
+4. the annotation phase: ``ModelScheduler.begin_annotation``, the focus
+   processor's ``annotate_remaining``, ``_process_annotations`` within
+   main()'s hourly and daily ``AnnotationBudget`` (rolled on the clock)
+   and ``_process_diffs``, charged to it;
+5. the generation phase: ``ModelScheduler.plan_generation``, then
+   ``_process_focus_sessions_v2`` (or the v1 path when the v2 pipeline is
+   off), then ``_process_passive_discovery`` every 2 hours of *clock* time
+   (the timer starts when the worker is built, as main() seeds it at loop
+   entry) while no focus session is pending, charged to the budget, then
+   ``ModelScheduler.end_generation``;
 6. ``_write_sops_index``;
 7. the status heartbeat, ``_write_worker_status`` with the running totals,
-   the annotation budget and pause reason and the compute counters
-   (``status()`` reads it back).  Building a ``JourneyWorker`` resets the
-   process-wide usage counters, as a worker start does.
+   the annotation budget and pause reason, the compute counters and the
+   model schedule (``status()`` reads it back).  Building a
+   ``JourneyWorker`` resets the process-wide usage counters, as a worker
+   start does.
+
+The scheduler runs on the journey clock and, unless a journey passes
+``free_memory``, sees memory to spare (the host's real ``vm_stat`` would
+make a replay depend on the machine running it).
 
 Not driven here, because they only exist inline in ``main()``: the VLM
 fallback job runner (needs ``VLMWorker``), the idle-gate shortcut for
@@ -47,6 +55,7 @@ import dataclasses
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Callable
 
 from agenthandover_worker import main as wm
 from agenthandover_worker import ops_telemetry
@@ -54,7 +63,8 @@ from agenthandover_worker import trigger_spool
 from agenthandover_worker.annotation_cache import AnnotationCache
 from agenthandover_worker.config import load_config
 from agenthandover_worker.loop_guard import EventRetryGuard
-from agenthandover_worker.ollama import OllamaError
+from agenthandover_worker.model_scheduler import GB, ModelScheduler
+from agenthandover_worker.ollama import OllamaClient, OllamaError
 from agenthandover_worker.scheduler import AnnotationBudget, charged_to
 
 PASSIVE_DISCOVERY_INTERVAL = timedelta(seconds=7200)  # main(): _PASSIVE_DISCOVERY_INTERVAL
@@ -91,6 +101,7 @@ class JourneyWorker:
         sops_dir: Path,
         clock: Clock,
         adapter: str = "openclaw",
+        free_memory: Callable[[], int | None] = lambda: 64 * GB,
     ) -> None:
         from agenthandover_worker.activity_classifier import ActivityClassifier
         from agenthandover_worker.activity_search import ActivitySearcher
@@ -106,7 +117,11 @@ class JourneyWorker:
         from agenthandover_worker.knowledge_base import KnowledgeBase
         from agenthandover_worker.knowledge_export_adapter import KnowledgeBaseExportAdapter
         from agenthandover_worker.lifecycle_manager import LifecycleManager
-        from agenthandover_worker.llm_reasoning import LLMReasoner, ReasoningConfig
+        from agenthandover_worker.llm_reasoning import (
+            LLMReasoner,
+            ReasoningConfig,
+            annotation_reasoner,
+        )
         from agenthandover_worker.privacy_zones import PrivacyZoneChecker, PrivacyZoneConfig
         from agenthandover_worker.procedure_curator import ProcedureCurator
         from agenthandover_worker.procedure_matcher import ProcedureMatcher
@@ -193,7 +208,9 @@ class JourneyWorker:
         if features.activity_classification:
             self.activity_classifier = ActivityClassifier(
                 profile=kb.get_profile(), policy=UserPolicy(kb),
-                llm_reasoner=llm_reasoner,
+                llm_reasoner=annotation_reasoner(
+                    vlm_cfg.annotation_model, host, self.vlm_queue,
+                ),
             )
         self.constraint_manager = ConstraintManager(kb)
 
@@ -303,6 +320,16 @@ class JourneyWorker:
             )
         self.activity_searcher = ActivitySearcher(db_path=self.db_path)
         self.sop_auto_approve = cfg.sop.auto_approve
+        self.model_scheduler = ModelScheduler(
+            OllamaClient(host),
+            annotation_model=vlm_cfg.annotation_model,
+            sop_model=vlm_cfg.sop_model,
+            clock=lambda: clock.now().timestamp(),
+            free_memory=free_memory,
+        )
+        self.model_scheduler.register(
+            self.sop_generator, self.behavioral_synthesizer, llm_reasoner,
+        )
 
         self.db = wm.WorkerDB(self.db_path)
         self.v2_schema_ok = (
@@ -409,36 +436,6 @@ class JourneyWorker:
             wm._write_curation_queue(self.procedure_curator)
 
         wm._sweep_stale_focus_session(self.state_dir, self.focus_max_session_hours)
-        if self.focus_processor is not None and self.v2_schema_ok:
-            focus_sops = wm._process_focus_sessions_v2(
-                db,
-                focus_processor=self.focus_processor,
-                screenshots_dir=self.screenshots_dir,
-                sop_auto_approve=self.sop_auto_approve,
-                behavioral_synthesizer=self.behavioral_synthesizer,
-                focus_questioner=self.focus_questioner,
-                knowledge_base=self.knowledge_base,
-                vector_kb=self.vector_kb,
-                ollama_host=self.cfg.vlm.ollama_host,
-                qna_model=self.cfg.vlm.sop_model,
-                **writers,
-            )
-        else:
-            focus_sops = wm._process_focus_sessions(
-                db,
-                episode_builder=self.episode_builder,
-                clipboard_linker=self.clipboard_linker,
-                translator=self.translator,
-                scorer=self.scorer,
-                vlm_queue=self.vlm_queue,
-                sop_inducer=self.sop_inducer,
-                sop_enhancer=self.sop_enhancer,
-                sop_auto_approve=self.sop_auto_approve,
-                **writers,
-            )
-        if focus_sops > 0:
-            wm._write_sops_index(db, self.knowledge_base)
-
         unprocessed = db.get_unprocessed_events(limit=self.event_guard.batch_limit)
         summary = None
         if unprocessed:
@@ -466,6 +463,10 @@ class JourneyWorker:
             if summary["vlm_enqueued"] > 0:
                 wm._persist_vlm_jobs(db, self.vlm_queue)
 
+        scheduler = self.model_scheduler
+        scheduler.begin_annotation()
+        if self.focus_processor is not None and self.v2_schema_ok:
+            self.focus_processor.annotate_remaining(db)
         ann_stats = diff_stats = None
         if self.scene_annotator is not None and not self.v2_schema_ok:
             self.v2_schema_ok = wm._check_v2_schema(db)
@@ -484,14 +485,49 @@ class JourneyWorker:
                 db, self.frame_differ, budget=self.annotation_budget,
             )
 
-        passive_sops = None
-        if (
+        passive_due = bool(
             self.task_segmenter is not None
             and self.sop_generator is not None
             and self.v2_schema_ok
             and self._passive_discovery_due()
             and not (self.state_dir / "focus-session.json").exists()
-        ):
+        )
+        focus_work = wm._focus_work_ready(self.state_dir, db)
+        plan = scheduler.plan_generation(
+            urgent=focus_work is not None, due={"passive_discovery": passive_due},
+        )
+        if self.focus_processor is not None and self.v2_schema_ok:
+            focus_sops = wm._process_focus_sessions_v2(
+                db,
+                focus_processor=self.focus_processor,
+                screenshots_dir=self.screenshots_dir,
+                sop_auto_approve=self.sop_auto_approve,
+                behavioral_synthesizer=self.behavioral_synthesizer,
+                focus_questioner=self.focus_questioner,
+                knowledge_base=self.knowledge_base,
+                vector_kb=self.vector_kb,
+                ollama_host=self.cfg.vlm.ollama_host,
+                qna_model=scheduler.generation_model,
+                **writers,
+            )
+        else:
+            focus_sops = wm._process_focus_sessions(
+                db,
+                episode_builder=self.episode_builder,
+                clipboard_linker=self.clipboard_linker,
+                translator=self.translator,
+                scorer=self.scorer,
+                vlm_queue=self.vlm_queue,
+                sop_inducer=self.sop_inducer,
+                sop_enhancer=self.sop_enhancer,
+                sop_auto_approve=self.sop_auto_approve,
+                **writers,
+            )
+        if focus_sops > 0:
+            wm._write_sops_index(db, self.knowledge_base)
+
+        passive_sops = None
+        if passive_due and plan.allows("passive_discovery"):
             with charged_to(self.annotation_budget):
                 passive_sops = wm._process_passive_discovery(
                     db,
@@ -508,9 +544,11 @@ class JourneyWorker:
             self._last_passive_discovery = self.clock.now()
             if passive_sops > 0:
                 wm._write_sops_index(db, self.knowledge_base)
-
-        wm._write_sops_index(db, self.knowledge_base)
+        # As main(): the heartbeat and the index, then (after the daily
+        # jobs main() runs here) the end of the generation phase.
         self._write_status(unprocessed, summary, focus_sops, passive_sops, ann_stats, diff_stats)
+        wm._write_sops_index(db, self.knowledge_base)
+        scheduler.end_generation()
         return {
             "triggers_consumed": triggers_consumed,
             "focus_sops": focus_sops,
@@ -518,6 +556,7 @@ class JourneyWorker:
             "annotations": ann_stats,
             "diffs": diff_stats,
             "passive_sops": passive_sops,
+            "generation_plan": plan,
         }
 
     def _write_status(
@@ -525,7 +564,8 @@ class JourneyWorker:
     ) -> None:
         """main()'s end-of-iteration heartbeat: ``worker-status.json`` with
         the running totals, the passive annotation budget and pause reason
-        (on AC, so only the budget pauses it) and the compute counters."""
+        (on AC, so only the budget pauses it), the compute counters and the
+        model schedule."""
         self._events_processed += len(unprocessed)
         self._sops_generated += (
             focus_sops + (passive_sops or 0) + (summary["sops_exported"] if summary else 0)
@@ -548,6 +588,7 @@ class JourneyWorker:
             v2_diffs_today=self._diffs,
             annotation_paused_reason=self.annotation_budget.pause_reason() if exhausted else None,
             annotation_budget=self.annotation_budget.status(),
+            model_schedule=self.model_scheduler.status(),
         )
 
     def status(self) -> dict:

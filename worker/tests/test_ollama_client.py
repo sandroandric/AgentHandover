@@ -281,6 +281,36 @@ def _http_error(code: int) -> urllib.error.HTTPError:
     return urllib.error.HTTPError(f"{HOST}/api/generate", code, "err", {}, io.BytesIO(b"{}"))
 
 
+def test_unload_and_ps():
+    """``unload`` sends ``keep_alive: 0`` with an empty prompt (Ollama's
+    unload request, not counted as a model call); ``ps`` lists the loaded
+    models with their sizes."""
+    loaded = {"models": [
+        {"name": "qwen3.5:4b", "size": 3_400_000_000, "size_vram": 3_400_000_000},
+        "junk",
+    ]}
+    opener = _Urlopen({"model": "qwen3.5:4b", "done": True, "done_reason": "unload"}, loaded)
+    with patch("urllib.request.urlopen", opener):
+        OllamaClient(HOST).unload("qwen3.5:4b")
+        assert OllamaClient(HOST).ps() == [loaded["models"][0]]
+    assert opener.sent == [
+        ("POST", f"{HOST}/api/generate",
+         b'{"model": "qwen3.5:4b", "prompt": "", "stream": false, "keep_alive": 0}', 30.0),
+        ("GET", f"{HOST}/api/ps", None, 5.0),
+    ]
+    assert MODEL_USAGE.snapshot() == {}
+
+
+def test_a_failed_load_is_unavailable_with_ollamas_reason():
+    """Ollama's 500 for a load that timed out is a transient deferral, and
+    its message says why."""
+    body = b'{"error":"timed out waiting for llama-server to start"}'
+    error = urllib.error.HTTPError(f"{HOST}/api/generate", 500, "Internal Server Error", {}, io.BytesIO(body))
+    with patch("urllib.request.urlopen", _Urlopen(error)):
+        with pytest.raises(OllamaUnavailable, match="timed out waiting for llama-server to start"):
+            OllamaClient(HOST).generate("gemma4:12b-it-qat", "p")
+
+
 @pytest.mark.parametrize("error, expected", [
     (urllib.error.URLError(ConnectionRefusedError(61, "Connection refused")),
      OllamaUnavailable),

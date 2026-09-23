@@ -24,10 +24,11 @@ import logging
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, TYPE_CHECKING
+from typing import Any, Callable, TYPE_CHECKING
 
 from agenthandover_worker.json_extract import clean_model_text, extract_json
-from agenthandover_worker.model_profiles import STANDARD_TIER
+from agenthandover_worker.model_profiles import STANDARD_TIER, get_profile
+from agenthandover_worker.model_scheduler import before_generation_call
 from agenthandover_worker.ollama import OllamaClient
 
 if TYPE_CHECKING:
@@ -64,6 +65,14 @@ def sanitize_user_data(text: str, max_length: int = _MAX_USER_DATA_LENGTH) -> st
 # ---------------------------------------------------------------------------
 
 
+class TruncatedAnswer(Exception):
+    """Ollama stopped the answer at ``num_predict``: it is incomplete."""
+
+    def __init__(self, message: str, elapsed: float = 0.0) -> None:
+        super().__init__(message)
+        self.elapsed = elapsed
+
+
 @dataclass
 class ReasoningConfig:
     """Configuration for the LLM reasoner."""
@@ -72,7 +81,17 @@ class ReasoningConfig:
     ollama_host: str = "http://localhost:11434"
     num_predict: int = 4000
     timeout: float = 1800.0
-    think: bool = True
+    # Off: every reasoning call wants a short structured answer, and with
+    # thinking on the Focus Q&A call spent its whole num_predict (4000) on
+    # 15,000 characters of thinking and returned a cut-off JSON answer
+    # (focus_dailynews cassette, qwen3.5:4b).  A caller may still pass
+    # ``think=True``; a truncated answer is then retried without it.
+    think: bool = False
+    # Ollama context size; None means the model profile's ``sop_num_ctx``,
+    # the context every generation-phase call on that model uses (Ollama
+    # reloads a model whose num_ctx changes).  The annotation-phase
+    # reasoner (the activity classifier's) passes ``ann_num_ctx``.
+    num_ctx: int | None = None
 
 
 @dataclass
@@ -112,6 +131,9 @@ class LLMReasoner:
     ) -> None:
         self.config = config or ReasoningConfig()
         self._queue = vlm_queue
+        # Set by ``ModelScheduler.register``: switches Ollama to the
+        # generation model before a call (see ``before_generation_call``).
+        self.before_call: Callable[[], bool] | None = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -132,7 +154,7 @@ class LLMReasoner:
 
         Args:
             think: Override for thinking mode.  Defaults to ``config.think``
-                (True).  JSON responses benefit from thinking.
+                (False).
         """
         result = self._execute(prompt, system, caller, think=think)
         if not result.success:
@@ -260,6 +282,14 @@ class LLMReasoner:
         """Budget-check, call Ollama, build base ReasoningResult."""
         prompt_hash = hashlib.sha256(prompt.encode()).hexdigest()[:12]
         now_iso = datetime.now(timezone.utc).isoformat()
+        try:
+            before_generation_call(self)
+        except ConnectionError as exc:
+            logger.warning("LLM reasoning deferred (%s): %s", caller, exc)
+            return ReasoningResult(
+                model=self.config.model, prompt_hash=prompt_hash,
+                generated_at=now_iso, error=f"Ollama connection failed: {exc}",
+            )
 
         base = ReasoningResult(
             model=self.config.model,
@@ -273,9 +303,25 @@ class LLMReasoner:
             logger.debug("LLM reasoning skipped (%s): over budget", caller)
             return base
 
-        # Call Ollama
+        # Call Ollama.  An answer cut off at num_predict is never parsed
+        # as if complete: a call that thought is retried once without
+        # thinking (the thinking is what ate the budget); otherwise it fails.
         try:
-            raw_text, elapsed = self._call_ollama(prompt, system, think=think)
+            try:
+                raw_text, elapsed = self._call_ollama(prompt, system, think=think)
+            except TruncatedAnswer as exc:
+                use_think = think if think is not None else self.config.think
+                if not use_think:
+                    raise
+                logger.warning(
+                    "LLM reasoning (%s): %s; retrying without thinking", caller, exc,
+                )
+                raw_text, elapsed = self._call_ollama(prompt, system, think=False)
+                elapsed += exc.elapsed
+        except TruncatedAnswer as exc:
+            base.error = f"Truncated answer: {exc}"
+            logger.warning("LLM reasoning failed (%s): %s", caller, exc)
+            return base
         except ConnectionError as exc:
             base.error = f"Ollama connection failed: {exc}"
             logger.warning("LLM reasoning failed (%s): %s", caller, exc)
@@ -313,7 +359,8 @@ class LLMReasoner:
         """Call Ollama /api/generate. This is the mock boundary for tests.
 
         Returns the answer without ``<think>`` blocks and the call's
-        wall-clock seconds.
+        wall-clock seconds; raises :class:`TruncatedAnswer` when Ollama
+        stopped at ``num_predict`` (``done_reason == "length"``).
         """
         use_think = think if think is not None else self.config.think
         response = OllamaClient(self.config.ollama_host).generate(
@@ -322,13 +369,20 @@ class LLMReasoner:
             system=system,
             options={
                 "num_predict": num_predict or self.config.num_predict,
-                "num_ctx": 16384,
+                "num_ctx": self.config.num_ctx or get_profile(self.config.model).sop_num_ctx,
                 "temperature": 0.3,
             },
             think=use_think,
             timeout=self.config.timeout,
             call_type="reasoning",
         )
+        if response.done_reason == "length":
+            raise TruncatedAnswer(
+                f"{self.config.model} stopped at num_predict="
+                f"{num_predict or self.config.num_predict} "
+                f"({'with' if use_think else 'without'} thinking)",
+                response.elapsed,
+            )
         return clean_model_text(response.text), response.elapsed
 
     # ------------------------------------------------------------------
@@ -370,3 +424,26 @@ class LLMReasoner:
             return False
 
         return None
+
+
+# A frame classification is one category name.
+CLASSIFIER_NUM_PREDICT = 16
+
+
+def annotation_reasoner(
+    model: str, ollama_host: str, vlm_queue: "VLMFallbackQueue | None" = None,
+) -> LLMReasoner:
+    """The reasoner for calls made while frames are annotated (the activity
+    classifier): on the annotation model with its ``ann_num_ctx``, so it
+    neither loads the SOP model nor reloads the annotation model with
+    another context size between two frames."""
+    return LLMReasoner(
+        config=ReasoningConfig(
+            model=model,
+            ollama_host=ollama_host,
+            num_predict=CLASSIFIER_NUM_PREDICT,
+            think=False,
+            num_ctx=get_profile(model).ann_num_ctx,
+        ),
+        vlm_queue=vlm_queue,
+    )

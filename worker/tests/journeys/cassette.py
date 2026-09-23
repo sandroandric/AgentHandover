@@ -2,7 +2,7 @@
 
 A tiny HTTP server on a random localhost port that speaks the part of the
 Ollama API the worker uses (``/api/generate``, ``/api/chat``, ``/api/embed``,
-``/api/tags``, ``/api/version``).  Journeys point every ``ollama_host`` at
+``/api/tags``, ``/api/version``, ``/api/ps``).  Journeys point every ``ollama_host`` at
 ``cassette.host``; no production code changes.
 
 Replay (default): answers come from ``cassettes/<journey>.jsonl``.  A request
@@ -19,7 +19,10 @@ recorded answer and its replay are byte-identical.
 
 Key: sha256 over the path and the request body with ``stream`` and
 ``keep_alive`` removed and every image replaced by the sha256 of its bytes.
-JSON is dumped with sorted keys, so option order does not matter.
+JSON is dumped with sorted keys, so option order does not matter.  An
+unload (an empty prompt with ``keep_alive: 0``) therefore keys as an empty
+prompt, and ``/api/ps`` (a GET without a body) by its path alone: a cassette
+holds the one loaded-model list recorded at the journey's first call.
 
 Fault injection (control endpoints, not counted as API requests):
   ``/__cassette/down?n=N``        answer the next N API requests with HTTP 503
@@ -52,7 +55,7 @@ from urllib.parse import parse_qs, urlsplit
 CASSETTE_DIR = Path(__file__).parent / "cassettes"
 
 API_PATHS = frozenset(
-    {"/api/generate", "/api/chat", "/api/embed", "/api/tags", "/api/version"}
+    {"/api/generate", "/api/chat", "/api/embed", "/api/tags", "/api/version", "/api/ps"}
 )
 _STREAMING_PATHS = frozenset({"/api/generate", "/api/chat"})
 _IGNORED_FIELDS = ("stream", "keep_alive")
