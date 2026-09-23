@@ -531,6 +531,45 @@ def _next_poll_interval(
     return min(current * 2, max(5.0, base * 4))
 
 
+def _log_handlers(log_dir: Path, *, stderr_is_tty: bool) -> list[logging.Handler]:
+    """The worker's log handlers: one rotating ``worker.log``, plus stderr
+    only for a manual run in a terminal.
+
+    Under launchd, stderr is ``worker.stderr.log``; a stderr handler there
+    wrote every line twice (the two files were byte-identical).  That file
+    now keeps only what bypasses logging: tracebacks of a crash and output
+    of native libraries.
+    """
+    from logging.handlers import RotatingFileHandler
+
+    formatter = logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%Y-%m-%dT%H:%M:%S",
+    )
+    file_handler = RotatingFileHandler(
+        log_dir / "worker.log",
+        maxBytes=10 * 1024 * 1024,
+        backupCount=5,
+        encoding="utf-8",
+    )
+    handlers: list[logging.Handler] = [file_handler]
+    if stderr_is_tty:
+        handlers.append(logging.StreamHandler())
+    for handler in handlers:
+        handler.setFormatter(formatter)
+    return handlers
+
+
+def _poll_log_level(
+    counts: tuple[int, int], last_logged: tuple[int, int] | None,
+) -> int:
+    """INFO for a poll whose (unprocessed events, pending VLM jobs) counts
+    changed since the last one logged, DEBUG for a repeat.  A job the
+    worker cannot finish kept the same line at INFO every 2 s (~43k
+    lines a day)."""
+    return logging.INFO if counts != last_logged else logging.DEBUG
+
+
 def _status_dir() -> Path:
     """Return the standard data directory for status/PID files."""
     return data_dir()
@@ -3944,33 +3983,15 @@ def main(argv: list[str] | None = None) -> None:
         print(f"Backfilled {count} procedure(s) in {args.knowledge_dir}")
         return
 
-    from logging.handlers import RotatingFileHandler
-
     if _platform.system() == "Darwin":
         log_dir = Path.home() / "Library" / "Application Support" / "agenthandover" / "logs"
     else:
         log_dir = Path.home() / ".local" / "share" / "agenthandover" / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
 
-    log_format = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
-    log_datefmt = "%Y-%m-%dT%H:%M:%S"
-
-    # File handler with rotation (10MB, 5 backups)
-    file_handler = RotatingFileHandler(
-        log_dir / "worker.log",
-        maxBytes=10 * 1024 * 1024,
-        backupCount=5,
-        encoding="utf-8",
-    )
-    file_handler.setFormatter(logging.Formatter(log_format, datefmt=log_datefmt))
-
-    # Also log to stderr for debugging when running manually
-    stderr_handler = logging.StreamHandler()
-    stderr_handler.setFormatter(logging.Formatter(log_format, datefmt=log_datefmt))
-
     logging.basicConfig(
         level=getattr(logging, args.log_level),
-        handlers=[file_handler, stderr_handler],
+        handlers=_log_handlers(log_dir, stderr_is_tty=sys.stderr.isatty()),
     )
 
     # Signal handling — set up BEFORE the DB retry loop so we can
@@ -4645,6 +4666,8 @@ def main(argv: list[str] | None = None) -> None:
 
     # Task 5: Idle progress tracking
     last_idle_log_time = time.monotonic()
+    # (unprocessed, pending VLM) counts of the last poll logged at INFO.
+    last_logged_poll_counts: tuple[int, int] | None = None
 
     # Episode store cleanup — run once per day
     _last_episode_cleanup = 0.0
@@ -4871,11 +4894,13 @@ def main(argv: list[str] | None = None) -> None:
                 pending_vlm = db.get_pending_vlm_jobs(limit=10)
 
                 if unprocessed or pending_vlm:
-                    logger.info(
+                    poll_counts = (len(unprocessed), len(pending_vlm))
+                    logger.log(
+                        _poll_log_level(poll_counts, last_logged_poll_counts),
                         "Poll: %d unprocessed events, %d pending VLM jobs",
-                        len(unprocessed),
-                        len(pending_vlm),
+                        *poll_counts,
                     )
+                    last_logged_poll_counts = poll_counts
                     current_interval = _next_poll_interval(
                         current_interval, args.poll_interval,
                         busy=True, triggers_consumed=triggers_consumed,
@@ -4884,6 +4909,7 @@ def main(argv: list[str] | None = None) -> None:
                     last_idle_log_time = time.monotonic()
                 else:
                     logger.debug("Poll: nothing to do")
+                    last_logged_poll_counts = None
                     current_interval = _next_poll_interval(
                         current_interval, args.poll_interval,
                         busy=False, triggers_consumed=triggers_consumed,
