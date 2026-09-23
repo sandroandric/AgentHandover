@@ -1515,9 +1515,6 @@ def run_pipeline(
                 openclaw_writer, sop_templates, procedure_writer,
             )
             summary["sops_exported"] = len(paths)
-            index_generator.update_index(
-                openclaw_writer.get_sops_dir(), sop_templates
-            )
             logger.info("Exported %d SOPs", len(paths))
         except Exception:
             logger.exception("SOP export failed")
@@ -1783,9 +1780,6 @@ def _process_focus_sessions(
                     openclaw_writer, sop_templates, procedure_writer,
                 )
                 exported = len(paths)
-                index_generator.update_index(
-                    openclaw_writer.get_sops_dir(), sop_templates
-                )
                 logger.info(
                     "Focus session '%s': exported %d SOP(s)", title, exported
                 )
@@ -2305,9 +2299,6 @@ def _focus_v2_export(
             openclaw_writer, sop_templates, procedure_writer,
         )
         exported = len(paths)
-        index_generator.update_index(
-            openclaw_writer.get_sops_dir(), sop_templates
-        )
         logger.info(
             "Focus v2 session '%s': exported %d SOP(s) (%.1fs VLM time)",
             title, exported, inference_time,
@@ -2909,9 +2900,6 @@ def _process_passive_discovery(
                     openclaw_writer, sop_templates, procedure_writer,
                 )
                 total_exported += len(paths)
-                index_generator.update_index(
-                    openclaw_writer.get_sops_dir(), sop_templates,
-                )
                 logger.info(
                     "Passive SOP '%s': exported %d SOP(s) (%.1fs VLM)",
                     task_label[:60], len(paths), result.inference_time_seconds,
@@ -3756,9 +3744,6 @@ def _export_sop_templates(
     try:
         paths = _export_via_adapter(
             openclaw_writer, sop_templates, procedure_writer,
-        )
-        index_generator.update_index(
-            openclaw_writer.get_sops_dir(), sop_templates,
         )
         logger.info("Exported %d SOP(s) via primary adapter", len(paths))
     except Exception:

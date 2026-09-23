@@ -11,8 +11,11 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-from agenthandover_worker.export_adapter import SOPExportAdapter
-from agenthandover_worker.exporter import AtomicWriter
+from agenthandover_worker.export_adapter import (
+    SOPExportAdapter,
+    procedure_to_sop_template,
+)
+from agenthandover_worker.exporter import AtomicWriter, IndexGenerator
 from agenthandover_worker.procedure_schema import sop_to_procedure
 from agenthandover_worker.skill_render import render_packet
 
@@ -31,6 +34,7 @@ class GenericWriter(SOPExportAdapter):
         self.sops_dir = self.sops_dir_path
         self.metadata_dir = self.output_dir / "metadata"
         self.json_export = json_export
+        self.index_generator = IndexGenerator()
 
     def _ensure_dirs(self) -> None:
         self.sops_dir_path.mkdir(parents=True, exist_ok=True)
@@ -41,11 +45,21 @@ class GenericWriter(SOPExportAdapter):
         return self.write_procedure(sop_to_procedure(sop_template))
 
     def write_procedure(self, procedure: dict) -> Path:
-        """Write ``sop.<slug>.md`` (and ``sop.<slug>.v3.json`` when enabled).
+        """Write ``sop.<slug>.md`` (and ``sop.<slug>.v3.json`` when enabled)
+        and refresh ``index.md`` beside ``sops/``.
 
         The markdown is ``render_packet(procedure, target="generic")``;
-        the JSON is the procedure itself, for machine consumption.
+        the JSON is the procedure itself, for machine consumption.  The
+        catalogue lists the ``sop.*.v3.json`` procedures on disk plus this
+        one (without ``json_export`` only this one is known).
         """
+        md_path = self._write(procedure)
+        self.index_generator.update_index(
+            self.sops_dir_path, [procedure_to_sop_template(procedure)],
+        )
+        return md_path
+
+    def _write(self, procedure: dict) -> Path:
         self._ensure_dirs()
         slug = str(procedure.get("id") or procedure.get("slug") or "unknown")
 
@@ -61,8 +75,14 @@ class GenericWriter(SOPExportAdapter):
         return md_path
 
     def write_all_sops(self, sop_templates: list[dict]) -> list[Path]:
-        """Write multiple SOPs and return paths to all written files."""
-        return [self.write_sop(t) for t in sop_templates]
+        """Write multiple SOPs, refresh the catalogue once, and return
+        paths to all written files."""
+        procedures = [sop_to_procedure(t) for t in sop_templates]
+        paths = [self._write(p) for p in procedures]
+        self.index_generator.update_index(
+            self.sops_dir_path, [procedure_to_sop_template(p) for p in procedures],
+        )
+        return paths
 
     def write_metadata(self, metadata_type: str, data: dict) -> Path:
         """Write a metadata JSON file."""
