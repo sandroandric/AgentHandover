@@ -26,6 +26,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
+from agenthandover_worker.redaction import redact
+
 if TYPE_CHECKING:
     from agenthandover_worker.llm_reasoning import LLMReasoner
 
@@ -214,14 +216,16 @@ class FocusQuestioner:
         else:
             variables = "(none)"
 
+        # The procedure's text quotes the screen: redacted before the
+        # model sees it.
         prompt = _QUESTIONER_PROMPT.format(
-            title=title,
-            description=description,
-            strategy=strategy or "(not yet determined)",
-            steps_text=steps_text,
-            apps=apps,
-            urls=urls,
-            variables=variables,
+            title=redact(title),
+            description=redact(description),
+            strategy=redact(strategy) or "(not yet determined)",
+            steps_text=redact(steps_text),
+            apps=redact(apps),
+            urls=redact(urls),
+            variables=redact(variables),
         )
 
         result = self._reasoner.reason_json(

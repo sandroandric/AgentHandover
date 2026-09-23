@@ -26,6 +26,7 @@ from typing import Any
 from agenthandover_worker.json_extract import extract_json
 from agenthandover_worker.model_profiles import STANDARD_TIER
 from agenthandover_worker.ollama import OllamaClient
+from agenthandover_worker.redaction import redact
 
 logger = logging.getLogger(__name__)
 
@@ -753,17 +754,20 @@ class BehavioralSynthesizer:
         # the prompt asks for verbatim text but never shows any.
         timeline_evidence = self._format_timeline_evidence(observations)
 
+        # Everything below the static instructions came from the screen,
+        # the clipboard or the knowledge base: redacted before the model
+        # sees it.
         return BEHAVIORAL_SYNTHESIS_PROMPT.format(
             observation_count=len(observations),
-            title=title,
-            description=description,
-            user_context=user_context or "(no user profile yet — first-time user; infer from observations only)",
-            steps_summary=steps_summary,
-            timeline_evidence=timeline_evidence or "(no per-frame evidence available)",
-            daily_context=daily_context or "(no daily context available)",
-            session_context=session_context or "(no cross-day context available)",
-            continuity_context=continuity_context or "(no continuity context available)",
-            evidence_context=evidence_context or "(no extracted evidence available)",
+            title=redact(title),
+            description=redact(description),
+            user_context=redact(user_context) or "(no user profile yet — first-time user; infer from observations only)",
+            steps_summary=redact(steps_summary),
+            timeline_evidence=redact(timeline_evidence) or "(no per-frame evidence available)",
+            daily_context=redact(daily_context) or "(no daily context available)",
+            session_context=redact(session_context) or "(no cross-day context available)",
+            continuity_context=redact(continuity_context) or "(no continuity context available)",
+            evidence_context=redact(evidence_context) or "(no extracted evidence available)",
             voice_guidance=voice_guidance,
         )
 

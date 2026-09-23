@@ -22,6 +22,8 @@ import re
 from typing import Iterable, Iterator
 from urllib.parse import urlparse
 
+from agenthandover_worker.redaction import redact
+
 # A capped snapshot ends with a synthetic ``#truncated`` marker node.
 _MARKER_PREFIX = "#"
 
@@ -193,7 +195,10 @@ def _anchor(node: dict, click_target: dict | None) -> dict | None:
         )
     if not (role or name or selector):
         return None
-    return {"role": role, "name": name, "selector": selector}
+    # The anchor is stored in the Skill: a selector copied from the page
+    # (an ``a[href=...]`` with a token in its query) is redacted like any
+    # other screen text.
+    return {"role": role, "name": redact(name), "selector": redact(selector)}
 
 
 def select_anchor(nodes: Iterable | None, click_target: dict | None) -> dict | None:
