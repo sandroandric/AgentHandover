@@ -901,7 +901,10 @@ class TestTypedVariables:
 
         template = _vlm_sop_to_template(parsed, mode="focus")
         variables = template["variables"]
-        assert len(variables) == 2
+        # The two declared ones, then the placeholders the fixture's steps
+        # use without declaring them (declared with no example).
+        assert [v["name"] for v in variables[:2]] == ["email_address", "api_key"]
+        assert all(v["example"] == "" for v in variables[2:])
 
         email_var = variables[0]
         assert email_var["name"] == "email_address"

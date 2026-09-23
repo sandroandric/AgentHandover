@@ -109,8 +109,9 @@ class TestErrors:
         result = lint_sop(sop)
         assert result.valid is True
 
-    def test_undeclared_variable_warning(self):
-        """Undeclared variables are warnings, not errors (VLM output may be imprecise)."""
+    def test_undeclared_variable_is_an_error(self):
+        """A step's {{name}} with no declared variable blocks export: an
+        agent has nothing to fill it from (WP-Q1)."""
         sop = _valid_sop(steps=[
             {
                 "step": "Navigate to {{base_url}}/dashboard",
@@ -125,9 +126,10 @@ class TestErrors:
         ])
         sop["variables"] = [{"name": "base_url", "type": "string", "example": "https://example.com"}]
         result = lint_sop(sop)
-        assert result.valid is True
-        warns = [i for i in result.warnings if "user_name" in i.message]
-        assert len(warns) == 1
+        assert result.valid is False
+        errs = [i for i in result.errors if "user_name" in i.message]
+        assert len(errs) == 1
+        assert not [i for i in result.issues if "base_url" in i.message]
 
     def test_undeclared_variable_in_parameters(self):
         """Variables referenced inside step.parameters should also be checked."""
@@ -146,9 +148,9 @@ class TestErrors:
         ])
         sop["variables"] = []
         result = lint_sop(sop)
-        assert result.valid is True
-        warns = [i for i in result.warnings if "password" in i.message]
-        assert len(warns) == 1
+        assert result.valid is False
+        errs = [i for i in result.errors if "password" in i.message]
+        assert len(errs) == 1
 
     def test_variable_ref_with_spaces(self):
         """Both {{var}} and {{ var }} should be detected."""

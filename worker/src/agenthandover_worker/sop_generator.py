@@ -847,7 +847,10 @@ def _wire_variables_into_steps(
     sorted_vars = sorted(var_map.items(), key=lambda kv: -len(kv[1]))
 
     substitutions = 0
-    text_fields = ("action", "description", "input", "location", "verify", "target")
+    # The fields a placeholder counts in (the internal template's action is
+    # "step", the raw answer's "action"): a field wired but not counted
+    # would drop its variable as unused.
+    from agenthandover_worker.sop_linter import STEP_TEXT_KEYS as text_fields
     param_fields = ("input", "verify", "location", "target")
 
     def _substitute(value: str, var_name: str, example: str) -> tuple[str, int]:
@@ -882,6 +885,53 @@ def _wire_variables_into_steps(
                             substitutions += count
 
     return substitutions
+
+
+def _reconcile_variables(steps: list[dict], variables: list[dict], slug: str) -> list[dict]:
+    """The declared variables that *steps* use, plus one for each
+    ``{{name}}`` a step uses without a declaration.
+
+    A declared variable no step references is dropped: the model declared
+    it "because it would be useful" and never used it.  A placeholder the
+    model wrote without declaring it is declared here, since an agent must
+    be told what to fill in: its example is left empty (nothing in the
+    recording says what the value was) and its description says so.
+    Checked on every text field an agent reads (``sop_linter.
+    STEP_TEXT_KEYS``), the description included: a variable wired only
+    into a description was dropped as unused before, leaving its
+    ``{{name}}`` undeclared.
+    """
+    from agenthandover_worker.sop_linter import step_placeholders
+
+    referenced = step_placeholders(steps)
+    kept = [v for v in variables if v.get("name") in referenced]
+    dropped = [str(v.get("name") or "?") for v in variables if v.get("name") not in referenced]
+    if dropped:
+        logger.info(
+            "Dropped %d unused variable(s) from SOP '%s': %s",
+            len(dropped), slug, ", ".join(dropped),
+        )
+    added = sorted(referenced - {v.get("name") for v in kept})
+    for name in added:
+        kept.append({
+            "name": name,
+            "type": "text",
+            "example": "",
+            "default": "",
+            "description": (
+                f"The {name.replace('_', ' ')}: the steps use it; its value "
+                "was not seen in the recording"
+            ),
+            "required": True,
+            "sensitive": False,
+            "validation": "",
+        })
+    if added:
+        logger.info(
+            "Declared %d variable(s) that SOP '%s' steps use without a "
+            "declaration: %s", len(added), slug, ", ".join(added),
+        )
+    return kept
 
 
 def _vlm_sop_to_template(
@@ -1119,42 +1169,9 @@ def _vlm_sop_to_template(
             _subs, slug,
         )
 
-    # Drop any declared variable that isn't actually referenced in any
-    # step text. Gemma 4 (and any other VLM) occasionally hallucinates
-    # "would be useful" variables that it then forgets to weave into the
-    # step text. The sop_linter catches this as a warning, but the
-    # variable still ships in the final procedure and clutters the Skill
-    # for no reason. Cleaner to drop them silently here and emit a
-    # single INFO log so we can still monitor prompt quality.
-    #
-    # The prompt rule above tells the VLM not to do this in the first
-    # place, AND _wire_variables_into_steps above tries to wire them
-    # post-hoc; this pass is the final safety net.
-    from agenthandover_worker.sop_linter import (
-        _collect_variable_refs,
-        _step_text_fields,
-    )
-    _referenced: set[str] = set()
-    for _s in steps:
-        if not isinstance(_s, dict):
-            continue
-        for _txt in _step_text_fields(_s):
-            _referenced.update(_collect_variable_refs(_txt))
-    _unused = [
-        v for v in variables
-        if isinstance(v, dict) and v.get("name") and v["name"] not in _referenced
-    ]
-    if _unused:
-        variables = [
-            v for v in variables
-            if not (isinstance(v, dict) and v.get("name") and v["name"] not in _referenced)
-        ]
-        logger.info(
-            "Dropped %d unused variable(s) from SOP '%s': %s",
-            len(_unused),
-            slug,
-            ", ".join(v.get("name", "?") for v in _unused),
-        )
+    # Every {{name}} a step uses is declared, and every declared variable
+    # is used (the prompt asks for both; the model often breaks one).
+    variables = _reconcile_variables(steps, variables, slug)
 
     template = {
         "slug": slug,

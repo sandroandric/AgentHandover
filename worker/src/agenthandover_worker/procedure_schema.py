@@ -21,6 +21,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+from agenthandover_worker.sop_linter import declared_variable_names, step_placeholders
+
 PROCEDURE_SCHEMA_VERSION = "3.2.0"
 
 # All accepted versions for backward compatibility
@@ -449,6 +451,15 @@ def validate_procedure(data: dict) -> list[str]:
                 # credential field is optional, must be bool if present
                 if "credential" in inp and not isinstance(inp["credential"], bool):
                     errors.append(f"inputs[{i}].credential must be a boolean")
+
+    # Every {{name}} a step uses is a declared input: an agent has nothing
+    # to fill an undeclared one from.
+    undeclared = step_placeholders(data.get("steps")) - declared_variable_names(data)
+    if undeclared:
+        errors.append(
+            "steps use undeclared input(s): "
+            + ", ".join(f"{{{{{name}}}}}" for name in sorted(undeclared))
+        )
 
     # Outputs must be a list of dicts
     if "outputs" in data:

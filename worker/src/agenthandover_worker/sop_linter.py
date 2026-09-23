@@ -66,12 +66,18 @@ def _collect_variable_refs(text: str) -> set[str]:
     return set(_VAR_REF_RE.findall(text))
 
 
+# The step fields a ``{{variable}}`` can appear in.  The internal template
+# uses "step" for the action verb, the VLM's raw format and v3 procedures
+# use "action"; the description is rendered to the agent as well.
+STEP_TEXT_KEYS: tuple[str, ...] = (
+    "step", "action", "description", "input", "location", "verify", "target",
+)
+
+
 def _step_text_fields(step: dict) -> list[str]:
     """Return the text values from step fields that may contain variable refs."""
     texts: list[str] = []
-    # Internal template uses "step" for the action verb.  The VLM raw
-    # format uses "action".  Check both, plus common supplementary fields.
-    for key in ("step", "action", "input", "location", "verify", "target"):
+    for key in STEP_TEXT_KEYS:
         val = step.get(key)
         if isinstance(val, str):
             texts.append(val)
@@ -82,6 +88,29 @@ def _step_text_fields(step: dict) -> list[str]:
             if isinstance(v, str):
                 texts.append(v)
     return texts
+
+
+def step_placeholders(steps: object) -> set[str]:
+    """Every ``{{name}}`` referenced in the text fields of *steps*."""
+    names: set[str] = set()
+    for step in steps if isinstance(steps, list) else []:
+        if isinstance(step, dict):
+            for text in _step_text_fields(step):
+                names.update(_collect_variable_refs(text))
+    return names
+
+
+def declared_variable_names(sop: dict) -> set[str]:
+    """The variable names *sop* declares: ``variables`` on a template,
+    ``inputs`` on a v3 procedure (dicts with a name, or bare names)."""
+    declared: set[str] = set()
+    for key in ("variables", "inputs"):
+        items = sop.get(key)
+        for var in items if isinstance(items, list) else []:
+            name = var.get("name", "") if isinstance(var, dict) else var
+            if isinstance(name, str) and name:
+                declared.add(name)
+    return declared
 
 
 def _step_field(step: dict, key: str) -> str:
@@ -149,30 +178,13 @@ def lint_sop(sop_template: dict, source: str | None = None) -> LintResult:
                 )
             )
 
-    # 5. Variable references in steps not declared in variables list
-    declared_vars: set[str] = set()
-    variables = sop_template.get("variables")
-    if isinstance(variables, list):
-        for var in variables:
-            if isinstance(var, dict):
-                name = var.get("name", "")
-                if name:
-                    declared_vars.add(name)
-            elif isinstance(var, str) and var:
-                declared_vars.add(var)
-
-    referenced_vars: set[str] = set()
-    for step in steps:
-        if not isinstance(step, dict):
-            continue
-        for text in _step_text_fields(step):
-            referenced_vars.update(_collect_variable_refs(text))
-
-    undeclared = referenced_vars - declared_vars
+    # 5. Variable references in steps not declared: an agent reading
+    #    ``{{name}}`` has no declared input to fill it from.
+    undeclared = step_placeholders(steps) - declared_variable_names(sop_template)
     for var_name in sorted(undeclared):
         issues.append(
             LintIssue(
-                "warning",
+                "error",
                 f"variables.{var_name}",
                 f"Variable '{{{{{var_name}}}}}' referenced in steps but not declared",
             )
@@ -267,7 +279,7 @@ def lint_sop(sop_template: dict, source: str | None = None) -> LintResult:
         )
 
     # 7. Unused variables (declared but never referenced)
-    unused = declared_vars - referenced_vars
+    unused = declared_variable_names(sop_template) - step_placeholders(steps)
     for var_name in sorted(unused):
         issues.append(
             LintIssue(
