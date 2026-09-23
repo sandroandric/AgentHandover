@@ -283,10 +283,12 @@ def _process_annotations(
                 logger.debug("Event %s metadata-only by privacy zone", event_id[:8])
                 continue
 
+        # Without Ollama the frame stays pending; later rows are still
+        # scanned for privacy zones.
         if ollama_ready is None:
             ollama_ready = annotator.ready()
         if not ollama_ready:
-            break
+            continue
 
         # Get sliding window context (last N annotations within time window)
         recent = db.get_recent_annotations(
