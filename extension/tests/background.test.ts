@@ -79,8 +79,14 @@ function installChrome(alarms = new Map<string, { periodInMinutes?: number }>())
     tabs: {
       onUpdated: event('tabs.onUpdated'),
       onRemoved: event('tabs.onRemoved'),
+      onActivated: event('tabs.onActivated'),
       sendMessage: vi.fn(),
       query: vi.fn(),
+      get: vi.fn(),
+    },
+    windows: {
+      WINDOW_ID_NONE: -1,
+      onFocusChanged: event('windows.onFocusChanged'),
     },
     alarms: {
       get: (name: string, cb: (alarm?: unknown) => void) => {
@@ -241,6 +247,33 @@ describe('navigation events', () => {
     expect(sent[0]).toMatchObject({
       type: 'navigation_change',
       payload: { tabId: 5, url, title: 'Inbox' },
+    });
+  });
+
+  it('reports a switch to another tab or window as the page now on screen', async () => {
+    const chrome = installChrome();
+    await startWorker();
+    const tabs = (globalThis as any).chrome.tabs;
+    tabs.get.mockImplementation((id: number, cb: (tab: unknown) => void) =>
+      cb({ ...activeTab('https://vault.example/items', 'Vault'), id }),
+    );
+    tabs.query.mockImplementation((_q: unknown, cb: (tabs: unknown[]) => void) =>
+      cb([{ ...activeTab('https://docs.example/guide', 'Guide'), id: 9 }]),
+    );
+
+    chrome.fire('tabs.onActivated', { tabId: 8, windowId: 1 });
+    chrome.fire('windows.onFocusChanged', 2);
+    chrome.fire('windows.onFocusChanged', -1); // Chrome lost focus: nothing to report
+
+    const sent = sentMessages(chrome.ports[0]);
+    expect(sent).toHaveLength(2);
+    expect(sent[0]).toMatchObject({
+      type: 'navigation_change',
+      payload: { tabId: 8, url: 'https://vault.example/items', title: 'Vault' },
+    });
+    expect(sent[1]).toMatchObject({
+      type: 'navigation_change',
+      payload: { tabId: 9, url: 'https://docs.example/guide' },
     });
   });
 
