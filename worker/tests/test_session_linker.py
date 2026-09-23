@@ -14,7 +14,7 @@ from agenthandover_worker.session_linker import (
     STOP_WORDS,
     LinkedTask,
     SessionLinker,
-    _SIMILARITY_THRESHOLD,
+    _JACCARD_THRESHOLD,
     _STALE_DAYS,
 )
 
@@ -96,36 +96,36 @@ class TestNormalizeIntent:
 class TestIntentSimilarity:
     def test_identical_intents(self, kb: KnowledgeBase) -> None:
         linker = SessionLinker(kb)
-        sim = linker._intent_similarity("Deploy API server", "Deploy API server")
+        sim, _ = linker._intent_similarity("Deploy API server", "Deploy API server")
         assert sim == 1.0
 
     def test_completely_different(self, kb: KnowledgeBase) -> None:
         linker = SessionLinker(kb)
-        sim = linker._intent_similarity("Deploy API server", "Cook dinner tonight")
+        sim, _ = linker._intent_similarity("Deploy API server", "Cook dinner tonight")
         assert sim == 0.0
 
     def test_partial_overlap(self, kb: KnowledgeBase) -> None:
         linker = SessionLinker(kb)
-        sim = linker._intent_similarity("Deploy API server", "Deploy API client")
+        sim, _ = linker._intent_similarity("Deploy API server", "Deploy API client")
         # {"deploy", "api", "server"} vs {"deploy", "api", "client"}
         # intersection=2, union=4 -> 0.5
         assert sim == pytest.approx(0.5, abs=0.01)
 
     def test_above_threshold(self, kb: KnowledgeBase) -> None:
         linker = SessionLinker(kb)
-        sim = linker._intent_similarity(
+        sim, _ = linker._intent_similarity(
             "Update project documentation", "Update documentation project"
         )
-        assert sim >= _SIMILARITY_THRESHOLD
+        assert sim >= _JACCARD_THRESHOLD
 
     def test_both_empty_returns_one(self, kb: KnowledgeBase) -> None:
         linker = SessionLinker(kb)
-        sim = linker._intent_similarity("the", "a")  # All stop words
+        sim, _ = linker._intent_similarity("the", "a")  # All stop words
         assert sim == 1.0
 
     def test_one_empty_returns_zero(self, kb: KnowledgeBase) -> None:
         linker = SessionLinker(kb)
-        sim = linker._intent_similarity("the", "deploy server")
+        sim, _ = linker._intent_similarity("the", "deploy server")
         assert sim == 0.0
 
 
@@ -516,7 +516,7 @@ class TestLLMSessionLinking:
             linker = SessionLinker(kb, llm_reasoner=reasoner)
             links = linker.analyze_daily_summaries()
 
-        # Similarity ~0.2, below _SIMILARITY_THRESHOLD (0.4), LLM failed -> no link
+        # Similarity ~0.2, below _JACCARD_THRESHOLD (0.4), LLM failed -> no link
         assert len(links) == 0
 
     def test_llm_called_for_wider_range(self, kb: KnowledgeBase) -> None:
@@ -556,7 +556,90 @@ class TestLLMSessionLinking:
             linker = SessionLinker(kb, llm_reasoner=reasoner)
             links = linker.analyze_daily_summaries()
 
-        # LLM should have been called (similarity ~0.167, in the 0.15-0.6 range)
+        # LLM called: similarity ~0.167 is in the band just below 0.4
         assert call_count >= 1
         # LLM said YES, so tasks should be linked
         assert len(links) == 1
+
+
+# ---------------------------------------------------------------------------
+# The LLM band and the per-metric thresholds (#163)
+# ---------------------------------------------------------------------------
+
+
+class _CountingReasoner:
+    """An LLM reasoner that counts its YES/NO calls."""
+
+    def __init__(self, answer: bool) -> None:
+        self.calls = 0
+        self._answer = answer
+
+    def reason_yesno(self, prompt: str, caller: str = ""):
+        from agenthandover_worker.llm_reasoning import ReasoningResult
+
+        self.calls += 1
+        return ReasoningResult(value=self._answer, success=True)
+
+
+class _FakeVectorKB:
+    """compute_embeddings returning fixed vectors per text."""
+
+    def __init__(self, vectors: dict[str, list[float]]) -> None:
+        self.vectors = vectors
+        self.embedded: list[str] = []
+
+    def compute_embeddings(self, texts, *, prefix=""):
+        self.embedded += list(texts)
+        return [self.vectors[t] for t in texts]
+
+
+class TestLLMBand:
+    def test_pair_above_the_threshold_links_without_a_model_call(self, kb: KnowledgeBase) -> None:
+        """Similarity 0.55 used to fall in the old [0.15, 0.6] band: a model
+        call whose verdict was discarded (the pair linked either way)."""
+        a = "Review quarterly sales pipeline report draft alpha"
+        b = "Review quarterly sales pipeline report final beta"
+        linker = SessionLinker(kb, llm_reasoner=_CountingReasoner(answer=False))
+        score, metric = linker._intent_similarity(a, b)
+        assert metric == "jaccard" and score == pytest.approx(5 / 9)  # 0.556
+        _save_daily(kb, "2025-03-01", [{"intent": a, "duration_minutes": 5, "apps": []}])
+        _save_daily(kb, "2025-03-02", [{"intent": b, "duration_minutes": 5, "apps": []}])
+
+        links = linker.analyze_daily_summaries()
+
+        assert linker._llm_reasoner.calls == 0
+        assert len(links) == 1
+
+    def test_similarity_055_makes_no_model_call(self, kb: KnowledgeBase) -> None:
+        reasoner = _CountingReasoner(answer=False)
+        linker = SessionLinker(kb, llm_reasoner=reasoner)
+        with patch.object(SessionLinker, "_intent_similarity", return_value=(0.55, "jaccard")):
+            assert linker._intents_match("a", "b") is True
+        assert reasoner.calls == 0
+
+    def test_band_below_the_threshold_asks_the_model(self, kb: KnowledgeBase) -> None:
+        for answer in (True, False):
+            reasoner = _CountingReasoner(answer=answer)
+            linker = SessionLinker(kb, llm_reasoner=reasoner)
+            with patch.object(SessionLinker, "_intent_similarity", return_value=(0.3, "jaccard")):
+                assert linker._intents_match("a", "b") is answer
+            assert reasoner.calls == 1
+
+    def test_cosine_is_compared_with_the_cosine_threshold(self, kb: KnowledgeBase) -> None:
+        """A cosine of 0.6 is far below the cosine threshold, though it
+        would pass the Jaccard-calibrated 0.4."""
+        from agenthandover_worker.session_linker import _COSINE_THRESHOLD, _LLM_BAND
+
+        vectors = {"x": [1.0, 0.0], "y": [0.6, 0.8]}  # cosine 0.6
+        linker = SessionLinker(kb, vector_kb=_FakeVectorKB(vectors))
+        score, metric = linker._intent_similarity("x", "y")
+        assert metric == "cosine" and score == pytest.approx(0.6)
+        assert score < _COSINE_THRESHOLD - _LLM_BAND["cosine"]
+        assert linker._intents_match("x", "y") is False
+
+    def test_each_intent_is_embedded_once(self, kb: KnowledgeBase) -> None:
+        vkb = _FakeVectorKB({"x": [1.0, 0.0], "y": [0.0, 1.0], "z": [1.0, 1.0]})
+        linker = SessionLinker(kb, vector_kb=vkb)
+        for a, b in (("x", "y"), ("x", "z"), ("y", "z"), ("x", "y")):
+            linker._intent_similarity(a, b)
+        assert sorted(vkb.embedded) == ["x", "y", "z"]

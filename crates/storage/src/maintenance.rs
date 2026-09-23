@@ -14,51 +14,100 @@ impl<'a> MaintenanceRunner<'a> {
     }
 
     /// Delete events older than `retention_days` that have left the queue
-    /// (processed = 1, or quarantined by the worker as -1).
+    /// (processed = 1, or quarantined by the worker as -1) and that the
+    /// worker has distilled (see [`Self::expired_event_clause`]).
     /// Their VLM queue jobs go with them (a job references its event, so a
     /// leftover job would fail the delete on the foreign key).
     /// Returns the number of rows deleted.
     pub fn purge_old_events(&self, retention_days: u32) -> Result<usize> {
-        let cutoff = format!("-{} days", retention_days);
+        let (clause, params) = self.expired_event_clause("timestamp", retention_days)?;
         let tx = self.conn.unchecked_transaction()?;
         tx.execute(
-            "DELETE FROM vlm_queue WHERE event_id IN (\
-                SELECT id FROM events \
-                WHERE processed != 0 AND datetime(timestamp) < datetime('now', ?1)\
-            )",
-            [&cutoff],
+            &format!(
+                "DELETE FROM vlm_queue WHERE event_id IN (\
+                    SELECT id FROM events WHERE processed != 0 AND {clause})"
+            ),
+            rusqlite::params_from_iter(&params),
         )?;
         let deleted = tx.execute(
-            "DELETE FROM events WHERE processed != 0 AND datetime(timestamp) < datetime('now', ?1)",
-            [&cutoff],
+            &format!("DELETE FROM events WHERE processed != 0 AND {clause}"),
+            rusqlite::params_from_iter(&params),
         )?;
         tx.commit()?;
         info!(deleted, retention_days, "Purged old processed events");
         Ok(deleted)
     }
 
+    /// The SQL condition (on the timestamp column `column`) and its three
+    /// parameters for "past retention and safe to delete".
+    ///
+    /// The worker records every finished work session in its
+    /// `workflow_observations` log (which outlives the events) and stores
+    /// in `worker_state` the time up to which it has done so
+    /// (`observations_distilled_through`).  An expired event newer than
+    /// that is kept until the worker catches up, but never past twice the
+    /// retention, so a worker that stopped distilling cannot fill the disk.
+    /// Without the key (no worker yet, an older worker), retention alone
+    /// decides.
+    fn expired_event_clause(
+        &self,
+        column: &str,
+        retention_days: u32,
+    ) -> Result<(String, Vec<String>)> {
+        let has_state: bool = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master \
+             WHERE type = 'table' AND name = 'worker_state')",
+            [],
+            |row| row.get(0),
+        )?;
+        let distilled: Option<String> = if has_state {
+            self.conn
+                .query_row(
+                    "SELECT value FROM worker_state WHERE key = 'observations_distilled_through'",
+                    [],
+                    |row| row.get(0),
+                )
+                .ok()
+        } else {
+            None
+        };
+        let clause = format!(
+            "datetime({column}) < datetime('now', ?1) \
+             AND (datetime({column}) < datetime(?2) OR datetime({column}) < datetime('now', ?3))"
+        );
+        Ok((
+            clause,
+            vec![
+                format!("-{retention_days} days"),
+                distilled.unwrap_or_else(|| "9999-12-31 00:00:00".to_string()),
+                format!("-{} days", 2 * retention_days),
+            ],
+        ))
+    }
+
     /// Delete old artifact records and return their file paths for cleanup.
     ///
     /// Joins on `events`, so it must run before [`Self::purge_old_events`].
     pub fn purge_old_artifacts(&self, retention_days: u32) -> Result<Vec<String>> {
-        let mut stmt = self.conn.prepare(
+        let (clause, params) = self.expired_event_clause("e.timestamp", retention_days)?;
+        let mut stmt = self.conn.prepare(&format!(
             "SELECT a.file_path FROM artifacts a \
              INNER JOIN events e ON a.event_id = e.id \
-             WHERE e.processed != 0 AND datetime(e.timestamp) < datetime('now', ?1)",
-        )?;
+             WHERE e.processed != 0 AND {clause}"
+        ))?;
 
         let paths: Vec<String> = stmt
-            .query_map([format!("-{} days", retention_days)], |row| row.get(0))?
+            .query_map(rusqlite::params_from_iter(&params), |row| row.get(0))?
             .filter_map(|r| r.ok())
             .collect();
 
         if !paths.is_empty() {
             self.conn.execute(
-                "DELETE FROM artifacts WHERE event_id IN (\
-                    SELECT e.id FROM events e \
-                    WHERE e.processed != 0 AND datetime(e.timestamp) < datetime('now', ?1)\
-                )",
-                [format!("-{} days", retention_days)],
+                &format!(
+                    "DELETE FROM artifacts WHERE event_id IN (\
+                        SELECT e.id FROM events e WHERE e.processed != 0 AND {clause})"
+                ),
+                rusqlite::params_from_iter(&params),
             )?;
             info!(count = paths.len(), "Purged old artifact records");
         }

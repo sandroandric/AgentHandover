@@ -41,3 +41,18 @@ def write_conn(tmp_db_path: Path) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     yield conn  # type: ignore[misc]
     conn.close()
+
+
+@pytest.fixture()
+def local_tz(monkeypatch: pytest.MonkeyPatch):
+    """Set the process's local time zone: ``local_tz("America/Los_Angeles")``.
+    Restored (and re-applied with ``time.tzset``) after the test."""
+    import time
+
+    def set_zone(name: str) -> None:
+        monkeypatch.setenv("TZ", name)
+        time.tzset()
+
+    yield set_zone
+    monkeypatch.undo()
+    time.tzset()

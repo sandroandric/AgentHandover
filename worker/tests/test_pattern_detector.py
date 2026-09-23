@@ -169,8 +169,9 @@ class TestDailyPattern:
         assert daily.observations == 8
 
     def test_daily_pattern_with_time(
-        self, kb: KnowledgeBase
+        self, kb: KnowledgeBase, local_tz
     ) -> None:
+        local_tz("UTC")
         summaries = []
         for i in range(1, 11):
             tasks = [make_task(
@@ -190,6 +191,24 @@ class TestDailyPattern:
             p for p in patterns if p.procedure_slug == "daily-standup"
         )
         assert daily.time == "09:00"
+
+    def test_reported_hour_is_local(self, kb: KnowledgeBase, local_tz) -> None:
+        """09:00 UTC is 02:00 in Los Angeles (PDT, after March 8 2026)."""
+        local_tz("America/Los_Angeles")
+        summaries = [
+            make_daily_summary(f"2026-03-{i:02d}", tasks=[make_task(
+                "standup", ["Zoom"], matched_procedure="daily-standup",
+                start_time=f"2026-03-{i:02d}T09:00:00Z", duration_minutes=15,
+            )])
+            for i in range(10, 20)
+        ]
+        _populate_summaries(kb, summaries)
+
+        daily = next(
+            p for p in PatternDetector(kb, min_observations=3).detect_recurrence()
+            if p.procedure_slug == "daily-standup"
+        )
+        assert daily.time == "02:00"
 
     def test_daily_pattern_with_duration(
         self, kb: KnowledgeBase

@@ -377,3 +377,70 @@ fn test_full_maintenance_purges_events_with_queued_vlm_jobs() {
         .map(|r| r.unwrap()).collect();
     assert_eq!(jobs, vec![fresh], "only the live event's job remains");
 }
+
+fn set_distilled_through(store: &EventStore, value: &str) {
+    let conn = store.connection();
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS worker_state (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT OR REPLACE INTO worker_state (key, value) \
+         VALUES ('observations_distilled_through', ?1)",
+        [value],
+    )
+    .unwrap();
+}
+
+fn event_ids(store: &EventStore) -> Vec<String> {
+    let mut ids: Vec<String> = store
+        .connection()
+        .prepare("SELECT id FROM events")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    ids.sort();
+    ids
+}
+
+/// Raw retention waits for the worker: an expired event the worker has not
+/// yet distilled into its workflow observations is kept, up to twice the
+/// retention.
+#[test]
+fn test_purge_holds_events_the_worker_has_not_distilled() {
+    let tmp = TempDir::new().unwrap();
+    let store = EventStore::open(&tmp.path().join("events.db")).unwrap();
+    insert_aged_event(&store, 20); // distilled: purged
+    let pending = insert_aged_event(&store, 16); // expired, not distilled: kept
+    insert_aged_event(&store, 30); // past twice the retention: purged
+    let fresh = insert_aged_event(&store, 1);
+    // The worker distilled everything up to 18 days ago.
+    let through = (Utc::now() - chrono::Duration::days(18))
+        .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+        .to_string();
+    set_distilled_through(&store, &through);
+
+    let runner = MaintenanceRunner::new(store.connection());
+    assert_eq!(runner.purge_old_events(14).unwrap(), 2);
+
+    let mut kept = vec![pending, fresh];
+    kept.sort();
+    assert_eq!(event_ids(&store), kept);
+}
+
+/// Without the worker's key (no worker yet, or an older one) retention
+/// alone decides.
+#[test]
+fn test_purge_without_distilled_key_uses_retention_only() {
+    let tmp = TempDir::new().unwrap();
+    let store = EventStore::open(&tmp.path().join("events.db")).unwrap();
+    insert_aged_event(&store, 16);
+    let fresh = insert_aged_event(&store, 1);
+
+    let runner = MaintenanceRunner::new(store.connection());
+    assert_eq!(runner.purge_old_events(14).unwrap(), 1);
+    assert_eq!(event_ids(&store), vec![fresh]);
+}
