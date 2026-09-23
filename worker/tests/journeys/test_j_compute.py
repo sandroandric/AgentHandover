@@ -103,7 +103,7 @@ def test_compute_volatile_hour_annotates_at_most_60_frames(
 
 @pytest.mark.xfail(strict=True, reason=(
     "cannot hold while the 60-frame bound is broken (the run stops there, "
-    "3 minutes into the hour, having spent ~370 cassette seconds): " + _UNGATED
+    "3 minutes into the hour, having spent ~480 cassette seconds): " + _UNGATED
 ))
 def test_compute_volatile_hour_spends_at_most_600_model_seconds(
     events_db, worker, clock, temp_home, cassette,
