@@ -591,3 +591,25 @@ class TestParseInsightsValidation:
         )
         with pytest.raises(EmptyInsightsError):
             BehavioralSynthesizer._parse_insights("not a dict")  # type: ignore
+
+# Evidence as a row stored before the current redaction rules could carry
+# it: WP-F1 redacts every prompt built from screen text.
+_OLD_ROW_PASSWORD = "hunter22"
+_OLD_ROW_TOKEN = "abc123"
+_OLD_ROW_TEXT = f"my password is {_OLD_ROW_PASSWORD}"
+_OLD_ROW_URL = f"https://x.com/reset?token={_OLD_ROW_TOKEN}"
+
+
+def test_synthesis_prompt_evidence_is_redacted():
+    synth = BehavioralSynthesizer(SynthesizerConfig(min_observations=1))
+    proc = _make_procedure_with_evidence()
+    proc["evidence"]["extracted_evidence"]["url_patterns"].append(
+        {"url": _OLD_ROW_URL, "visit_count": 1},
+    )
+    observations = [[{
+        "action": "reply", "location": _OLD_ROW_URL, "urls": [_OLD_ROW_URL],
+        "screen_text": _OLD_ROW_TEXT, "clipboard_preview": _OLD_ROW_TEXT,
+    }]]
+    prompt = synth._build_prompt(proc, observations)
+    assert _OLD_ROW_PASSWORD not in prompt and _OLD_ROW_TOKEN not in prompt
+    assert "https://x.com/reset" in prompt

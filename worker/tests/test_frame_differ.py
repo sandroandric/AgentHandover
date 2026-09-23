@@ -431,3 +431,21 @@ class TestFrameDiffer:
         result = differ.diff_pair(prev, curr)
         assert result.diff["diff_type"] == "diff_failed"
         assert "missing_annotation" in result.diff["error"]
+
+# Evidence as a row stored before the current redaction rules could carry
+# it: WP-F1 redacts every prompt built from screen text.
+_OLD_ROW_PASSWORD = "hunter22"
+_OLD_ROW_TOKEN = "abc123"
+_OLD_ROW_TEXT = f"my password is {_OLD_ROW_PASSWORD}"
+_OLD_ROW_URL = f"https://x.com/reset?token={_OLD_ROW_TOKEN}"
+
+
+def test_diff_prompt_evidence_is_redacted():
+    ann = {
+        "app": "Google Chrome", "location": _OLD_ROW_URL,
+        "_screen_text": _OLD_ROW_TEXT,
+        "key_text": {"typed_text": f"pw: {_OLD_ROW_PASSWORD}"},
+    }
+    text = _format_annotation_for_diff(ann)
+    assert _OLD_ROW_PASSWORD not in text and _OLD_ROW_TOKEN not in text
+    assert "Location: https://x.com/reset" in text

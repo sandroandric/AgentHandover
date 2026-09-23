@@ -759,3 +759,20 @@ class TestParseQAResult:
         assert result is not None
         assert 0 in result.answers
         assert len(result.answers) == 1
+
+# Evidence as a row stored before the current redaction rules could carry
+# it: WP-F1 redacts every prompt built from screen text.
+_OLD_ROW_PASSWORD = "hunter22"
+_OLD_ROW_TOKEN = "abc123"
+_OLD_ROW_TEXT = f"my password is {_OLD_ROW_PASSWORD}"
+_OLD_ROW_URL = f"https://x.com/reset?token={_OLD_ROW_TOKEN}"
+
+
+def test_focus_qa_prompt_is_redacted():
+    reasoner = _make_reasoner(response_value={"questions": []})
+    proc = _make_procedure(description=_OLD_ROW_TEXT)
+    proc["steps"][0]["url"] = _OLD_ROW_URL
+    FocusQuestioner(llm_reasoner=reasoner).generate_questions(proc)
+    prompt = reasoner.reason_json.call_args.kwargs["prompt"]
+    assert _OLD_ROW_PASSWORD not in prompt and _OLD_ROW_TOKEN not in prompt
+    assert "https://x.com/reset" in prompt
