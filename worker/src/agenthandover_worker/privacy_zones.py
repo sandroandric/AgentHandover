@@ -93,7 +93,7 @@ class PrivacyZoneChecker:
     ``crates/daemon/src/observer/privacy_zones.rs``); a test keeps them equal.
     """
 
-    # Default blocked apps — password managers, keychains, security tools
+    # Default blocked apps — password managers, keychains, system auth UIs
     _DEFAULT_BLOCKED: ClassVar[set[str]] = {
         "1Password",
         "1Password 7",
@@ -103,6 +103,16 @@ class PrivacyZoneChecker:
         "Dashlane",
         "KeePassXC",
         "Keychain Access",
+        # macOS authentication and system UIs: password prompts, Touch ID,
+        # the login window, permission dialogs, Apple's Passwords app, the
+        # screen saver's unlock prompt and system alerts.
+        "SecurityAgent",
+        "coreautha",
+        "loginwindow",
+        "universalAccessAuthWarn",
+        "Passwords",
+        "ScreenSaverEngine",
+        "UserNotificationCenter",
     }
 
     # Default blocked URL patterns — banking, gov, payroll, auth pages

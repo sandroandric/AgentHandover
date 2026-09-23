@@ -18,6 +18,8 @@ from pathlib import Path
 from collections.abc import Callable
 from typing import Self
 
+from agenthandover_worker.redaction import redact
+
 logger = logging.getLogger(__name__)
 
 
@@ -1702,7 +1704,7 @@ class WorkerDB:
                         if isinstance(ocr, dict):
                             full_text = ocr.get("full_text", "")
                             if full_text and len(full_text) > 10:
-                                texts_to_save.append(("ocr", full_text[:4000]))
+                                texts_to_save.append(("ocr", redact(full_text[:4000])))
                     except (TypeError, _json.JSONDecodeError):
                         pass
 

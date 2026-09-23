@@ -21,6 +21,7 @@ import time
 from dataclasses import dataclass
 
 from agenthandover_worker.json_extract import extract_json
+from agenthandover_worker.redaction import redact
 from agenthandover_worker.scene_annotator import as_compact
 from agenthandover_worker.model_profiles import STANDARD_TIER
 
@@ -224,7 +225,9 @@ _DIFF_SCREEN_TEXT_MAX_CHARS = 600
 
 
 def _format_annotation_for_diff(annotation: dict) -> str:
-    """Format an annotation dict into a compact text representation for the diff prompt."""
+    """Format an annotation dict into a compact text representation for the
+    diff prompt, redacted (rows stored before the current redaction rules
+    carry what they carried)."""
     lines = []
     app = annotation.get("app", "?")
     location = annotation.get("location", "?")
@@ -258,7 +261,7 @@ def _format_annotation_for_diff(annotation: dict) -> str:
     if tc.get("what_doing"):
         lines.append(f"Doing: {tc['what_doing']}")
 
-    return "\n".join(lines)
+    return redact("\n".join(lines))
 
 
 # ---------------------------------------------------------------------------

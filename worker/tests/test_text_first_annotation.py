@@ -271,6 +271,38 @@ class TestPage:
 
 
 class TestStoredAnnotationIsRedacted:
+    def test_password_and_reset_token_never_reach_the_prompt(self, tmp_path):
+        """WP-F1: redaction runs on what enters the prompt, not only on what
+        is stored: the OCR, the window header (title and URL) and the
+        sliding-window context."""
+        ocr = _LONG_OCR + [
+            "my password is hunter22",
+            "https://x.com/reset?token=abc123",
+        ]
+        recent = [{
+            "timestamp": "2026-03-03T10:00:00Z",
+            "scene_annotation_json": json.dumps({
+                "app": "Mail", "location": "https://x.com/login?session=s3cr3t",
+                "task_context": {"what_doing": "Typing pw: hunter22"},
+            }),
+        }]
+        rec = _Recorder(_answer())
+        annotator = SceneAnnotator(AnnotationConfig())
+        event = _event(
+            tmp_path, ocr=ocr, title="Reset - PIN 4821",
+            metadata={"url": "https://x.com/reset?token=abc123#step2"},
+        )
+        with patch("urllib.request.urlopen", rec):
+            result = annotator.annotate_event(event, recent_annotations=recent)
+        prompt = rec.bodies[0]["prompt"]
+        for secret in ("hunter22", "abc123", "4821", "s3cr3t", "step2"):
+            assert secret not in prompt, secret
+        assert "my password is [REDACTED_PASSWORD]" in prompt
+        assert "https://x.com/reset\n" in prompt  # the OCR line, query gone
+        assert "url: https://x.com/reset" in prompt
+        stored = json.dumps(result.annotation)
+        assert "hunter22" not in stored and "abc123" not in stored
+
     def test_email_and_api_key_are_not_stored_verbatim(self, tmp_path):
         key = "sk-proj-" + "Q" * 30
         ocr = _LONG_OCR + ["To: jane.doe@example.com", f"OPENAI_API_KEY {key}"]
@@ -281,9 +313,11 @@ class TestStoredAnnotationIsRedacted:
         annotator = SceneAnnotator(AnnotationConfig())
         with patch("urllib.request.urlopen", rec):
             result = annotator.annotate_event(_event(tmp_path, ocr=ocr))
-        # The model still read the real text ...
-        assert "jane.doe@example.com" in rec.bodies[0]["prompt"]
-        # ... but nothing stored carries it.
+        # The model never read them ...
+        assert "jane.doe@example.com" not in rec.bodies[0]["prompt"]
+        assert key not in rec.bodies[0]["prompt"]
+        # ... and nothing stored carries them (the model's own answer is
+        # redacted too).
         stored = json.dumps(result.annotation) + (result.visual_text_proxy or "")
         assert "jane.doe@example.com" not in stored
         assert key not in stored

@@ -17,8 +17,6 @@ from __future__ import annotations
 import json
 import sqlite3
 
-import pytest
-
 
 TICKS = 4
 
@@ -84,15 +82,6 @@ def test_privacy_password_manager_frame_is_never_annotated_and_its_jpeg_is_delet
     assert not (fixture.screenshots_dir / shot.rsplit("/", 1)[-1]).exists()
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "WP-V1/#8: the password on screen reaches the model and the store: "
-    "SceneAnnotator.annotate_event redacts only the annotation it stores "
-    "(scene_annotator.py:1176), not the OCR it puts in the prompt "
-    "(_select_ocr_text and guard_screen_text, scene_annotator.py:1058-1059); "
-    "and redaction.py's password rule needs 'password:' or 'password=' "
-    "(redaction.py:39), so 'The staging GitHub password is <pw>' in the Gmail "
-    "draft survives redaction in the stored key_text.typed_text and _screen_text"
-))
 def test_privacy_password_on_screen_never_reaches_the_model_or_the_store(
     events_db, worker, clock, temp_home, cassette,
 ) -> None:
@@ -107,20 +96,18 @@ def test_privacy_password_on_screen_never_reaches_the_model_or_the_store(
             assert password not in path.read_text(encoding="utf-8", errors="replace"), path
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "WP-V1/#8 (worker half): the daemon strips the extension's URL, but the "
-    "reset token is on screen; the stored annotation keeps it in location, "
-    "key_text.urls and _screen_text (the address-bar OCR): redact_value "
-    "(scene_annotator.py:1176, redaction.py) has no URL query reduction and "
-    "the 20-hex token is below its 80-char high-entropy rule"
-))
 def test_privacy_stored_urls_carry_no_query_string(
     events_db, worker, clock, temp_home, cassette,
 ) -> None:
-    """The reset page's token is on screen (address bar OCR) but no URL the
-    worker stores keeps it."""
-    fixture, journey, _tape = _run(events_db, worker, clock, temp_home, cassette)
+    """The reset page's token is on screen (address bar OCR) but neither the
+    prompt nor any URL the worker stores keeps it."""
+    fixture, journey, tape = _run(events_db, worker, clock, temp_home, cassette)
     token = fixture.manifest["secrets"]["reset_token"]
+    reset_prompts = [p for p in _prompts(tape) if "Reset your password" in p]
+    assert reset_prompts
+    assert not any(token in p for p in _prompts(tape))
+    # The address bar line reaches the model as host and path.
+    assert all("accounts.example.com/reset\\n" in p for p in reset_prompts)
     annotations = [
         json.loads(r["scene_annotation_json"]) for r in _rows(fixture)
         if r["scene_annotation_json"]

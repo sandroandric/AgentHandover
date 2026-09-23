@@ -16,8 +16,9 @@ Key features:
 - Compact 12-leaf JSON schema (Ollama ``format``): the screen's own text
   is not copied into the answer; the salient OCR lines are kept on the
   annotation as ``_screen_text`` and the full OCR stays in metadata_json.
-- Everything stored is passed through :mod:`redaction` (secrets, emails,
-  phone numbers).
+- Everything put in the prompt and everything stored is passed through
+  :mod:`redaction` (secrets, passwords, emails, phone numbers; URLs
+  reduced to scheme, host and path).
 - 3-frame sliding window context (time-bounded to 10 minutes)
 - Annotation cache: a frame whose app, title and screen text match an
   annotated frame reuses its annotation without a model call
@@ -363,7 +364,9 @@ def _build_context_section(recent_annotations: list[dict]) -> str:
         app = parsed.get("app", "?")
         location = parsed.get("location", "?")
         what_doing = (parsed.get("task_context") or {}).get("what_doing", "?")
-        line = f"- [{ts}] {app} — {location} — {what_doing}"
+        # Rows annotated before the current redaction rules are redacted
+        # again here: the context goes into the prompt.
+        line = redact(f"- [{ts}] {app} — {location} — {what_doing}")
         lines.append(line[:_CONTEXT_LINE_MAX_CHARS])
 
     if not lines:
@@ -1050,19 +1053,20 @@ class SceneAnnotator:
 
         # --- Screen text ---
         # The daemon's OCR (salient lines within the budget), the browser
-        # page's elements and the window header.  All of it is written by
-        # whoever made the page or document on screen: neutralise
-        # instruction-like spans before it enters a prompt.
+        # page's elements and the window header.  Secrets and personal data
+        # are redacted (and URLs reduced) before any of it reaches the
+        # model; and all of it is written by whoever made the page or
+        # document on screen: neutralise instruction-like spans too.
         page = page or {}
         page_url = str(page.get("url") or metadata.get("url") or "")
         ocr_text, ocr_record = _select_ocr_text(event)
-        ocr_text, ocr_injection = guard_screen_text(ocr_text)
+        ocr_text, ocr_injection = guard_screen_text(redact(ocr_text))
         page_text, page_injection = guard_screen_text(
-            page_elements(page.get("nodes"), ocr_text)
+            redact(page_elements(page.get("nodes"), ocr_text))
         )
-        header, window_injection = guard_screen_text(window_header(
+        header, window_injection = guard_screen_text(redact(window_header(
             window, metadata.get("app_state"), page_url,
-        ))
+        )))
         injection_record = {
             source: hit
             for source, hit in (
@@ -1152,8 +1156,9 @@ class SceneAnnotator:
             )
 
         # --- Cache the model's answer (before the per-frame additions) ---
+        # Redacted: a vision call saw the pixels, not the redacted text.
         if annotation is not None and cached is None and key is not None:
-            self._cache.store(key, annotation)
+            self._cache.store(key, redact_value(annotation))
 
         # --- Bookkeeping, then redaction of everything stored ---
         if annotation is None:

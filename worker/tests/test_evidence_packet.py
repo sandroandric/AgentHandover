@@ -235,6 +235,18 @@ class TestFlattenAndAnchor:
         assert select_anchor(anchors, clicked)["selector"] == '[data-testid="nav-inbox"]'
         assert select_anchor([], None) is None
 
+    def test_anchor_copied_from_the_page_is_redacted(self) -> None:
+        """WP-F1: the anchor goes into the Skill; a selector carrying a
+        tokenised href or a name carrying an email is redacted."""
+        anchors = [{
+            "tag": "span", "name": "Mail jane@example.com", "interacted": True,
+            "selector": 'a[href="https://x.com/reset?token=abc123#s"]',
+        }]
+        assert select_anchor(anchors, None) == {
+            "role": "", "name": "Mail [REDACTED_EMAIL]",
+            "selector": 'a[href="https://x.com/reset"]',
+        }
+
 
 # ---------------------------------------------------------------------------
 # DB: snapshots (both shapes) and clicks

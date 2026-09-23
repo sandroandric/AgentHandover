@@ -27,6 +27,7 @@ from agenthandover_worker.event_helpers import describe_focused_field, display_n
 from agenthandover_worker.json_extract import extract_json
 from agenthandover_worker.model_profiles import STANDARD_TIER
 from agenthandover_worker.ollama import OllamaClient
+from agenthandover_worker.redaction import redact
 from agenthandover_worker.scene_annotator import as_compact
 
 logger = logging.getLogger(__name__)
@@ -377,7 +378,8 @@ def _format_timeline_entry(
     *focused_field* is the frame's focused element (:func:`event_helpers.
     focused_field`, read through Accessibility); *shell_commands* are the
     commands the shell hook recorded since the previous frame.  Both are
-    recorded facts, rendered verbatim for the steps to quote.
+    recorded facts, rendered verbatim for the steps to quote.  The entry is
+    redacted (:func:`redaction.redact`) before it goes into a prompt.
     """
     annotation = as_compact(annotation)
     lines = []
@@ -500,7 +502,7 @@ def _format_timeline_entry(
             "a subsequent Paste step in the SOP)"
         )
 
-    return "\n".join(lines)
+    return redact("\n".join(lines))
 
 
 def _build_focus_prompt(
@@ -718,14 +720,14 @@ def _build_enriched_passive_prompt(
 
     prompt = ENRICHED_PASSIVE_PROMPT.format(
         demo_count=len(demonstrations),
-        canonical_steps_text=canonical_steps_text,
-        parameters_text=parameters_text,
-        branches_text=branches_text,
+        canonical_steps_text=redact(canonical_steps_text),
+        parameters_text=redact(parameters_text),
+        branches_text=redact(branches_text),
         demonstrations_text="\n\n".join(demo_texts),
     )
 
     if evidence_text:
-        prompt += evidence_text
+        prompt += redact(evidence_text)
 
     return prompt
 

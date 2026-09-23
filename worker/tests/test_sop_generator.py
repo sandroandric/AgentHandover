@@ -178,7 +178,9 @@ class TestFormatTimelineEntry:
             "2026-03-03T10:00:01Z",
         )
         assert "Actions since previous frame" in text
-        assert "john@example.com" in text
+        # The typed email is in the entry, redacted for the prompt.
+        assert "- Email: [REDACTED_EMAIL]" in text
+        assert "john@example.com" not in text
         assert "Inputs:" in text
 
     def test_with_app_switch_diff(self):
@@ -215,7 +217,7 @@ class TestFormatTimelineEntry:
             None,
             "2026-03-03T10:00:00Z",
         )
-        assert 'Screen text: "Dashboard | Save | Cancel | John Doe | john@example.com"' in text
+        assert 'Screen text: "Dashboard | Save | Cancel | John Doe | [REDACTED_EMAIL]"' in text
 
     def test_empty_annotation(self):
         """Empty annotation should not crash."""

@@ -67,13 +67,6 @@ def test_approve_for_agents_walks_to_agent_ready_and_writes_the_skill(
         }
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "with --adapter claude-skill the primary writer is ClaudeSkillWriter, so "
-    "_focus_v2_export (main.py:2102) calls index_generator.update_index with "
-    "the Skills root (~/.claude/skills) and IndexGenerator.update_index "
-    "(exporter.py:174) writes its SOP catalogue to the parent: a stray "
-    "~/.claude/index.md in Claude Code's config directory"
-))
 def test_claude_skill_adapter_writes_only_the_skill_and_the_index_command(
     events_db, worker, clock, temp_home, cassette,
 ) -> None:

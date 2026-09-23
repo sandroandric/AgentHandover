@@ -62,6 +62,17 @@ class TestGenericWriter:
         assert sops[0]["slug"] == "a-first"
         assert sops[1]["slug"] == "b-second"
 
+    def test_writes_keep_the_catalogue_beside_sops(self, tmp_path):
+        """The writer maintains ``index.md`` itself (the pipeline no longer
+        writes a catalogue next to whatever the primary writer's directory
+        is), listing every procedure on disk."""
+        writer = GenericWriter(output_dir=tmp_path, json_export=True)
+        writer.write_sop({"slug": "a-first", "title": "First SOP", "steps": []})
+        writer.write_all_sops([{"slug": "b-second", "title": "Second SOP", "steps": []}])
+        index = (tmp_path / "index.md").read_text(encoding="utf-8")
+        assert "**Total SOPs:** 2" in index
+        assert "`a-first`" in index and "`b-second`" in index
+
     def test_get_sops_dir(self, tmp_path):
         writer = GenericWriter(output_dir=tmp_path)
         assert writer.get_sops_dir() == tmp_path / "sops"
