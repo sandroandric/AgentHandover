@@ -35,8 +35,9 @@ class FocusRun:
     ticks: list[dict] = field(default_factory=list)
     questions_skipped: int = 0
     # How many model calls the cassette had served when the Skill was
-    # written: the focus processor annotates the keyframes the SOP did not
-    # need (``annotate_remaining``) only after that.
+    # generated (SOP, synthesis, questions): the focus processor annotates
+    # the keyframes the SOP did not need (``annotate_remaining``) only in
+    # the next tick's annotation phase.
     served_at_skill: int | None = None
 
     def procedures(self) -> list[dict]:
@@ -86,7 +87,9 @@ def start_focus_run(
     annotate_remaining = processor.annotate_remaining
 
     def remaining_after_the_skill(db):
-        if run.served_at_skill is None:
+        # Every tick's annotation phase calls it; the first call with
+        # keyframes left over is the tick after the SOP was generated.
+        if run.served_at_skill is None and processor._remaining:
             run.served_at_skill = len(tape.served)
         return annotate_remaining(db)
 
