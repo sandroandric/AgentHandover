@@ -1,6 +1,7 @@
 //! The observer loop evaluates privacy before the shutter: a failed
 //! observation snapshot, a blocked app or title, a blocked page URL and a
-//! metadata-only app never cause a capture request to reach the app.
+//! metadata-only app never cause a capture request to reach the app; a
+//! frame taken while the user switched to a blocked window is dropped.
 //!
 //! Each test runs the real `run_observer_loop` against a fake observation
 //! socket (scripted window sequence) and a fake capture socket that counts
@@ -12,6 +13,7 @@ use agenthandover_common::browser_transition::{
 };
 use agenthandover_common::config::PrivacyZonesConfig;
 use agenthandover_common::event::{Event, EventKind};
+use agenthandover_daemon::capture::screenshot::FRAME_MAGIC;
 use agenthandover_daemon::observer::event_loop::{run_observer_loop, ObserverConfig, ObserverMessage};
 use agenthandover_storage::artifact_store::ArtifactStore;
 use std::io::Write;
@@ -61,12 +63,33 @@ fn fake_observation_server(path: &Path, replies: Vec<String>) {
     });
 }
 
-/// Count capture requests; answer each by closing the connection (the
-/// capture fails, which is fine: the count is what the tests check).
-fn fake_capture_server(path: &Path) -> Arc<AtomicUsize> {
+/// A real frame as the app sends it: magic, width, height, length, JPEG.
+fn frame_response() -> Vec<u8> {
+    let (width, height) = (64u32, 40u32);
+    let mut rgb = image::RgbImage::new(width, height);
+    for (x, y, px) in rgb.enumerate_pixels_mut() {
+        *px = image::Rgb([(x * 4 % 256) as u8, (y * 6 % 256) as u8, 200]);
+    }
+    let mut jpeg = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 70)
+        .encode_image(&rgb)
+        .unwrap();
+    let mut out = FRAME_MAGIC.to_vec();
+    out.extend_from_slice(&width.to_le_bytes());
+    out.extend_from_slice(&height.to_le_bytes());
+    out.extend_from_slice(&(jpeg.len() as u32).to_le_bytes());
+    out.extend_from_slice(&jpeg);
+    out
+}
+
+/// Count capture requests. By default each is answered by closing the
+/// connection (the capture fails; the count is what most tests check);
+/// with `serve_frames` each gets a real frame.
+fn fake_capture_server(path: &Path, serve_frames: bool) -> Arc<AtomicUsize> {
     let listener = UnixListener::bind(path).unwrap();
     let count = Arc::new(AtomicUsize::new(0));
     let seen = Arc::clone(&count);
+    let frame = frame_response();
     tokio::spawn(async move {
         loop {
             let Ok((stream, _)) = listener.accept().await else { return };
@@ -74,6 +97,9 @@ fn fake_capture_server(path: &Path) -> Arc<AtomicUsize> {
             let mut reader = BufReader::new(stream);
             let mut line = String::new();
             let _ = reader.read_line(&mut line).await;
+            if serve_frames {
+                let _ = reader.get_mut().write_all(&frame).await;
+            }
         }
     });
     count
@@ -87,11 +113,16 @@ struct Harness {
 }
 
 fn harness(zones: PrivacyZonesConfig) -> Harness {
+    harness_with(zones, false)
+}
+
+fn harness_with(zones: PrivacyZonesConfig, serve_frames: bool) -> Harness {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().to_path_buf();
     let state_dir = root.join("state");
     std::fs::create_dir_all(&state_dir).unwrap();
-    let captures = fake_capture_server(&root.join("capture.sock"));
+    std::fs::create_dir_all(root.join("screenshots")).unwrap();
+    let captures = fake_capture_server(&root.join("capture.sock"), serve_frames);
     let config = ObserverConfig {
         poll_interval: Duration::from_millis(40),
         screenshots_dir: root.join("screenshots"),
@@ -348,4 +379,50 @@ async fn a_failed_tick_does_not_fabricate_a_transition() {
     let events = run_loop(h.config, &h.root, Duration::from_millis(500)).await;
     assert!(events.is_empty(), "no events: {events:?}");
     assert_eq!(h.captures.load(Ordering::SeqCst), 0);
+}
+
+fn jpegs_in(dir: &Path) -> usize {
+    std::fs::read_dir(dir)
+        .map(|entries| entries.filter_map(|e| e.ok()).count())
+        .unwrap_or(0)
+}
+
+/// End to end with a real frame: an ordinary app switch keeps a frame and
+/// writes its JPEG (the control for the next test).
+#[tokio::test(flavor = "current_thread")]
+async fn an_allowed_window_keeps_its_frame() {
+    let h = harness_with(PrivacyZonesConfig::default(), true);
+    let shots = h.config.screenshots_dir.clone();
+    fake_observation_server(
+        &h.config.observation_socket,
+        vec![
+            window_reply("pid:10:TextEdit", "notes.txt"),
+            window_reply("pid:12:Preview", "invoice.pdf"),
+        ],
+    );
+    let events = run_loop(h.config, &h.root, Duration::from_millis(800)).await;
+    assert_eq!(frames(&events), 1, "{events:?}");
+    assert_eq!(jpegs_in(&shots), 1);
+}
+
+/// The user switches to 1Password while the frame is being taken: the
+/// frame in hand is checked against the window on screen now, and dropped.
+#[tokio::test(flavor = "current_thread")]
+async fn a_switch_to_a_blocked_window_during_the_capture_drops_the_frame() {
+    let h = harness_with(PrivacyZonesConfig::default(), true);
+    let shots = h.config.screenshots_dir.clone();
+    fake_observation_server(
+        &h.config.observation_socket,
+        vec![
+            window_reply("pid:10:TextEdit", "notes.txt"),
+            // Tick 2: the switch to Preview fires the shutter ...
+            window_reply("pid:12:Preview", "invoice.pdf"),
+            // ... and by the time the frame is in hand 1Password is on screen.
+            window_reply("pid:11:1Password", "Vault"),
+        ],
+    );
+    let events = run_loop(h.config, &h.root, Duration::from_millis(800)).await;
+    assert!(h.captures.load(Ordering::SeqCst) >= 1, "the capture was taken");
+    assert_eq!(frames(&events), 0, "no frame row: {events:?}");
+    assert_eq!(jpegs_in(&shots), 0, "no file");
 }

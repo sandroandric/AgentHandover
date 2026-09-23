@@ -225,10 +225,10 @@ pub async fn run_observer_loop(
                 };
 
                 // 2. Check for secure field — if focused, skip all capture.
-                if observation.accessibility_granted && observation.secure_field_focused {
+                let Some(zone) = privacy_zone(&zones, &observation, browser_url.as_deref()) else {
                     debug!("Secure field focused — skipping capture");
                     continue;
-                }
+                };
 
                 // 3. Observation metadata comes from the app-owned socket.
                 let display_topology = observation.display_topology.clone();
@@ -249,12 +249,9 @@ pub async fn run_observer_loop(
                     None
                 };
 
-                // Privacy zone of the focused window, before anything is
+                // The privacy zone (above) is known before anything is
                 // recorded. A blocked window's title is withheld from every
                 // event; only the app switch into it is recorded.
-                let zone = observed_window.as_ref().map_or(Zone::Full, |w| {
-                    zones.zone(&w.app_id, &w.title, browser_url.as_deref(), Local::now().time())
-                });
                 let window = observed_window.clone().map(|mut w| {
                     if zone == Zone::Blocked {
                         w.title.clear();
@@ -381,7 +378,13 @@ pub async fn run_observer_loop(
                 else {
                     continue;
                 };
-                let Some(kept) = capture_kept_frame(&mut policy, trigger, focus_recording, &config).await
+                let gate = PrivacyGate {
+                    zones: &zones,
+                    warnings: &snapshot_warnings,
+                    browser_url: browser_url.as_deref(),
+                };
+                let Some(kept) =
+                    capture_kept_frame(&mut policy, trigger, focus_recording, &config, &gate).await
                 else {
                     continue;
                 };
@@ -485,8 +488,48 @@ struct KeptFrame {
     ocr: Option<serde_json::Value>,
 }
 
+/// The zone of the snapshot's focused window, or `None` when a secure
+/// (password) field is focused and nothing may be recorded.
+fn privacy_zone(
+    zones: &PrivacyZones,
+    observation: &crate::observation::ObservationSnapshot,
+    browser_url: Option<&str>,
+) -> Option<Zone> {
+    if !observation.accessibility_granted {
+        return Some(Zone::Full);
+    }
+    if observation.secure_field_focused {
+        return None;
+    }
+    Some(observation.focused_window.as_ref().map_or(Zone::Full, |w| {
+        zones.zone(&w.app_id, &w.title, browser_url, Local::now().time())
+    }))
+}
+
+/// What a captured frame is checked against once it is in hand.
+struct PrivacyGate<'a> {
+    zones: &'a PrivacyZones,
+    warnings: &'a WarnLimiter,
+    browser_url: Option<&'a str>,
+}
+
+impl PrivacyGate<'_> {
+    /// Whether the window on screen *now* may still be recorded: the user
+    /// can switch to a blocked window, or focus a password field, while
+    /// the frame is being taken. A failed snapshot is a no.
+    async fn still_allows(&self, config: &ObserverConfig) -> bool {
+        let Ok(now) = snapshot_at_async(&config.observation_socket, SNAPSHOT_TIMEOUT, self.warnings).await
+        else {
+            return false;
+        };
+        privacy_zone(self.zones, &now, self.browser_url) == Some(Zone::Full)
+    }
+}
+
 /// Capture one frame for `trigger` and run it through the policy, cheapest
-/// check first: the block-mean signature against the last kept frame, then
+/// check first: the privacy zone of the window on screen once the frame is
+/// in hand (it may have changed during the capture), the block-mean
+/// signature against the last kept frame, then
 /// (heartbeats only) fast OCR against the last kept frame's words, then, for
 /// a frame that is kept, accurate OCR and the JPEG write. Nothing reaches
 /// disk for a dropped frame. `None` when the capture failed or the frame
@@ -496,9 +539,14 @@ async fn capture_kept_frame(
     trigger: CaptureTrigger,
     focus_recording: bool,
     config: &ObserverConfig,
+    gate: &PrivacyGate<'_>,
 ) -> Option<KeptFrame> {
     let (width, height, bgra, jpeg) =
         grab_frame(&config.capture_socket, config.screenshot_scale, config.screenshot_quality).await?;
+    if !gate.still_allows(config).await {
+        debug!("The window changed to a private one during the capture, dropping the frame");
+        return None;
+    }
     let signature = dhash::compute_signature(&bgra, width, height)?;
 
     let mut pixels = bgra;
