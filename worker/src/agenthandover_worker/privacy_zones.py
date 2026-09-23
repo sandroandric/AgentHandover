@@ -411,3 +411,31 @@ class PrivacyZoneChecker:
         if _TIER_RANK[a] >= _TIER_RANK[b]:
             return a
         return b
+
+
+# ---------------------------------------------------------------------------
+# System UI: captured, never annotated
+# ---------------------------------------------------------------------------
+
+# macOS processes whose windows carry no workflow: notification banners,
+# Control Center, Notification Center, Spotlight's panel, the Dock, the menu
+# bar extras.  Unlike the blocked apps above they are not a privacy matter
+# (system alerts, UserNotificationCenter, are blocked above and stay off
+# this list): their frames are captured and their window titles count for
+# segmentation, but annotating them would spend a model call on nothing, so
+# the annotator marks them ``skipped`` with reason ``system_ui``.  Matched
+# case-insensitively against the window's app name (the daemon's
+# ``pid:<pid>:<process name>``) and bundle id.
+SYSTEM_UI_APPS: frozenset[str] = frozenset(name.casefold() for name in (
+    "NotificationCenter", "Notification Center", "com.apple.notificationcenterui",
+    "ControlCenter", "Control Center", "Control Centre", "com.apple.controlcenter",
+    "Spotlight", "com.apple.Spotlight",
+    "Dock", "com.apple.dock",
+    "SystemUIServer", "com.apple.systemuiserver",
+))
+
+
+def is_system_ui(event: dict) -> bool:
+    """Whether the event's window belongs to a :data:`SYSTEM_UI_APPS` process."""
+    app_name, bundle_id, _title = PrivacyZoneChecker._extract_app_info(event)
+    return any(name.casefold() in SYSTEM_UI_APPS for name in (app_name, bundle_id) if name)

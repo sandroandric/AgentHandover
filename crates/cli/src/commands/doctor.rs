@@ -7,7 +7,7 @@ use agenthandover_common::observation::{
 };
 
 use agenthandover_common::tiers;
-use crate::paths;
+use crate::{ollama, paths};
 
 /// Detect which install channel produced this AgentHandover installation.
 fn detect_install_channel() -> &'static str {
@@ -221,13 +221,10 @@ pub fn run() -> Result<()> {
     }
 
     // Check 15: Ollama reachable
-    let ollama_ok = std::process::Command::new("curl")
-        .args(["-s", "-o", "/dev/null", "-w", "%{http_code}", "http://localhost:11434/"])
-        .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "200")
-        .unwrap_or(false);
-    if ollama_ok {
-        check_pass(&mut counts, "Ollama service");
+    let ollama_version = ollama::version(ollama::BASE_URL);
+    let ollama_ok = ollama_version.is_some();
+    if let Some(version) = &ollama_version {
+        check_pass(&mut counts, &format!("Ollama service ({version})"));
     } else {
         check_fail(&mut counts, "Ollama service");
         eprintln!("  Fix: Install Ollama from https://ollama.com and run it");
@@ -268,15 +265,8 @@ pub fn run() -> Result<()> {
             let embedding_model = read_config_string_field(&config_str, "embedding", "model")
                 .unwrap_or_else(|| tiers::table().embedding_model.clone());
 
-            // Ask the service over HTTP, like the check above: the `ollama`
-            // CLI is not on the PATH of a GUI-launched or non-interactive
-            // process (no /opt/homebrew/bin), so `ollama list` reported
-            // installed models as missing.
-            let installed = std::process::Command::new("curl")
-                .args(["-s", "--max-time", "5", "http://localhost:11434/api/tags"])
-                .output()
-                .map(|o| ollama_tag_names(&String::from_utf8_lossy(&o.stdout)))
-                .unwrap_or_default();
+            // Over HTTP, as `setup` asks (see crate::ollama for why).
+            let installed = ollama::installed_models(ollama::BASE_URL).unwrap_or_default();
 
             // The standard tier runs one model for both jobs; deduplicate
             // so we don't report the same model twice.
@@ -292,7 +282,7 @@ pub fn run() -> Result<()> {
             }
 
             for (model, purpose) in &models_to_check {
-                if model_installed(&installed, model) {
+                if ollama::model_installed(&installed, model) {
                     check_pass(&mut counts, &format!("Model {} ({})", model, purpose));
                 } else {
                     check_fail(&mut counts, &format!("Model {} ({})", model, purpose));
@@ -550,31 +540,6 @@ fn heartbeat_verdict(
     }
 }
 
-/// Names of the models in an Ollama `GET /api/tags` response.
-fn ollama_tag_names(tags_json: &str) -> Vec<String> {
-    serde_json::from_str::<serde_json::Value>(tags_json)
-        .ok()
-        .and_then(|v| v.get("models").and_then(|m| m.as_array()).cloned())
-        .unwrap_or_default()
-        .iter()
-        .filter_map(|m| m.get("name").and_then(|n| n.as_str()).map(str::to_string))
-        .collect()
-}
-
-/// Whether `wanted` is among `installed`, where `name` and `name:latest`
-/// are the same model (Ollama's default tag).
-fn model_installed(installed: &[String], wanted: &str) -> bool {
-    fn canonical(name: &str) -> String {
-        if name.contains(':') {
-            name.to_string()
-        } else {
-            format!("{}:latest", name)
-        }
-    }
-    let wanted = canonical(wanted.trim());
-    installed.iter().any(|n| canonical(n) == wanted)
-}
-
 // Path resolution functions (find_homebrew_libexec, find_venv_python,
 // find_extension_dir, find_local_extension_dist, find_daemon_binary)
 // live in crate::paths. Don't duplicate them here.
@@ -774,37 +739,6 @@ mod tests {
     #[test]
     fn venv_version_empty_output_fails() {
         assert!(venv_version_verdict("", "0.4.0").is_err());
-    }
-
-    const TAGS: &str = r#"{"models":[
-        {"name":"qwen3.5:4b","model":"qwen3.5:4b","size":1},
-        {"name":"nomic-embed-text:latest","model":"nomic-embed-text:latest","size":2},
-        {"name":"gemma4:12b-it-qat","size":3}
-    ]}"#;
-
-    #[test]
-    fn models_come_from_api_tags() {
-        let installed = ollama_tag_names(TAGS);
-        assert_eq!(
-            installed,
-            vec!["qwen3.5:4b", "nomic-embed-text:latest", "gemma4:12b-it-qat"]
-        );
-        assert!(model_installed(&installed, "qwen3.5:4b"));
-        assert!(model_installed(&installed, "gemma4:12b-it-qat"));
-        // `name` and `name:latest` are the same model, in both directions.
-        assert!(model_installed(&installed, "nomic-embed-text"));
-        assert!(model_installed(&["nomic-embed-text".into()], "nomic-embed-text:latest"));
-        // A different tag or a name prefix is not a match.
-        assert!(!model_installed(&installed, "qwen3.5:2b"));
-        assert!(!model_installed(&installed, "qwen3.5"));
-        assert!(!model_installed(&["qwen3.5:4b-extra".into()], "qwen3.5:4b"));
-    }
-
-    #[test]
-    fn unreachable_or_garbled_tags_mean_no_models() {
-        assert!(ollama_tag_names("").is_empty());
-        assert!(ollama_tag_names("<html>").is_empty());
-        assert!(ollama_tag_names(r#"{"error":"x"}"#).is_empty());
     }
 
     fn now() -> chrono::DateTime<Utc> {

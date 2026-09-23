@@ -44,12 +44,12 @@ Steps refer to inputs as `{{name}}`.
    App: Google Chrome
    Target: https://news.ycombinator.com/
    Verify: The Hacker News homepage displays the list of top stories.
-   Anchor: link "Show HN: A tiny HTTP cassette recorder for tests" (`role=link[name="Show HN: A tiny HTTP cassette recorder for tests"]`)
 2. [step_2] Click on the article titled 'SQLite's WAL mode, explained with diagrams'
    Detail: Select the specific article to read and gather information for the first news item.
    App: Google Chrome
    Target: https://news.ycombinator.com/
    Verify: The browser navigates to the article page at {{article_url}}.
+   Anchor: link "SQLite's WAL mode, explained with diagrams" (`role=link[name="SQLite's WAL mode, explained with diagrams"]`)
 3. [step_3] Copy the article title and URL
    Detail: Capture the metadata for the first news item to include in the Notes app.
    App: Google Chrome
@@ -82,6 +82,7 @@ Steps refer to inputs as `{{name}}`.
    App: Google Chrome
    Target: https://news.ycombinator.com/
    Verify: The browser navigates to https://research.example.com/on-device-vision-guide.
+   Anchor: link "A field guide to on-device vision models" (`role=link[name="A field guide to on-device vision models"]`)
 9. [step_9] Copy the title and URL of the on-device vision guide
    Detail: Capture the metadata for the second news item.
    App: Google Chrome
@@ -104,6 +105,7 @@ Steps refer to inputs as `{{name}}`.
    App: Google Chrome
    Target: https://news.ycombinator.com/
    Verify: The browser navigates to https://github.com/example/cassette.
+   Anchor: link "Show HN: A tiny HTTP cassette recorder for tests" (`role=link[name="Show HN: A tiny HTTP cassette recorder for tests"]`)
 13. [step_13] Copy the title and URL of the HTTP cassette recorder project
    Detail: Capture the metadata for the third news item.
    App: Google Chrome
@@ -143,6 +145,7 @@ Steps refer to inputs as `{{name}}`.
    App: Google Chrome
    Target: #daily-news
    Verify: The message appears in the channel history and the composition box is cleared.
+   Anchor: button "Send now" (`[aria-label="Send now"]`)
 
 ## Success criteria
 

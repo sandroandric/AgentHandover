@@ -5,6 +5,13 @@
     <key>Label</key>
     <string>com.agenthandover.worker</string>
 
+    <!-- macOS 13+ names a background item after its executable; without
+         this key Login Items shows "python" instead of AgentHandover. -->
+    <key>AssociatedBundleIdentifiers</key>
+    <array>
+        <string>com.agenthandover.app</string>
+    </array>
+
     <key>ProgramArguments</key>
     <array>
         <string>/usr/local/lib/agenthandover/venv/bin/python</string>

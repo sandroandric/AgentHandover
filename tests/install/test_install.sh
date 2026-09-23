@@ -193,6 +193,12 @@ check_installed_prefix() {
     check "install marker written" test -f "${dd}/config.toml.bak"
 
     local plist="${p}/LaunchAgents/com.agenthandover.worker.plist"
+    check "worker plist: Label is the worker's" \
+        test "$(plist_value "${plist}" Label)" = "com.agenthandover.worker"
+    check "worker plist: attributed to the app in Login Items" \
+        test "$(plist_value "${plist}" AssociatedBundleIdentifiers.0)" = "com.agenthandover.app"
+    check "worker plist: ProcessType Background" \
+        test "$(plist_value "${plist}" ProcessType)" = "Background"
     check "worker plist: RunAtLoad true" test "$(plist_value "${plist}" RunAtLoad)" = "true"
     check "worker plist: KeepAlive.SuccessfulExit false" \
         test "$(plist_value "${plist}" KeepAlive.SuccessfulExit)" = "false"
@@ -444,9 +450,12 @@ make_build_tree() {
     mkdir -p "${t}/scripts" "${t}/target/universal-release" "${t}/extension/dist" \
         "${t}/app/AgentHandoverApp/Sources/AgentHandoverApp" "${t}/resources/launchd" \
         "${t}/resources/pkg/scripts" "${t}/worker" "${t}/fakebin"
-    cp "${REPO_ROOT}/scripts/build-pkg.sh" "${t}/scripts/"
+    cp "${REPO_ROOT}/scripts/build-pkg.sh" "${REPO_ROOT}/scripts/version.py" "${t}/scripts/"
     cp "${REPO_ROOT}/app/AgentHandoverApp/Sources/AgentHandoverApp/Info.plist" \
         "${t}/app/AgentHandoverApp/Sources/AgentHandoverApp/"
+    cp "${REPO_ROOT}/Cargo.toml" "${REPO_ROOT}/Cargo.lock" "${t}/"
+    cp "${REPO_ROOT}/extension/manifest.json" "${REPO_ROOT}/extension/package.json" \
+        "${REPO_ROOT}/extension/package-lock.json" "${t}/extension/"
     cp "${REPO_ROOT}/resources/launchd/com.agenthandover.worker.plist" "${t}/resources/launchd/"
     cp "${SCRIPTS}/preinstall" "${SCRIPTS}/postinstall" "${SCRIPTS}/resolve-user.sh" "${t}/resources/pkg/scripts/"
     cp -R "${REPO_ROOT}/worker/src" "${t}/worker/src"
@@ -458,8 +467,8 @@ make_build_tree() {
     chmod +x "${t}/fakebin/swift"
     echo "${t}"
 }
-run_build() { # run_build <tree> <log>
-    env PATH="$1/fakebin:${PATH}" CODESIGN_IDENTITY="none-for-test" VERSION=0.0.0-test \
+run_build() { # run_build <tree> <log> [VERSION]
+    env PATH="$1/fakebin:${PATH}" CODESIGN_IDENTITY="none-for-test" VERSION="${3:-}" \
         bash "$1/scripts/build-pkg.sh" >"$2" 2>&1
 }
 FAKE_FRAMEWORK='mkdir -p .build/release/Sparkle.framework/Versions/B/Resources
@@ -469,6 +478,19 @@ cat > .build/release/Sparkle.framework/Versions/B/Resources/Info.plist <<EOF
 <plist version="1.0"><dict><key>CFBundleShortVersionString</key><string>SPARKLE_VERSION</string></dict></plist>
 EOF'
 FAKE_APP='mkdir -p .build/release && cp /bin/echo .build/release/AgentHandoverApp'
+
+T="$(make_build_tree versions 'exit 0')"
+run_build "${T}" "${WORK}/build-version-env.log" 9.9.9
+check "VERSION unlike the tree's: build-pkg exits non-zero" test $? -ne 0
+check "VERSION unlike the tree's: says how to stamp it" \
+    contains "${WORK}/build-version-env.log" "Run: python3 scripts/version.py set 9.9.9"
+sed -i '' 's|<string>'"$(python3 "${REPO_ROOT}/scripts/version.py" check)"'</string>|<string>9.9.9</string>|' \
+    "${T}/app/AgentHandoverApp/Sources/AgentHandoverApp/Info.plist"
+run_build "${T}" "${WORK}/build-version-skew.log"
+check "app version unlike the worker's: build-pkg exits non-zero" test $? -ne 0
+check "app version unlike the worker's: names the file" \
+    contains "${WORK}/build-version-skew.log" "app/AgentHandoverApp/Sources/AgentHandoverApp/Info.plist: 9.9.9, 9.9.9"
+check "the repo's components carry one version" python3 "${REPO_ROOT}/scripts/version.py" check
 
 T="$(make_build_tree norust 'exit 0')"
 rm -f "${T}/target/universal-release/agenthandover-daemon"

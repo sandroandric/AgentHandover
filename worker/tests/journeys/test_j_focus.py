@@ -149,6 +149,29 @@ def test_focus_browser_step_carries_a_dom_anchor(
     ]
 
 
+def test_focus_click_anchors_land_on_the_steps_that_click(
+    events_db, worker, clock, temp_home, cassette,
+) -> None:
+    """Each story's link anchors the step that opens it, in story order, and
+    Send anchors the step that sends (WP-F3: step 1, "Navigate to the Hacker
+    News homepage", carried the third story's link)."""
+    _run_, proc, _packet = _run(events_db, worker, clock, temp_home, cassette)
+    steps = [s for s in proc.get("steps") or [] if isinstance(s, dict)]
+    anchored = {
+        s["anchor"]["name"]: i for i, s in enumerate(steps) if isinstance(s.get("anchor"), dict)
+    }
+    stories = [
+        "SQLite's WAL mode, explained with diagrams",
+        "A field guide to on-device vision models",
+        "Show HN: A tiny HTTP cassette recorder for tests",
+    ]
+    at = [anchored.get(title) for title in stories]
+    assert None not in at and at == sorted(at) and len(set(at)) == 3, anchored
+    assert at[0] > 0, "the first step (opening the list) carries a story's link"
+    assert "SQLite" in steps[at[0]]["action"], steps[at[0]]["action"]
+    assert "send" in steps[anchored["Send now"]]["action"].lower(), steps[anchored["Send now"]]["action"]
+
+
 def _clipboard_previews(fixture) -> list[str]:
     import json
     import sqlite3
