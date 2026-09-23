@@ -4870,7 +4870,8 @@ def main(argv: list[str] | None = None) -> None:
     _PASSIVE_DISCOVERY_INTERVAL = 7200
     total_passive_sops: int = 0
 
-    # Passive annotation's daily budget and why it is paused (if it is).
+    # Passive model use's hourly and daily budget, and why passive
+    # annotation is paused (if it is).
     annotation_budget = AnnotationBudget.from_config(vlm_cfg)
     annotation_paused_reason: str | None = None
     # SOP mining input seen by the last run_pipeline (see its docstring).
@@ -5196,9 +5197,10 @@ def main(argv: list[str] | None = None) -> None:
                 if pending_vlm and vlm_worker is not None:
                     gate_result = idle_gate.check()
                     if gate_result.can_run:
-                        vlm_completed_events = _process_vlm_jobs(
-                            db, pending_vlm, vlm_worker, vlm_queue
-                        )
+                        with charged_to(annotation_budget):
+                            vlm_completed_events = _process_vlm_jobs(
+                                db, pending_vlm, vlm_worker, vlm_queue
+                            )
                         # VLM reconciliation: reset events with completed VLM
                         # boosts so the pipeline re-evaluates them with higher
                         # confidence scores.
@@ -5780,7 +5782,8 @@ def main(argv: list[str] | None = None) -> None:
 
                     # Phase 5: Curation queue refresh
                     try:
-                        curation_summary = procedure_curator.curate()
+                        with charged_to(annotation_budget):
+                            curation_summary = procedure_curator.curate()
                         if curation_summary.total_queue_items > 0:
                             logger.info(
                                 "Curation: %d item(s) (%d merges, %d upgrades, %d stale, %d drift)",
