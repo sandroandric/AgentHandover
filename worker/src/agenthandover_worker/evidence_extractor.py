@@ -182,20 +182,10 @@ class EvidenceExtractor:
         if not all_events:
             return {}
 
-        # Extract patterns
-        content = self.extract_content_produced(all_events)
-        selection = self.extract_selection_signals(all_events)
-        urls = self._extract_url_patterns(all_events)
-        timing = self._extract_timing_patterns(all_events)
-
-        extracted = {
-            "content_produced": content,
-            "selection_signals": selection,
-            "url_patterns": urls,
-            "timing_patterns": timing,
-            "extracted_at": datetime.now(timezone.utc).isoformat(),
-            "event_count": len(all_events),
-        }
+        extracted = self.extract_evidence(all_events)
+        content = extracted["content_produced"]
+        selection = extracted["selection_signals"]
+        urls = extracted["url_patterns"]
 
         # Store on the procedure
         evidence["extracted_evidence"] = extracted
@@ -274,11 +264,27 @@ class EvidenceExtractor:
 
         return processed
 
+    @staticmethod
+    def extract_evidence(events: list[dict]) -> dict:
+        """Content, selection signals, URL and timing patterns of *events*
+        (raw event rows).  Called per procedure before its frames expire,
+        and once per work session when passive discovery records the
+        session in ``workflow_observations``, which outlives the frames."""
+        return {
+            "content_produced": EvidenceExtractor.extract_content_produced(events),
+            "selection_signals": EvidenceExtractor.extract_selection_signals(events),
+            "url_patterns": EvidenceExtractor._extract_url_patterns(events),
+            "timing_patterns": EvidenceExtractor._extract_timing_patterns(events),
+            "extracted_at": datetime.now(timezone.utc).isoformat(),
+            "event_count": len(events),
+        }
+
     # ------------------------------------------------------------------
     # Content extraction
     # ------------------------------------------------------------------
 
-    def extract_content_produced(self, events: list[dict]) -> list[dict]:
+    @staticmethod
+    def extract_content_produced(events: list[dict]) -> list[dict]:
         """Extract content that the user produced during this workflow.
 
         Looks at:
@@ -333,7 +339,8 @@ class EvidenceExtractor:
     # Selection signal extraction
     # ------------------------------------------------------------------
 
-    def extract_selection_signals(self, events: list[dict]) -> list[dict]:
+    @staticmethod
+    def extract_selection_signals(events: list[dict]) -> list[dict]:
         """Extract selection signals from navigation and dwell patterns.
 
         From dwell times and navigation patterns, infer what the user
@@ -406,7 +413,8 @@ class EvidenceExtractor:
     # URL pattern extraction
     # ------------------------------------------------------------------
 
-    def _extract_url_patterns(self, events: list[dict]) -> list[dict]:
+    @staticmethod
+    def _extract_url_patterns(events: list[dict]) -> list[dict]:
         """Extract URL navigation patterns from annotations."""
         url_counter: Counter[str] = Counter()
         url_sequence: list[str] = []
@@ -439,7 +447,8 @@ class EvidenceExtractor:
     # Timing pattern extraction
     # ------------------------------------------------------------------
 
-    def _extract_timing_patterns(self, events: list[dict]) -> dict:
+    @staticmethod
+    def _extract_timing_patterns(events: list[dict]) -> dict:
         """Extract timing patterns from event timestamps."""
         if not events:
             return {}

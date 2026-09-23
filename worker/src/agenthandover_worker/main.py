@@ -23,6 +23,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from agenthandover_worker import trigger_spool
+from agenthandover_worker import workflow_mining
 from agenthandover_worker.clipboard_linker import ClipboardLinker
 from agenthandover_worker.event_helpers import focused_field
 from agenthandover_worker.config import EXPORT_ADAPTERS, load_config
@@ -2494,14 +2495,18 @@ def _process_passive_discovery(
     Pipeline:
       1. Load recent annotated events from DB
       2. Run task segmenter (embeddings + clustering + noise filter)
-      3. Persist segments to DB
-      4. For clusters with ≥2 demonstrations, generate passive SOPs
+      3. Persist segments (14-day TTL) and record every finished work
+         session in ``workflow_observations`` (``workflow_mining``)
+      4. For the workflows the review queue admits (observed at least
+         three times, at most three per week, highest value first),
+         generate passive SOPs
       5. Export SOPs
     """
+    now = now or datetime.now(timezone.utc)
     # Step 1: Load annotated events
     events = db.get_annotated_events_in_window(
         hours=segmenter.config.default_window_hours,
-        now=now or datetime.now(timezone.utc),
+        now=now,
     )
     if not events:
         logger.debug("Passive discovery: no annotated events in window")
@@ -2564,10 +2569,12 @@ def _process_passive_discovery(
         except Exception:
             logger.debug("Continuity tracking failed", exc_info=True)
 
-    # Step 3: Persist segments to DB (including per-frame embeddings)
+    # Step 3: Persist segments, then record each finished work session as
+    # a workflow observation (the grouping unit; it outlives raw frames).
+    labels: dict[str, str] = {}
     for seg in seg_result.segments:
         event_ids = [f.event_id for f in seg.frames]
-        frame_embeddings = [f.embedding for f in seg.frames if f.embedding]
+        labels.update(dict.fromkeys(event_ids, seg.task_label))
         db.save_task_segment(
             segment_id=seg.segment_id,
             cluster_id=seg.cluster_id,
@@ -2576,38 +2583,34 @@ def _process_passive_discovery(
             apps=seg.apps_involved,
             start_time=seg.start_time,
             end_time=seg.end_time,
-            embeddings=frame_embeddings if frame_embeddings else None,
         )
+    recorded = workflow_mining.record_observations(
+        db, events, now=now, labels=labels, sleep_boundaries=sleep_boundaries,
+    )
+    logger.info("Passive discovery: %d work session(s) recorded", recorded)
 
-    # Step 4: Query DB for pending clusters (sop_generated = 0)
-    # This uses persisted state instead of transient in-memory cluster IDs,
-    # so re-segmentation with shuffled cluster IDs won't re-trigger SOPs.
+    # Step 4: the workflows the review queue admits now.
     import json as _json
 
-    pending_clusters = db.get_sop_pending_clusters()
-
-    if not pending_clusters:
-        logger.info(
-            "Passive discovery: no clusters with ≥2 pending segments in DB",
-        )
+    candidates = workflow_mining.review_candidates(db, now=now)
+    if not candidates:
+        logger.info("Passive discovery: no workflow ready for review")
         return 0
 
     total_exported = 0
 
-    for cluster_row in pending_clusters:
-        cluster_id = cluster_row["cluster_id"]
-        task_label = cluster_row.get("task_label", "")
+    for candidate in candidates:
+        cluster_id = candidate.source_id
+        task_label = candidate.task_label
+        candidate_events = {
+            eid for o in candidate.observations for eid in _json.loads(o["event_ids_json"])
+        }
 
-        # Get all pending segments for this cluster from DB
-        pending_segs = db.get_cluster_segments(cluster_id)
-        if len(pending_segs) < segmenter.config.min_demonstrations:
-            continue
-
-        # Reconstruct demonstrations (timelines) from DB event IDs
+        # Reconstruct demonstrations (timelines) from DB event IDs; the
+        # frames of observations older than the raw retention are gone.
         demonstrations: list[list[dict]] = []
-        segment_ids: list[str] = []
-        for seg_row in pending_segs:
-            event_ids = _json.loads(seg_row.get("event_ids_json", "[]"))
+        for obs in candidate.observations:
+            event_ids = _json.loads(obs["event_ids_json"])
             events_for_seg = db.get_events_by_ids(event_ids)
             timeline: list[dict] = []
             for ev in events_for_seg:
@@ -2645,9 +2648,17 @@ def _process_passive_discovery(
                 timeline.append(frame)
             if timeline:
                 demonstrations.append(timeline)
-                segment_ids.append(seg_row["segment_id"])
 
         if len(demonstrations) < segmenter.config.min_demonstrations:
+            # Recorded as a failure for these observations, so the workflow
+            # is tried again only when a new observation (or a retry) comes.
+            db.record_failed_generation(
+                source="passive",
+                source_id=str(cluster_id),
+                error=f"only {len(demonstrations)} observation(s) still have frames",
+                title=task_label,
+                context={"obs_ids": candidate.obs_ids},
+            )
             continue
 
         # --- Semantic alignment + variant detection + parameter extraction ---
@@ -2772,7 +2783,7 @@ def _process_passive_discovery(
                     source_id=str(cluster_id),
                     error=lint_error or result.error or "Unknown error",
                     title=task_label,
-                    context={"segment_count": len(pending_segs)},
+                    context={"obs_ids": candidate.obs_ids},
                 )
             except Exception:
                 logger.debug(
@@ -2785,6 +2796,8 @@ def _process_passive_discovery(
             )
             continue
 
+        # The draft carries its observations: count, recurrence, value.
+        result.sop.update(candidate.template_evidence())
         sop_templates = [result.sop]
         slug = result.sop.get("slug", "")
 
@@ -2848,11 +2861,14 @@ def _process_passive_discovery(
             if seg_result.spans:
                 for tpl in sop_templates:
                     try:
-                        # Match spans that contain any of our segment_ids.
+                        # Match spans holding a segment of this workflow.
                         # ContinuitySpan.segments is a list of objects with
                         # segment_id attribute, or dicts with "segment_id".
                         _matching_spans = []
-                        _seg_id_set = set(segment_ids)
+                        _seg_id_set = {
+                            s.segment_id for s in seg_result.segments
+                            if any(f.event_id in candidate_events for f in s.frames)
+                        }
                         for _span in seg_result.spans:
                             span_segs = getattr(_span, "segments", [])
                             for _sseg in span_segs:
@@ -2946,9 +2962,8 @@ def _process_passive_discovery(
                 task_label[:60],
             )
 
-        # Mark all pending segments in this cluster as SOP-generated
-        for seg_id in segment_ids:
-            db.mark_segment_sop_generated(seg_id)
+        # The workflow is promoted: its observations belong to the Skill.
+        db.set_observations_promoted(candidate.obs_ids, slug, promoted_at=now)
 
     return total_exported
 
@@ -2960,6 +2975,7 @@ def _record_retry_lint_failure(
     title: str,
     sop_template: dict,
     label: str,
+    context: dict | None = None,
 ) -> None:
     """Record a retried SOP that still fails lint as a new failure, so it
     stays retryable (the retried record is marked retried afterwards)."""
@@ -2969,6 +2985,7 @@ def _record_retry_lint_failure(
             source_id=source_id,
             error=_lint_error_text(sop_template, label),
             title=title,
+            context=context,
         )
     except Exception:
         logger.debug("Failed to record retry lint failure", exc_info=True)
@@ -3077,8 +3094,10 @@ def _process_retry_triggers(
                 )
 
         elif source == "passive" and sop_generator is not None:
-            # Re-run passive generation for the cluster
-            pending_segs = db.get_cluster_segments(int(source_id))
+            # Re-run passive generation for the workflow's observations
+            context = failure.get("context_json")
+            obs_ids = (context if isinstance(context, dict) else {}).get("obs_ids") or []
+            pending_segs = db.get_workflow_observations(obs_ids=obs_ids) if obs_ids else []
             if pending_segs:
                 import json as _json
                 demonstrations: list[list[dict]] = []
@@ -3123,12 +3142,16 @@ def _process_retry_triggers(
                     )
                     if result.success and result.sop:
                         slug = result.sop.get("slug", "")
+                        result.sop.update(
+                            episode_count=len(pending_segs),
+                            observations=workflow_mining.observation_pointers(pending_segs),
+                        )
 
                         # Lint before save+export
                         if not _lint_and_log(result.sop, "retry_passive"):
                             _record_retry_lint_failure(
                                 db, "passive", source_id, title, result.sop,
-                                "retry_passive",
+                                "retry_passive", context={"obs_ids": obs_ids},
                             )
                         else:
                             try:
@@ -3157,17 +3180,20 @@ def _process_retry_triggers(
                                     procedure_writer=procedure_writer,
                                     kb_export_adapter=kb_export_adapter,
                                 )
+                            db.set_observations_promoted(
+                                obs_ids, slug, promoted_at=datetime.now(timezone.utc),
+                            )
                             logger.info(
-                                "Retry succeeded for passive cluster '%s'", title,
+                                "Retry succeeded for passive workflow '%s'", title,
                             )
                     else:
                         logger.warning(
-                            "Retry failed again for passive cluster '%s': %s",
+                            "Retry failed again for passive workflow '%s': %s",
                             title, result.error,
                         )
             else:
                 logger.warning(
-                    "Retry: no segments found for cluster %s", source_id,
+                    "Retry: no observations found for workflow %s", source_id,
                 )
         else:
             logger.warning(
@@ -4402,7 +4428,6 @@ def main(argv: list[str] | None = None) -> None:
     correction_detector = CorrectionDetector(knowledge_base, llm_reasoner=llm_reasoner)
     trust_advisor = TrustAdvisor(knowledge_base, execution_monitor=execution_monitor)
     session_linker = SessionLinker(knowledge_base, llm_reasoner=llm_reasoner, vector_kb=vector_kb)
-    digest_generator = DigestGenerator(knowledge_base)
     procedure_matcher = ProcedureMatcher(kb=knowledge_base, vector_kb=vector_kb)
     daily_processor = DailyBatchProcessor(
         knowledge_base=knowledge_base, matcher=procedure_matcher,
@@ -5419,11 +5444,10 @@ def main(argv: list[str] | None = None) -> None:
                         logger.debug("Episode store cleanup failed", exc_info=True)
 
                 # --- Phase 2+: Daily batch + staleness (once per day) ---
-                # Process *yesterday* (UTC, the events' timestamp date) —
-                # today is still in progress and would produce an
-                # incomplete summary.
+                # Process *yesterday* (the local calendar day) — today is
+                # still in progress and would produce an incomplete summary.
                 yesterday_str = (
-                    datetime.now(timezone.utc) - timedelta(days=1)
+                    datetime.now().astimezone() - timedelta(days=1)
                 ).strftime("%Y-%m-%d")
                 if run_daily:
                     try:
@@ -5638,48 +5662,6 @@ def main(argv: list[str] | None = None) -> None:
                                         exc_info=True,
                                     )
 
-                                # --- Session linker feedback into recurrence ---
-                                try:
-                                    active_links = session_linker.get_active_links()
-                                    link_updates = 0
-                                    for link in active_links:
-                                        matched = link.matched_procedure if hasattr(link, "matched_procedure") else link.get("matched_procedure")
-                                        if not matched:
-                                            continue
-                                        proc = knowledge_base.get_procedure(matched)
-                                        if proc is None:
-                                            continue
-                                        sessions = link.sessions if hasattr(link, "sessions") else link.get("sessions", [])
-                                        total_dur = link.total_duration_minutes if hasattr(link, "total_duration_minutes") else link.get("total_duration_minutes", 0)
-                                        recurrence = proc.get("recurrence", {})
-                                        if sessions and len(sessions) >= 2:
-                                            recurrence["observations"] = len(sessions)
-                                            if total_dur > 0:
-                                                recurrence["avg_duration_minutes"] = round(
-                                                    total_dur / len(sessions), 1,
-                                                )
-                                            # Detect daily/weekly pattern
-                                            span_days = link.span_days if hasattr(link, "span_days") else link.get("span_days", 0)
-                                            if span_days > 0 and len(sessions) >= 3:
-                                                avg_gap = span_days / (len(sessions) - 1)
-                                                if avg_gap <= 1.5:
-                                                    recurrence["pattern"] = "daily"
-                                                elif 6 <= avg_gap <= 8:
-                                                    recurrence["pattern"] = "weekly"
-                                            proc["recurrence"] = recurrence
-                                            knowledge_base.save_procedure(proc)
-                                            link_updates += 1
-                                    if link_updates:
-                                        logger.info(
-                                            "Session linker: updated recurrence for %d procedure(s)",
-                                            link_updates,
-                                        )
-                                except Exception:
-                                    logger.debug(
-                                        "Session linker recurrence feedback failed",
-                                        exc_info=True,
-                                    )
-
                             # Seed default constraints if constraints file is empty.
                             # Runs on every daily batch (outside the summaries >= 3
                             # gate) so constraints are available from day one.  The
@@ -5704,6 +5686,7 @@ def main(argv: list[str] | None = None) -> None:
                                 )
                             # Generate daily digest
                             try:
+                                digest_generator = DigestGenerator(knowledge_base, db=db)
                                 digest = digest_generator.generate(yesterday_str)
                                 digest_generator.save_digest(digest)
                                 logger.info("Daily digest generated for %s", yesterday_str)
@@ -5711,6 +5694,12 @@ def main(argv: list[str] | None = None) -> None:
                                 logger.debug("Digest generation failed", exc_info=True)
                     except Exception:
                         logger.debug("Daily batch failed", exc_info=True)
+
+                    # Workflow observations: segment and observation TTLs,
+                    # the promoted workflows' recurrence and value.
+                    workflow_mining.run_daily(
+                        db, knowledge_base, now=datetime.now(timezone.utc),
+                    )
 
                     # Preserve OCR text from soon-to-expire events
                     try:

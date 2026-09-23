@@ -613,69 +613,69 @@ class TestDBPassiveDiscoveryMethods:
             )
             assert ok is True
 
-            segments = db.get_cluster_segments(0)
+            segments = db.get_task_segments()
             assert len(segments) == 1
             assert segments[0]["segment_id"] == "seg-0-0"
             assert segments[0]["task_label"] == "expense report"
+            # No per-frame vectors in the row (they live in the vector KB).
+            assert "embeddings_json" not in segments[0]
+            columns = {r[1] for r in conn.execute("PRAGMA table_info(task_segments)")}
+            assert "embeddings_json" not in columns
             db.close()
         finally:
             conn.close()
             db_path.unlink(missing_ok=True)
 
-    def test_mark_segment_sop_generated(self):
+    def test_old_table_loses_its_embeddings_column(self):
+        """A v0.4 task_segments table carried per-frame vectors; the
+        worker drops the column the first time it touches the table."""
         conn, db_path = _make_test_db()
         try:
+            conn.execute(
+                "CREATE TABLE task_segments (segment_id TEXT PRIMARY KEY, "
+                "cluster_id INTEGER NOT NULL, task_label TEXT NOT NULL DEFAULT '', "
+                "event_ids_json TEXT NOT NULL, frame_count INTEGER NOT NULL, "
+                "apps_json TEXT NOT NULL DEFAULT '[]', start_time TEXT, end_time TEXT, "
+                "sop_generated INTEGER NOT NULL DEFAULT 0, embeddings_json TEXT, "
+                "created_at TEXT NOT NULL DEFAULT '')"
+            )
+            conn.execute(
+                "INSERT INTO task_segments (segment_id, cluster_id, event_ids_json, "
+                "frame_count, embeddings_json) VALUES ('old', 0, '[]', 0, ?)",
+                (json.dumps([[0.1] * 768] * 20),),
+            )
+            conn.commit()
             from agenthandover_worker.db import WorkerDB
             db = WorkerDB(db_path)
-
             db.save_task_segment(
-                segment_id="seg-0-0", cluster_id=0, task_label="test",
-                event_ids=["e1"], apps=[], start_time="", end_time="",
+                segment_id="new", cluster_id=1, task_label="", event_ids=["e1"],
+                apps=[], start_time="", end_time="",
             )
-            db.save_task_segment(
-                segment_id="seg-0-1", cluster_id=0, task_label="test",
-                event_ids=["e2"], apps=[], start_time="", end_time="",
-            )
-
-            # Before marking: both visible
-            assert len(db.get_cluster_segments(0)) == 2
-
-            db.mark_segment_sop_generated("seg-0-0")
-
-            # After marking: only one visible (sop_generated=0 filter)
-            segs = db.get_cluster_segments(0)
-            assert len(segs) == 1
-            assert segs[0]["segment_id"] == "seg-0-1"
+            columns = {r[1] for r in conn.execute("PRAGMA table_info(task_segments)")}
+            assert "embeddings_json" not in columns
+            assert {s["segment_id"] for s in db.get_task_segments()} == {"old", "new"}
             db.close()
         finally:
             conn.close()
             db_path.unlink(missing_ok=True)
 
-    def test_get_sop_pending_clusters(self):
+    def test_ttl_sweep_deletes_segments_older_than_14_days(self):
         conn, db_path = _make_test_db()
         try:
+            from datetime import datetime, timedelta, timezone
+
             from agenthandover_worker.db import WorkerDB
             db = WorkerDB(db_path)
+            now = datetime(2026, 9, 21, 12, 0, tzinfo=timezone.utc)
+            for seg_id, age_days in (("old", 15), ("edge", 13.9), ("new", 1)):
+                end = (now - timedelta(days=age_days)).isoformat()
+                db.save_task_segment(
+                    segment_id=seg_id, cluster_id=0, task_label="", event_ids=[seg_id],
+                    apps=[], start_time=end, end_time=end,
+                )
 
-            # Create cluster with 2 segments
-            db.save_task_segment(
-                segment_id="seg-0-0", cluster_id=0, task_label="expense",
-                event_ids=["e1"], apps=[], start_time="", end_time="",
-            )
-            db.save_task_segment(
-                segment_id="seg-0-1", cluster_id=0, task_label="expense",
-                event_ids=["e2"], apps=[], start_time="", end_time="",
-            )
-            # Cluster with only 1 segment
-            db.save_task_segment(
-                segment_id="seg-1-0", cluster_id=1, task_label="deploy",
-                event_ids=["e3"], apps=[], start_time="", end_time="",
-            )
-
-            pending = db.get_sop_pending_clusters()
-            assert len(pending) == 1
-            assert pending[0]["cluster_id"] == 0
-            assert pending[0]["seg_count"] == 2
+            assert db.purge_task_segments(14, now=now) == 1
+            assert {s["segment_id"] for s in db.get_task_segments()} == {"edge", "new"}
             db.close()
         finally:
             conn.close()
@@ -689,39 +689,38 @@ class TestDBPassiveDiscoveryMethods:
 class TestProcessPassiveDiscovery:
     @patch("agenthandover_worker.task_segmenter._compute_embeddings", side_effect=_mock_embeddings)
     def test_full_pipeline_generates_sop(self, mock_embed):
-        """End-to-end: events → segment → generate (export waits for approval)."""
+        """End-to-end: events → sessions → observations → generate (export
+        waits for approval).
+
+        Three work sessions of the same two-step workflow, hours apart,
+        make three observations: the workflow is promoted, its observations
+        marked, and the draft carries their count, recurrence and value."""
         conn, db_path = _make_test_db()
         try:
             from agenthandover_worker.db import WorkerDB
             from agenthandover_worker.main import _process_passive_discovery
 
-            # Insert multiple expense-related annotated events
-            # Use timestamps relative to "now" so the test doesn't
-            # become date-dependent.
             from datetime import datetime, timedelta, timezone
             _now = datetime.now(timezone.utc)
-            for i in range(4):
-                ann = json.dumps({
-                    "app": "Chrome",
-                    "location": "https://expensify.com",
-                    "task_context": {
-                        "what_doing": "Filing expense report",
-                        "is_workflow": True,
-                    },
-                })
-                # Two separate time segments (demonstrations):
-                # first 2 events at -2 hours, next 2 at -1 hour
-                if i < 2:
-                    dt = _now - timedelta(hours=2, minutes=-i)
-                else:
-                    dt = _now - timedelta(hours=1, minutes=-(i - 2))
-                ts = dt.strftime("%Y-%m-%dT%H:%M:%SZ")
-                conn.execute(
-                    "INSERT INTO events "
-                    "(id, timestamp, annotation_status, scene_annotation_json) "
-                    "VALUES (?, ?, 'completed', ?)",
-                    (f"e{i}", ts, ann),
-                )
+            steps = [
+                ("https://expensify.com/reports", "Filing expense report", ""),
+                ("https://expensify.com/report/R123", "Filing expense report", "$42.00"),
+            ]
+            for session, hours_ago in enumerate((5, 3, 1)):
+                for i, (location, what, typed) in enumerate(steps):
+                    ann = json.dumps({
+                        "app": "Chrome",
+                        "location": location,
+                        "task_context": {"what_doing": what, "is_workflow": True},
+                        "key_text": {"typed_text": typed},
+                    })
+                    dt = _now - timedelta(hours=hours_ago, minutes=-i)
+                    conn.execute(
+                        "INSERT INTO events "
+                        "(id, timestamp, annotation_status, scene_annotation_json) "
+                        "VALUES (?, ?, 'completed', ?)",
+                        (f"e{session}{i}", dt.strftime("%Y-%m-%dT%H:%M:%SZ"), ann),
+                    )
             conn.commit()
 
             db = WorkerDB(db_path)
@@ -771,12 +770,15 @@ class TestProcessPassiveDiscovery:
                 sop_generator=mock_sop_gen,
                 openclaw_writer=mock_writer,
                 index_generator=mock_index,
+                now=_now,
             )
 
             # The SOP is generated and kept for review; nothing is written to
             # an agent's directory before it is approved for agents.
             assert sops == 0
             mock_sop_gen.generate_from_passive.assert_called_once()
+            demos = mock_sop_gen.generate_from_passive.call_args.args[0]
+            assert len(demos) == 3
             mock_writer.write_sop.assert_not_called()
             mock_writer.write_procedure.assert_not_called()
             assert len(db.get_generated_sops()) == 1
@@ -784,6 +786,15 @@ class TestProcessPassiveDiscovery:
             # duration and domains accumulated by the earlier observation.
             generated = mock_sop_gen.generate_from_passive.return_value.sop
             assert generated["_extracted_evidence"] == prior_extracted
+            # The draft carries its observations.
+            assert generated["episode_count"] == 3
+            assert [o["obs_id"] for o in generated["observations"]] == [
+                o["obs_id"] for o in db.get_workflow_observations()
+            ]
+            assert generated["value"]["automatable_fraction"] == 1.0
+            observations = db.get_workflow_observations()
+            assert len(observations) == 3
+            assert {o["promoted_slug"] for o in observations} == {generated["slug"]}
             db.close()
         finally:
             conn.close()

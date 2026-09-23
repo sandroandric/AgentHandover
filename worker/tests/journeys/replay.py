@@ -18,8 +18,8 @@ The replay is the worker as ``main()`` runs it, driven by the journey driver
   ``--record``) or a live Ollama (``--ollama``).  Config is the production
   default apart from the host and any ``--vlm`` keys.
 
-Scoring: every passive SOP generation is a *candidate*, made from the task
-segments it marked generated.  Each labelled event belongs to one unit (a
+Scoring: every passive SOP generation is a *candidate*, made from the work
+sessions (workflow observations) it promoted.  Each labelled event belongs to one unit (a
 routine, a one-off task, or noise).  A candidate is a *chimera* when its
 events span two or more work units (routines or one-off tasks), a *true
 positive* when they span exactly one and it is a routine.  Precision is true
@@ -79,7 +79,7 @@ class Candidate:
     sop_id: str
     slug: str
     title: str
-    cluster_id: int
+    source_id: str  # the workflow key the SOP was generated for
     generated_at: str
     segments: list[list[str]]
     units: dict[str, int] = field(default_factory=dict)  # work unit -> events
@@ -292,6 +292,7 @@ def replay(
         home = stack.enter_context(throwaway_home(host, vlm))
 
         from agenthandover_worker import main as wm
+        from agenthandover_worker import workflow_mining
         from agenthandover_worker.daily_digest import DigestGenerator
         from agenthandover_worker.daily_processor import DailyBatchProcessor
 
@@ -312,7 +313,7 @@ def replay(
         daily = DailyBatchProcessor(
             knowledge_base=worker.knowledge_base, matcher=worker.procedure_matcher,
         )
-        digests = DigestGenerator(worker.knowledge_base)
+        digests = DigestGenerator(worker.knowledge_base, db=worker.db)
 
         write = sqlite3.connect(str(db_path))
         stack.callback(write.close)
@@ -341,16 +342,17 @@ def replay(
                 write.commit()
                 pending = pending[len(due):]
 
-            generated_before = _generated_segments(write)
+            promoted_before = _promoted_observations(write)
             sops_before = _passive_sop_ids(write)
             result = worker.run_tick()
             ticks += 1
             if result["passive_sops"] is not None:
                 passive_runs += 1
-                candidates += _new_candidates(write, generated_before, sops_before, now)
+                candidates += _new_candidates(write, promoted_before, sops_before, now)
 
             if now.date() != last_day:
                 days += _daily_batch(worker.db, daily, digests, now.date() - timedelta(days=1))
+                workflow_mining.run_daily(worker.db, worker.knowledge_base, now=now)
                 last_day = now.date()
             clock.advance(step)
 
@@ -379,10 +381,10 @@ def _count(conn: sqlite3.Connection, sql: str) -> int:
         return 0
 
 
-def _generated_segments(conn: sqlite3.Connection) -> set[str]:
+def _promoted_observations(conn: sqlite3.Connection) -> set[str]:
     try:
         return {r[0] for r in conn.execute(
-            "SELECT segment_id FROM task_segments WHERE sop_generated = 1"
+            "SELECT obs_id FROM workflow_observations WHERE promoted_at IS NOT NULL"
         )}
     except sqlite3.OperationalError:
         return set()
@@ -398,20 +400,20 @@ def _passive_sop_ids(conn: sqlite3.Connection) -> set[str]:
 
 
 def _new_candidates(
-    conn: sqlite3.Connection, generated_before: set[str], sops_before: set[str], now: datetime,
+    conn: sqlite3.Connection, promoted_before: set[str], sops_before: set[str], now: datetime,
 ) -> list[Candidate]:
-    """The SOPs this passive run generated, each with the segments it used
-    (the cluster's segments it marked generated in the same run)."""
+    """The SOPs this passive run generated, each with the work sessions it
+    came from (the workflow observations it promoted in the same run)."""
     tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
-    if not {"task_segments", "generated_sops"} <= tables:
+    if not {"workflow_observations", "generated_sops"} <= tables:
         return []
-    by_cluster: dict[int, list[list[str]]] = {}
-    for seg_id, cluster_id, event_ids in conn.execute(
-        "SELECT segment_id, cluster_id, event_ids_json FROM task_segments "
-        "WHERE sop_generated = 1 ORDER BY start_time"
+    by_slug: dict[str, list[list[str]]] = {}
+    for obs_id, slug, event_ids in conn.execute(
+        "SELECT obs_id, promoted_slug, event_ids_json FROM workflow_observations "
+        "WHERE promoted_at IS NOT NULL ORDER BY started_utc"
     ):
-        if seg_id not in generated_before:
-            by_cluster.setdefault(int(cluster_id), []).append(json.loads(event_ids))
+        if obs_id not in promoted_before:
+            by_slug.setdefault(slug, []).append(json.loads(event_ids))
     out = []
     for sop_id, slug, title, source_id in conn.execute(
         "SELECT sop_id, slug, title, source_id FROM generated_sops "
@@ -419,10 +421,9 @@ def _new_candidates(
     ):
         if sop_id in sops_before:
             continue
-        cluster_id = int(source_id)
         out.append(Candidate(
-            sop_id=sop_id, slug=slug, title=title, cluster_id=cluster_id,
-            generated_at=now.isoformat(), segments=by_cluster.get(cluster_id, []),
+            sop_id=sop_id, slug=slug, title=title, source_id=source_id,
+            generated_at=now.isoformat(), segments=by_slug.get(slug, []),
         ))
     return out
 

@@ -91,7 +91,7 @@ def test_planted_variation() -> None:
 
 
 def _cand(segments: list[list[str]], at: str = "2026-09-02T10:00:00+00:00") -> Candidate:
-    return Candidate(sop_id="s", slug="x", title="x", cluster_id=0, generated_at=at, segments=segments)
+    return Candidate(sop_id="s", slug="x", title="x", source_id="k", generated_at=at, segments=segments)
 
 
 def test_score_verdicts_and_metrics() -> None:

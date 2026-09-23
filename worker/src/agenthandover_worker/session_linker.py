@@ -31,8 +31,22 @@ STOP_WORDS = {
     "and", "or", "is", "was", "are", "were", "this", "that",
 }
 
-# Similarity threshold for linking tasks by intent
-_SIMILARITY_THRESHOLD = 0.4
+# Linking thresholds, one per similarity metric: Jaccard over normalised
+# intent tokens, and cosine of ``clustering:``-prefixed nomic-embed-text
+# vectors.  A score from one metric is never compared with the other's
+# threshold.  The cosine value is measured on intent texts in
+# tests/journeys/test_linker_threshold.py (recorded nomic-embed-text
+# vectors): same-task pairs score 0.76-0.96, and the closest different-task
+# pair (a Stripe payout reconciliation vs. failed payments in the Stripe
+# dashboard) 0.88, so the segmenter's 0.83 would link different tasks.
+# 0.89 links no two tasks; the pairs in between go to the LLM band.
+_JACCARD_THRESHOLD = 0.4
+_COSINE_THRESHOLD = 0.89
+_THRESHOLDS = {"jaccard": _JACCARD_THRESHOLD, "cosine": _COSINE_THRESHOLD}
+# Just below its metric's threshold, an LLM YES links two intents.  Only
+# below: at or above the threshold the intents link without a model call,
+# so a verdict there would change nothing.
+_LLM_BAND = {"jaccard": 0.25, "cosine": 0.08}
 
 # Days of inactivity before a link is marked stale
 _STALE_DAYS = 14
@@ -66,6 +80,8 @@ class SessionLinker:
         self._kb = knowledge_base
         self._llm_reasoner = llm_reasoner
         self._vector_kb = vector_kb
+        # Intent text -> its embedding, so each intent is embedded once.
+        self._embeddings: dict[str, list[float]] = {}
         self._links: list[LinkedTask] = []
         self._load_links()
 
@@ -140,31 +156,12 @@ class SessionLinker:
                 if task_a["date"] == task_b["date"]:
                     continue  # Only link across different days
 
-                similarity = self._intent_similarity(
-                    task_a["intent"], task_b["intent"]
-                )
-                # Also consider matching procedure as a link signal
+                # The same matched procedure links them outright.
                 proc_match = (
                     task_a["matched_procedure"] is not None
                     and task_a["matched_procedure"] == task_b["matched_procedure"]
                 )
-
-                # Ambiguous range: use LLM semantic check to break ties.
-                # Wider range (0.15-0.6) catches both "below threshold but
-                # might be same" AND "above threshold but might be different".
-                is_match = similarity >= _SIMILARITY_THRESHOLD
-                if (
-                    not proc_match
-                    and self._llm_reasoner is not None
-                    and 0.15 <= similarity <= 0.6
-                ):
-                    llm_verdict = self._semantic_check(
-                        task_a["intent"], task_b["intent"],
-                    )
-                    if llm_verdict is True:
-                        is_match = True
-
-                if is_match or proc_match:
+                if proc_match or self._intents_match(task_a["intent"], task_b["intent"]):
                     group.append(task_b)
                     used_indices.add(j)
 
@@ -243,19 +240,39 @@ class SessionLinker:
         tokens = [t for t in tokens if t not in STOP_WORDS and len(t) > 1]
         return " ".join(tokens)
 
-    def _intent_similarity(self, a: str, b: str) -> float:
-        """Semantic similarity via vector KB, with Jaccard fallback."""
+    def _intent_similarity(self, a: str, b: str) -> tuple[float, str]:
+        """``(score, metric)``: the cosine of the intents' embeddings when
+        the vector KB can embed them, else token Jaccard."""
         if self._vector_kb is not None:
             try:
                 from agenthandover_worker.vector_kb import CLUSTERING_PREFIX, VectorKB
-                embs = self._vector_kb.compute_embeddings(
-                    [a, b], prefix=CLUSTERING_PREFIX,
-                )
-                if len(embs) == 2 and embs[0] and embs[1]:
-                    return VectorKB.cosine_similarity(embs[0], embs[1])
+                missing = [t for t in dict.fromkeys((a, b)) if t not in self._embeddings]
+                if missing:
+                    embs = self._vector_kb.compute_embeddings(
+                        missing, prefix=CLUSTERING_PREFIX,
+                    )
+                    self._embeddings.update(
+                        (t, e) for t, e in zip(missing, embs) if e
+                    )
+                if a in self._embeddings and b in self._embeddings:
+                    return VectorKB.cosine_similarity(
+                        self._embeddings[a], self._embeddings[b],
+                    ), "cosine"
             except Exception:
                 logger.debug("Vector similarity failed, falling back to Jaccard")
-        return self._jaccard_similarity(a, b)
+        return self._jaccard_similarity(a, b), "jaccard"
+
+    def _intents_match(self, a: str, b: str) -> bool:
+        """Two intents are the same recurring task: the score reaches its
+        metric's threshold, or it falls in the band just below and the LLM
+        says YES."""
+        score, metric = self._intent_similarity(a, b)
+        threshold = _THRESHOLDS[metric]
+        if score >= threshold:
+            return True
+        if self._llm_reasoner is not None and score >= threshold - _LLM_BAND[metric]:
+            return self._semantic_check(a, b) is True
+        return False
 
     def _jaccard_similarity(self, a: str, b: str) -> float:
         """Jaccard similarity on normalized tokens (fallback)."""
@@ -321,20 +338,10 @@ class SessionLinker:
             ):
                 return link
 
-            # Check intent similarity (with LLM for ambiguous range)
-            similarity = self._intent_similarity(link.intent, task.get("intent", ""))
-            if similarity >= _SIMILARITY_THRESHOLD:
+            # Intent similarity (with the LLM just below the threshold),
+            # the same test as the new-group path so links don't fragment.
+            if self._intents_match(link.intent, task.get("intent", "")):
                 return link
-
-            # LLM semantic check for ambiguous similarity — same logic
-            # as the new-group path so existing links don't fragment
-            if (
-                self._llm_reasoner is not None
-                and 0.15 <= similarity < _SIMILARITY_THRESHOLD
-            ):
-                is_same = self._semantic_check(link.intent, task.get("intent", ""))
-                if is_same is True:
-                    return link
 
         return None
 

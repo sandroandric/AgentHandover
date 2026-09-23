@@ -11,11 +11,15 @@ Summary text is generated programmatically (no LLM calls).
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 import logging
+from typing import TYPE_CHECKING
 
 from agenthandover_worker.knowledge_base import KnowledgeBase
+
+if TYPE_CHECKING:
+    from agenthandover_worker.db import WorkerDB
 
 logger = logging.getLogger(__name__)
 
@@ -56,8 +60,11 @@ class DailyDigest:
 class DigestGenerator:
     """Generates daily digests from knowledge base data."""
 
-    def __init__(self, knowledge_base: KnowledgeBase) -> None:
+    def __init__(self, knowledge_base: KnowledgeBase, db: "WorkerDB | None" = None) -> None:
         self._kb = knowledge_base
+        # With the worker DB, the digest names the recurring workflows seen
+        # that day and the time they take ("about N hours a month").
+        self._db = db
 
     # ------------------------------------------------------------------
     # Public API
@@ -265,6 +272,8 @@ class DigestGenerator:
                 )
             )
 
+        highlights += self._workflow_highlights(date)
+
         # Milestones
         tasks = summary_data.get("tasks", [])
         if len(tasks) >= 10:
@@ -278,6 +287,36 @@ class DigestGenerator:
             )
 
         return highlights
+
+    def _workflow_highlights(self, date: str) -> list[DigestHighlight]:
+        """One highlight per recurring workflow observed on the local *date*,
+        with the time it takes in a month."""
+        if self._db is None:
+            return []
+        from agenthandover_worker.workflow_mining import about_hours, recurring_workflows
+
+        day_end = (datetime.strptime(date, "%Y-%m-%d") + timedelta(days=1)).astimezone()
+        try:
+            workflows = recurring_workflows(self._db, now=day_end, date=date)
+        except Exception:
+            logger.debug("Recurring workflows unavailable for the digest", exc_info=True)
+            return []
+        out = []
+        for wf in workflows:
+            name = wf["slug"] or wf["label"] or "an unnamed workflow"
+            cadence = (wf["recurrence"] or {}).get("pattern")
+            detail = (
+                f"Seen {wf['observations']} times"
+                + (f" ({cadence})" if cadence else "")
+                + f"; {about_hours(wf['value'])}."
+            )
+            out.append(DigestHighlight(
+                type="pattern_detected",
+                title=f"Recurring workflow: {name}",
+                detail=detail,
+                priority=2,
+            ))
+        return out
 
     def _build_sections(
         self, tasks: list[dict], summary_data: dict | None

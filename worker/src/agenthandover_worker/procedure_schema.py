@@ -347,6 +347,15 @@ def sop_to_procedure(sop_template: dict) -> dict:
     if sop_template.get("branches"):
         procedure["branches"] = sop_template["branches"]
 
+    # A passively mined workflow: its observations (pointers into the
+    # workflow_observations log), recurrence and value.
+    if sop_template.get("observations"):
+        procedure["evidence"]["observations"] = list(sop_template["observations"])
+    if sop_template.get("recurrence"):
+        procedure["recurrence"].update(sop_template["recurrence"])
+    if sop_template.get("value"):
+        procedure["value"] = dict(sop_template["value"])
+
     # Map continuity span metadata onto procedure fields
     span_meta = sop_template.get("_span_metadata")
     if span_meta and isinstance(span_meta, dict):
