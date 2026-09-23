@@ -246,6 +246,32 @@ class TestDetectEdgeCase:
         assert result["diff_type"] == "no_change"
         assert result["what_doing"] == "Browsing Reddit front page"
 
+    def test_volatile_text_alone_is_no_change(self):
+        """A clock or an "updated 5s ago" is not a change worth a model call:
+        the screen text is compared the way the annotation cache compares it."""
+        base = dict(ANN_REDDIT)
+        prev_ann = {**base, "_screen_text": "r/programming  updated 5s ago  12:04  1,204 comments"}
+        curr_ann = {**base, "_screen_text": "r/programming  updated 41s ago  12:05  1,209 comments"}
+        prev = _make_event("e1", "2026-03-03T09:14:50.000Z", prev_ann)
+        curr = _make_event("e2", "2026-03-03T09:15:05.000Z", curr_ann)
+        result = _detect_edge_case(prev, curr, prev_ann, curr_ann, DiffConfig())
+        assert result is not None and result["diff_type"] == "no_change"
+
+    def test_changed_words_are_still_a_change(self):
+        base = dict(ANN_REDDIT)
+        prev_ann = {**base, "_screen_text": "r/programming  Draft: hello"}
+        curr_ann = {**base, "_screen_text": "r/programming  Draft: hello world"}
+        prev = _make_event("e1", "2026-03-03T09:14:50.000Z", prev_ann)
+        curr = _make_event("e2", "2026-03-03T09:15:05.000Z", curr_ann)
+        assert _detect_edge_case(prev, curr, prev_ann, curr_ann, DiffConfig()) is None
+
+    def test_model_not_allowed_returns_no_diff(self):
+        prev = _make_event("e1", "2026-03-03T09:14:50.000Z", ANN_CHROME_GITHUB)
+        curr = _make_event("e2", "2026-03-03T09:15:05.000Z", ANN_CHROME_GITHUB_FILLED)
+        with patch("agenthandover_worker.scene_annotator._call_ollama_vlm") as call:
+            result = FrameDiffer().diff_pair(prev, curr, allow_model=False)
+        assert result.diff is None and not call.called
+
     def test_real_change_no_edge_case(self):
         """Different values on same page → None (needs LLM diff)."""
         prev = _make_event("e1", "2026-03-03T09:14:50.000Z", ANN_CHROME_GITHUB)

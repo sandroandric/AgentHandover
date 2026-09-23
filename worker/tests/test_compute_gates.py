@@ -337,7 +337,7 @@ class TestHourlyGate:
         differ = wm.FrameDiffer()
         calls = []
 
-        def diff_pair(prev, curr):
+        def diff_pair(prev, curr, *, allow_model=True):
             calls.append(curr["id"])
             _usage("diff-model:1b", 3.0)
             return MagicMock(diff={"diff_type": "action", "step_description": "x"},
@@ -354,6 +354,48 @@ class TestHourlyGate:
         assert budget.compute_seconds == pytest.approx(3.0)  # d1 only
         assert budget.hour() == (0, pytest.approx(3.0))
         assert budget.status()["hour_compute_minutes"] > before["hour_compute_minutes"]
+
+    def test_a_spent_compute_budget_leaves_passive_diffs_pending(self, events_db):
+        """Diffs are charged to the budget, so they also wait on it: with the
+        hour's compute spent, a passive pair that needs the model is left
+        pending (not diffed, not failed) while a focus frame is still diffed."""
+        now = datetime.now(timezone.utc)
+        for eid, minute, meta in (
+            ("p0", 0, {}), ("p1", 1, {}), ("p2", 2, {"focus_session_id": "s1"}),
+        ):
+            _insert(events_db, eid, now - timedelta(minutes=10 - minute), meta)
+        conn = sqlite3.connect(str(events_db))
+        for eid, text in (("p0", "Inbox"), ("p1", "Draft to Ana"), ("p2", "Sent")):
+            conn.execute(
+                "UPDATE events SET annotation_status = 'completed', scene_annotation_json = ? WHERE id = ?",
+                (json.dumps({"app": "Mail", "location": "Mail", "_screen_text": text,
+                             "task_context": {"what_doing": text}}), eid),
+            )
+        conn.execute("UPDATE events SET frame_diff_json = '{}' WHERE id = 'p0'")
+        conn.commit()
+        conn.close()
+
+        differ = wm.FrameDiffer()
+        budget = AnnotationBudget(
+            max_frames=1500, max_compute_seconds=3600, max_compute_seconds_per_hour=600,
+        )
+        budget.roll(datetime.now())
+        budget.charge_compute(600.0)
+        assert budget.compute_exhausted() and budget.pause_reason() is not None
+        model_calls = []
+
+        def call(**kwargs):
+            model_calls.append(kwargs["call_type"])
+            return json.dumps({"diff_type": "action", "step_description": "sent it"}), 1.0
+
+        with WorkerDB(events_db) as db, patch(
+            "agenthandover_worker.scene_annotator._call_ollama_vlm", side_effect=call,
+        ):
+            stats = wm._process_diffs(db, differ, budget=budget)
+            pending = {e["id"] for e in db.get_events_needing_diff(limit=10)}
+        assert stats["deferred"] == 1 and stats["diffs"] == 1
+        assert model_calls == ["diff"]  # the focus frame only
+        assert pending == {"p1"}
 
 
 # ---------------------------------------------------------------------------

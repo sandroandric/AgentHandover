@@ -20,6 +20,7 @@ import logging
 import time
 from dataclasses import dataclass
 
+from agenthandover_worker.annotation_cache import normalise_screen_text
 from agenthandover_worker.json_extract import extract_json
 from agenthandover_worker.redaction import redact
 from agenthandover_worker.scene_annotator import as_compact
@@ -46,7 +47,8 @@ class DiffResult:
     """Result of comparing two consecutive annotations."""
 
     event_id: str
-    diff: dict
+    # None: the pair needs the model and the caller did not allow it.
+    diff: dict | None
     inference_time_seconds: float = 0.0
 
 
@@ -168,9 +170,13 @@ def _detect_edge_case(
     prev_what = prev_annotation.get("task_context", {}).get("what_doing", "")
     curr_what = curr_annotation.get("task_context", {}).get("what_doing", "")
 
+    # Screen text compared with its volatile parts (clocks, "5s ago",
+    # counters) folded, as the annotation cache compares it: a screen the
+    # cache calls unchanged is not sent to the model to learn the same.
     def _content(annotation: dict) -> tuple:
         kt = annotation.get("key_text") or {}
-        return (annotation.get("_screen_text", ""), kt.get("typed_text", ""))
+        screen = normalise_screen_text(str(annotation.get("_screen_text") or ""))
+        return (screen, kt.get("typed_text", ""))
 
     if (
         prev_app == curr_app
@@ -311,11 +317,15 @@ class FrameDiffer:
         self,
         prev_event: dict,
         curr_event: dict,
+        *,
+        allow_model: bool = True,
     ) -> DiffResult:
         """Compute the diff between two consecutive annotated events.
 
         Returns a DiffResult with the diff dict (may be an edge-case
-        marker or an LLM-generated action diff).
+        marker or an LLM-generated action diff).  With *allow_model*
+        False, a pair that needs the model gets ``diff=None`` (the caller
+        leaves it pending) instead of a model call.
         """
         curr_id = curr_event.get("id", "unknown")
 
@@ -346,6 +356,9 @@ class FrameDiffer:
         if edge_case is not None:
             self._stats["edge_cases"] += 1
             return DiffResult(event_id=curr_id, diff=edge_case)
+
+        if not allow_model:
+            return DiffResult(event_id=curr_id, diff=None)
 
         # --- LLM diff ---
         frame_a = _format_annotation_for_diff(prev_ann)

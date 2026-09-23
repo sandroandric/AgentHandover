@@ -37,6 +37,8 @@ import sqlite3
 import time
 from dataclasses import dataclass, field
 
+import os
+
 import pytest
 
 from journeys.cassette import CASSETTE_DIR, load_entries
@@ -128,7 +130,8 @@ F6_MISSING_KEYS = (
 )
 _HOUR_ENTRIES = load_entries(CASSETTE_DIR / "passive_volatile_hour.jsonl")
 needs_f6_recording = pytest.mark.skipif(
-    any(key not in _HOUR_ENTRIES for key in F6_MISSING_KEYS),
+    any(key not in _HOUR_ENTRIES for key in F6_MISSING_KEYS)
+    and os.environ.get("AH_RECORD") != "1",
     reason=(
         "cassettes/passive_volatile_hour.jsonl lacks the requests the hour makes "
         "once cache hits are free (WP-F6): "
@@ -179,7 +182,8 @@ def _recorded_load_seconds(key: str) -> float:
 
 
 @pytest.mark.skipif(
-    _recorded_load_seconds(COLD_CLASSIFIER_KEY) >= _COLD_LOAD_SECONDS,
+    _recorded_load_seconds(COLD_CLASSIFIER_KEY) >= _COLD_LOAD_SECONDS
+    and os.environ.get("AH_RECORD") != "1",
     reason=(
         f"cassettes/passive_volatile_hour.jsonl entry {COLD_CLASSIFIER_KEY} was "
         "recorded with a cold model load (146 s load_duration, replayed on each "

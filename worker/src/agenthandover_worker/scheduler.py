@@ -558,6 +558,16 @@ class AnnotationBudget:
     def exhausted(self) -> bool:
         return self.pause_reason() is not None
 
+    def compute_exhausted(self) -> bool:
+        """Whether the day's or the hour's model-compute cap is spent.  Frame
+        diffs wait on this, not on the frame caps: they follow frames that
+        were already annotated."""
+        _, seconds = self.hour()
+        return (
+            self.compute_seconds >= self.max_compute_seconds
+            or seconds >= self.max_compute_seconds_per_hour
+        )
+
     def charge_frame(self, *, model_call: bool) -> None:
         """Count one annotated frame against the day's and the hour's frame
         caps when the model was called for it; a cache hit is only

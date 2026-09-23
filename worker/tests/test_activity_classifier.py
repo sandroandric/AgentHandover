@@ -723,6 +723,30 @@ class TestLLMClassification:
         assert result.source == "llm"
         assert result.activity_type == ActivityType.RESEARCH
 
+    def test_a_repeated_screen_reuses_the_llm_answer(self):
+        """A cached annotation repeats what_doing/app/location exactly, so the
+        classifier answers it again without a second model call; a
+        different activity still asks."""
+        from unittest.mock import patch
+        from agenthandover_worker.llm_reasoning import LLMReasoner
+
+        reasoner = LLMReasoner()
+        prompts = []
+
+        def mock_ollama(prompt, system, num_predict=None, **kwargs):
+            prompts.append(prompt)
+            return ("research", 0.5)
+
+        with patch.object(LLMReasoner, "_call_ollama", side_effect=mock_ollama):
+            c = ActivityClassifier(llm_reasoner=reasoner)
+            first = c.classify(_ann(is_workflow=True))
+            again = c.classify(_ann(is_workflow=True))
+            c.classify(_ann(active_app="Zed", location="notes", is_workflow=True))
+
+        assert len(prompts) == 2
+        assert again.activity_type == first.activity_type == ActivityType.RESEARCH
+        assert again.source == "llm"
+
     def test_llm_not_called_high_confidence(self):
         """LLM is NOT called when heuristic confidence is >= 0.6."""
         from unittest.mock import patch

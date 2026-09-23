@@ -19,6 +19,7 @@ from __future__ import annotations
 import fnmatch
 import logging
 import re
+from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
@@ -30,6 +31,9 @@ if TYPE_CHECKING:
     from agenthandover_worker.user_policy import UserPolicy
 
 logger = logging.getLogger(__name__)
+
+# How many distinct classifier prompts keep their LLM answer.
+_LLM_ANSWERS_MAX = 512
 
 
 # ---------------------------------------------------------------------------
@@ -258,6 +262,10 @@ class ActivityClassifier:
         self._profile = profile
         self._policy = policy
         self._llm_reasoner = llm_reasoner
+        # The LLM's answer per prompt. The prompt is only what_doing, app
+        # and location, which a cached annotation repeats exactly, so a
+        # screen seen again costs no second call.
+        self._llm_answers: OrderedDict[str, str] = OrderedDict()
         # Session-level app frequency tracker — learns from current session
         # even before the multi-day profile exists
         self._session_app_counts: dict[str, int] = {}
@@ -443,6 +451,10 @@ class ActivityClassifier:
             "Respond with ONLY the category name."
         )
 
+        if prompt in self._llm_answers:
+            self._llm_answers.move_to_end(prompt)
+            return self._llm_answers[prompt]
+
         try:
             result = self._llm_reasoner.reason_text(
                 prompt, caller="activity_classifier.classify_with_llm",
@@ -455,6 +467,9 @@ class ActivityClassifier:
             # Match against ActivityType enum values
             valid_values = {at.value for at in ActivityType}
             if raw in valid_values:
+                self._llm_answers[prompt] = raw
+                if len(self._llm_answers) > _LLM_ANSWERS_MAX:
+                    self._llm_answers.popitem(last=False)
                 return raw
         except Exception:
             logger.debug("LLM classification failed", exc_info=True)

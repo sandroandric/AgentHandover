@@ -507,15 +507,15 @@ def _process_diffs(
     For each event, finds the previous annotated event and computes
     the diff (either a code-only marker for edge cases or an LLM-based
     action diff).  A passive frame's diff call is charged to *budget*
-    (a focus-session frame's is not).
+    (a focus-session frame's is not), and while the budget's compute is
+    spent a passive pair that needs the model stays pending.
 
-    Returns stats dict with counts of diffs/edge_cases/failed.
+    Returns stats dict with counts of diffs/edge_cases/failed/deferred.
     """
     needs_diff = db.get_events_needing_diff(limit=batch_size)
+    stats = {"diffs": 0, "edge_cases": 0, "failed": 0, "deferred": 0}
     if not needs_diff:
-        return {"diffs": 0, "edge_cases": 0, "failed": 0}
-
-    stats = {"diffs": 0, "edge_cases": 0, "failed": 0}
+        return stats
 
     for event in needs_diff:
         event_id = event.get("id", "unknown")
@@ -533,8 +533,12 @@ def _process_diffs(
 
         # Compute diff
         focus = parse_json_field(event, "metadata_json").get("focus_session_id")
+        allow_model = bool(focus) or budget is None or not budget.compute_exhausted()
         with charged_to(None if focus else budget):
-            result = differ.diff_pair(prev_event, event)
+            result = differ.diff_pair(prev_event, event, allow_model=allow_model)
+        if result.diff is None:
+            stats["deferred"] += 1
+            continue
 
         # Save
         db.save_frame_diff(event_id, json.dumps(result.diff))

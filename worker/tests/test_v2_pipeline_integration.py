@@ -354,7 +354,7 @@ class TestProcessDiffs:
         """When no events need diffs, returns zero stats."""
         differ = FrameDiffer(DiffConfig())
         stats = _process_diffs(v2_db, differ)
-        assert stats == {"diffs": 0, "edge_cases": 0, "failed": 0}
+        assert stats == {"diffs": 0, "edge_cases": 0, "failed": 0, "deferred": 0}
 
     def test_first_frame_gets_first_frame_marker(
         self, v2_db: WorkerDB, v2_write_conn: sqlite3.Connection,
