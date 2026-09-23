@@ -1,7 +1,8 @@
 """Tests for the main.py pipeline orchestration.
 
 Covers run_pipeline() with episode building, pruning, translation,
-confidence scoring, VLM auto-enqueue, and SOP export.
+confidence scoring and VLM auto-enqueue.  It produces no SOP: the v1
+PrefixSpan miner that ran here every poll was removed (WP-F5).
 """
 
 from __future__ import annotations
@@ -17,11 +18,10 @@ import pytest
 
 from agenthandover_worker.clipboard_linker import ClipboardLinker
 from agenthandover_worker.confidence import ConfidenceScorer
+from agenthandover_worker.db import WorkerDB
 from agenthandover_worker.episode_builder import EpisodeBuilder
-from agenthandover_worker.exporter import IndexGenerator
 from agenthandover_worker.main import run_pipeline
 from agenthandover_worker.negative_demo import NegativeDemoPruner
-from agenthandover_worker.openclaw_writer import OpenClawWriter
 from agenthandover_worker.translator import SemanticTranslator
 from agenthandover_worker.vlm_queue import VLMFallbackQueue
 
@@ -62,7 +62,6 @@ def _make_event(
 
 def _build_pipeline_components(tmp_path: Path) -> dict:
     """Build all pipeline components for testing."""
-    workspace = tmp_path / "workspace"
     return {
         "episode_builder": EpisodeBuilder(),
         "clipboard_linker": ClipboardLinker(),
@@ -70,9 +69,6 @@ def _build_pipeline_components(tmp_path: Path) -> dict:
         "translator": SemanticTranslator(),
         "scorer": ConfidenceScorer(),
         "vlm_queue": VLMFallbackQueue(),
-        "openclaw_writer": OpenClawWriter(workspace_dir=workspace),
-        "index_generator": IndexGenerator(),
-        "sop_inducer": None,
     }
 
 
@@ -266,10 +262,47 @@ class TestPipelineSummaryKeys:
 
         expected_keys = {
             "events_in", "episodes", "positive_events", "negative_events",
-            "translations", "vlm_enqueued", "sops_induced", "sops_exported",
-            "skills_exported",
+            "translations", "vlm_enqueued",
         }
         assert set(summary.keys()) == expected_keys
+
+
+class TestPassiveBatchMinesNothing:
+    """The live test Mac's pattern: the same TextEdit switch/navigate/read
+    sequence over and over.  The removed v1 miner turned it into a junk
+    template every tick (switch_app_textedit_navigate_textedit_read_…) at
+    two model calls per tick; now the batch builds and translates episodes
+    and nothing else."""
+
+    def test_repeated_passive_sequences_produce_no_template(
+        self, tmp_path: Path, tmp_db_path: Path, monkeypatch,
+    ) -> None:
+        import inspect
+
+        from agenthandover_worker import main as main_mod
+
+        params = inspect.signature(run_pipeline).parameters
+        assert not {"sop_inducer", "sop_enhancer", "mining_watermark"} & set(params)
+
+        monkeypatch.setattr(main_mod, "_status_dir", lambda: tmp_path / "state")
+        base = datetime(2026, 9, 23, 9, 0, 0, tzinfo=timezone.utc)
+        events = []
+        for rep in range(6):
+            start = base + timedelta(minutes=10 * rep)
+            for i, kind in enumerate(("AppSwitch", "FocusChange", "DwellSnapshot")):
+                events.append(_make_event(
+                    app_id="com.apple.TextEdit", kind=kind, title="notes.txt",
+                    timestamp=_ts(start + timedelta(seconds=i)),
+                ))
+
+        with WorkerDB(tmp_db_path) as db:
+            for _ in range(3):  # three ticks over the same store
+                summary = run_pipeline(
+                    events, db=db, **_build_pipeline_components(tmp_path),
+                )
+                assert summary["translations"] >= 1
+            assert db.get_generated_sops() == []
+        assert not (tmp_path / "state").exists()
 
 
 # ------------------------------------------------------------------

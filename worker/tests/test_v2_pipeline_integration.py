@@ -594,7 +594,6 @@ class TestWorkerStatusV2:
             last_pipeline_duration_ms=1234,
             consecutive_errors=0,
             vlm_available=True,
-            sop_inducer_available=True,
             v2_annotation_enabled=True,
             v2_annotations_today=42,
             v2_diffs_today=38,
@@ -619,7 +618,6 @@ class TestWorkerStatusV2:
             last_pipeline_duration_ms=1234,
             consecutive_errors=0,
             vlm_available=True,
-            sop_inducer_available=True,
             v2_annotation_enabled=False,
         )
 
@@ -642,14 +640,11 @@ class TestV2DoesNotBreakV1:
         from agenthandover_worker.clipboard_linker import ClipboardLinker
         from agenthandover_worker.confidence import ConfidenceScorer
         from agenthandover_worker.episode_builder import EpisodeBuilder
-        from agenthandover_worker.exporter import IndexGenerator
         from agenthandover_worker.main import run_pipeline
         from agenthandover_worker.negative_demo import NegativeDemoPruner
-        from agenthandover_worker.openclaw_writer import OpenClawWriter
         from agenthandover_worker.translator import SemanticTranslator
         from agenthandover_worker.vlm_queue import VLMFallbackQueue
 
-        workspace = tmp_path / "workspace"
         summary = run_pipeline(
             [],
             episode_builder=EpisodeBuilder(),
@@ -658,8 +653,6 @@ class TestV2DoesNotBreakV1:
             translator=SemanticTranslator(),
             scorer=ConfidenceScorer(),
             vlm_queue=VLMFallbackQueue(),
-            openclaw_writer=OpenClawWriter(workspace_dir=workspace),
-            index_generator=IndexGenerator(),
         )
 
         assert summary["events_in"] == 0

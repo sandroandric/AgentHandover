@@ -868,150 +868,26 @@ class WorkerDB:
         return cursor.fetchone() is not None
 
     # ------------------------------------------------------------------
-    # Episode store — persist translated episodes for cross-cycle SOP mining
+    # Legacy episode store
     # ------------------------------------------------------------------
 
-    def _ensure_episode_store_table(self, write_conn: sqlite3.Connection) -> None:
-        """Create the translated_episodes table if it doesn't exist."""
-        write_conn.execute(
-            "CREATE TABLE IF NOT EXISTS translated_episodes ("
-            "  episode_id TEXT PRIMARY KEY,"
-            "  thread_id TEXT NOT NULL,"
-            "  steps_json TEXT NOT NULL,"
-            "  step_count INTEGER NOT NULL,"
-            "  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))"
-            ")"
-        )
-
-    def save_episode_steps(
-        self,
-        episode_id: str,
-        thread_id: str,
-        steps: list[dict],
-    ) -> bool:
-        """Persist translated episode steps for future SOP induction.
-
-        Uses INSERT OR REPLACE so re-processed episodes (e.g. after VLM
-        reconciliation) update rather than duplicate.
-        """
-        if not steps:
-            return True
-
-        db_path = self._get_writable_path()
-        if not db_path:
-            logger.error("Cannot determine DB path for episode store")
-            return False
-
-        import json as _json
-
-        write_conn = sqlite3.connect(db_path)
-        try:
-            write_conn.execute("PRAGMA busy_timeout = 5000;")
-            self._ensure_episode_store_table(write_conn)
-            write_conn.execute(
-                "INSERT OR REPLACE INTO translated_episodes "
-                "(episode_id, thread_id, steps_json, step_count) "
-                "VALUES (?, ?, ?, ?)",
-                (episode_id, thread_id, _json.dumps(steps), len(steps)),
-            )
-            write_conn.commit()
-            return True
-        except sqlite3.Error as exc:
-            logger.error("Failed to save episode steps: %s", exc)
-            return False
-        finally:
-            write_conn.close()
-
-    def get_all_episode_steps(self, max_age_days: int = 14) -> list[list[dict]]:
-        """Load all stored episode step sequences for SOP induction.
-
-        Returns a list of episode step lists, each being a list of step
-        dicts suitable for ``SOPInducer.induce()``.  Only episodes within
-        *max_age_days* are returned.
-        """
-        import json as _json
-
-        self._ensure_once(self._ensure_episode_store_table)
-
-        try:
-            cursor = self._conn.execute(
-                "SELECT steps_json FROM translated_episodes "
-                "WHERE created_at >= strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?)",
-                (f"-{max_age_days} days",),
-            )
-            result: list[list[dict]] = []
-            for row in cursor.fetchall():
-                try:
-                    steps = _json.loads(row[0])
-                    if steps:
-                        result.append(steps)
-                except (ValueError, TypeError):
-                    continue
-            return result
-        except sqlite3.OperationalError:
-            # Table doesn't exist yet (first run)
-            return []
-
-    def episode_steps_watermark(self, max_age_days: int = 14) -> tuple[int, int]:
-        """``(COUNT(*), MAX(rowid))`` of the stored episodes that
-        :meth:`get_all_episode_steps` would load.
-
-        Any saved or re-saved episode raises the rowid (INSERT OR REPLACE
-        writes a new row) and an episode ageing out lowers the count, so an
-        unchanged watermark means SOP mining would see the same input.
-        """
-        self._ensure_once(self._ensure_episode_store_table)
-        try:
-            count, top = self._conn.execute(
-                "SELECT COUNT(*), COALESCE(MAX(rowid), 0) FROM translated_episodes "
-                "WHERE created_at >= strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?)",
-                (f"-{max_age_days} days",),
-            ).fetchone()
-        except sqlite3.OperationalError:
-            return (0, 0)
-        return (count, top)
-
-    def cleanup_old_episodes(self, max_age_days: int = 14) -> int:
-        """Remove episodes older than *max_age_days*.
-
-        Returns the number of rows deleted.
+    def drop_episode_store(self) -> None:
+        """Drop ``translated_episodes``, the episode store the removed v1
+        PrefixSpan miner read (WP-F5).  Nothing writes it any more; this
+        frees the rows older installs left behind.
         """
         db_path = self._get_writable_path()
         if not db_path:
-            return 0
-
+            return
         write_conn = sqlite3.connect(db_path)
         try:
             write_conn.execute("PRAGMA busy_timeout = 5000;")
-            self._ensure_episode_store_table(write_conn)
-            cursor = write_conn.execute(
-                "DELETE FROM translated_episodes "
-                "WHERE created_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?)",
-                (f"-{max_age_days} days",),
-            )
+            write_conn.execute("DROP TABLE IF EXISTS translated_episodes")
             write_conn.commit()
-            deleted = cursor.rowcount
-            if deleted:
-                logger.info("Cleaned up %d old episode(s) from store", deleted)
-            return deleted
         except sqlite3.Error as exc:
-            logger.error("Failed to cleanup old episodes: %s", exc)
-            return 0
+            logger.error("Failed to drop the legacy episode store: %s", exc)
         finally:
             write_conn.close()
-
-    def count_stored_episodes(self) -> int:
-        """Return the number of episodes in the store."""
-        self._ensure_once(self._ensure_episode_store_table)
-
-        try:
-            cursor = self._conn.execute(
-                "SELECT COUNT(*) FROM translated_episodes"
-            )
-            row = cursor.fetchone()
-            return row[0] if row else 0
-        except sqlite3.OperationalError:
-            return 0
 
     # ------------------------------------------------------------------
     # Passive discovery (v2 task segmentation)

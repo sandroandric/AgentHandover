@@ -1,10 +1,10 @@
 """Phase 2 End-to-End SOP Pipeline Integration Tests.
 
 Full pipeline integration test: recorded events -> episodes -> semantic steps
--> SOP induction -> export to OpenClaw format.
+-> SOP template -> export to OpenClaw format.  (Scenario 1, v1 PrefixSpan
+discovery of a repeated workflow, went with the miner in WP-F5.)
 
 Test scenarios:
-1. Full Pipeline — Repeated Workflow Discovery (3 repetitions -> pattern mining)
 2. Low Confidence -> VLM Queue (poor metadata -> reject -> enqueue)
 3. Manual Edit Detection in Pipeline (edit detection -> v2_draft)
 4. Scheduler Gate Check (favorable vs unfavorable conditions)
@@ -49,7 +49,7 @@ from agenthandover_worker.scheduler import (
 from agenthandover_worker.procedure_schema import sop_to_procedure
 from agenthandover_worker.skill_render import render_packet
 from agenthandover_worker.sop_format import SOPFormatter
-from agenthandover_worker.sop_inducer import SOPInducer
+from agenthandover_worker.sop_inducer import induce_from_focus_session
 from agenthandover_worker.sop_versioner import SOPVersioner
 from agenthandover_worker.translator import SemanticTranslator
 from agenthandover_worker.vlm_queue import QueueBudget, VLMFallbackQueue, VLMJob
@@ -357,213 +357,6 @@ def openclaw_workspace(tmp_path: Path) -> Path:
 
 
 # ===================================================================
-# Test 1: Full Pipeline — Repeated Workflow Discovery
-# ===================================================================
-
-
-class TestFullPipelineRepeatedWorkflow:
-    """Simulate a user doing the same PR review task 3 times
-    (minimum for pattern mining).
-
-    Each repetition:
-    1. Navigate to GitHub PR page
-    2. Dwell / read the PR code
-    3. Click Approve button
-    4. Type review comment
-    5. Switch to Slack and send notification
-
-    Each repetition has different PR numbers, timestamps, and
-    slight comment variations.
-
-    Verify the full pipeline from events -> SOP export.
-    """
-
-    def test_full_pipeline_discovers_repeated_workflow(
-        self,
-        tmp_db_path: Path,
-        write_conn: sqlite3.Connection,
-        openclaw_workspace: Path,
-    ) -> None:
-        base = datetime(2026, 2, 16, 10, 0, 0, tzinfo=timezone.utc)
-
-        # --- Generate 3 repetitions of the PR review workflow ---
-        all_event_ids: list[list[str]] = []
-
-        for rep_idx, (pr_num, comment, channel) in enumerate([
-            (42, "LGTM", "#frontend"),
-            (87, "Looks good!", "#backend"),
-            (103, "Ship it", "#infra"),
-        ]):
-            event_ids = _generate_pr_review_workflow(
-                write_conn,
-                pr_number=pr_num,
-                base_time=base + timedelta(hours=rep_idx * 2),
-                comment_text=comment,
-                slack_channel=channel,
-            )
-            all_event_ids.append(event_ids)
-
-        # ===============================================================
-        # PHASE A: Read events from SQLite via WorkerDB
-        # ===============================================================
-        with WorkerDB(tmp_db_path) as db:
-            events = db.get_unprocessed_events(limit=200)
-
-        assert len(events) == 15, f"Expected 15 events (5 * 3 reps), got {len(events)}"
-
-        # ===============================================================
-        # PHASE B: Build episodes via EpisodeBuilder
-        # ===============================================================
-        builder = EpisodeBuilder()
-        episodes = builder.process_events(events)
-
-        # We expect at least 3 episodes (each repetition in a separate
-        # episode because of the 2-hour gap between repetitions, and
-        # the thread multiplexing separates Chrome from Slack).
-        assert len(episodes) >= 3, (
-            f"Expected at least 3 episodes, got {len(episodes)}"
-        )
-
-        # Total event count preserved
-        total_events = sum(ep.event_count for ep in episodes)
-        assert total_events == 15
-
-        # ===============================================================
-        # PHASE C: Prune negative demos (all should be positive here)
-        # ===============================================================
-        pruner = NegativeDemoPruner()
-        prune_result = pruner.prune(events)
-
-        assert len(prune_result.positive_events) == 15
-        assert len(prune_result.negative_events) == 0
-
-        # ===============================================================
-        # PHASE D: Translate events to semantic steps
-        # ===============================================================
-        translator = SemanticTranslator()
-        scorer = ConfidenceScorer()
-
-        # Translate per-repetition to produce separate episode step lists
-        episode_step_lists: list[list[dict]] = []
-
-        for rep_idx in range(3):
-            rep_events = events[rep_idx * 5 : (rep_idx + 1) * 5]
-            episode_id = f"episode-rep-{rep_idx}"
-
-            steps = _events_to_semantic_steps(rep_events, episode_id)
-
-            # Verify each step has an intent
-            for step in steps:
-                assert step.intent != "unknown", (
-                    f"Step {step.step_index} has unknown intent"
-                )
-
-            # Convert to SOP-step dicts for the inducer
-            sop_steps = [s.to_sop_step() for s in steps]
-            episode_step_lists.append(sop_steps)
-
-        assert len(episode_step_lists) == 3
-
-        # ===============================================================
-        # PHASE E: Verify confidence scoring
-        # ===============================================================
-        # Re-translate with full context to check scoring
-        for rep_idx in range(3):
-            rep_events = events[rep_idx * 5 : (rep_idx + 1) * 5]
-            steps = _events_to_semantic_steps(rep_events, f"ep-{rep_idx}")
-
-            for step in steps:
-                # All events have ARIA labels, so confidence should be
-                # at least at the accept_flagged level (>= 0.40 from
-                # UI anchor alone, plus state match contributions)
-                assert step.confidence > 0.0, (
-                    f"Step {step.step_index} ({step.intent}) has zero confidence"
-                )
-                # Steps with ARIA labels should not be rejected
-                if step.decision == "reject":
-                    # Some steps may lack state match context on first
-                    # event of a rep; that is acceptable as long as the
-                    # reason is consistent
-                    assert step.confidence < 0.60, (
-                        f"Step with confidence {step.confidence} should not be rejected"
-                    )
-
-        # ===============================================================
-        # PHASE F: Mine patterns via SOPInducer
-        # ===============================================================
-        inducer = SOPInducer(min_support=0.3, min_pattern_length=3)
-        sop_templates = inducer.induce(episode_step_lists)
-
-        assert len(sop_templates) >= 1, (
-            f"Expected at least 1 SOP template from 3 repetitions, got {len(sop_templates)}"
-        )
-
-        # The longest/highest-support template should capture the
-        # common pattern
-        best_sop = sop_templates[0]
-        assert best_sop["episode_count"] >= 2, (
-            f"Expected pattern in at least 2 episodes, got {best_sop['episode_count']}"
-        )
-        assert len(best_sop["steps"]) >= 3, (
-            f"Expected at least 3 steps in pattern, got {len(best_sop['steps'])}"
-        )
-        assert best_sop["slug"], "SOP slug should not be empty"
-        assert best_sop["title"], "SOP title should not be empty"
-
-        # ===============================================================
-        # PHASE G: Render SOPs with the one Skill renderer
-        # ===============================================================
-        formatter = SOPFormatter()
-        for template in sop_templates:
-            content = render_packet(sop_to_procedure(template), target="openclaw")
-
-            # Verify YAML frontmatter structure
-            assert content.startswith("---\n"), "SOP should start with YAML frontmatter"
-            frontmatter, body = formatter._extract_frontmatter_and_body(content)
-
-            assert frontmatter["name"]
-            assert frontmatter["title"] == template["title"]
-            assert "generated_by" in frontmatter
-            assert frontmatter["generated_body_hash"].startswith("sha256:")
-            assert frontmatter["generated_body_hash"] == formatter._compute_body_hash(body)
-
-            # Verify body has numbered steps
-            assert "## Steps" in body, "SOP body should have Steps section"
-
-        # ===============================================================
-        # PHASE H: Export via OpenClawWriter
-        # ===============================================================
-        writer = OpenClawWriter(workspace_dir=openclaw_workspace)
-        writer.ensure_directory_structure()
-
-        paths = writer.write_all_sops(sop_templates)
-        assert len(paths) >= 1, "Expected at least 1 SOP file written"
-
-        # Verify file structure
-        sops_dir = openclaw_workspace / "memory" / "apprentice" / "sops"
-        assert sops_dir.exists()
-        assert (sops_dir / "archive").exists()
-
-        # Verify SOP files exist
-        for path in paths:
-            assert path.exists(), f"SOP file should exist: {path}"
-            assert path.suffix == ".md"
-            content = path.read_text(encoding="utf-8")
-            assert content.startswith("---\n")
-
-        # Verify index.md is generated
-        index_path = openclaw_workspace / "memory" / "apprentice" / "index.md"
-        assert index_path.exists(), "index.md should be generated"
-        index_content = index_path.read_text(encoding="utf-8")
-        assert "# SOP Index" in index_content
-        assert "Total SOPs" in index_content
-
-        # Verify metadata directory exists
-        metadata_dir = openclaw_workspace / "memory" / "apprentice" / "metadata"
-        assert metadata_dir.exists()
-
-
-# ===================================================================
 # Test 2: Low Confidence -> VLM Queue
 # ===================================================================
 
@@ -755,10 +548,9 @@ class TestManualEditDetection:
             steps = _events_to_semantic_steps(rep_events, f"ep-edit-{rep}")
             episode_step_lists.append([s.to_sop_step() for s in steps])
 
-        # Mine patterns
-        inducer = SOPInducer(min_support=0.3, min_pattern_length=3)
-        sop_templates = inducer.induce(episode_step_lists)
-        assert len(sop_templates) >= 1
+        # One template from the first repetition
+        sop_templates = induce_from_focus_session(episode_step_lists[:1], "Review PR")
+        assert len(sop_templates) == 1
 
         # --- First write: create the canonical SOP ---
         writer = OpenClawWriter(workspace_dir=openclaw_workspace)
@@ -1319,23 +1111,23 @@ class TestPipelineWithNegativeDemo:
                 steps = _events_to_semantic_steps(rep_events, f"ep-clean-{rep}")
                 episode_step_lists.append([s.to_sop_step() for s in steps])
 
-        # Mine patterns from clean episodes only
-        if episode_step_lists:
-            inducer = SOPInducer(min_support=0.3, min_pattern_length=3)
-            sop_templates = inducer.induce(episode_step_lists)
+        # One template per clean repetition, then export
+        assert episode_step_lists
+        sop_templates = [
+            induce_from_focus_session([steps], f"Review PR {i}")[0]
+            for i, steps in enumerate(episode_step_lists)
+        ]
+        writer = OpenClawWriter(workspace_dir=openclaw_workspace)
+        writer.ensure_directory_structure()
+        paths = writer.write_all_sops(sop_templates)
 
-            # Export if we got patterns
-            if sop_templates:
-                writer = OpenClawWriter(workspace_dir=openclaw_workspace)
-                writer.ensure_directory_structure()
-                paths = writer.write_all_sops(sop_templates)
-
-                for path in paths:
-                    assert path.exists()
-                    content = path.read_text(encoding="utf-8")
-                    # The SOP should not contain undo-related content
-                    assert "cmd+z" not in content.lower()
-                    assert "undo" not in content.lower()
+        assert paths
+        for path in paths:
+            assert path.exists()
+            content = path.read_text(encoding="utf-8")
+            # The SOP should not contain undo-related content
+            assert "cmd+z" not in content.lower()
+            assert "undo" not in content.lower()
 
 
 # ===================================================================

@@ -5,8 +5,6 @@ What each pin holds:
 * passive annotation stops at the daily budget with rows still pending,
   their screenshots kept, and the reason published in worker-status.json;
 * the annotation cache answers an identical screen without the model;
-* SOP mining is skipped while the episode store is unchanged, and re-mined
-  templates are exported only when their fingerprint changed;
 * the procedure list, the sops index and the curation queue do no repeated
   work when nothing changed;
 * the passive backlog is capped at a day, and worker state persists.
@@ -41,7 +39,6 @@ from agenthandover_worker.scene_annotator import (
     SceneAnnotator,
 )
 from agenthandover_worker.scheduler import AnnotationBudget, charged_to
-from agenthandover_worker.sop_dedup import deduplicate_templates
 from daemon_db import create_daemon_db
 
 
@@ -124,7 +121,7 @@ class TestAnnotationBudget:
         wm._write_worker_status(
             started_at="x", events_processed_today=0, sops_generated=0,
             last_pipeline_duration_ms=None, consecutive_errors=0,
-            vlm_available=True, sop_inducer_available=True,
+            vlm_available=True,
             v2_annotation_enabled=True,
             annotation_paused_reason="annotation_budget_exhausted",
             annotation_budget=budget.status(),
@@ -419,75 +416,6 @@ class TestAnnotationCache:
         assert cache.prune(max_age_days=14) == 1
         assert cache.lookup(cache_key("Chrome", "Inbox", _SCREEN)) is not None
         cache.close()
-
-
-# ---------------------------------------------------------------------------
-# SOP mining gated on new input; changed-only export
-# ---------------------------------------------------------------------------
-
-
-class TestMiningGate:
-
-    def test_unchanged_episode_store_skips_induction(self, events_db, tmp_path):
-        inducer = MagicMock()
-        inducer.induce.return_value = []
-        episode_builder = MagicMock()
-        episode_builder.process_events.return_value = []
-        watermark: dict = {}
-        event = {
-            "id": "e1", "timestamp": _iso(datetime.now(timezone.utc)),
-            "kind_json": "{}", "window_json": "{}", "metadata_json": "{}",
-        }
-
-        with WorkerDB(events_db) as db:
-            db.save_episode_steps("ep1", "t1", [{"step": "open"}, {"step": "send"}])
-
-            def tick():
-                return wm.run_pipeline(
-                    [event],
-                    episode_builder=episode_builder,
-                    clipboard_linker=wm.ClipboardLinker(),
-                    pruner=wm.NegativeDemoPruner(),
-                    translator=wm.SemanticTranslator(),
-                    scorer=wm.ConfidenceScorer(),
-                    vlm_queue=wm.VLMFallbackQueue(),
-                    openclaw_writer=MagicMock(),
-                    index_generator=MagicMock(),
-                    sop_inducer=inducer,
-                    db=db,
-                    mining_watermark=watermark,
-                )
-
-            tick()
-            tick()
-            assert inducer.induce.call_count == 1
-            db.save_episode_steps("ep2", "t2", [{"step": "open"}, {"step": "send"}])
-            tick()
-            assert inducer.induce.call_count == 2
-            # Re-saving an episode (INSERT OR REPLACE) is new input too.
-            db.save_episode_steps("ep2", "t2", [{"step": "open"}, {"step": "archive"}])
-            tick()
-            assert inducer.induce.call_count == 3
-
-    def test_changed_only_dedup_returns_new_and_changed_templates(self, tmp_path):
-        def template(title: str) -> dict:
-            return {
-                "slug": "reply-to-email", "title": title,
-                "apps_involved": ["Mail"],
-                "steps": [{"step": "open", "target": "Mail"}, {"step": "send"}],
-                "episode_count": 1,
-            }
-
-        first = deduplicate_templates([template("Reply to email")], tmp_path, changed_only=True)
-        assert len(first) == 1
-        again = deduplicate_templates([template("Reply to email")], tmp_path, changed_only=True)
-        assert again == []
-        renamed = deduplicate_templates(
-            [template("Reply to customer email")], tmp_path, changed_only=True,
-        )
-        assert len(renamed) == 1
-        # The default (recorded Skills) still hands every template on.
-        assert len(deduplicate_templates([template("Reply to customer email")], tmp_path)) == 1
 
 
 # ---------------------------------------------------------------------------

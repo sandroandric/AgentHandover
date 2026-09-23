@@ -735,18 +735,15 @@ def _merge_variables(
 # ------------------------------------------------------------------
 
 _REGISTRY_FILE = "sop-registry.json"
-# Templates mined by the v1 PrefixSpan path dedup against their own
-# registry, so they can never merge into (or poison) recorded Skills.
-V1_MINED_REGISTRY_FILE = "sop-registry-v1-mined.json"
 
 
-def load_registry(state_dir: Path, registry_file: str = _REGISTRY_FILE) -> list[dict]:
+def load_registry(state_dir: Path) -> list[dict]:
     """Load the cumulative SOP registry from disk.
 
     The registry stores all known SOP templates (without ``_timeline``
     to save space) keyed by slug.  Used for dedup matching.
     """
-    registry_path = state_dir / registry_file
+    registry_path = state_dir / _REGISTRY_FILE
     if not registry_path.is_file():
         return []
     try:
@@ -759,9 +756,7 @@ def load_registry(state_dir: Path, registry_file: str = _REGISTRY_FILE) -> list[
     return []
 
 
-def save_registry(
-    state_dir: Path, sops: list[dict], registry_file: str = _REGISTRY_FILE,
-) -> None:
+def save_registry(state_dir: Path, sops: list[dict]) -> None:
     """Save the cumulative SOP registry to disk.
 
     Strips ``_timeline`` from each SOP to save space (timelines can be
@@ -778,7 +773,7 @@ def save_registry(
             entry["_fingerprint"] = compute_fingerprint(entry)
         clean.append(entry)
 
-    registry_path = state_dir / registry_file
+    registry_path = state_dir / _REGISTRY_FILE
     state_dir.mkdir(parents=True, exist_ok=True)
     AtomicWriter.write(registry_path, json.dumps(clean, indent=2, default=str))
 
@@ -789,8 +784,6 @@ def deduplicate_templates(
     threshold: float = _DEFAULT_THRESHOLD,
     evidence_normalizer=None,
     llm_reasoner: "LLMReasoner | None" = None,
-    registry_file: str = _REGISTRY_FILE,
-    changed_only: bool = False,
 ) -> list[dict]:
     """Deduplicate a batch of new SOPs against the cumulative registry.
 
@@ -808,16 +801,10 @@ def deduplicate_templates(
         evidence_normalizer: Optional ``EvidenceNormalizer`` instance.
             When provided, ``merge_sops`` uses semantic alignment
             instead of the simple "keep more steps" strategy.
-        registry_file: Registry filename inside *state_dir*.
-        changed_only: Return only new templates and merged ones whose
-            ``compute_fingerprint`` differs from the registry's stored
-            fingerprint, so re-mining an unchanged library exports nothing.
-            (Recorded and passive Skills keep the default: a re-recording
-            is always handed on.)
 
     Returns the final list of SOP templates to export (merged + new).
     """
-    registry = load_registry(state_dir, registry_file)
+    registry = load_registry(state_dir)
     output: list[dict] = []
 
     for new_sop in new_sops:
@@ -830,10 +817,8 @@ def deduplicate_templates(
                 evidence_normalizer=evidence_normalizer,
                 llm_reasoner=llm_reasoner,
             )
-            stored_fp = registry[match_idx].get("_fingerprint")
             registry[match_idx] = merged
-            if not changed_only or merged.get("_fingerprint") != stored_fp:
-                output.append(merged)
+            output.append(merged)
         else:
             # New SOP — add to registry
             new_sop["_fingerprint"] = compute_fingerprint(new_sop)
@@ -841,6 +826,6 @@ def deduplicate_templates(
             output.append(new_sop)
 
     # Persist updated registry
-    save_registry(state_dir, registry, registry_file)
+    save_registry(state_dir, registry)
 
     return output

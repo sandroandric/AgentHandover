@@ -332,17 +332,6 @@ fn print_service_status(name: &str, status_file: &str, pid_name: &str) {
                 };
                 println!("    VLM:        {}", vlm_str);
             }
-            if let Some(inducer) = value
-                .get("sop_inducer_available")
-                .and_then(|v| v.as_bool())
-            {
-                let inducer_str = if inducer {
-                    "ready".green()
-                } else {
-                    "not installed".dimmed()
-                };
-                println!("    SOP mining: {}", inducer_str);
-            }
 
             if let Some(errors) = value.get("consecutive_errors").and_then(|v| v.as_u64()) {
                 if errors > 0 {

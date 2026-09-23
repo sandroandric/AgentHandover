@@ -750,7 +750,6 @@ def _write_worker_status(
     last_pipeline_duration_ms: int | None,
     consecutive_errors: int,
     vlm_available: bool,
-    sop_inducer_available: bool,
     vlm_queue_pending: int = 0,
     vlm_jobs_today: int = 0,
     vlm_dropped_today: int = 0,
@@ -780,7 +779,6 @@ def _write_worker_status(
         "last_pipeline_duration_ms": last_pipeline_duration_ms,
         "consecutive_errors": consecutive_errors,
         "vlm_available": vlm_available,
-        "sop_inducer_available": sop_inducer_available,
         "vlm_queue_pending": vlm_queue_pending,
         "vlm_jobs_today": vlm_jobs_today,
         "vlm_dropped_today": vlm_dropped_today,
@@ -1009,9 +1007,9 @@ def _write_sops_index(
         all_sops_raw = db.get_generated_sops()
         failed = db.get_failed_generations()
 
-        # Surface v2 pipeline SOPs and focus recordings, plus mined (v1
-        # PrefixSpan) templates, which reach the DB only when review is on
-        # and must then be approved here before anything exports them.
+        # Surface v2 pipeline SOPs and focus recordings.  ``v1_mined`` rows
+        # were queued by the removed v1 PrefixSpan miner; they stay listed
+        # so a user can still reject the drafts it left behind.
         _REVIEWABLE_SOURCES = {
             "v2_focus_recording", "v2_passive_discovery", "focus", "v1_mined",
         }
@@ -1218,32 +1216,16 @@ def run_pipeline(
     translator: SemanticTranslator,
     scorer: ConfidenceScorer,
     vlm_queue: VLMFallbackQueue,
-    openclaw_writer: SOPExportAdapter,
-    index_generator: IndexGenerator,
-    sop_inducer: object | None = None,
-    sop_enhancer: object | None = None,
-    skill_md_writer: "SOPExportAdapter | None" = None,
-    claude_skill_writer: "SOPExportAdapter | None" = None,
     db: "WorkerDB | None" = None,
-    procedure_writer: "ProcedureWriter | None" = None,
-    kb_export_adapter: "KnowledgeBaseExportAdapter | None" = None,
-    sop_auto_approve: bool = True,
-    mining_watermark: dict | None = None,
 ) -> dict:
-    """Run the full D->E->F pipeline on a batch of events.
+    """Build, prune, translate and score a batch of events (steps D->E).
 
-    Mined (v1 PrefixSpan) templates are linted like every other path.
-    With ``sop_auto_approve`` off they are only queued for review in the
-    DB; nothing reaches the knowledge base or any export directory until
-    a human approves them.
+    Translations the scorer rejects are queued for the VLM fallback.  No
+    SOP comes out of this path: the v1 PrefixSpan miner that used to run
+    here on every poll is gone (WP-F5), and passive recurrence belongs to
+    ``workflow_mining``.
 
-    *mining_watermark* is the caller's memory of the episode store
-    (``WorkerDB.episode_steps_watermark``) at the last mining run: when
-    the store has not changed since, step F (induction, enhancement,
-    dedup, export) is skipped.  Only templates whose fingerprint changed
-    are exported and counted.
-
-    Returns a summary dict with counts and results for monitoring.
+    Returns a summary dict with counts for monitoring.
     """
     summary: dict = {
         "events_in": len(events),
@@ -1252,9 +1234,6 @@ def run_pipeline(
         "negative_events": 0,
         "translations": 0,
         "vlm_enqueued": 0,
-        "sops_induced": 0,
-        "sops_exported": 0,
-        "skills_exported": 0,
     }
 
     if not events:
@@ -1299,7 +1278,6 @@ def run_pipeline(
 
     # Step E: Translate positive events into semantic steps (parallel per episode)
     all_translations = []
-    episode_sop_steps: list[list[dict]] = []
 
     # Episodes are independent — translate in parallel
     if len(positive_episodes_events) > 1:
@@ -1317,8 +1295,6 @@ def run_pipeline(
 
     # Score each episode's translations and handle VLM fallback
     for translations in translation_batches:
-        sop_steps_for_episode: list[dict] = []
-
         for idx, tr in enumerate(translations):
             # Build scoring context from PREVIOUS step's post_state so the
             # context match score reflects an independent expectation rather
@@ -1377,186 +1353,12 @@ def run_pipeline(
                 if vlm_queue.enqueue(job):
                     summary["vlm_enqueued"] += 1
 
-            # Build SOP step dict for high-confidence translations
-            if conf.decision in ("accept", "accept_flagged"):
-                target_desc = ""
-                selector = None
-                if tr.target:
-                    target_desc = tr.target.selector
-                    selector = tr.target.selector
-
-                sop_step = {
-                    "step": tr.intent,
-                    "target": target_desc,
-                    "selector": selector,
-                    "parameters": tr.parameters,
-                    "confidence": conf.total,
-                    "pre_state": tr.pre_state,
-                }
-                sop_steps_for_episode.append(sop_step)
-
-        if sop_steps_for_episode:
-            episode_sop_steps.append(sop_steps_for_episode)
-
     summary["translations"] = len(all_translations)
     logger.info(
         "Translated %d events, enqueued %d VLM jobs",
         len(all_translations),
         summary["vlm_enqueued"],
     )
-
-    # Step E2: Persist translated episode steps to the episode store
-    # so future pipeline cycles can see them during SOP induction.
-    if db is not None and episode_sop_steps:
-        for i, ep_steps in enumerate(episode_sop_steps):
-            ep = episodes[i] if i < len(episodes) else None
-            ep_id = ep.episode_id if ep else str(uuid.uuid4())
-            thread_id = ep.thread_id if ep else "unknown"
-            db.save_episode_steps(ep_id, thread_id, ep_steps)
-        logger.debug(
-            "Persisted %d episode(s) to episode store", len(episode_sop_steps)
-        )
-
-    # Step F: Induce SOPs from ALL historical episodes (not just current batch)
-    # Load stored episodes + current batch for cross-cycle pattern mining.
-    sop_templates: list[dict] = []
-    if sop_inducer is not None and db is not None and mining_watermark is not None:
-        watermark = db.episode_steps_watermark(max_age_days=14)
-        if mining_watermark.get("episodes") == watermark:
-            logger.debug("Episode store unchanged; SOP mining skipped")
-            return summary
-        mining_watermark["episodes"] = watermark
-    if sop_inducer is not None:
-        all_episodes_for_mining: list[list[dict]] = []
-        if db is not None:
-            all_episodes_for_mining = db.get_all_episode_steps(max_age_days=14)
-            logger.info(
-                "Loaded %d historical episode(s) from store for SOP mining",
-                len(all_episodes_for_mining),
-            )
-        else:
-            # Fallback: only use current batch (original behaviour)
-            all_episodes_for_mining = episode_sop_steps
-
-        if all_episodes_for_mining:
-            try:
-                sop_templates = sop_inducer.induce(all_episodes_for_mining)
-                summary["sops_induced"] = len(sop_templates)
-                logger.info("Induced %d SOP templates", len(sop_templates))
-            except Exception:
-                logger.exception("SOP induction failed")
-
-    # Step F1.5: Enhance SOPs with LLM-generated descriptions
-    if sop_enhancer is not None and sop_templates:
-        enhanced_count = 0
-        for template in sop_templates:
-            try:
-                enhanced = sop_enhancer.enhance_sop(template)
-                if "task_description" in enhanced:
-                    template.update(enhanced)
-                    enhanced_count += 1
-            except Exception:
-                logger.debug(
-                    "SOP enhancement failed for '%s'",
-                    template.get("slug", "unknown"),
-                    exc_info=True,
-                )
-        if enhanced_count:
-            logger.info("Enhanced %d/%d SOPs with LLM descriptions",
-                        enhanced_count, len(sop_templates))
-
-    # Step F2: Lint, then dedup against the mined-template registry (its
-    # own file, so mined templates never merge into recorded Skills).
-    sop_templates = [t for t in sop_templates if _lint_and_log(t, "v1_mined")]
-    if sop_templates:
-        from agenthandover_worker.sop_dedup import (
-            V1_MINED_REGISTRY_FILE,
-            deduplicate_templates,
-        )
-        sop_templates = deduplicate_templates(
-            sop_templates, _status_dir(), registry_file=V1_MINED_REGISTRY_FILE,
-            changed_only=True,
-        )
-
-    if sop_templates and not sop_auto_approve:
-        # Review is on: queue each new template once (mining re-runs over
-        # the stored episodes every tick) and export nothing.
-        if db is not None:
-            for tpl in sop_templates:
-                slug = tpl.get("slug", "")
-                if db.get_generated_sop_by_slug(slug) is not None:
-                    continue
-                db.save_generated_sop(
-                    slug=slug,
-                    title=tpl.get("title") or slug,
-                    source="v1_mined",
-                    sop_template=tpl,
-                    confidence=tpl.get("confidence_avg", tpl.get("confidence", 0.0)),
-                    auto_approve=False,
-                )
-                summary["sops_queued"] = summary.get("sops_queued", 0) + 1
-        return summary
-
-    # Step F2b: Format, version, and export SOPs (auto-approve on)
-    if sop_templates:
-        # Cache SOP templates for CLI export trigger re-export
-        _save_sop_cache(sop_templates)
-
-        # Step F3: Write v3 procedures to the knowledge base first so
-        # all adapters (including OpenClaw) can use the richer v3 format.
-        if procedure_writer is not None:
-            for tpl in sop_templates:
-                try:
-                    procedure_writer.write_procedure(
-                        tpl,
-                        source="sop_pipeline",
-                        source_id=tpl.get("slug", "unknown"),
-                    )
-                except Exception:
-                    logger.debug(
-                        "Failed to write procedure for %s",
-                        tpl.get("slug", "?"), exc_info=True,
-                    )
-
-        # Step F4: Export via OpenClaw (uses v3 procedure from KB when available)
-        try:
-            paths = _export_via_adapter(
-                openclaw_writer, sop_templates, procedure_writer,
-            )
-            summary["sops_exported"] = len(paths)
-            logger.info("Exported %d SOPs", len(paths))
-        except Exception:
-            logger.exception("SOP export failed")
-
-        # Step F5: Also export as SKILL.md if skill_md_writer is configured
-        # (uses v3 procedure from KB when available)
-        if skill_md_writer is not None:
-            try:
-                skill_paths = _export_via_adapter(
-                    skill_md_writer, sop_templates, procedure_writer,
-                )
-                summary["skills_exported"] = len(skill_paths)
-                logger.info("Exported %d SKILL.md files", len(skill_paths))
-            except Exception:
-                logger.exception("SKILL.md export failed")
-
-        # Step F5: Also export as Claude Code skills if configured
-        # (uses v3 procedure from KB when available)
-        if claude_skill_writer is not None:
-            try:
-                cs_paths = _export_via_adapter(
-                    claude_skill_writer, sop_templates, procedure_writer,
-                )
-                summary["claude_skills_exported"] = len(cs_paths)
-                logger.info("Exported %d Claude Code skill(s)", len(cs_paths))
-            except Exception:
-                logger.exception("Claude Code skill export failed")
-
-        if kb_export_adapter is not None:
-            try:
-                kb_export_adapter.write_all_sops(sop_templates)
-            except Exception:
-                logger.debug("KB export adapter failed", exc_info=True)
 
     return summary
 
@@ -1569,7 +1371,6 @@ def _process_focus_sessions(
     translator: SemanticTranslator,
     scorer: "ConfidenceScorer",
     vlm_queue: "VLMFallbackQueue",
-    sop_inducer: object | None,
     sop_enhancer: object | None,
     openclaw_writer: "SOPExportAdapter",
     skill_md_writer: "SOPExportAdapter | None" = None,
@@ -1583,8 +1384,8 @@ def _process_focus_sessions(
 
     Queries for events tagged with focus_session_id, groups them by session,
     runs through the episode builder + translator, and calls
-    ``induce_from_focus_session()`` (bypassing PrefixSpan multi-episode
-    requirement) to produce a SOP from a single demonstration.
+    ``sop_inducer.induce_from_focus_session()`` to produce a SOP from a
+    single demonstration.
 
     Note: ``NegativeDemoPruner`` is deliberately skipped here because focus
     sessions are single-shot demonstrations — there are no negative counter-
@@ -1692,15 +1493,14 @@ def _process_focus_sessions(
         _clear_focus_signal(signal_path)
         return 0
 
-    # Induce SOP from focus session (bypasses PrefixSpan)
+    # One SOP from the single demonstration
+    from agenthandover_worker.sop_inducer import induce_from_focus_session
+
     sop_templates: list[dict] = []
-    if sop_inducer is not None:
-        try:
-            sop_templates = sop_inducer.induce_from_focus_session(
-                episode_sop_steps, title
-            )
-        except Exception:
-            logger.exception("Focus session SOP induction failed for '%s'", title)
+    try:
+        sop_templates = induce_from_focus_session(episode_sop_steps, title)
+    except Exception:
+        logger.exception("Focus session SOP induction failed for '%s'", title)
 
     # Enhance with LLM descriptions
     if sop_enhancer is not None and sop_templates:
@@ -1834,7 +1634,7 @@ def _process_focus_sessions(
                 "Focus session '%s': SOP(s) saved as draft (auto_approve=False)",
                 title,
             )
-    elif not sop_templates and sop_inducer is not None:
+    else:
         # SOP induction ran but produced no templates — record failure
         try:
             db.record_failed_generation(
@@ -1878,7 +1678,7 @@ def _process_focus_sessions_v2(
     """Process completed focus recording sessions via v2 VLM pipeline.
 
     Uses the scene annotator + frame differ + SOP generator instead of
-    the v1 episode builder + translator + PrefixSpan path.  Produces
+    the v1 episode builder + translator path.  Produces
     semantic SOPs with exact screen-observed details.
 
     Enhanced flow:
@@ -4348,7 +4148,6 @@ def main(argv: list[str] | None = None) -> None:
         last_pipeline_duration_ms=None,
         consecutive_errors=0,
         vlm_available=False,
-        sop_inducer_available=False,
         vlm_mode="starting",
     )
 
@@ -4797,31 +4596,6 @@ def main(argv: list[str] | None = None) -> None:
     else:
         logger.info("SOP enhancement disabled by config")
 
-    # Try to import SOPInducer (requires prefixspan)
-    sop_inducer = None
-    sop_inducer_available = False
-    try:
-        from agenthandover_worker.sop_inducer import SOPInducer
-        # Use low min_support (abs_support will be max(2, ...)) and
-        # min_pattern_length=2 to enable cold-start pattern discovery.
-        # The sliding-window mining inside the inducer creates enough
-        # sequences for PrefixSpan even with few real episodes.
-        sop_inducer = SOPInducer(
-            min_support=0.05,
-            min_pattern_length=2,
-            vlm_worker=vlm_worker,
-        )
-        sop_inducer_available = True
-        if vlm_worker is not None:
-            logger.info("SOPInducer loaded with VLM-assisted variable classification")
-        else:
-            logger.info("SOPInducer loaded (prefixspan available)")
-    except ImportError:
-        logger.warning(
-            "prefixspan not installed — SOP induction disabled. "
-            "Install with: pip install prefixspan"
-        )
-
     # Initialize v2 scene annotation pipeline
     scene_annotator: SceneAnnotator | None = None
     frame_differ: FrameDiffer | None = None
@@ -5006,8 +4780,6 @@ def main(argv: list[str] | None = None) -> None:
         sop_model=vlm_cfg.sop_model,
     )
     model_scheduler.register(sop_generator, behavioral_synthesizer, llm_reasoner)
-    # SOP mining input seen by the last run_pipeline (see its docstring).
-    mining_watermark: dict = {}
 
     # Write initial status file after DB connect
     _vlm_stats = vlm_queue.get_stats()
@@ -5018,7 +4790,6 @@ def main(argv: list[str] | None = None) -> None:
         last_pipeline_duration_ms=last_pipeline_duration_ms,
         consecutive_errors=0,
         vlm_available=vlm_available,
-        sop_inducer_available=sop_inducer_available,
         vlm_queue_pending=_vlm_stats.pending_jobs,
         vlm_jobs_today=_vlm_stats.jobs_today,
         vlm_dropped_today=_vlm_stats.dropped_count,
@@ -5226,40 +4997,18 @@ def main(argv: list[str] | None = None) -> None:
                         translator=translator,
                         scorer=scorer,
                         vlm_queue=vlm_queue,
-                        openclaw_writer=sop_writer,
-                        index_generator=index_generator,
-                        sop_inducer=sop_inducer,
-                        sop_enhancer=sop_enhancer,
-                        skill_md_writer=skill_md_writer,
-                        claude_skill_writer=claude_skill_writer,
                         db=db,
-                        procedure_writer=procedure_writer,
-                        kb_export_adapter=kb_export_adapter,
-                        sop_auto_approve=sop_auto_approve,
-                        mining_watermark=mining_watermark,
                     )
                     pipeline_elapsed_ms = int((time.monotonic() - pipeline_start) * 1000)
                     last_pipeline_duration_ms = pipeline_elapsed_ms
                     logger.info("Pipeline summary: %s", summary)
 
-                    # Update cumulative counters
                     total_events_processed += summary["events_in"]
-                    total_sops_generated += summary["sops_exported"]
-
-                    # Task 5: User-facing progress messages
-                    if summary["sops_exported"] > 0:
-                        logger.info(
-                            "Generated %d new SOP(s)!",
-                            summary["sops_exported"],
-                        )
-                        _write_sops_index(db, knowledge_base)
-                    else:
-                        logger.info(
-                            "Processed %d events into %d episodes. "
-                            "SOPs generated after workflows repeated 2+ times.",
-                            summary["events_in"],
-                            summary["episodes"],
-                        )
+                    logger.info(
+                        "Processed %d events into %d episodes.",
+                        summary["events_in"],
+                        summary["episodes"],
+                    )
 
                     # Mark processed events so they are not re-read (GAP 4)
                     if inflight_event_ids:
@@ -5440,7 +5189,7 @@ def main(argv: list[str] | None = None) -> None:
                 # memory: the v2 VLM pipeline when available (semantic SOPs
                 # from screen annotations; its keyframes are annotated
                 # before the SOP call switches to the generation model),
-                # else v1 (episode builder + translator + PrefixSpan).
+                # else v1 (episode builder + translator + one template).
                 if focus_processor is not None and v2_schema_ok:
                     focus_sops = _process_focus_sessions_v2(
                         db,
@@ -5472,7 +5221,6 @@ def main(argv: list[str] | None = None) -> None:
                         translator=translator,
                         scorer=scorer,
                         vlm_queue=vlm_queue,
-                        sop_inducer=sop_inducer,
                         sop_enhancer=sop_enhancer,
                         openclaw_writer=sop_writer,
                         skill_md_writer=skill_md_writer,
@@ -5545,7 +5293,6 @@ def main(argv: list[str] | None = None) -> None:
                     last_pipeline_duration_ms=last_pipeline_duration_ms,
                     consecutive_errors=consecutive_errors,
                     vlm_available=vlm_available,
-                    sop_inducer_available=sop_inducer_available,
                     vlm_queue_pending=db_vlm_pending,
                     vlm_jobs_today=_vlm_stats.jobs_today,
                     vlm_dropped_today=_vlm_stats.dropped_count,
@@ -5566,12 +5313,12 @@ def main(argv: list[str] | None = None) -> None:
                 # keyed on the date persisted when they last ran. ---
                 run_daily = gen_plan.allows("daily")
 
-                # Episode store cleanup
+                # The v1 miner's episode store is unused (WP-F5): drop it.
                 if run_daily:
                     try:
-                        db.cleanup_old_episodes(max_age_days=14)
+                        db.drop_episode_store()
                     except Exception:
-                        logger.debug("Episode store cleanup failed", exc_info=True)
+                        logger.debug("Episode store drop failed", exc_info=True)
 
                 # --- Phase 2+: Daily batch + staleness (once per day) ---
                 # Process *yesterday* (the local calendar day) — today is
@@ -5969,7 +5716,6 @@ def main(argv: list[str] | None = None) -> None:
                         last_pipeline_duration_ms=last_pipeline_duration_ms,
                         consecutive_errors=consecutive_errors,
                         vlm_available=vlm_available,
-                        sop_inducer_available=sop_inducer_available,
                         vlm_mode=vlm_mode_str,
                         vlm_provider=vlm_provider_str or None,
                     )

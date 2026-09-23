@@ -120,7 +120,6 @@ struct WorkerStatusFile: Codable {
     let last_pipeline_duration_ms: UInt64?
     let consecutive_errors: UInt32
     let vlm_available: Bool
-    let sop_inducer_available: Bool
     let vlm_queue_pending: UInt64?
     let vlm_jobs_today: UInt64?
     let vlm_dropped_today: UInt64?

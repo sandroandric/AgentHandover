@@ -140,8 +140,6 @@ class JourneyWorker:
         self.state_dir = wm._status_dir()
         self.screenshots_dir = self.state_dir / "screenshots"
         self._last_passive_discovery = clock.now()
-        # main()'s memory of the episode store at the last SOP mining run.
-        self.mining_watermark: dict = {}
         # A worker is one process: its usage counters start at zero.
         ops_telemetry.MODEL_USAGE.reset()
         ops_telemetry.COMPUTE.reset()
@@ -260,7 +258,7 @@ class JourneyWorker:
         else:
             raise ValueError(f"adapter {adapter!r} is not driven by journeys")
 
-        # SOP enhancement and the SOP inducer, as main() sets them up.
+        # SOP enhancement (the v1 focus fallback's), as main() sets it up.
         self.sop_enhancer = None
         llm_config = dataclasses.asdict(cfg.llm)
         if llm_config.get("enhance_sops", True):
@@ -276,8 +274,6 @@ class JourneyWorker:
                     backend=backend,
                     max_enhancements_per_day=int(llm_config.get("max_enhancements_per_day", 20)),
                 )
-        from agenthandover_worker.sop_inducer import SOPInducer
-        self.sop_inducer = SOPInducer(min_support=0.05, min_pattern_length=2, vlm_worker=None)
 
         self.scene_annotator = None
         self.frame_differ = None
@@ -447,15 +443,8 @@ class JourneyWorker:
                 translator=self.translator,
                 scorer=self.scorer,
                 vlm_queue=self.vlm_queue,
-                sop_inducer=self.sop_inducer,
-                sop_enhancer=self.sop_enhancer,
                 db=db,
-                sop_auto_approve=self.sop_auto_approve,
-                mining_watermark=self.mining_watermark,
-                **writers,
             )
-            if summary["sops_exported"] > 0:
-                wm._write_sops_index(db, self.knowledge_base)
             event_ids = [ev["id"] for ev in unprocessed if "id" in ev]
             if event_ids:
                 db.mark_events_processed(event_ids)
@@ -518,7 +507,6 @@ class JourneyWorker:
                 translator=self.translator,
                 scorer=self.scorer,
                 vlm_queue=self.vlm_queue,
-                sop_inducer=self.sop_inducer,
                 sop_enhancer=self.sop_enhancer,
                 sop_auto_approve=self.sop_auto_approve,
                 **writers,
@@ -568,7 +556,7 @@ class JourneyWorker:
         model schedule."""
         self._events_processed += len(unprocessed)
         self._sops_generated += (
-            focus_sops + (passive_sops or 0) + (summary["sops_exported"] if summary else 0)
+            focus_sops + (passive_sops or 0)
         )
         self._annotations += (ann_stats or {}).get("annotated", 0)
         self._diffs += (diff_stats or {}).get("diffs", 0)
@@ -581,7 +569,6 @@ class JourneyWorker:
             last_pipeline_duration_ms=None,
             consecutive_errors=0,
             vlm_available=self.scene_annotator is not None,
-            sop_inducer_available=self.sop_inducer is not None,
             vlm_mode="local",
             v2_annotation_enabled=self.scene_annotator is not None,
             v2_annotations_today=self._annotations,

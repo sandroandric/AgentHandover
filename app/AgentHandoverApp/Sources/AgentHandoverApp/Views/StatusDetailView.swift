@@ -50,7 +50,6 @@ struct StatusDetailView: View {
 
                         HStack(spacing: 8) {
                             FeatureBadge(name: "VLM", available: worker.vlm_available)
-                            FeatureBadge(name: "SOP Inducer", available: worker.sop_inducer_available)
                         }
                         .padding(.top, 4)
                     }
