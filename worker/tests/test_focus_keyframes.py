@@ -90,6 +90,15 @@ class TestSelectKeyframes:
         assert {"f0", "f99", "f40", "f20", "f21", "f50", "f70"} == set(ids)
 
 
+    def test_rows_without_a_screenshot_rank_last(self):
+        frames = [_frame(i, title=f"P{i}") for i in range(10)]
+        for i in (2, 4, 6):
+            meta = json.loads(frames[i]["metadata_json"])
+            meta["screenshot_path"] = f"/shots/f{i}.jpg"
+            frames[i]["metadata_json"] = json.dumps(meta)
+        assert [f["id"] for f in select_keyframes(frames, 3)] == ["f2", "f4", "f6"]
+
+
 def _insert(db_path: Path, frames: list[dict], screenshots: Path) -> None:
     conn = sqlite3.connect(str(db_path))
     for f in frames:

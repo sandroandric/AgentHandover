@@ -84,7 +84,8 @@ def select_keyframes(
     within ``_DOM_TOLERANCE_SEC`` of a click (*click_times*, datetimes),
     frames whose OCR text changed most from the previous frame, and frames
     after a long pause.  When there are more dwell boundaries than *k*,
-    those other signals decide among them.
+    those other signals decide among them.  Rows without a screenshot
+    (app switches, title changes) cannot be annotated and rank last.
     """
     if len(frames) <= k:
         return list(frames)
@@ -97,6 +98,8 @@ def select_keyframes(
     scores: list[float] = []
     for i, frame in enumerate(frames):
         score = 1000.0 if i in (0, n - 1) else 0.0
+        if not parse_json_field(frame, "metadata_json").get("screenshot_path"):
+            score -= 10_000.0
         if (
             i in (0, n - 1)
             or places[i - 1] != places[i]
