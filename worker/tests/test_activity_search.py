@@ -1180,3 +1180,56 @@ class TestPendingAnnotationsExcluded:
             timeline = s.session_recall(date="2026-03-10")
 
         assert len(timeline.entries) == 0
+
+
+# ---------------------------------------------------------------------------
+# Shared across threads (worker loop + query API)
+# ---------------------------------------------------------------------------
+
+
+class TestQueryApiThread:
+    """The worker builds one searcher on its main thread and hands it to
+    the query API, whose handlers run on the HTTP server thread."""
+
+    def test_search_and_recall_over_http(
+        self, tmp_db_path: Path, write_conn: sqlite3.Connection, tmp_path: Path,
+    ) -> None:
+        import urllib.request
+
+        from agenthandover_worker.knowledge_base import KnowledgeBase
+        from agenthandover_worker.query_api import TOKEN_HEADER, QueryAPIServer
+
+        ts = datetime.now(timezone.utc).isoformat()
+        eid = _insert_annotated_event(
+            write_conn, timestamp=ts, what_doing="Renewing expired domains",
+        )
+        searcher = ActivitySearcher(tmp_db_path)
+        searcher.refresh_index()  # main thread uses the connection first
+
+        srv = QueryAPIServer(
+            KnowledgeBase(root=tmp_path / "kb"), port=0,
+            activity_searcher=searcher,
+        )
+        srv.start()
+        try:
+            def post(path: str, data: dict) -> tuple[int, dict]:
+                req = urllib.request.Request(
+                    f"http://127.0.0.1:{srv.port}{path}",
+                    data=json.dumps(data).encode(),
+                    headers={"Content-Type": "application/json",
+                             TOKEN_HEADER: srv.token},
+                    method="POST",
+                )
+                with urllib.request.urlopen(req, timeout=5) as resp:
+                    return resp.status, json.loads(resp.read())
+
+            status, body = post("/search", {"query": "expired domains"})
+            assert status == 200
+            assert [r["event_id"] for r in body["results"]] == [eid]
+
+            status, body = post("/recall", {"date": ts[:10]})
+            assert status == 200
+            assert "Renewing expired domains" in json.dumps(body)
+        finally:
+            srv.stop()
+            searcher.close()

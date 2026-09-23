@@ -5,3 +5,4 @@ pub mod redaction;
 pub mod status;
 pub mod pid;
 pub mod observation;
+pub mod browser_transition;

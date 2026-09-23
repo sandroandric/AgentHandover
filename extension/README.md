@@ -51,10 +51,11 @@ The extension connects to the daemon automatically. Check `agenthandover status`
 
 ## Architecture
 
-- `background.ts` — Service worker, manages native messaging connection
+- `background.ts` — Service worker: native messaging connection (reconnects on every worker start and by a one-minute alarm), active-tab navigations
 - `content.ts` — Content script injected into all pages
 - `dom-capture.ts` — DOM snapshots: the interacted element's anchor chain (role, name, test id, selector) and a text digest of the viewport, under 8 KB
 - `click-capture.ts` — Click intent with UI element metadata
+- `form-submit.ts` — Which form and submit control were used (never field values)
 - `dwell-tracker.ts` — Reading/scrolling pattern detection
 - `secure-field.ts` — Password/sensitive field exclusion
 - `native-messaging.ts` — Chrome Native Messaging protocol handler
