@@ -21,11 +21,13 @@ from agenthandover_worker.model_scheduler import (
     GB,
     GENERATION_BATCH_WAIT_SECONDS,
     LOAD_BACKOFF_SECONDS,
+    LOAD_START_SECONDS,
+    LOAD_TIMEOUT_SECONDS,
     ModelScheduler,
     before_generation_call,
     parse_vm_stat,
 )
-from agenthandover_worker.ollama import OllamaClient, OllamaUnavailable, Response
+from agenthandover_worker.ollama import OllamaClient, OllamaTimeout, OllamaUnavailable, Response
 from agenthandover_worker.sop_generator import SOPGenerator, SOPGeneratorConfig
 
 QWEN = "qwen3.5:4b"
@@ -44,6 +46,11 @@ class FakeOllama(OllamaClient):
         self.loaded: dict[str, int] = dict(loaded or {})
         self.log: list[tuple] = []
         self.fail_loads = 0
+        # Loads that do not answer within their timeout: "queued" (Ollama
+        # has not started them: absent from /api/ps) or "loading" (listed
+        # in /api/ps, answered by the next request).
+        self.stalled_loads: list[str] = []
+        self.load_timeouts: list[float | None] = []
 
     def ps(self, timeout=5.0):
         self.log.append(("ps",))
@@ -57,6 +64,12 @@ class FakeOllama(OllamaClient):
         num_ctx = (options or {}).get("num_ctx")
         if prompt == "" and keep_alive is not None:
             self.log.append(("load", model, num_ctx))
+            self.load_timeouts.append(kwargs.get("timeout"))
+            if self.stalled_loads:
+                stall = self.stalled_loads.pop(0)
+                if stall == "loading":
+                    self.loaded[model] = GEMMA_SIZE
+                raise OllamaTimeout(f"Ollama timed out after {kwargs.get('timeout'):.0f}s")
             if self.fail_loads:
                 self.fail_loads -= 1
                 raise OllamaUnavailable(
@@ -486,3 +499,43 @@ def test_a_generation_model_that_cannot_load_defers_the_registered_components():
         insights = synthesizer.synthesize("s", {"title": "t"}, [[{"app": "x"}]], force=True)
     assert not insights.goal and not insights.strategy
     assert not [e for e in fake.log if e[0] == "generate"]
+
+
+def test_a_load_ollama_never_starts_is_deferred_after_the_start_wait():
+    """Ollama queues the load (no memory) and never lists the model in
+    /api/ps: the phase is deferred after LOAD_START_SECONDS, not after the
+    full load timeout, and nothing is generated."""
+    fake = FakeOllama({QWEN: QWEN_SIZE})
+    fake.stalled_loads = ["queued"]
+    scheduler, _ = _scheduler(fake)
+    component = FakeGenerator(fake)
+    scheduler.register(component)
+
+    scheduler.plan_generation(urgent=True, due={})
+    with pytest.raises(OllamaUnavailable):
+        component.call()
+    assert fake.load_timeouts == [LOAD_START_SECONDS]
+    assert "did not start loading" in scheduler.reason
+    assert "retrying in 60 s" in scheduler.reason
+    assert GEMMA not in fake.loaded
+    assert not [e for e in fake.log if e[0] == "generate"]
+    assert fake.log[-1] == ("ps",)
+
+
+def test_a_slow_load_that_ollama_started_is_waited_for():
+    """The model is in /api/ps after the start wait: the load is under way,
+    the request is repeated for the rest of the load timeout and the phase
+    runs."""
+    fake = FakeOllama({QWEN: QWEN_SIZE})
+    fake.stalled_loads = ["loading"]
+    scheduler, _ = _scheduler(fake)
+    component = FakeGenerator(fake)
+    scheduler.register(component)
+
+    scheduler.plan_generation(urgent=True, due={})
+    component.call()
+    assert fake.load_timeouts == [
+        LOAD_START_SECONDS, LOAD_TIMEOUT_SECONDS - LOAD_START_SECONDS,
+    ]
+    assert scheduler.reason is None
+    assert fake.log[-1] == ("generate", GEMMA, GEMMA_CTX)

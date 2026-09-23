@@ -37,7 +37,12 @@ start").  The worker therefore runs each tick in two phases:
   focus recording is always processed, on the SOP model.
 * a load that fails (Ollama answers 5xx or times out) defers the phase with
   an exponential backoff: the calls raise ``OllamaUnavailable``, which the
-  generators treat as "try again later", never as a failed Skill.
+  generators treat as "try again later", never as a failed Skill.  A load
+  Ollama has not even started after :data:`LOAD_START_SECONDS` (the model
+  is absent from ``/api/ps``: Ollama is still waiting for memory) is
+  deferred then, not after the full load timeout; dropping the request
+  withdraws it from Ollama's queue, so it does not hold up the annotation
+  model's calls.
 
 On a tier with one model for both (Standard) none of this applies: the
 generation phase runs whenever work is due, as before.
@@ -53,7 +58,9 @@ from dataclasses import dataclass
 from typing import Callable
 
 from agenthandover_worker.model_profiles import MODEL_SIZES_GB, get_profile
-from agenthandover_worker.ollama import OllamaClient, OllamaError, OllamaUnavailable
+from agenthandover_worker.ollama import (
+    OllamaClient, OllamaError, OllamaTimeout, OllamaUnavailable,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +86,9 @@ LOAD_BACKOFF_SECONDS = 60.0
 LOAD_BACKOFF_MAX_SECONDS = 30 * 60.0
 # Ollama's own load timeout is 5 minutes; wait a little longer for its answer.
 LOAD_TIMEOUT_SECONDS = 360.0
+# A model that is not in /api/ps this long after the load request is not
+# loading (Ollama lists a runner from the moment it starts it): defer.
+LOAD_START_SECONDS = 60.0
 GENERATION_KEEP_ALIVE = "5m"
 
 
@@ -319,11 +329,7 @@ class ModelScheduler:
         if not _same_model(model, self.annotation_model):
             self._unload(self.annotation_model)
         try:
-            self.client.preload(
-                model, GENERATION_KEEP_ALIVE,
-                options={"num_predict": 1, "num_ctx": get_profile(model).sop_num_ctx},
-                timeout=LOAD_TIMEOUT_SECONDS,
-            )
+            self._load(model)
         except OllamaError as exc:
             self._load_failures += 1
             delay = min(
@@ -365,6 +371,37 @@ class ModelScheduler:
         self._due_since.clear()
         self._plan_model = model
         return GenerationPlan(run=True, model=model, jobs=jobs, fallback=fallback)
+
+    def _load(self, model: str) -> None:
+        """Load *model* with the context its calls use; raise
+        :class:`OllamaError` when it does not load.
+
+        The first wait is :data:`LOAD_START_SECONDS`.  If Ollama has not
+        answered by then and the model is not in ``/api/ps``, the load has
+        not started and :class:`OllamaUnavailable` defers it; if it is
+        there, the load is under way and the request is repeated (Ollama
+        joins it to the running load) for the rest of
+        :data:`LOAD_TIMEOUT_SECONDS`.
+        """
+        options = {"num_predict": 1, "num_ctx": get_profile(model).sop_num_ctx}
+        try:
+            self.client.preload(
+                model, GENERATION_KEEP_ALIVE, options=options,
+                timeout=LOAD_START_SECONDS,
+            )
+            return
+        except OllamaTimeout:
+            loaded = self.client.ps()
+        self._learn_sizes(loaded)
+        if not any(_same_model(m.get("name", ""), model) for m in loaded):
+            raise OllamaUnavailable(
+                f"Ollama did not start loading {model} within "
+                f"{LOAD_START_SECONDS:.0f} s (not in /api/ps)"
+            )
+        self.client.preload(
+            model, GENERATION_KEEP_ALIVE, options=options,
+            timeout=LOAD_TIMEOUT_SECONDS - LOAD_START_SECONDS,
+        )
 
     def _unload(self, model: str) -> None:
         try:
