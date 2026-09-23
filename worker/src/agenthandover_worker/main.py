@@ -1968,11 +1968,14 @@ def _process_focus_sessions_v2(
     )
 
     # Run through v2 focus processor (lint included: an SOP that fails
-    # validation is regenerated once, then recorded as a failure)
+    # validation is regenerated once, then recorded as a failure).  A
+    # session whose SOP was generated before a restart resumes from its
+    # saved draft instead of generating it again.
+    saved = _read_focus_draft(state_dir, session_id)
     result, lint_error = _generate_linted(
         lambda: focus_processor.process_session(
             db, session_id, title, focus_events,
-            screenshots_dir=screenshots_dir,
+            screenshots_dir=screenshots_dir, saved=saved,
         ),
         "focus_v2",
         title,
@@ -2007,6 +2010,12 @@ def _process_focus_sessions_v2(
                 merge_existing_procedure(
                     procedure_dict, existing_proc, keep_lifecycle=False,
                 )
+        # Save the draft now: synthesis and Q&A only enrich it, and a
+        # restart before they finish must not lose the generated SOP.
+        _save_focus_draft(
+            db, state_dir, session_id=session_id, title=title,
+            result=result, procedure=procedure_dict,
+        )
         if behavioral_synthesizer is not None:
             try:
                 # Prefer the rich per-frame observations stashed by the
@@ -2165,25 +2174,14 @@ def _process_focus_sessions_v2(
                         "pausing export for user answers",
                         title, len(questions),
                     )
-                    # Save SOP to DB as draft while waiting for answers
-                    try:
-                        db.save_generated_sop(
-                            slug=slug,
-                            title=title,
-                            source="focus",
-                            sop_template=procedure_dict,
-                            confidence=procedure_dict.get(
-                                "confidence_avg",
-                                result.sop.get("confidence_avg", 0.5),
-                            ),
-                            source_id=session_id,
-                            auto_approve=False,  # draft until answers
-                        )
-                    except Exception:
-                        logger.debug(
-                            "Failed to save pending SOP to DB", exc_info=True,
+                    # The draft stays a draft until the answers: it now
+                    # carries the synthesis.
+                    if not db.update_sop_json(slug, procedure_dict):
+                        logger.warning(
+                            "No draft record to update for '%s'", slug,
                         )
                     _clear_focus_signal(signal_path)
+                    (state_dir / FOCUS_DRAFT_FILE).unlink(missing_ok=True)
                     return 0  # Don't export yet — wait for answers
             except Exception:
                 logger.warning(
@@ -2201,22 +2199,14 @@ def _process_focus_sessions_v2(
         except Exception:
             logger.debug("Failed to save procedure to KB", exc_info=True)
 
-        # Save generated SOP to DB for review tracking
-        try:
-            db.save_generated_sop(
-                slug=slug,
-                title=title,
-                source="focus",
-                sop_template=procedure_dict,
-                confidence=procedure_dict.get("confidence_avg", result.sop.get("confidence_avg", 0.5)),
-                source_id=session_id,
-                auto_approve=sop_auto_approve,
-            )
-        except Exception:
-            logger.warning(
-                "Failed to save generated SOP to DB for '%s'",
-                title, exc_info=True,
-            )
+        # The draft record now carries the synthesis; auto-approve
+        # approves it.
+        if not db.update_sop_json(slug, procedure_dict):
+            logger.warning("No draft record to update for '%s'", slug)
+        elif sop_auto_approve:
+            record = db.get_generated_sop_by_slug(slug)
+            if record is not None:
+                db.update_sop_status(record["sop_id"], "approved")
 
         # Only export if auto_approve is enabled
         if sop_auto_approve:
@@ -2257,10 +2247,78 @@ def _process_focus_sessions_v2(
             title, lint_error or result.error,
         )
 
-    # Clear the signal.  The keyframes the SOP did not need are annotated
-    # in the next tick's annotation phase (``annotate_remaining``).
+    # Clear the signal and the saved draft state.  The keyframes the SOP
+    # did not need are annotated in the next tick's annotation phase
+    # (``annotate_remaining``).
     _clear_focus_signal(signal_path)
+    (state_dir / FOCUS_DRAFT_FILE).unlink(missing_ok=True)
     return exported
+
+
+# The last focus session's generated SOP until the session is exported or
+# waits for answers (``focus-pending.json`` then holds it).
+FOCUS_DRAFT_FILE = "focus-draft.json"
+
+
+def _read_focus_draft(state_dir: Path, session_id: str) -> "GeneratedSOP | None":
+    """The SOP generated for *session_id* before a restart, from the draft
+    state ``_save_focus_draft`` wrote, or None."""
+    from agenthandover_worker.sop_generator import GeneratedSOP
+
+    try:
+        draft = json.loads((state_dir / FOCUS_DRAFT_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(draft, dict) or draft.get("session_id") != session_id:
+        return None
+    sop = draft.get("sop_template")
+    if not isinstance(sop, dict) or not sop:
+        return None
+    return GeneratedSOP(
+        sop=sop, inference_time_seconds=float(draft.get("inference_time_seconds") or 0.0),
+    )
+
+
+def _save_focus_draft(
+    db: "WorkerDB",
+    state_dir: Path,
+    *,
+    session_id: str,
+    title: str,
+    result: "GeneratedSOP",
+    procedure: dict,
+) -> None:
+    """Persist a focus session's SOP as soon as it is generated: a draft
+    record in the review queue (updated, not duplicated, when the session
+    resumes after a restart) and the state ``_read_focus_draft`` resumes
+    from.  Synthesis, Q&A and approval update the record afterwards."""
+    slug = procedure["slug"]
+    try:
+        _atomic_write_result(state_dir / FOCUS_DRAFT_FILE, {
+            "session_id": session_id,
+            "sop_template": result.sop,
+            "inference_time_seconds": result.inference_time_seconds,
+        })
+    except OSError:
+        logger.warning(
+            "Could not save the draft state of '%s'; a restart before its "
+            "export generates it again", slug, exc_info=True,
+        )
+    record = db.get_generated_sop_by_slug(slug)
+    if record is not None and record.get("source_id") == session_id:
+        db.update_sop_json(slug, procedure)
+        return
+    db.save_generated_sop(
+        slug=slug,
+        title=title,
+        source="focus",
+        sop_template=procedure,
+        confidence=procedure.get(
+            "confidence_avg", result.sop.get("confidence_avg", 0.5),
+        ),
+        source_id=session_id,
+        auto_approve=False,
+    )
 
 
 def _focus_v2_export(
