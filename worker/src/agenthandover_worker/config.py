@@ -60,11 +60,15 @@ class VlmConfig:
     annotation_enabled: bool = True
     annotation_model: str = "qwen3.5:2b"
     sop_model: str = "qwen3.5:4b"
-    stale_skip_count: int = 3
     sliding_window_max_age_sec: int = 600
     ollama_host: str = DEFAULT_OLLAMA_HOST
     # Per annotation call; also bounds the model preload at worker start.
     annotation_timeout_seconds: float = 180.0
+    # Daily budget for passive annotation (focus recordings are exempt):
+    # frames sent to the model, and Ollama's own prompt + generation time.
+    # When either is spent, passive rows wait for the next local day.
+    annotation_max_frames_per_day: int = 1500
+    annotation_max_compute_minutes_per_day: float = 60.0
 
 
 @dataclass(frozen=True)
@@ -149,6 +153,10 @@ class EmbeddingConfig:
     """``[embedding]``."""
 
     image_embeddings: bool = False
+    # Vectors not updated for this many days are purged once a day.
+    retention_days: int = 90
+    # Hard cap on stored vectors; the least recently updated go first.
+    max_rows: int = 50_000
 
 
 @dataclass(frozen=True)
@@ -234,7 +242,11 @@ def load_config(path: str | Path | None = None) -> Config:
 # Fields whose value must be a positive, finite number.
 _POSITIVE = {
     ("vlm", "annotation_timeout_seconds"),
+    ("vlm", "annotation_max_frames_per_day"),
+    ("vlm", "annotation_max_compute_minutes_per_day"),
     ("focus", "max_session_hours"),
+    ("embedding", "retention_days"),
+    ("embedding", "max_rows"),
 }
 
 

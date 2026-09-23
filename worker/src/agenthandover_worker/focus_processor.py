@@ -1,8 +1,11 @@
 """Focus session processor for the v2 VLM annotation pipeline.
 
 Orchestrates the end-to-end processing of a completed focus recording
-session:  ensures all events are annotated → ensures frame diffs exist →
-collects the annotated timeline → generates a semantic SOP.
+session:  picks keyframes → annotates the SOP's keyframes → ensures frame
+diffs exist → collects the annotated timeline → generates a semantic SOP.
+The session's other keyframes are annotated after its Skill is written
+(:meth:`FocusProcessor.annotate_remaining`); frames that are not keyframes
+are never sent to the model.
 
 This replaces the v1 focus processing path (episode_builder → translator
 → scorer → sop_inducer.induce_from_focus_session) when v2 annotation is
@@ -13,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import timedelta
 from pathlib import Path
 
@@ -29,6 +33,92 @@ _ANNOTATION_DONE = ("completed", "skipped", "missing_screenshot")
 
 # How far (seconds) a DOM snapshot or click may lie from a frame to join it.
 _DOM_TOLERANCE_SEC = 5.0
+
+# Frames of one session that are ever annotated, and the subset annotated
+# before the SOP is generated (the SOP prompt's frame cap,
+# ``SOPGeneratorConfig.max_timeline_frames``).
+FOCUS_KEYFRAMES = 60
+SOP_KEYFRAMES = 20
+
+_WORD_RE = re.compile(r"\w+", re.UNICODE)
+
+
+def _frame_place(event: dict) -> tuple[str, str, str]:
+    """(app, window title, URL): a dwell is a run of frames sharing it."""
+    window = parse_json_field(event, "window_json")
+    metadata = parse_json_field(event, "metadata_json")
+    return (
+        str(window.get("app_id") or ""),
+        str(window.get("title") or ""),
+        str(metadata.get("url") or ""),
+    )
+
+
+def _ocr_words(event: dict) -> frozenset[str]:
+    """The lowercased words of the daemon's OCR for a frame."""
+    ocr = parse_json_field(event, "metadata_json").get("ocr")
+    if not isinstance(ocr, dict):
+        return frozenset()
+    text = ocr.get("full_text")
+    if not isinstance(text, str) or not text:
+        elements = ocr.get("elements")
+        text = " ".join(
+            str(el.get("text", "")) for el in elements if isinstance(el, dict)
+        ) if isinstance(elements, list) else ""
+    return frozenset(_WORD_RE.findall(text.lower()))
+
+
+def select_keyframes(
+    frames: list[dict],
+    k: int = FOCUS_KEYFRAMES,
+    *,
+    click_times: list | tuple = (),
+    clipboard_ids: frozenset[str] | set[str] = frozenset(),
+) -> list[dict]:
+    """The *k* most informative frames of a session, in time order.
+
+    Needs no model: every signal comes from the rows.  The first and last
+    frame of every dwell (a run of frames with the same app, title and URL,
+    so every title or URL change) rank first, the session's first and last
+    frame above all; then frames next to a copy (*clipboard_ids*), frames
+    within ``_DOM_TOLERANCE_SEC`` of a click (*click_times*, datetimes),
+    frames whose OCR text changed most from the previous frame, and frames
+    after a long pause.  When there are more dwell boundaries than *k*,
+    those other signals decide among them.
+    """
+    if len(frames) <= k:
+        return list(frames)
+    n = len(frames)
+    places = [_frame_place(f) for f in frames]
+    words = [_ocr_words(f) for f in frames]
+    times = [parse_timestamp(f.get("timestamp")) for f in frames]
+    slack = timedelta(seconds=_DOM_TOLERANCE_SEC)
+
+    scores: list[float] = []
+    for i, frame in enumerate(frames):
+        score = 1000.0 if i in (0, n - 1) else 0.0
+        if (
+            i in (0, n - 1)
+            or places[i - 1] != places[i]
+            or places[i + 1] != places[i]
+        ):
+            score += 100.0
+        if frame.get("id") in clipboard_ids:
+            score += 10.0
+        when = times[i]
+        if when is not None and any(abs(c - when) <= slack for c in click_times):
+            score += 8.0
+        if i > 0:
+            union = words[i - 1] | words[i]
+            if union:
+                score += 5.0 * (1.0 - len(words[i - 1] & words[i]) / len(union))
+            if when is not None and times[i - 1] is not None:
+                gap = (when - times[i - 1]).total_seconds()
+                score += 3.0 * min(max(gap, 0.0) / 30.0, 1.0)
+        scores.append(score)
+
+    top = sorted(range(n), key=lambda i: (-scores[i], i))[:k]
+    return [frames[i] for i in sorted(top)]
 
 
 class FocusProcessor:
@@ -51,6 +141,9 @@ class FocusProcessor:
         self.differ = differ
         self.sop_generator = sop_generator
         self._last_rich_observations: list[list[dict]] = []
+        # Keyframes of the last session that wait for annotate_remaining().
+        self._remaining: list[dict] = []
+        self._remaining_dir: str | Path = ""
 
     def process_session(
         self,
@@ -64,8 +157,9 @@ class FocusProcessor:
         """Process a completed focus session end-to-end.
 
         Steps:
-          1. Ensure all events have scene annotations (run VLM if needed)
-          2. Ensure all annotated events have frame diffs
+          1. Pick the session's keyframes (:func:`select_keyframes`), mark
+             the other frames skipped, and annotate the SOP's keyframes
+          2. Ensure the annotated SOP keyframes have frame diffs
           3. Collect the full annotated timeline
           4. Generate a semantic SOP via the SOP generator
 
@@ -99,7 +193,24 @@ class FocusProcessor:
         # Step 0b: Attach clipboard context to adjacent screenshots
         events = self._attach_clipboard_context(events)
 
-        # Step 1: Ensure all events are annotated.  During the transport
+        # Step 0c: Keyframes.  Only these are ever annotated, the SOP's
+        # own first; the rest wait until the Skill is written.
+        click_times = self._click_times(db, events)
+        clipboard_ids = frozenset(self._clipboard_map)
+        keyframes = select_keyframes(
+            events, FOCUS_KEYFRAMES,
+            click_times=click_times, clipboard_ids=clipboard_ids,
+        )
+        self._drop_frames(db, events, keyframes, screenshots_dir)
+        events = select_keyframes(
+            keyframes, SOP_KEYFRAMES,
+            click_times=click_times, clipboard_ids=clipboard_ids,
+        )
+        sop_ids = {e.get("id") for e in events}
+        self._remaining = [e for e in keyframes if e.get("id") not in sop_ids]
+        self._remaining_dir = screenshots_dir
+
+        # Step 1: Ensure the SOP keyframes are annotated.  During the transport
         # backoff, don't hit Ollama at all; the session waits.
         needs_annotation = any(
             e.get("annotation_status", "pending") not in _ANNOTATION_DONE
@@ -462,6 +573,76 @@ class FocusProcessor:
         return meta
 
     # ------------------------------------------------------------------
+    # Step 0c: Keyframes
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _click_times(db: object, events: list[dict]) -> list:
+        """When the session's Chrome clicks happened (datetimes)."""
+        times = [
+            when for e in events
+            if (when := parse_timestamp(e.get("timestamp"))) is not None
+        ]
+        if not times:
+            return []
+        slack = timedelta(seconds=_DOM_TOLERANCE_SEC)
+        clicks = db.get_click_intents(  # type: ignore[union-attr]
+            (min(times) - slack).isoformat(), (max(times) + slack).isoformat(),
+        )
+        return [
+            when for c in clicks
+            if (when := parse_timestamp(c.get("timestamp"))) is not None
+        ]
+
+    def _drop_frames(
+        self,
+        db: object,
+        events: list[dict],
+        keyframes: list[dict],
+        screenshots_dir: str | Path,
+    ) -> None:
+        """Mark pending frames that are not keyframes as skipped and delete
+        their JPEGs: they are never sent to the model."""
+        keep = {e.get("id") for e in keyframes}
+        dropped = 0
+        for event in events:
+            if event.get("id") in keep:
+                continue
+            if event.get("annotation_status", "pending") in _ANNOTATION_DONE:
+                continue
+            db.save_annotation(  # type: ignore[union-attr]
+                event.get("id", ""), "", status="skipped",
+            )
+            self.annotator.discard_screenshot(event, screenshots_dir)
+            event["annotation_status"] = "skipped"
+            dropped += 1
+        if dropped:
+            logger.info(
+                "Focus v2: %d keyframe(s) of %d frames; %d skipped",
+                len(keyframes), len(events), dropped,
+            )
+
+    def annotate_remaining(self, db: object) -> dict:
+        """Annotate the last session's keyframes that the SOP did not need.
+
+        Called once the session's Skill is written (or its generation has
+        failed), so they never delay it.  Frames Ollama cannot take now
+        stay pending with their screenshots.
+        """
+        rest, self._remaining = self._remaining, []
+        if not rest or not self.annotator.ready():
+            return {
+                "annotated": 0, "skipped": 0, "failed": 0,
+                "already_done": 0, "deferred": len(rest),
+            }
+        stats = self._ensure_annotations(db, rest, self._remaining_dir)
+        logger.info(
+            "Focus v2: %d remaining keyframe(s) annotated after the Skill",
+            stats["annotated"],
+        )
+        return stats
+
+    # ------------------------------------------------------------------
     # Step 1: Annotation
     # ------------------------------------------------------------------
 
@@ -498,13 +679,10 @@ class FocusProcessor:
                 max_age_seconds=self.annotator.config.sliding_window_max_age_sec,
             )
 
-            # For focus sessions, disable stale-frame skipping —
-            # every frame matters in a single-demonstration recording.
             result = self.annotator.annotate_event(
                 event,
                 recent_annotations=recent,
                 artifact_dir=str(screenshots_dir),
-                skip_stale_check=True,
             )
 
             if result.status == "completed" and result.annotation:

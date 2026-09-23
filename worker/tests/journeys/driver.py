@@ -242,7 +242,6 @@ class JourneyWorker:
                 config=wm.AnnotationConfig(
                     model=vlm_cfg.annotation_model,
                     ollama_host=host,
-                    stale_skip_count=vlm_cfg.stale_skip_count,
                     sliding_window_max_age_sec=vlm_cfg.sliding_window_max_age_sec,
                     timeout_seconds=vlm_cfg.annotation_timeout_seconds,
                 ),

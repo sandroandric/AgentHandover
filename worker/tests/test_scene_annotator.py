@@ -18,7 +18,6 @@ from agenthandover_worker.scene_annotator import (
     AnnotationConfig,
     AnnotationResult,
     SceneAnnotator,
-    _StaleTracker,
     _extract_ocr_text_from_event,
     _validate_annotation,
     build_annotation_prompt,
@@ -235,87 +234,6 @@ class TestBuildContextSection:
         section = _build_context_section(recent)
         assert "Opening PR page" in section
         assert "Reviewing PR" in section
-
-
-# ---------------------------------------------------------------------------
-# Stale tracker tests
-# ---------------------------------------------------------------------------
-
-class TestStaleTracker:
-
-    def test_workflow_resets(self):
-        tracker = _StaleTracker()
-        ann = {
-            "app": "Chrome",
-            "location": "github.com",
-            "task_context": {"is_workflow": True, "what_doing": "coding"},
-        }
-        tracker.update(ann)
-        assert not tracker.should_skip(3)
-
-    def test_non_workflow_accumulates(self):
-        tracker = _StaleTracker()
-        ann = {
-            "app": "Chrome",
-            "location": "reddit.com",
-            "task_context": {"is_workflow": False, "what_doing": "browsing"},
-        }
-        for _ in range(3):
-            tracker.update(ann)
-
-        assert tracker.should_skip(3)
-
-    def test_app_change_resets(self):
-        tracker = _StaleTracker()
-        ann1 = {
-            "app": "Chrome",
-            "location": "reddit.com",
-            "task_context": {"is_workflow": False, "what_doing": "browsing"},
-        }
-        ann2 = {
-            "app": "Finder",
-            "location": "/Users",
-            "task_context": {"is_workflow": False, "what_doing": "file browsing"},
-        }
-        for _ in range(3):
-            tracker.update(ann1)
-        assert tracker.should_skip(3)
-
-        tracker.update(ann2)
-        assert not tracker.should_skip(3)
-
-    def test_location_change_resets(self):
-        tracker = _StaleTracker()
-        ann1 = {
-            "app": "Chrome",
-            "location": "reddit.com",
-            "task_context": {"is_workflow": False, "what_doing": "browsing reddit"},
-        }
-        ann2 = {
-            "app": "Chrome",
-            "location": "github.com",
-            "task_context": {"is_workflow": False, "what_doing": "browsing github"},
-        }
-        for _ in range(3):
-            tracker.update(ann1)
-        assert tracker.should_skip(3)
-
-        tracker.update(ann2)
-        assert not tracker.should_skip(3)
-
-    def test_reset_method(self):
-        tracker = _StaleTracker()
-        ann = {
-            "app": "Chrome",
-            "location": "reddit.com",
-            "task_context": {"is_workflow": False, "what_doing": "browsing"},
-        }
-        for _ in range(5):
-            tracker.update(ann)
-        assert tracker.should_skip(3)
-
-        tracker.reset()
-        assert not tracker.should_skip(3)
 
 
 # ---------------------------------------------------------------------------
@@ -1020,21 +938,48 @@ class TestScreenshotLifecycle:
         vlm.assert_not_called()
         assert outside.exists(), "a file outside the screenshots dir is never deleted"
 
-    def test_stale_skip_deletes_the_frame(self, tmp_path):
-        img = _jpeg(tmp_path / "screenshots" / "stale.jpg")
-        config = AnnotationConfig(stale_skip_count=3)
-        annotator = SceneAnnotator(config)
-        annotator._stale.consecutive_non_workflow = 3
-        annotator._stale.last_app = "Example"
-        annotator._stale.last_location = "Same title"
-        event = _event_for(
-            img,
-            window_json=json.dumps(
-                {"app_id": "pid:42:Example", "title": "Same title"}
-            ),
-        )
+    def test_two_identical_frames_make_one_model_call(self, tmp_path):
+        """The annotation cache is the one skip mechanism: an identical
+        second frame reuses the first frame's annotation."""
+        from agenthandover_worker.annotation_cache import AnnotationCache
 
-        result = annotator.annotate_event(event, artifact_dir=tmp_path / "screenshots")
+        db = tmp_path / "events.db"
+        sqlite3.connect(db).close()
+        annotator = SceneAnnotator(AnnotationConfig(), cache=AnnotationCache(db))
+        metadata = {
+            "ocr": {"full_text": "Inbox (3) - Compose - Reply to Alice about the Q3 budget review"},
+        }
+        results = []
+        with patch(
+            "agenthandover_worker.scene_annotator._call_ollama_vlm",
+            side_effect=_canned_vlm_call,
+        ) as vlm:
+            for name in ("a.jpg", "b.jpg"):
+                img = _jpeg(tmp_path / "screenshots" / name)
+                event = _event_for(
+                    img,
+                    id=f"evt-{name}",
+                    window_json=json.dumps({"app_id": "com.google.Chrome", "title": "Inbox"}),
+                    metadata_json=json.dumps({**metadata, "screenshot_path": str(img)}),
+                )
+                results.append(
+                    annotator.annotate_event(event, artifact_dir=tmp_path / "screenshots")
+                )
+                assert not img.exists()
 
-        assert result.status == "skipped"
-        assert not img.exists(), "a finally-skipped frame is not left on disk"
+        assert vlm.call_count == 1
+        assert [r.status for r in results] == ["completed", "completed"]
+        assert [r.cached for r in results] == [False, True]
+        assert results[1].annotation == results[0].annotation
+        assert annotator.stats["cache_hits"] == 1
+
+    def test_no_window_json_skip_path_remains(self):
+        """The stale-frame tracker that skipped on ``window_json`` is gone."""
+        import inspect
+
+        from agenthandover_worker import scene_annotator
+
+        source = inspect.getsource(scene_annotator)
+        assert "_StaleTracker" not in source
+        assert "stale_skip" not in source
+        assert "skip_stale_check" not in source

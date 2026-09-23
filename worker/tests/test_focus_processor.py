@@ -301,29 +301,6 @@ class TestFocusProcessorBasic:
 
 
 class TestFocusProcessorAnnotation:
-    def test_skip_stale_check_passed(self, tmp_path):
-        """Focus processor passes skip_stale_check=True to annotator."""
-        db_path = _create_test_db(tmp_path)
-        session_id = "focus-sess-010"
-        _insert_focus_events(db_path, session_id, count=2, annotated=False)
-
-        with WorkerDB(db_path) as db:
-            annotator = _make_mock_annotator()
-            processor = FocusProcessor(
-                annotator,
-                _make_mock_differ(),
-                _make_mock_sop_generator(),
-            )
-            processor.process_session(
-                db, session_id, "Task",
-                db.get_focus_session_events(session_id),
-                screenshots_dir=str(tmp_path),
-            )
-
-        # Verify skip_stale_check=True was passed
-        for call in annotator.annotate_event.call_args_list:
-            assert call.kwargs.get("skip_stale_check") is True
-
     def test_mixed_annotated_unannotated(self, tmp_path):
         """Some events annotated, some not — only unannotated get processed."""
         db_path = _create_test_db(tmp_path)

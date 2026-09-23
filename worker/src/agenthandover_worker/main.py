@@ -36,6 +36,7 @@ from agenthandover_worker.ollama import OllamaError
 from agenthandover_worker.ops_telemetry import MODEL_USAGE
 from agenthandover_worker.export_adapter import SOPExportAdapter
 from agenthandover_worker.openclaw_writer import OpenClawWriter
+from agenthandover_worker.annotation_cache import AnnotationCache
 from agenthandover_worker.scene_annotator import AnnotationConfig, SceneAnnotator
 from agenthandover_worker.sop_generator import SOPGenerator, SOPGeneratorConfig, _generate_slug
 from agenthandover_worker.sop_linter import lint_sop
@@ -1974,6 +1975,7 @@ def _process_focus_sessions_v2(
                             "Failed to save pending SOP to DB", exc_info=True,
                         )
                     _clear_focus_signal(signal_path)
+                    focus_processor.annotate_remaining(db)
                     return 0  # Don't export yet — wait for answers
             except Exception:
                 logger.warning(
@@ -2047,8 +2049,9 @@ def _process_focus_sessions_v2(
             title, lint_error or result.error,
         )
 
-    # Clear signal file
+    # Clear signal file, then annotate the keyframes the SOP did not need.
     _clear_focus_signal(signal_path)
+    focus_processor.annotate_remaining(db)
     return exported
 
 
@@ -2849,6 +2852,7 @@ def _process_retry_triggers(
                         "Retry failed again for focus session '%s': %s",
                         title, result.error,
                     )
+                focus_processor.annotate_remaining(db)
             else:
                 logger.warning(
                     "Retry: no events found for focus session %s", source_id,
@@ -4496,7 +4500,6 @@ def main(argv: list[str] | None = None) -> None:
         ann_config = AnnotationConfig(
             model=vlm_cfg.annotation_model,
             ollama_host=vlm_cfg.ollama_host,
-            stale_skip_count=vlm_cfg.stale_skip_count,
             sliding_window_max_age_sec=vlm_cfg.sliding_window_max_age_sec,
             timeout_seconds=vlm_cfg.annotation_timeout_seconds,
         )
@@ -4521,6 +4524,7 @@ def main(argv: list[str] | None = None) -> None:
             config=ann_config,
             image_embedder=_image_embedder,
             vector_kb=vector_kb,
+            cache=AnnotationCache(args.db_path),
         )
         # Load the annotation model now (with keep_alive) so the first
         # real frame meets a warm model.  A failure only logs and starts
@@ -4560,10 +4564,9 @@ def main(argv: list[str] | None = None) -> None:
 
         logger.info(
             "v2 scene annotation pipeline enabled "
-            "(annotation=%s, sop=%s, stale_skip=%d, window=%ds)",
+            "(annotation=%s, sop=%s, window=%ds)",
             vlm_cfg.annotation_model,
             vlm_cfg.sop_model,
-            vlm_cfg.stale_skip_count,
             vlm_cfg.sliding_window_max_age_sec,
         )
     else:
