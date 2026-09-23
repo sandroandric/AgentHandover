@@ -150,6 +150,12 @@ struct OnboardingView: View {
     /// Called when onboarding completes (sets hasCompletedOnboarding).
     var onComplete: (() -> Void)?
 
+    /// - Parameter initialStep: where to open (see `OnboardingProgress`).
+    init(initialStep: Int = 0, onComplete: (() -> Void)? = nil) {
+        _currentStep = State(initialValue: initialStep)
+        self.onComplete = onComplete
+    }
+
     private let totalSteps = 9
 
     // MARK: - Design Tokens (Contra-inspired)
@@ -219,11 +225,17 @@ struct OnboardingView: View {
             }
         }
         .onAppear {
+            OnboardingProgress.save(step: currentStep, in: .standard)
             resolveExtensionPath()
             seedVLMStateFromConfigIfNeeded()
             refreshVLMSetupState(force: currentStep == 6)
+            if currentStep >= 7 {
+                ServiceController.installNativeMessagingHostManifest()
+            }
         }
         .onChange(of: currentStep) { newStep in
+            // Survives "Quit & Reopen" after the Screen Recording grant.
+            OnboardingProgress.save(step: newStep, in: .standard)
             if newStep == 6 {
                 seedVLMStateFromConfigIfNeeded()
                 refreshVLMSetupState(force: true)
@@ -330,9 +342,9 @@ struct OnboardingView: View {
                         appState.screenRecordingGranted ? "Next" : "Continue anyway",
                         icon: "arrow.right",
                         style: .darkFilled,
-                        disabled: false
+                        disabled: firstCaptureInProgress
                     ) {
-                        withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) { currentStep += 1 }
+                        leaveScreenRecordingStep()
                     }
                     if !appState.screenRecordingGranted {
                         Text("You can grant this later via agenthandover doctor")
@@ -1020,6 +1032,11 @@ struct OnboardingView: View {
     @State private var awaitingSettingsReturn: PermissionKind? = nil
     @State private var screenRecordingNeedsRestart = false
     @State private var screenRecordingNeedsManualSettings = false
+    /// Shown under "recheck" after a user-requested recheck still fails.
+    @State private var recheckGuidance: [PermissionKind: String] = [:]
+    /// The test capture at the end of the Screen Recording step.
+    @State private var firstCaptureInProgress = false
+    @State private var firstCaptureDone = false
 
     private var accessibilityStep: some View {
         singlePermissionStep(
@@ -1178,6 +1195,24 @@ struct OnboardingView: View {
                 .buttonStyle(.plain)
                 .disabled(isProbing)
                 .padding(.top, 4)
+
+                if let guidance = recheckGuidance[permission], !isProbing {
+                    Text(guidance)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(warmOrange)
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: 400)
+                }
+            }
+
+            if isScreenRecording && granted && !screenRecordingNeedsRestart {
+                Text(firstCaptureInProgress
+                    ? "Taking a test screenshot\u{2026} If macOS asks whether AgentHandover may bypass the system private window picker, click Allow."
+                    : "When you click Next, AgentHandover takes one test screenshot. macOS may then ask whether it may bypass the system private window picker: click Allow. That is how it takes screenshots of the window you are working in, and macOS asks only once.")
+                    .font(.system(size: 12))
+                    .foregroundColor(darkNavy.opacity(0.6))
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 420)
             }
 
             HStack(spacing: 7) {
@@ -1214,7 +1249,7 @@ struct OnboardingView: View {
             if isScreenRecording {
                 if screenRecordingNeedsManualSettings {
                     ServiceController.prepareForAppOwnedPermissionRequest()
-                    PermissionChecker.openScreenRecordingSettings()
+                    await PermissionChecker.registerAndOpenScreenRecordingSettings()
                     awaitingSettingsReturn = .screenRecording
                     probingPermission = nil
                     return
@@ -1245,6 +1280,31 @@ struct OnboardingView: View {
         }
     }
 
+    /// Next on the Screen Recording step. With the grant in place, take one
+    /// real capture first (the focused window, as the daemon's requests
+    /// do): on macOS 26 the first one raises a second prompt ("bypass the
+    /// system private window picker"), and here the step explains it,
+    /// instead of it appearing mid-work at the first real capture.
+    private func leaveScreenRecordingStep() {
+        let advance = {
+            withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) { currentStep += 1 }
+        }
+        guard appState.screenRecordingGranted, !firstCaptureDone else {
+            advance()
+            return
+        }
+        firstCaptureInProgress = true
+        Task { @MainActor in
+            let result = await ScreenCaptureService().captureFrame(CaptureRequest())
+            if case .failure(let error) = result {
+                NSLog("AgentHandover: onboarding test capture failed (%@)", String(describing: error))
+            }
+            firstCaptureInProgress = false
+            firstCaptureDone = true
+            advance()
+        }
+    }
+
     /// Restart the app so macOS applies Screen Recording permission.
     private func restartApp() {
         let url = URL(fileURLWithPath: Bundle.main.bundlePath)
@@ -1266,6 +1326,7 @@ struct OnboardingView: View {
         probingPermission = permission
 
         Task { @MainActor in
+            let granted: Bool
             switch permission {
             case .screenRecording:
                 let status = await PermissionChecker.resolveScreenRecordingStatus(
@@ -1274,9 +1335,16 @@ struct OnboardingView: View {
                 appState.screenRecordingGranted = status.granted
                 screenRecordingNeedsRestart = status.granted && !status.captureReady
                 screenRecordingNeedsManualSettings = !status.granted
+                granted = status.granted
 
             case .accessibility:
-                appState.accessibilityGranted = PermissionChecker.isAccessibilityGranted()
+                granted = PermissionChecker.isAccessibilityGranted()
+                appState.accessibilityGranted = granted
+            }
+            // Only after the user pressed recheck: the automatic check on
+            // returning from Settings may simply be early.
+            if !returnedFromSettings {
+                recheckGuidance[permission] = PermissionChecker.recheckGuidance(granted: granted)
             }
 
             if probingPermission == permission {

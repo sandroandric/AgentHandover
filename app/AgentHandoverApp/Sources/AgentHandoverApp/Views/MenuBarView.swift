@@ -203,6 +203,7 @@ struct MenuBarView: View {
     private var statusTitle: String {
         if isRecording { return "Recording..." }
         if appState.userStopped { return "Paused" }
+        if appState.health == .starting { return "Starting\u{2026}" }
         // Derive title from actual daemon state, not combined health
         if appState.daemonRunning {
             return "Observing"
@@ -218,6 +219,7 @@ struct MenuBarView: View {
             return "\(focusSessionTitle) \u{00B7} \(formattedElapsed)"
         }
         if appState.userStopped { return "Tap Start to resume learning" }
+        if appState.health == .starting { return "Waiting for the daemon and worker to report" }
         if appState.daemonRunning && appState.workerRunning {
             if appState.eventsToday > 0 {
                 return "Learning from your work"
@@ -732,6 +734,7 @@ struct MenuBarView: View {
                 Button(action: {
                     appState.userStopped = false
                     UserDefaults.standard.set(false, forKey: "observingPaused")
+                    appState.servicesStarting()
                     observationToggle.start { _ in appState.refreshStatus() }
                 }) {
                     HStack(spacing: 4) {
@@ -848,7 +851,7 @@ struct MenuBarView: View {
         Task {
             if screenRecordingNeedsManualSettings {
                 ServiceController.prepareForAppOwnedPermissionRequest()
-                PermissionChecker.openScreenRecordingSettings()
+                await PermissionChecker.registerAndOpenScreenRecordingSettings()
                 openedPermissionSettings = .screenRecording
                 return
             }

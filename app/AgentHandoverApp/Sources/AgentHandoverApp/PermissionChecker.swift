@@ -29,22 +29,57 @@ enum PermissionChecker {
         }
     }
 
-    /// Kick off the Accessibility grant flow from the main app.
-    ///
-    /// We intentionally avoid `AXIsProcessTrustedWithOptions(...prompt: true)`
-    /// in onboarding/menu bar flows. On newer macOS releases that prompt path
-    /// can surface broader Privacy UI and has proven too noisy in this app's
-    /// setup sequence. The reliable UX here is a direct deep-link to the
-    /// Accessibility pane, followed by an explicit recheck when the user
-    /// returns.
+    /// The system calls behind the "Open Settings" buttons, injectable so
+    /// tests can check their order without touching TCC.
+    struct SettingsRegistration {
+        var isAccessibilityTrusted: () -> Bool = { PermissionChecker.isAccessibilityGranted() }
+        /// `AXIsProcessTrustedWithOptions(prompt: true)`: adds AgentHandover
+        /// to the Accessibility list (switched off) and shows macOS's prompt.
+        var registerAccessibility: () -> Void = { PermissionChecker.requestAccessibility() }
+        var openAccessibilityPane: () -> Void = { PermissionChecker.openAccessibilitySettings() }
+        /// One ScreenCaptureKit capture attempt: adds AgentHandover to the
+        /// Screen Recording list.
+        var registerScreenRecording: () async -> Void = { _ = await ScreenCaptureService.runCaptureProbe() }
+        var openScreenRecordingPane: () -> Void = { PermissionChecker.openScreenRecordingSettings() }
+    }
+
+    /// Accessibility "Open Settings": register the app with TCC, then open
+    /// the pane. Opening the pane alone (as this used to) left nothing to
+    /// switch on when the app was not in the list yet: a first run, or
+    /// after the installer reset a grant whose code signature changed.
     @MainActor
     @discardableResult
-    static func requestAccessibilityAndOpenSettingsIfNeeded() async -> Bool {
-        let granted = isAccessibilityGranted()
+    static func requestAccessibilityAndOpenSettingsIfNeeded(
+        _ system: SettingsRegistration = SettingsRegistration()
+    ) async -> Bool {
+        let granted = system.isAccessibilityTrusted()
         if !granted {
-            openAccessibilitySettings()
+            system.registerAccessibility()
+            system.openAccessibilityPane()
         }
         return granted
+    }
+
+    /// Screen Recording "Open Settings" (the manual fallback): one capture
+    /// attempt so the app is in the list, then open the pane.
+    @MainActor
+    static func registerAndOpenScreenRecordingSettings(
+        _ system: SettingsRegistration = SettingsRegistration()
+    ) async {
+        await system.registerScreenRecording()
+        system.openScreenRecordingPane()
+    }
+
+    /// Shown when the user asked for a recheck and the grant is still
+    /// missing. After an upgrade that changed the app's code signature the
+    /// old switch can stay ON while it no longer applies to this build;
+    /// removing and re-adding the entry is what makes macOS apply it.
+    static let staleGrantGuidance =
+        "If AgentHandover is already switched on, select it, click \u{2212} to remove it, then add it again with +."
+
+    /// Guidance after a user-requested recheck: nil when the grant is there.
+    static func recheckGuidance(granted: Bool) -> String? {
+        granted ? nil : staleGrantGuidance
     }
 
     // MARK: - Screen Recording

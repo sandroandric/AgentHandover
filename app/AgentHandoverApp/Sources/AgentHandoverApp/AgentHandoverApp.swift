@@ -90,8 +90,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     private let observationServer = ObservationServer()
     private var runtimeBridgesStarted = false
 
-    private var onboardingNeeded: Bool {
-        !UserDefaults.standard.bool(forKey: "hasCompletedOnboarding")
+    /// The setup step to open at, or nil when setup is complete (see
+    /// `OnboardingProgress`).
+    private func onboardingStartStep() -> Int? {
+        OnboardingProgress.startStep(
+            defaults: .standard,
+            accessibilityGranted: PermissionChecker.isAccessibilityGranted(),
+            screenRecordingGranted: PermissionChecker.isScreenRecordingGranted()
+        )
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -99,7 +105,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         // request screenshots at any point — during onboarding or after.
         startRuntimeBridges()
 
-        if onboardingNeeded {
+        // The worker serves approvals, search and MCP reporting whether or
+        // not capture is on, so it is loaded on every launch (a paused
+        // relaunch included); only capture follows the pause.
+        DispatchQueue.global(qos: .utility).async {
+            ServiceController.startWorker()
+        }
+
+        if let step = onboardingStartStep() {
             hasTriggeredOnboarding = true
 
             // Show in dock during onboarding
@@ -108,14 +121,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             // Clean up stale helper state on a background thread
             // so it doesn't block the onboarding window.
             DispatchQueue.global(qos: .utility).async {
-                ServiceController.stopAll()
                 ServiceController.prepareForAppOwnedPermissionRequest()
                 ServiceController.removeNativeMessagingHostManifest()
             }
 
             // Show onboarding immediately
             DispatchQueue.main.async { [weak self] in
-                self?.showOnboarding()
+                self?.showOnboarding(at: step)
             }
         } else {
             // Keep the bundle a normal app principal for TCC purposes, but
@@ -130,6 +142,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             let userPaused = UserDefaults.standard.bool(forKey: "observingPaused")
             if !userPaused {
                 MainActor.assumeIsolated {
+                    sharedAppState.servicesStarting()
                     observationToggle.start { [weak self] _ in
                         self?.sharedAppState.refreshStatus()
                     }
@@ -155,13 +168,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         }
     }
 
+    /// Open setup at `step`, or where `OnboardingProgress` says it should
+    /// open (the welcome screen when there is nothing left to set up and
+    /// the user asked for it anyway).
     @MainActor
-    func showOnboarding() {
-        // Don't create duplicates
-        if onboardingWindow != nil { return }
+    func showOnboarding(at step: Int? = nil) {
+        // Don't create duplicates; bring a closed or hidden one back.
+        if let window = onboardingWindow {
+            NSApp.activate(ignoringOtherApps: true)
+            window.makeKeyAndOrderFront(nil)
+            return
+        }
 
-        let onboardingView = OnboardingView(onComplete: { [weak self] in
-            UserDefaults.standard.set(true, forKey: "hasCompletedOnboarding")
+        let onboardingView = OnboardingView(initialStep: step ?? onboardingStartStep() ?? 0, onComplete: { [weak self] in
+            OnboardingProgress.finish(in: .standard)
             // Default to paused — user chooses "Observe Me" or "Record" explicitly
             UserDefaults.standard.set(true, forKey: "observingPaused")
             self?.sharedAppState.userStopped = true
@@ -208,8 +228,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         runtimeBridgesStarted = true
     }
 
+    /// Quitting stops capture only: the worker (launchd) keeps serving
+    /// approvals, search and MCP reporting while the app is not running.
     private func stopRuntimeBridges() {
-        ServiceController.stopAll()
+        ServiceController.stopCapture()
         captureServer.stop()
         observationServer.stop()
         runtimeBridgesStarted = false
