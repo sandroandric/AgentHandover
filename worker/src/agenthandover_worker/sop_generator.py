@@ -847,10 +847,11 @@ def _wire_variables_into_steps(
     sorted_vars = sorted(var_map.items(), key=lambda kv: -len(kv[1]))
 
     substitutions = 0
-    # The fields a placeholder counts in (the internal template's action is
-    # "step", the raw answer's "action"): a field wired but not counted
-    # would drop its variable as unused.
-    from agenthandover_worker.sop_linter import STEP_TEXT_KEYS as text_fields
+    # The template's own action text ("step") is left as the model wrote
+    # it.  Every field wired here is one the unused-variable pass reads
+    # (``sop_linter.STEP_TEXT_KEYS``): a variable wired only into a
+    # description used to be dropped as unused, its {{name}} left behind.
+    text_fields = ("action", "description", "input", "location", "verify", "target")
     param_fields = ("input", "verify", "location", "target")
 
     def _substitute(value: str, var_name: str, example: str) -> tuple[str, int]:

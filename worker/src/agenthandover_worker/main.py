@@ -1991,7 +1991,7 @@ def _process_focus_sessions_v2(
                         write_focus_pending,
                     )
                     write_focus_questions(
-                        state_dir, session_id, slug, questions,
+                        state_dir, session_id, slug, questions, title=title,
                     )
                     write_focus_pending(
                         state_dir, session_id, slug,
@@ -2313,13 +2313,22 @@ def _check_focus_answers(
     # Parse and merge answers.  A skipped Q&A still merges: every
     # question is recorded as unanswered rather than dropped.
     qa_result = parse_qa_result_from_file(questions_data)
+    # What the user actually did, not the file's status: "answered" is
+    # written by the app's Submit even when every field was cleared.
+    qa_status = status
+    if qa_result is not None and qa_result.questions:
+        counts = qa_result.counts()
+        qa_status = (
+            f"{status if status == 'skipped' else qa_result.status()}: "
+            f"{counts['typed']} typed, {counts['accepted_guess']} accepted guess(es), "
+            f"{counts['unanswered']} unanswered"
+        )
     if qa_result is not None and focus_questioner is not None and qa_result.questions:
         try:
             procedure_dict = focus_questioner.merge_answers(procedure_dict, qa_result)
             logger.info(
-                "Focus v2 '%s': merged %d answer(s) into procedure (%d question(s))",
-                title, sum(1 for a in qa_result.answers.values() if a.strip()),
-                len(qa_result.questions),
+                "Focus v2 '%s': merged the answers into the procedure (%s)",
+                title, qa_status,
             )
         except Exception:
             logger.debug(
@@ -2374,7 +2383,7 @@ def _check_focus_answers(
 
     logger.info(
         "Focus v2 '%s': Q&A complete, exported %d SOP(s) (status=%s)",
-        title, exported, status,
+        title, exported, qa_status,
     )
     return exported
 

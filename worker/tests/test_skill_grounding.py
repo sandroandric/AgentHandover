@@ -8,6 +8,18 @@ Ragular") as an edit, and the Skill used placeholders it never declared.
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
+from agenthandover_worker.focus_questioner import (
+    ANSWER_ACCEPTED_GUESS,
+    ANSWER_TYPED,
+    FocusQuestion,
+    FocusQuestioner,
+    parse_qa_result_from_file,
+    write_focus_questions,
+)
+from agenthandover_worker.ledger import derive_knowledge, validate_knowledge
 from agenthandover_worker.procedure_schema import sop_to_procedure, validate_procedure
 from agenthandover_worker.sop_generator import _vlm_sop_to_template
 from agenthandover_worker.sop_linter import lint_sop
@@ -54,18 +66,6 @@ def test_a_placeholder_the_model_did_not_declare_is_declared() -> None:
     assert lint_sop(template).valid
 
 
-def test_the_wiring_reaches_the_step_text() -> None:
-    """The internal template's action field is "step": the wiring pass
-    looked for "action" only and never templated the step itself."""
-    template = _vlm_sop_to_template(_sop(
-        steps=[{"action": "Search for example.com", "app": "Safari",
-                "description": "Find the page.", "verify": "Results show"}],
-        variables=[{"name": "domain", "example": "example.com"}],
-    ))
-    assert template["steps"][0]["step"] == "Search for {{domain}}"
-    assert [v["name"] for v in template["variables"]] == ["domain"]
-
-
 def test_lint_and_validation_fail_on_an_undeclared_placeholder() -> None:
     proc = {
         "schema_version": "3.2.0", "id": "p", "title": "P",
@@ -84,3 +84,111 @@ def test_lint_and_validation_fail_on_an_undeclared_placeholder() -> None:
                       {"name": "file_name", "type": "text"}]
     assert validate_procedure(proc) == []
     assert not [i for i in lint_sop(proc).errors if i.field.startswith("variables.")]
+
+
+# ---------------------------------------------------------------------------
+# Q&A: a submitted guess is an accepted guess, a cleared field is unanswered
+# ---------------------------------------------------------------------------
+
+# What the app's Submit writes (``FocusQATests.testSubmitWritesTheSharedFixture``
+# encodes the same file from the app's side): the first field left with its
+# pre-filled guess, the second typed over, the third cleared.
+ANSWERED_FILE = Path(__file__).parent / "fixtures" / "focus_questions_answered.json"
+
+
+def _answered() -> dict:
+    return json.loads(ANSWERED_FILE.read_text(encoding="utf-8"))
+
+
+def test_the_apps_answer_file_parses_with_its_sources() -> None:
+    result = parse_qa_result_from_file(_answered())
+    assert result is not None
+    assert result.answers == {0: "Assume the page is public", 1: "Once a week, on Mondays"}
+    assert [result.source(i) for i in range(3)] == [
+        ANSWER_ACCEPTED_GUESS, ANSWER_TYPED, ANSWER_TYPED,
+    ]
+    assert [q.step_indexes for q in result.questions] == [[], [0], [2]]
+    assert result.counts() == {"typed": 1, "accepted_guess": 1, "unanswered": 1}
+    assert result.status() == "partial"
+
+
+def test_an_older_apps_answers_were_typed() -> None:
+    data = _answered()
+    del data["answer_sources"]
+    result = parse_qa_result_from_file(data)
+    assert result is not None
+    assert result.counts() == {"typed": 2, "accepted_guess": 0, "unanswered": 1}
+
+
+def test_the_status_counts_what_the_user_did() -> None:
+    """The run's worker logged "status=answered" for three questions it
+    stored as unanswered: Submit with every field cleared."""
+    data = _answered()
+    data["answers"], data["answer_sources"] = {}, {}
+    result = parse_qa_result_from_file(data)
+    assert result is not None and result.status() == "unanswered"
+    data = _answered()
+    data["answers"]["2"] = "The note lists example.com"
+    assert parse_qa_result_from_file(data).status() == "answered"
+
+
+def test_merged_answers_keep_their_source_and_the_ledger_tells_them_apart() -> None:
+    result = parse_qa_result_from_file(_answered())
+    proc = {"id": "look-up", "title": "Look up", "steps": [
+        {"action": "Open Safari", "target": "Safari", "parameters": {}},
+    ]}
+    merged = FocusQuestioner(llm_reasoner=None).merge_answers(proc, result)
+    clarifications = merged["agent_clarifications"]
+    assert [(c["status"], c.get("source")) for c in clarifications] == [
+        ("answered", ANSWER_ACCEPTED_GUESS),
+        ("answered", ANSWER_TYPED),
+        ("unanswered", None),
+    ]
+    # The accepted guess fills nothing; the typed scope answer sets the recurrence.
+    assert merged.get("recurrence") == "Once a week, on Mondays"
+
+    ledger = derive_knowledge(merged)
+    assert ledger["inputs"]["status"] == "hypothesis"  # access: the accepted guess
+    assert ledger["inputs"]["source"] == "user"
+    assert ledger["inputs"]["evidence"] == [{"kind": "answer", "id": "agent_clarifications.0"}]
+    assert ledger["trigger"]["status"] == "known"  # scope: typed
+    assert ledger["trigger"]["value_ref"] == "agent_clarifications.1"
+    assert ledger["verification"]["source"] != "user"  # cleared: nothing learned
+    assert validate_knowledge(ledger) == []
+
+
+def test_an_accepted_guess_does_not_lower_a_known_slot() -> None:
+    proc = {
+        "id": "p", "title": "P", "steps": [],
+        "agent_clarifications": [
+            {"category": "scope", "question": "How often?", "answer": "Every day",
+             "status": "answered", "source": ANSWER_ACCEPTED_GUESS},
+        ],
+        "knowledge": {"trigger": {
+            "status": "known", "value_ref": "recurrence", "source": "agent",
+            "evidence": [{"kind": "run", "id": "run-1"}], "updated_at": "2026-09-01T00:00:00+00:00",
+        }},
+    }
+    assert derive_knowledge(proc)["trigger"]["status"] == "known"
+    assert derive_knowledge(proc)["trigger"]["source"] == "agent"
+    proc["knowledge"] = {}
+    assert derive_knowledge(proc)["trigger"]["status"] == "hypothesis"
+    proc["agent_clarifications"].append(
+        {"category": "timing", "question": "When?", "answer": "At 9",
+         "status": "answered", "source": ANSWER_TYPED},
+    )
+    trigger = derive_knowledge(proc)["trigger"]
+    assert (trigger["status"], trigger["value_ref"]) == ("known", "agent_clarifications.1")
+
+
+def test_the_questions_file_carries_the_title_as_typed(tmp_path: Path) -> None:
+    questions = [FocusQuestion(question="How often?", category="scope", context="",
+                               default="Every day", step_indexes=[1])]
+    path = write_focus_questions(
+        tmp_path, "83f40b9b", "look-up-the-iana-reserved-domains-page-and-note-it",
+        questions, title="Look up the IANA reserved domains page and note it",
+    )
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert data["title"] == "Look up the IANA reserved domains page and note it"
+    assert data["questions"][0]["step_indexes"] == [1]
+    assert data["status"] == "pending"

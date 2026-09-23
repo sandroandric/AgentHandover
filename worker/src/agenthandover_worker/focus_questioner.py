@@ -46,8 +46,9 @@ class FocusQuestion:
     question: str
     category: str  # "credentials", "strategy", "decision", "verification", "scope"
     context: str   # why this question matters
-    # The model's guess.  The app shows it as the answer field's
-    # placeholder; it is never recorded as the user's answer.
+    # The model's guess.  The app pre-fills the answer field with it:
+    # submitted unchanged it is recorded as an accepted guess (a
+    # hypothesis), never as an answer the user typed.
     default: str
     # Step indexes (0-based) the question relates to.  When the user's answer
     # corrects a value (e.g. "the subreddit is r/ClaudeAI, not r/midclaw"),
@@ -64,6 +65,30 @@ class FocusQAResult:
     # question_index -> answer text.  A question with no entry (or an
     # empty one) was not answered.
     answers: dict[int, str]
+    # question_index -> ANSWER_TYPED or ANSWER_ACCEPTED_GUESS, for each
+    # entry of ``answers``; an answer without one was typed.
+    sources: dict[int, str] = field(default_factory=dict)
+
+    def source(self, idx: int) -> str:
+        return self.sources.get(idx, ANSWER_TYPED)
+
+    def counts(self) -> dict[str, int]:
+        """How many questions were answered by typing, by accepting the
+        model's guess, and not at all."""
+        counts = {ANSWER_TYPED: 0, ANSWER_ACCEPTED_GUESS: 0, "unanswered": 0}
+        for idx in range(len(self.questions)):
+            if str(self.answers.get(idx) or "").strip():
+                counts[self.source(idx)] += 1
+            else:
+                counts["unanswered"] += 1
+        return counts
+
+    def status(self) -> str:
+        """``answered`` (every question), ``partial`` or ``unanswered``."""
+        counts = self.counts()
+        if not counts["unanswered"]:
+            return "answered"
+        return "unanswered" if counts["unanswered"] == len(self.questions) else "partial"
 
 
 # ---------------------------------------------------------------------------
@@ -71,6 +96,12 @@ class FocusQAResult:
 # ---------------------------------------------------------------------------
 
 FOCUS_QUESTIONS_FILE = "focus-questions.json"
+
+# Where an answer came from (``answer_sources`` in the answered file, and
+# ``source`` on the clarification): typed by the user, or the model's
+# pre-filled guess submitted unchanged.
+ANSWER_TYPED = "typed"
+ANSWER_ACCEPTED_GUESS = "accepted_guess"
 FOCUS_PENDING_FILE = "focus-pending.json"
 
 _LEGACY_MERGE_CATEGORIES = frozenset({
@@ -332,9 +363,8 @@ class FocusQuestioner:
         for idx, q in enumerate(qa_result.questions):
             answer = str(qa_result.answers.get(idx) or "").strip()
             if not answer:
-                # Skipped or left blank: the question stays open.  The
-                # model's guess (``q.default``) is never recorded as the
-                # user's answer.
+                # Skipped, or the field was cleared: the question stays
+                # open.
                 clarifications.append({
                     "category": q.category,
                     "question": q.question,
@@ -349,13 +379,21 @@ class FocusQuestioner:
             # Every answer is recorded in agent_clarifications. This is the
             # canonical home for Q&A — UI reads from here, audit reads from
             # here, downstream consumers read from here.
+            # An accepted guess is recorded as such: the ledger keeps it a
+            # hypothesis, where a typed answer is known.
+            source = qa_result.source(idx)
             clarifications.append({
                 "category": q.category,
                 "question": q.question,
                 "answer": answer,
                 "status": "answered",
+                "source": source,
                 "context": q.context,
             })
+            if source == ANSWER_ACCEPTED_GUESS:
+                # The model's own guess confirms nothing: it fills no
+                # procedure field and rewrites no step.
+                continue
 
             # Strategy: free text, but only fill if we don't already have one
             # from behavioral synthesis (which is structurally richer).
@@ -431,6 +469,8 @@ class FocusQuestioner:
         for idx, answer in qa_result.answers.items():
             if idx < 0 or idx >= len(qa_result.questions):
                 continue
+            if qa_result.source(idx) == ANSWER_ACCEPTED_GUESS:
+                continue
             q = qa_result.questions[idx]
             ans = str(answer or "").strip()
             if not ans or len(ans) > 80:
@@ -472,10 +512,14 @@ def write_focus_questions(
     session_id: str,
     slug: str,
     questions: list[FocusQuestion],
+    *,
+    title: str = "",
 ) -> Path:
-    """Write focus questions to the status directory for CLI pickup.
+    """Write focus questions to the status directory for the app.
 
-    Returns the path to the written file.
+    *title* is the session's title as the user typed it: the app shows it
+    as is (the slug loses its casing, "IANA" became "Iana").  Returns the
+    path to the written file.
     """
     state_dir.mkdir(parents=True, exist_ok=True)
     path = state_dir / FOCUS_QUESTIONS_FILE
@@ -483,6 +527,7 @@ def write_focus_questions(
     payload = {
         "session_id": session_id,
         "slug": slug,
+        "title": title,
         "questions": [
             {
                 "index": i,
@@ -490,6 +535,9 @@ def write_focus_questions(
                 "category": q.category if hasattr(q, "category") else q.get("category", ""),
                 "context": q.context if hasattr(q, "context") else q.get("context", ""),
                 "default": q.default if hasattr(q, "default") else q.get("default", ""),
+                "step_indexes": list(
+                    q.step_indexes if hasattr(q, "step_indexes") else q.get("step_indexes") or []
+                ),
             }
             for i, q in enumerate(questions)
         ],
@@ -571,7 +619,11 @@ def parse_qa_result_from_file(
 ) -> FocusQAResult | None:
     """Parse a focus-questions.json with status=answered into a FocusQAResult.
 
-    Returns None if the data is invalid or not in answered state.
+    The app writes ``answers`` (question index -> text; a cleared field is
+    left out) and ``answer_sources`` (index -> ``typed`` or
+    ``accepted_guess``).  A file without sources (an older app) had only
+    typed answers.  Returns None if the data is invalid or not in answered
+    state.
     """
     if questions_data.get("status") not in ("answered", "skipped"):
         return None
@@ -586,20 +638,26 @@ def parse_qa_result_from_file(
             category=raw.get("category", "strategy"),
             context=raw.get("context", ""),
             default=raw.get("default", ""),
+            step_indexes=[i for i in raw.get("step_indexes") or [] if isinstance(i, int)],
         ))
 
     answers: dict[int, str] = {}
+    sources: dict[int, str] = {}
     if questions_data.get("status") == "answered":
-        raw_answers = questions_data.get("answers", {})
+        raw_answers = questions_data.get("answers") or {}
+        raw_sources = questions_data.get("answer_sources") or {}
         for key, value in raw_answers.items():
             try:
-                answers[int(key)] = str(value)
+                idx = int(key)
             except (ValueError, TypeError):
                 continue
+            answers[idx] = str(value)
+            if raw_sources.get(key) == ANSWER_ACCEPTED_GUESS:
+                sources[idx] = ANSWER_ACCEPTED_GUESS
     # "skipped" leaves ``answers`` empty: merge_answers records every
-    # question as unanswered and never substitutes the model's guess.
+    # question as unanswered.
 
-    return FocusQAResult(questions=questions, answers=answers)
+    return FocusQAResult(questions=questions, answers=answers, sources=sources)
 
 
 # ---------------------------------------------------------------------------

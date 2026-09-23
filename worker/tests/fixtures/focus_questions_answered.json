@@ -1,0 +1,40 @@
+{
+  "answer_sources": {
+    "0": "accepted_guess",
+    "1": "typed"
+  },
+  "answers": {
+    "0": "Assume the page is public",
+    "1": "Once a week, on Mondays"
+  },
+  "questions": [
+    {
+      "category": "access",
+      "context": "No login step was recorded",
+      "default": "Assume the page is public",
+      "index": 0,
+      "question": "Does the IANA page need a login?",
+      "step_indexes": []
+    },
+    {
+      "category": "scope",
+      "context": "One run was recorded",
+      "default": "Every day",
+      "index": 1,
+      "question": "How often do you do this?",
+      "step_indexes": [0]
+    },
+    {
+      "category": "verification",
+      "context": "No check was recorded",
+      "default": "The note shows the domains",
+      "index": 2,
+      "question": "How do you know the note is right?",
+      "step_indexes": [2]
+    }
+  ],
+  "session_id": "83f40b9b",
+  "slug": "look-up-the-iana-reserved-domains-page-and-note-it",
+  "status": "answered",
+  "title": "Look up the IANA reserved domains page and note it"
+}

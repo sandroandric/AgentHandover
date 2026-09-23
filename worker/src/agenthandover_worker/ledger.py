@@ -36,8 +36,10 @@ Who writes what:
   fields by :func:`derive_knowledge` every time the procedure is saved
   (``KnowledgeBase.save_procedure``).  They are recomputed, never edited.
 - ``source="user"`` entries are derived from answered
-  ``agent_clarifications`` (the post-recording questions): a user's answer
-  makes its slot ``known`` and wins over everything else.
+  ``agent_clarifications`` (the post-recording questions): an answer the
+  user typed makes its slot ``known`` and wins over everything else; the
+  model's guess submitted unchanged (``source: "accepted_guess"``) makes
+  it a ``hypothesis`` unless the slot is already known.
 - ``contrast`` / ``divergence`` / ``agent`` entries are written by the
   learners that produce them (chosen-versus-visible contrast, lead-in and
   divergence analysis, agent runs) through :func:`set_slot`.  The
@@ -241,8 +243,15 @@ def _observed(proc: dict, slot: str) -> dict:
 
 
 def _answered(proc: dict) -> dict[str, dict]:
-    """``user`` entries from answered post-recording questions, by slot."""
-    by_slot: dict[str, list[dict]] = {}
+    """``user`` entries from answered post-recording questions, by slot.
+
+    An answer the user typed makes its slot ``known``.  The model's guess
+    submitted unchanged (``source: "accepted_guess"``) is a ``hypothesis``:
+    the user let it stand but said nothing of their own.  A typed answer
+    for a slot wins over accepted guesses for it.
+    """
+    typed: dict[str, list[dict]] = {}
+    guessed: dict[str, list[dict]] = {}
     clarifications = proc.get("agent_clarifications")
     if not isinstance(clarifications, list):
         return {}
@@ -254,19 +263,26 @@ def _answered(proc: dict) -> dict[str, dict]:
         category = str(item.get("category") or "").strip().lower().replace(" ", "_")
         slot = _ANSWER_SLOTS.get(category)
         if slot is not None:
+            by_slot = guessed if item.get("source") == "accepted_guess" else typed
             by_slot.setdefault(slot, []).append(
                 {"kind": "answer", "id": f"agent_clarifications.{i}"}
             )
-    return {
-        slot: _entry("known", evidence[0]["id"], evidence, "user")
-        for slot, evidence in by_slot.items()
+    entries = {
+        slot: _entry("hypothesis", evidence[0]["id"], evidence, "user")
+        for slot, evidence in guessed.items()
     }
+    entries.update({
+        slot: _entry("known", evidence[0]["id"], evidence, "user")
+        for slot, evidence in typed.items()
+    })
+    return entries
 
 
 def derive_knowledge(proc: dict) -> dict[str, dict]:
     """The ledger for *proc*: derived entries merged with the stored ones.
 
-    Priority per slot: a user's answer, then a stored entry written by a
+    Priority per slot: a typed answer (an accepted guess only over a slot
+    not already known), then a stored entry written by a
     learner other than the observation derivation (``contrast``,
     ``divergence``, ``agent``, or a ``user`` entry set directly), then the
     observation derivation.  An entry equal to the stored one keeps its
@@ -278,15 +294,18 @@ def derive_knowledge(proc: dict) -> dict[str, dict]:
     ledger: dict[str, dict] = {}
     for slot in SLOTS:
         previous = stored.get(slot) if isinstance(stored.get(slot), dict) else None
-        if slot in answered:
-            entry = answered[slot]
-        elif previous and previous.get("source") not in (None, "observation") and not (
+        if previous and previous.get("source") not in (None, "observation") and not (
             previous.get("source") == "user"
             and str(previous.get("value_ref") or "").startswith("agent_clarifications.")
         ):
             entry = {k: previous.get(k) for k in ("status", "value_ref", "evidence", "source")}
         else:
             entry = _observed(proc, slot)
+        # A typed answer wins; an accepted guess (a hypothesis) never
+        # replaces what is already known.
+        answer = answered.get(slot)
+        if answer is not None and (answer["status"] == "known" or entry["status"] != "known"):
+            entry = answer
         same = previous is not None and all(
             previous.get(k) == entry[k] for k in ("status", "value_ref", "evidence", "source")
         )
