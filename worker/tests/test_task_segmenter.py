@@ -436,16 +436,22 @@ class TestTaskSegmenterSegment:
 
     @patch("agenthandover_worker.task_segmenter._compute_embeddings", side_effect=_mock_embeddings)
     def test_embedding_texts_carry_clustering_prefix(self, mock_embed):
-        """nomic-embed-text gets its clustering task prefix on every frame text."""
+        """nomic-embed-text gets its clustering task prefix on every frame
+        text (``_compute_embeddings`` adds it), and the configured model."""
         events = [
             _make_event("e1", "2026-03-04T10:00:00Z", what_doing="Filing expense report"),
             _make_event("e2", "2026-03-04T10:01:00Z", what_doing="Submitting expense form"),
         ]
-        TaskSegmenter().segment(events)
+        TaskSegmenter(SegmenterConfig(embedding_model="emb-x")).segment(events)
         texts = mock_embed.call_args.args[0]
         assert len(texts) == 2
-        assert all(t.startswith("clustering: ") for t in texts)
-        assert texts[0].startswith("clustering: Filing expense report")
+        assert texts[0].startswith("Filing expense report")
+        assert mock_embed.call_args.kwargs["model"] == "emb-x"
+        with patch("agenthandover_worker.task_segmenter.OllamaClient") as client:
+            _compute_embeddings(["a"], model="emb-x")
+        client.return_value.embed.assert_called_once_with(
+            "emb-x", ["a"], prefix="clustering: ", timeout=30.0,
+        )
 
     @patch("agenthandover_worker.task_segmenter._compute_embeddings", side_effect=_mock_embeddings)
     def test_mixed_workflow_and_noise(self, mock_embed):

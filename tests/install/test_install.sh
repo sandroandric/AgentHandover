@@ -177,6 +177,16 @@ check_installed_prefix() {
         "${py}" -c "import importlib.util, sys; sys.exit(importlib.util.find_spec('mlx_embeddings') is not None)"
     check "pip output logged to logs/pip-install.log" test -s "${dd}/logs/pip-install.log"
     check "default config disables image embeddings" contains "${dd}/config.toml" "image_embeddings = false"
+    check "tiers.json is the worker's tier table" \
+        cmp -s "${dd}/tiers.json" "${REPO_ROOT}/resources/tiers.json"
+    check "config names the standard tier" contains "${dd}/config.toml" 'tier = "standard"'
+    check "config [vlm] block is the worker's standard block" bash -c \
+        '"$1" -m agenthandover_worker.model_profiles vlm-block standard > "$3/vlm.expected" \
+         && grep -A4 "^\[vlm\]$" "$2/config.toml" | cmp -s - "$3/vlm.expected"' \
+        _ "${py}" "${dd}" "${WORK}"
+    check "default config: the worker runs the standard tier's models" \
+        env HOME="${p}/home" "${py}" -c \
+        "from agenthandover_worker.config import load_config; v = load_config().vlm; assert (v.tier, v.annotation_model, v.sop_model) == ('standard', 'qwen3.5:4b', 'qwen3.5:4b'), v"
     check "default config: the worker exports through every adapter" \
         env HOME="${p}/home" "${py}" -c \
         "from agenthandover_worker.config import load_config; assert load_config().export.adapter == 'all'"

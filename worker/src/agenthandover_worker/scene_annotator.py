@@ -39,6 +39,7 @@ from agenthandover_worker.annotation_cache import AnnotationCache, cache_key
 from agenthandover_worker.dom import accessible_name, flatten_dom, implicit_role, url_host
 from agenthandover_worker.event_helpers import display_name, is_bundle_id, parse_json_field
 from agenthandover_worker.json_extract import extract_json
+from agenthandover_worker.model_profiles import STANDARD_TIER
 from agenthandover_worker.ollama import (  # noqa: F401 - OllamaUnavailable re-exported
     OllamaClient,
     OllamaUnavailable,
@@ -137,7 +138,7 @@ ANNOTATION_KEEP_ALIVE = "30m"
 class AnnotationConfig:
     """Configuration for the scene annotator."""
 
-    model: str = "qwen3.5:4b"
+    model: str = STANDARD_TIER.annotation_model  # main() passes the configured model
     ollama_host: str = "http://localhost:11434"
     sliding_window_size: int = 3
     sliding_window_max_age_sec: int = 600
@@ -1179,9 +1180,11 @@ class SceneAnnotator:
             try:
                 vec = self._image_embedder.embed_image(screenshot_path)
                 if vec:
+                    from agenthandover_worker.vector_kb import ImageEmbedder
+
                     self._vector_kb.upsert(
                         "visual", event_id, f"image:{event_id}",
-                        embedding=vec,
+                        embedding=vec, prefix="", model=ImageEmbedder.MODEL_NAME,
                     )
             except Exception:
                 logger.debug("Image embedding failed for %s", event_id, exc_info=True)

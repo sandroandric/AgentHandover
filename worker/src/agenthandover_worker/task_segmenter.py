@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from agenthandover_worker.ollama import OllamaClient, OllamaError
+from agenthandover_worker.vector_kb import CLUSTERING_PREFIX
 
 if TYPE_CHECKING:
     from agenthandover_worker.llm_reasoning import LLMReasoner
@@ -231,23 +232,23 @@ class SegmentationResult:
 # nomic-embed-text is trained with task prefixes; grouping frames by task is
 # its ``clustering`` task.  The similarity threshold is calibrated for
 # vectors computed with this prefix.
-CLUSTERING_PREFIX = "clustering: "
 
 
 def _compute_embeddings(
     texts: list[str],
     *,
-    model: str = "all-minilm:l6-v2",
+    model: str,
     host: str = "http://localhost:11434",
     timeout: float = 30.0,
 ) -> list[list[float]]:
-    """Compute text embeddings via Ollama's /api/embed endpoint.
+    """Embed *texts* with the ``clustering:`` task prefix via /api/embed.
 
-    *texts* are sent as given: the caller includes any task prefix.
     Returns a list of embedding vectors (one per input text).
     Raises ConnectionError if Ollama is not reachable.
     """
-    return OllamaClient(host).embed(model, texts, timeout=timeout)
+    return OllamaClient(host).embed(
+        model, texts, prefix=CLUSTERING_PREFIX, timeout=timeout,
+    )
 
 
 def _cosine_similarity(a: list[float], b: list[float]) -> float:
@@ -655,7 +656,10 @@ class TaskSegmenter:
         for frame, text in zip(frames, texts):
             try:
                 cached.append(
-                    vkb.get_current("annotation", frame.event_id, text)
+                    vkb.get_current(
+                        "annotation", frame.event_id, text,
+                        prefix=CLUSTERING_PREFIX,
+                    )
                     if frame.event_id else None
                 )
             except sqlite3.Error:
@@ -706,7 +710,7 @@ class TaskSegmenter:
             proxy = f.annotation.get("_visual_text_proxy", "") if f.annotation else ""
             if proxy and len(proxy) > 20:
                 parts.append(proxy[:500])
-            texts.append(CLUSTERING_PREFIX + " | ".join(parts))
+            texts.append(" | ".join(parts))
 
         # A frame embedded by an earlier pass keeps its vector in the vector
         # KB (keyed by event id and text); only the others go to Ollama, so
@@ -744,7 +748,7 @@ class TaskSegmenter:
                     ]
                     valid_embs = [emb for emb in embeddings if emb]
                     stored = self._vector_kb.upsert_batch(
-                        items, embeddings=valid_embs,
+                        items, embeddings=valid_embs, prefix=CLUSTERING_PREFIX,
                     )
                     logger.info(
                         "Vector KB: %d/%d annotation embeddings stored",

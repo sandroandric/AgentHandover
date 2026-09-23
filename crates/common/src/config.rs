@@ -122,10 +122,15 @@ pub struct VlmConfig {
 
     // --- v2 scene annotation pipeline fields ---
 
-    /// Model for per-frame annotation (default: "qwen3.5:4b").
+    /// The RAM tier onboarding or `agenthandover setup` chose (`tiers.rs`).
+    #[serde(default)]
+    pub tier: Option<String>,
+
+    /// Model for per-frame annotation (default: the RAM tier's, see
+    /// `tiers.rs`; the worker's loader also honours `tier`).
     #[serde(default = "default_annotation_model")]
     pub annotation_model: String,
-    /// Model for SOP generation (default: "qwen3.5:4b").
+    /// Model for SOP generation (default: the RAM tier's).
     #[serde(default = "default_sop_model")]
     pub sop_model: String,
     /// Enable continuous scene annotation pipeline.
@@ -143,8 +148,8 @@ fn default_dhash_threshold() -> u32 { 1 }
 fn default_focus_screenshot_max_per_minute() -> u32 { 40 }
 
 fn default_vlm_mode() -> String { "local".to_string() }
-fn default_annotation_model() -> String { "qwen3.5:4b".to_string() }
-fn default_sop_model() -> String { "qwen3.5:4b".to_string() }
+fn default_annotation_model() -> String { crate::tiers::recommended_tier().annotation_model.clone() }
+fn default_sop_model() -> String { crate::tiers::recommended_tier().sop_model.clone() }
 fn default_annotation_enabled() -> bool { true }
 fn default_sliding_window_max_age_sec() -> u64 { 600 }
 
@@ -303,6 +308,7 @@ impl Default for VlmConfig {
             provider: None,
             model: None,
             api_key_env: None,
+            tier: None,
             annotation_model: default_annotation_model(),
             sop_model: default_sop_model(),
             annotation_enabled: default_annotation_enabled(),

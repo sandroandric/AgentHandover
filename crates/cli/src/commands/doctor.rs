@@ -6,6 +6,7 @@ use agenthandover_common::observation::{
     capture_socket_path, observation_socket_path, snapshot_at,
 };
 
+use agenthandover_common::tiers;
 use crate::paths;
 
 /// Detect which install channel produced this AgentHandover installation.
@@ -234,11 +235,8 @@ pub fn run() -> Result<()> {
 
     // Check 16: Required models pulled
     //
-    // v0.2.0 introduced RAM-based model tiers (Qwen 3.5 for 8GB, Gemma 4
-    // for 16GB+). The previous version of this check hardcoded
-    // `qwen3.5:2b` + `qwen3.5:4b` which is wrong for anyone on a 16GB+
-    // Mac — they'd have Gemma 4 installed and doctor would report both
-    // qwen models as missing. False failures.
+    // The models depend on the RAM tier (tiers.json), so a hard-coded
+    // list reports false failures on every other tier.
     //
     // Correct approach: read the user's config.toml to find their
     // ACTUALLY configured annotation_model + sop_model + embedding
@@ -260,12 +258,15 @@ pub fn run() -> Result<()> {
                 "vlm.mode = remote (using cloud API)",
             );
         } else {
-            let annotation_model = read_config_string_field(&config_str, "vlm", "annotation_model")
-                .unwrap_or_else(|| "qwen3.5:4b".to_string());
-            let sop_model = read_config_string_field(&config_str, "vlm", "sop_model")
-                .unwrap_or_else(|| "qwen3.5:4b".to_string());
+            // Missing model keys come from the config's tier, else the
+            // RAM tier, exactly as the worker resolves them.
+            let (_, annotation_model, sop_model) = tiers::resolve_models(
+                read_config_string_field(&config_str, "vlm", "tier").as_deref(),
+                read_config_string_field(&config_str, "vlm", "annotation_model").as_deref(),
+                read_config_string_field(&config_str, "vlm", "sop_model").as_deref(),
+            );
             let embedding_model = read_config_string_field(&config_str, "embedding", "model")
-                .unwrap_or_else(|| "nomic-embed-text".to_string());
+                .unwrap_or_else(|| tiers::table().embedding_model.clone());
 
             // Ask the service over HTTP, like the check above: the `ollama`
             // CLI is not on the PATH of a GUI-launched or non-interactive
@@ -277,9 +278,8 @@ pub fn run() -> Result<()> {
                 .map(|o| ollama_tag_names(&String::from_utf8_lossy(&o.stdout)))
                 .unwrap_or_default();
 
-            // Gemma 4 is a single-model tier where annotation_model ==
-            // sop_model; deduplicate so we don't report the same model
-            // twice with different purposes.
+            // The standard tier runs one model for both jobs; deduplicate
+            // so we don't report the same model twice.
             let mut models_to_check: Vec<(String, &str)> = Vec::new();
             if !annotation_model.is_empty() {
                 models_to_check.push((annotation_model.clone(), "scene annotation"));

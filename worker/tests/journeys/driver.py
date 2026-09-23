@@ -128,12 +128,15 @@ class JourneyWorker:
 
         self.vlm_queue = wm.VLMFallbackQueue()
         llm_reasoner = LLMReasoner(
-            config=ReasoningConfig(ollama_host=host), vlm_queue=self.vlm_queue,
+            config=ReasoningConfig(model=vlm_cfg.reasoner_model, ollama_host=host),
+            vlm_queue=self.vlm_queue,
         )
         # Vector KB with main()'s health check (unavailable -> None),
         # built before its consumers as main() builds it.
         self.vector_kb = None
-        vector_kb = VectorKB(self.db_path, VectorKBConfig(ollama_host=host))
+        vector_kb = VectorKB(self.db_path, VectorKBConfig(
+            embedding_model=cfg.embedding.model, ollama_host=host,
+        ))
         try:
             embedding = vector_kb.compute_embeddings(["health check"])
         except (ConnectionError, OllamaError):
@@ -264,7 +267,9 @@ class JourneyWorker:
                 sop_generator=self.sop_generator,
             )
             self.task_segmenter = wm.TaskSegmenter(
-                config=wm.SegmenterConfig(ollama_host=host),
+                config=wm.SegmenterConfig(
+                    embedding_model=cfg.embedding.model, ollama_host=host,
+                ),
                 llm_reasoner=llm_reasoner,
                 cluster_label_store=kb.root / "observations" / "cluster_labels.json",
                 vector_kb=self.vector_kb,

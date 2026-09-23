@@ -13,6 +13,10 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from agenthandover_worker.vector_kb import (
+    CLUSTERING_PREFIX,
+    DOCUMENT_PREFIX,
+    QUERY_PREFIX,
+    ImageEmbedder,
     VectorKB,
     VectorKBConfig,
     VectorSearchResult,
@@ -57,13 +61,16 @@ def _fake_embed_response(texts: list[str], dim: int = 4) -> bytes:
 
 @pytest.fixture
 def kb(tmp_db: Path, config: VectorKBConfig) -> VectorKB:
-    """VectorKB with mocked Ollama that returns deterministic embeddings."""
+    """VectorKB with mocked Ollama that returns deterministic embeddings.
+
+    The vectors depend on the text only; ``vkb.embed_calls`` records each
+    call's ``(model, prefix, texts)``.
+    """
     vkb = VectorKB(tmp_db, config)
+    vkb.embed_calls = []
 
-    # Patch compute_embeddings to avoid real Ollama calls
-    original_compute = vkb.compute_embeddings
-
-    def mock_compute(texts, *, model=None):
+    def mock_compute(texts, *, prefix=DOCUMENT_PREFIX):
+        vkb.embed_calls.append((vkb.config.embedding_model, prefix, list(texts)))
         embeddings = []
         for t in texts:
             h = hash(t) & 0xFFFFFFFF
@@ -347,6 +354,21 @@ class TestMaintenance:
         assert purged == 1
         assert kb.count() == 0
 
+    def test_purge_drops_vectors_from_another_model(self, kb: VectorKB):
+        kb.upsert("annotation", "e1", "task one")
+        kb.upsert(
+            "visual", "e2", "image:e2", embedding=[0.1, 0.2, 0.3, 0.4],
+            prefix="", model=ImageEmbedder.MODEL_NAME,
+        )
+        kb.config.embedding_model = "new-model"
+        kb.upsert("annotation", "e3", "task three")
+
+        assert kb.purge_stale() == 1
+        kept = {
+            row[0] for row in kb._conn.execute("SELECT source_id FROM vector_store")
+        }
+        assert kept == {"e2", "e3"}
+
     def test_reset_cycle_budget(self, kb: VectorKB):
         kb._cycle_embed_count = 100
         kb.reset_cycle_budget()
@@ -508,3 +530,160 @@ class TestSearchAtScale:
         assert len(hits) == 10
         assert elapsed < 0.25, f"search took {elapsed * 1000:.0f} ms"
         kb.close()
+
+
+# ---------------------------------------------------------------------------
+# Embedding model and task prefix (WP-C6)
+# ---------------------------------------------------------------------------
+
+class TestModelAndPrefix:
+
+    def test_model_change_re_embeds_the_row(self, kb: VectorKB):
+        """Embed one row, change the configured model: the row is embedded
+        again by the new model instead of being skipped as unchanged."""
+        assert kb.upsert("procedure", "p1", "file the expense report") is True
+        assert kb.upsert("procedure", "p1", "file the expense report") is False
+        assert len(kb.embed_calls) == 1
+
+        kb.config.embedding_model = "nomic-embed-text-v2"
+        assert kb.upsert("procedure", "p1", "file the expense report") is True
+        assert kb.embed_calls[-1] == (
+            "nomic-embed-text-v2", DOCUMENT_PREFIX, ["file the expense report"],
+        )
+        row = kb._conn.execute(
+            "SELECT model, prefix FROM vector_store WHERE id = ?",
+            (_vector_id("procedure", "p1"),),
+        ).fetchone()
+        assert tuple(row) == ("nomic-embed-text-v2", DOCUMENT_PREFIX)
+
+    def test_prefix_change_re_embeds_the_row(self, kb: VectorKB):
+        items = [("annotation", "e1", "reading hacker news")]
+        assert kb.upsert_batch(items, prefix=CLUSTERING_PREFIX) == 1
+        assert kb.upsert_batch(items, prefix=CLUSTERING_PREFIX) == 0
+        assert kb.upsert_batch(items) == 1
+        assert [c[1] for c in kb.embed_calls] == [CLUSTERING_PREFIX, DOCUMENT_PREFIX]
+
+    def test_documents_and_queries_use_their_prefixes(self, kb: VectorKB):
+        kb.upsert("procedure", "p1", "task one")
+        kb.search("task one")
+        assert [c[1] for c in kb.embed_calls] == [DOCUMENT_PREFIX, QUERY_PREFIX]
+
+    def test_rows_from_before_prefixes_are_migrated_and_re_embedded(
+        self, tmp_db: Path, config: VectorKBConfig,
+    ):
+        conn = sqlite3.connect(tmp_db)
+        conn.execute(
+            "CREATE TABLE vector_store (id TEXT PRIMARY KEY, source_type TEXT NOT NULL,"
+            " source_id TEXT NOT NULL, embedding BLOB NOT NULL, model TEXT NOT NULL,"
+            " dim INTEGER NOT NULL, text_hash TEXT NOT NULL,"
+            " created_at TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT '')"
+        )
+        conn.execute(
+            "INSERT INTO vector_store (id, source_type, source_id, embedding, model,"
+            " dim, text_hash) VALUES (?, 'procedure', 'p1', ?, ?, 4, ?)",
+            (_vector_id("procedure", "p1"), _encode_embedding([0.5] * 4),
+             config.embedding_model, _text_hash("task one")),
+        )
+        conn.commit()
+        conn.close()
+
+        vkb = VectorKB(tmp_db, config)
+        try:
+            with patch.object(vkb, "compute_embeddings", return_value=[[0.1] * 4]) as embed:
+                assert vkb.upsert("procedure", "p1", "task one") is True
+                embed.assert_called_once_with(["task one"], prefix=DOCUMENT_PREFIX)
+        finally:
+            vkb.close()
+
+    def test_get_current_matches_what_upsert_stores(self, kb: VectorKB):
+        """get_current tests the same (text hash, model, prefix) that
+        upsert skips on; the hashed text is the unprefixed text."""
+        items = [("annotation", "e1", "reading hacker news")]
+        assert kb.upsert_batch(items, prefix=CLUSTERING_PREFIX) == 1
+        vec = kb.get_current(
+            "annotation", "e1", "reading hacker news", prefix=CLUSTERING_PREFIX,
+        )
+        assert vec is not None and len(vec) == 4
+        # Another prefix, another text or another model is not current.
+        assert kb.get_current("annotation", "e1", "reading hacker news") is None
+        assert kb.get_current(
+            "annotation", "e1", CLUSTERING_PREFIX + "reading hacker news",
+            prefix=CLUSTERING_PREFIX,
+        ) is None
+        kb.config.embedding_model = "nomic-embed-text-v2"
+        assert kb.get_current(
+            "annotation", "e1", "reading hacker news", prefix=CLUSTERING_PREFIX,
+        ) is None
+
+    def test_vectors_from_before_the_prefix_column_are_stale(
+        self, tmp_db: Path, config: VectorKBConfig,
+    ):
+        """A vector stored before prefixes were recorded is never reused:
+        neither a plain row nor a segmenter row whose hashed text carried
+        the ``clustering:`` prefix inline (the pre-WP-C6 format)."""
+        conn = sqlite3.connect(tmp_db)
+        conn.execute(
+            "CREATE TABLE vector_store (id TEXT PRIMARY KEY, source_type TEXT NOT NULL,"
+            " source_id TEXT NOT NULL, embedding BLOB NOT NULL, model TEXT NOT NULL,"
+            " dim INTEGER NOT NULL, text_hash TEXT NOT NULL,"
+            " created_at TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT '',"
+            " qvec BLOB, qscale REAL)"
+        )
+        for sid, hashed in (
+            ("plain", "reading hacker news"),
+            ("inline", CLUSTERING_PREFIX + "reading hacker news"),
+        ):
+            conn.execute(
+                "INSERT INTO vector_store (id, source_type, source_id, embedding, model,"
+                " dim, text_hash) VALUES (?, 'annotation', ?, ?, ?, 4, ?)",
+                (_vector_id("annotation", sid), sid, _encode_embedding([0.5] * 4),
+                 config.embedding_model, _text_hash(hashed)),
+            )
+        conn.commit()
+        conn.close()
+
+        vkb = VectorKB(tmp_db, config)
+        try:
+            for sid in ("plain", "inline"):
+                for prefix in (DOCUMENT_PREFIX, CLUSTERING_PREFIX):
+                    assert vkb.get_current(
+                        "annotation", sid, "reading hacker news", prefix=prefix,
+                    ) is None
+            with patch.object(
+                vkb, "compute_embeddings", return_value=[[0.1] * 4, [0.2] * 4],
+            ) as embed:
+                stored = vkb.upsert_batch(
+                    [("annotation", "plain", "reading hacker news"),
+                     ("annotation", "inline", "reading hacker news")],
+                    prefix=CLUSTERING_PREFIX,
+                )
+            assert stored == 2
+            embed.assert_called_once()
+            assert vkb.get_current(
+                "annotation", "inline", "reading hacker news", prefix=CLUSTERING_PREFIX,
+            ) is not None
+        finally:
+            vkb.close()
+
+    def test_purge_by_model_resets_the_search_index(self, kb: VectorKB):
+        kb.upsert("procedure", "p1", "task one")
+        kb.upsert("visual", "e1", "image:e1", embedding=[1.0, 0.0, 0.0, 0.0],
+                  prefix="", model=ImageEmbedder.MODEL_NAME)
+        kb.search_by_vector([1.0, 0.0, 0.0, 0.0])  # builds the index
+        kb.config.embedding_model = "nomic-embed-text-v2"
+        assert kb.purge_stale() == 1
+        assert kb.count("procedure") == 0 and kb.count("visual") == 1
+        assert [h.source_id for h in kb.search_by_vector([1.0, 0.0, 0.0, 0.0])] == ["e1"]
+
+    def test_compute_embeddings_sends_the_prefix(self, tmp_db: Path, config: VectorKBConfig):
+        vkb = VectorKB(tmp_db, config)
+        try:
+            with patch("agenthandover_worker.vector_kb.OllamaClient") as client:
+                client.return_value.embed.return_value = [[0.0] * 4]
+                vkb.compute_embeddings(["x"], prefix=QUERY_PREFIX)
+            client.return_value.embed.assert_called_once_with(
+                "test-model", ["x"], prefix=QUERY_PREFIX,
+                batch_size=config.batch_size, timeout=config.timeout_seconds,
+            )
+        finally:
+            vkb.close()

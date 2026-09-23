@@ -55,8 +55,11 @@ sed -i '' \
     "${LAUNCH_AGENTS}/com.agenthandover.worker.plist"
 chown "${CONSOLE_USER}" "${LAUNCH_AGENTS}/com.agenthandover.worker.plist"
 
-# Create default config if none exists
+# Create default config if none exists. Its [vlm] block is appended once
+# the worker is installed (the tier table lives in the worker).
+CONFIG_CREATED=0
 if [ ! -f "${DATA_DIR}/config.toml" ]; then
+    CONFIG_CREATED=1
     cat > "${DATA_DIR}/config.toml" << 'TOML'
 # AgentHandover Configuration
 # See https://github.com/sandroandric/AgentHandover for documentation
@@ -216,6 +219,23 @@ else
     echo "  Updating worker package..."
     if ! as_user "${VENV}/bin/pip" install --disable-pip-version-check "${WORKER_SPEC}" >>"${PIP_LOG}" 2>&1; then
         pip_failed "could not update the AgentHandover worker package."
+    fi
+fi
+
+# The model tier table (model_profiles.TIERS in the worker) as tiers.json:
+# the app's onboarding and `agenthandover setup` read it, so they name the
+# same models as the worker. A new config gets the [vlm] block of the
+# "standard" tier, the pair every Mac can run; onboarding replaces it with
+# the tier the user picks.
+if ! as_user "${VENV}/bin/python" -m agenthandover_worker.model_profiles \
+        write-tiers "${DATA_DIR}/tiers.json"; then
+    warn "could not write ${DATA_DIR}/tiers.json; onboarding cannot list the model tiers"
+fi
+if [ "${CONFIG_CREATED}" -eq 1 ]; then
+    if VLM_BLOCK=$(as_user "${VENV}/bin/python" -m agenthandover_worker.model_profiles vlm-block standard); then
+        printf '\n%s\n' "${VLM_BLOCK}" >> "${DATA_DIR}/config.toml"
+    else
+        warn "could not write the [vlm] block to config.toml"
     fi
 fi
 

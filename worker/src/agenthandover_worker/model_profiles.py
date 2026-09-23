@@ -4,14 +4,23 @@ Each model family has different optimal parameters for annotation and SOP
 generation. This module provides a single source of truth so the pipeline
 automatically uses the right settings regardless of which model the user picks.
 
-The RAM-based model recommendation lives in the app's onboarding tier table
-(OnboardingView.swift); the worker only consumes the models it is configured with.
+It also holds the one RAM tier table (:data:`TIERS`).  The installer runs
+``python -m agenthandover_worker.model_profiles write-tiers`` to write it as
+``tiers.json``; the app's onboarding, the CLI (``agenthandover setup``,
+``doctor``) and the daemon's config defaults all read that JSON, so the
+tiers cannot diverge.  ``resources/tiers.json`` is the committed copy: the
+Rust crates compile it in and the Swift tests decode it; a worker test pins
+it to :func:`tiers_json`.
 """
 
 from __future__ import annotations
 
+import json
 import logging
-from dataclasses import dataclass
+import os
+import sys
+from dataclasses import asdict, dataclass
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -304,6 +313,32 @@ _PROFILES: dict[str, ModelProfile] = {
         diff_presence_penalty=1.0,
         diff_think=False,
     ),
+    # MoE 26B (4B active) QAT: registered for the 48 GB tier's A/B arm
+    # (``[vlm] sop_ab = true``); same settings as ``gemma4:26b``.
+    "gemma4:26b-a4b-it-qat": ModelProfile(
+        model="gemma4:26b-a4b-it-qat",
+        family="gemma4",
+        ann_system=_GEMMA_ANN_SYSTEM,
+        ann_top_k=64,
+        ann_top_p=0.95,
+        ann_presence_penalty=1.0,
+        ann_think=False,
+        sop_system=_GEMMA_SOP_SYSTEM,
+        sop_temperature=0.3,
+        sop_num_predict=6000,
+        sop_num_ctx=32768,
+        sop_top_k=64,
+        sop_top_p=0.95,
+        sop_presence_penalty=1.0,
+        sop_think=True,
+        diff_system=_GEMMA_DIFF_SYSTEM,
+        diff_temperature=0.3,
+        diff_num_predict=500,
+        diff_top_k=64,
+        diff_top_p=0.95,
+        diff_presence_penalty=1.0,
+        diff_think=False,
+    ),
     "gemma4:31b": ModelProfile(
         model="gemma4:31b",
         family="gemma4",
@@ -420,10 +455,20 @@ def get_profile(model: str) -> ModelProfile:
 # Ollama version check
 # ---------------------------------------------------------------------------
 
-# Bumped to 0.30.6 in v0.4.0: the QAT Gemma 4 tags (gemma4:12b-it-qat,
-# gemma4:31b-it-qat, etc.) require Ollama 0.30.6+ — older Ollama returns
-# HTTP 412 ("requires a newer version of Ollama") on pull.
-MINIMUM_OLLAMA_VERSION_FOR_GEMMA4 = "0.30.6"
+# The QAT Gemma 4 tags need a recent Ollama (older ones answer a pull with
+# HTTP 412, "requires a newer version of Ollama"); 0.34.0 is the version the
+# tier table's models were measured on (test Mac, Ollama 0.34.2).
+MINIMUM_OLLAMA_VERSION_FOR_GEMMA4 = "0.34.0"
+
+
+def version_at_least(version: str, minimum: str) -> bool:
+    """True when *version* (e.g. ``"0.34.2-rc1"``) is >= *minimum*."""
+    try:
+        have = [int(p) for p in version.split("-")[0].split(".")]
+        need = [int(p) for p in minimum.split(".")]
+    except ValueError:
+        return False
+    return have >= need
 
 
 def check_ollama_version(ollama_host: str = "http://localhost:11434") -> str | None:
@@ -442,14 +487,177 @@ def check_ollama_version(ollama_host: str = "http://localhost:11434") -> str | N
 def ollama_supports_gemma4(ollama_host: str = "http://localhost:11434") -> bool:
     """Check if the running Ollama version supports Gemma 4 models."""
     version = check_ollama_version(ollama_host)
-    if not version:
-        return False
+    return bool(version) and version_at_least(
+        version, MINIMUM_OLLAMA_VERSION_FOR_GEMMA4,
+    )
 
+
+# ---------------------------------------------------------------------------
+# RAM tiers: the one table of which models a Mac runs
+# ---------------------------------------------------------------------------
+
+EMBEDDING_MODEL = "nomic-embed-text"
+
+# The per-frame annotator is the small resident model on every tier
+# (text-first annotation, WP-C3b); the larger model only writes Skills and
+# behavioural syntheses, where quality matters and calls are rare.
+TIER_BASIS = (
+    "Annotator qwen3.5:4b on every tier; Skills and synthesis on the largest "
+    "model the RAM holds. Measured on a 16 GB Mac with Ollama 0.34.2: "
+    "gemma4:12b-it-qat takes 40+ s per annotated frame (11 s image prefill "
+    "+ 30 s decode) against a 3 s budget; qwen3.5:4b (3.4 GB) and "
+    "gemma4:12b-it-qat (7.2 GB) stay resident together."
+)
+
+# Download size in GB of the models a tier installs by default (``ollama
+# list`` on the test Mac; the 31B figure is the QAT quant's footprint).
+MODEL_SIZES_GB: dict[str, float] = {
+    "qwen3.5:4b": 3.4,
+    "gemma4:12b-it-qat": 7.2,
+    "gemma4:31b-it-qat": 18.0,
+    EMBEDDING_MODEL: 0.27,
+}
+
+
+@dataclass(frozen=True)
+class Tier:
+    """One row of the RAM tier table."""
+
+    id: str
+    label: str
+    subtitle: str
+    min_ram_gb: int
+    annotation_model: str
+    sop_model: str
+    # The A/B arm for the SOP model, used when ``[vlm] sop_ab = true``.
+    ab_sop_model: str = ""
+
+    @property
+    def models(self) -> list[str]:
+        """Every model this tier needs pulled, annotation model first."""
+        return list(dict.fromkeys(
+            [self.annotation_model, self.sop_model, EMBEDDING_MODEL],
+        ))
+
+
+# Ascending by ``min_ram_gb``; the first row takes any Mac.
+TIERS: tuple[Tier, ...] = (
+    Tier(
+        id="standard",
+        label="Standard",
+        subtitle="Qwen 3.5 4B for everything, works on 8 GB Macs",
+        min_ram_gb=0,
+        annotation_model="qwen3.5:4b",
+        sop_model="qwen3.5:4b",
+    ),
+    Tier(
+        id="recommended",
+        label="Recommended",
+        subtitle="Qwen 3.5 4B watches, Gemma 4 12B QAT writes Skills",
+        min_ram_gb=16,
+        annotation_model="qwen3.5:4b",
+        sop_model="gemma4:12b-it-qat",
+    ),
+    Tier(
+        id="performance",
+        label="Performance",
+        subtitle="Qwen 3.5 4B watches, Gemma 4 12B QAT writes Skills, with headroom",
+        min_ram_gb=24,
+        annotation_model="qwen3.5:4b",
+        sop_model="gemma4:12b-it-qat",
+    ),
+    Tier(
+        id="max_quality",
+        label="Max Quality",
+        subtitle="Qwen 3.5 4B watches, Gemma 4 31B QAT writes Skills",
+        min_ram_gb=48,
+        annotation_model="qwen3.5:4b",
+        sop_model="gemma4:31b-it-qat",
+        ab_sop_model="gemma4:26b-a4b-it-qat",
+    ),
+)
+
+
+# The tier every Mac can run: the library default of every model setting.
+STANDARD_TIER = TIERS[0]
+
+
+def machine_ram_gb() -> int:
+    """Physical memory in whole GiB (what "a 16 GB Mac" reports)."""
     try:
-        # Parse version like "0.20.0-rc1" → (0, 20, 0)
-        clean = version.split("-")[0]  # strip -rc1 etc
-        parts = [int(p) for p in clean.split(".")]
-        min_parts = [int(p) for p in MINIMUM_OLLAMA_VERSION_FOR_GEMMA4.split(".")]
-        return parts >= min_parts
-    except (ValueError, IndexError):
-        return False
+        return (os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")) // (1 << 30)
+    except (ValueError, OSError, AttributeError):
+        return 0
+
+
+def get_tier(tier_id: str) -> Tier | None:
+    """The tier named *tier_id*, or None."""
+    return next((t for t in TIERS if t.id == tier_id), None)
+
+
+def recommend_tier(ram_gb: int | None = None) -> Tier:
+    """The largest tier whose ``min_ram_gb`` fits *ram_gb* (default: this Mac)."""
+    ram = machine_ram_gb() if ram_gb is None else ram_gb
+    return [t for t in TIERS if t.min_ram_gb <= ram][-1]
+
+
+def tiers_document() -> dict:
+    """The tier table as the JSON object ``tiers.json`` holds."""
+    return {
+        "schema_version": 1,
+        "basis": TIER_BASIS,
+        "minimum_ollama_version_for_gemma4": MINIMUM_OLLAMA_VERSION_FOR_GEMMA4,
+        "embedding_model": EMBEDDING_MODEL,
+        "model_sizes_gb": MODEL_SIZES_GB,
+        "tiers": [asdict(t) for t in TIERS],
+    }
+
+
+def tiers_json() -> str:
+    """``tiers.json``'s exact text (the committed and the installed copy)."""
+    return json.dumps(tiers_document(), indent=2) + "\n"
+
+
+def vlm_block(tier: Tier) -> str:
+    """The managed ``[vlm]`` lines every writer puts in config.toml.
+
+    The installer (through this function), the app's onboarding
+    (``ModelTiers.swift``) and ``agenthandover setup``
+    (``crates/common/src/tiers.rs``) write these same bytes.
+    """
+    return (
+        "[vlm]\n"
+        'mode = "local"\n'
+        f'tier = "{tier.id}"\n'
+        f'annotation_model = "{tier.annotation_model}"\n'
+        f'sop_model = "{tier.sop_model}"\n'
+    )
+
+
+def _main(argv: list[str]) -> int:
+    """``write-tiers PATH`` | ``vlm-block TIER_ID``."""
+    if len(argv) == 2 and argv[0] == "write-tiers":
+        target = Path(argv[1])
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp = target.with_name(target.name + ".tmp")
+        tmp.write_text(tiers_json(), encoding="utf-8")
+        tmp.replace(target)
+        return 0
+    if len(argv) == 2 and argv[0] == "vlm-block":
+        tier = get_tier(argv[1])
+        if tier is None:
+            print(f"unknown tier {argv[1]!r}", file=sys.stderr)
+            return 2
+        sys.stdout.write(vlm_block(tier))
+        return 0
+    print(
+        "usage: python -m agenthandover_worker.model_profiles "
+        "write-tiers PATH | vlm-block TIER_ID",
+        file=sys.stderr,
+    )
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(_main(sys.argv[1:]))
+

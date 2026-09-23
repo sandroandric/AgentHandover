@@ -89,8 +89,10 @@ def build_mcp_server():
                     from agenthandover_worker.config import load_config
                     from agenthandover_worker.vector_kb import VectorKB, VectorKBConfig
 
+                    cfg = load_config()
                     _state["vkb"] = (VectorKB(db_path, VectorKBConfig(
-                        ollama_host=load_config().vlm.ollama_host,
+                        embedding_model=cfg.embedding.model,
+                        ollama_host=cfg.vlm.ollama_host,
                         timeout_seconds=QUERY_EMBED_TIMEOUT_S,
                     )), "")
                 except Exception as exc:
@@ -211,6 +213,7 @@ def build_mcp_server():
         semantic search was not used.
         """
         from agenthandover_worker.ollama import OllamaError
+        from agenthandover_worker.vector_kb import QUERY_PREFIX
 
         vkb, reason = _vector_kb()
         if vkb is not None:
@@ -221,7 +224,9 @@ def build_mcp_server():
                 reason = down_reason
             else:
                 try:
-                    vectors = vkb.compute_embeddings([query])
+                    vectors = vkb.compute_embeddings(
+                        [query], prefix=QUERY_PREFIX,
+                    )
                 except (ConnectionError, TimeoutError, OllamaError) as exc:
                     reason = f"embedding model unavailable: {exc}"
                     logger.warning("search_skills: %s", reason)

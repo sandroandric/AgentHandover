@@ -9,7 +9,11 @@ Design choices:
     over every row (``math.sumprod``) and an exact re-score of the best
   * Retention and a row cap — ``purge_stale`` runs daily, ``max_rows`` holds
   * Own SQLite connection — same isolation pattern as ActivitySearcher
-  * Idempotent upsert — SHA-256 text_hash skips re-embedding unchanged content
+  * Idempotent upsert — a row is reused only when its text_hash, embedding
+    model and task prefix all match; a model or prefix change re-embeds
+  * nomic-embed-text task prefixes — documents are stored with
+    ``search_document:``, queries embed with ``search_query:``, the task
+    segmenter's frame vectors with ``clustering:``
   * Budget cap — max_embeds_per_cycle prevents Ollama overload on backlog catch-up
 """
 
@@ -27,6 +31,11 @@ from pathlib import Path
 from agenthandover_worker.ollama import OllamaClient, OllamaError
 
 logger = logging.getLogger(__name__)
+
+# nomic-embed-text's task prefixes: every text is embedded with one.
+DOCUMENT_PREFIX = "search_document: "
+QUERY_PREFIX = "search_query: "
+CLUSTERING_PREFIX = "clustering: "
 
 
 # ---------------------------------------------------------------------------
@@ -194,6 +203,7 @@ class VectorKB:
             "  model       TEXT NOT NULL,"
             "  dim         INTEGER NOT NULL,"
             "  text_hash   TEXT NOT NULL,"
+            "  prefix      TEXT NOT NULL DEFAULT '',"
             "  created_at  TEXT NOT NULL DEFAULT "
             "    (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),"
             "  updated_at  TEXT NOT NULL DEFAULT "
@@ -205,7 +215,14 @@ class VectorKB:
         columns = {
             row[1] for row in self._conn.execute("PRAGMA table_info(vector_store)")
         }
-        for name, decl in (("qvec", "BLOB"), ("qscale", "REAL")):
+        for name, decl in (
+            ("qvec", "BLOB"),
+            ("qscale", "REAL"),
+            # Rows written before prefixes were recorded were embedded
+            # without one; '' makes them stale for every current prefix,
+            # so they re-embed on their next upsert.
+            ("prefix", "TEXT NOT NULL DEFAULT ''"),
+        ):
             if name not in columns:
                 self._conn.execute(f"ALTER TABLE vector_store ADD COLUMN {name} {decl}")
         self._conn.execute(
@@ -240,16 +257,17 @@ class VectorKB:
         self,
         texts: list[str],
         *,
-        model: str | None = None,
+        prefix: str = DOCUMENT_PREFIX,
     ) -> list[list[float]]:
-        """Compute text embeddings via Ollama, batched by config.batch_size.
+        """Embed *texts* with the task *prefix*, batched by config.batch_size.
 
         Raises ConnectionError if Ollama is unreachable.
         """
 
         return OllamaClient(self.config.ollama_host).embed(
-            model or self.config.embedding_model,
+            self.config.embedding_model,
             texts,
+            prefix=prefix,
             batch_size=self.config.batch_size,
             timeout=self.config.timeout_seconds,
         )
@@ -280,56 +298,62 @@ class VectorKB:
     # Storage: upsert
     # ------------------------------------------------------------------
 
-    def _is_current(self, vid: str, thash: str) -> bool:
-        """True if *vid* holds a vector of this text from the configured model.
+    def _is_current(self, vid: str, thash: str, model: str, prefix: str) -> bool:
+        """True if *vid* holds a vector of this text, model and prefix.
 
-        A vector from another embedding model lives in a different space,
-        so a model change re-embeds even when the text is unchanged.
+        A vector from another embedding model, or embedded with another
+        task prefix, lives in a different space: either change re-embeds
+        even when the text is unchanged.
         """
         row = self._conn.execute(
-            "SELECT text_hash, model FROM vector_store WHERE id = ?", (vid,),
+            "SELECT text_hash, model, prefix FROM vector_store WHERE id = ?",
+            (vid,),
         ).fetchone()
-        return bool(
-            row and row[0] == thash and row[1] == self.config.embedding_model
-        )
+        return row is not None and tuple(row) == (thash, model, prefix)
 
     def _store(
         self, source_type: str, source_id: str, text_hash: str,
-        embedding: list[float],
+        embedding: list[float], model: str, prefix: str,
     ) -> None:
-        """Write one normalised vector (no commit)."""
+        """Write one normalised vector with its 8-bit copy (no commit)."""
         unit = _normalize(embedding)
         qvec, scale = _quantize(unit)
         self._conn.execute(
             "INSERT INTO vector_store "
             "(id, source_type, source_id, embedding, model, dim, text_hash, "
-            " qvec, qscale) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            " prefix, qvec, qscale) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(id) DO UPDATE SET "
             " embedding = excluded.embedding,"
             " model = excluded.model,"
             " dim = excluded.dim,"
             " text_hash = excluded.text_hash,"
+            " prefix = excluded.prefix,"
             " qvec = excluded.qvec,"
             " qscale = excluded.qscale,"
             " updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
             (_vector_id(source_type, source_id), source_type, source_id,
-             _encode_embedding(unit), self.config.embedding_model, len(unit),
-             text_hash, qvec, scale),
+             _encode_embedding(unit), model, len(unit), text_hash, prefix,
+             qvec, scale),
         )
 
     def get_current(
         self, source_type: str, source_id: str, text: str,
+        *, prefix: str = DOCUMENT_PREFIX,
     ) -> list[float] | None:
         """The stored vector of *text* for this source, or None when the row
-        is missing, holds another text, or came from another model."""
-        row = self._conn.execute(
-            "SELECT embedding, dim, text_hash, model FROM vector_store WHERE id = ?",
-            (_vector_id(source_type, source_id),),
-        ).fetchone()
-        if not row or row[2] != _text_hash(text) or row[3] != self.config.embedding_model:
+        is missing or is not current for this text, the configured model
+        and *prefix* (the same test ``upsert`` skips on).  *text* is the
+        unprefixed text: the prefix is recorded in its own column."""
+        vid = _vector_id(source_type, source_id)
+        if not self._is_current(
+            vid, _text_hash(text), self.config.embedding_model, prefix,
+        ):
             return None
-        return _decode_embedding(row[0], row[1])
+        row = self._conn.execute(
+            "SELECT embedding, dim FROM vector_store WHERE id = ?", (vid,),
+        ).fetchone()
+        return _decode_embedding(row[0], row[1]) if row else None
 
     def upsert(
         self,
@@ -338,16 +362,22 @@ class VectorKB:
         text: str,
         *,
         embedding: list[float] | None = None,
+        prefix: str = DOCUMENT_PREFIX,
+        model: str | None = None,
     ) -> bool:
-        """Store a single vector.  Skips if text_hash is unchanged.
+        """Store a single vector of *text* embedded with *prefix*.
 
-        If *embedding* is provided, uses it directly (no Ollama call).
+        Skips when the stored row has the same text, model and prefix.
+        If *embedding* is provided, uses it directly (no Ollama call);
+        *model* then names the model that made it when that is not the
+        configured text model (image vectors).
         Returns True if the vector was stored/updated.
         """
         vid = _vector_id(source_type, source_id)
         thash = _text_hash(text)
+        model = model or self.config.embedding_model
 
-        if self._is_current(vid, thash):
+        if self._is_current(vid, thash, model, prefix):
             return False  # unchanged
 
         # Compute embedding if not provided
@@ -356,7 +386,7 @@ class VectorKB:
                 logger.debug("Embed budget exhausted, skipping %s:%s", source_type, source_id)
                 return False
             try:
-                embeddings = self.compute_embeddings([text])
+                embeddings = self.compute_embeddings([text], prefix=prefix)
                 if not embeddings or not embeddings[0]:
                     return False
                 embedding = embeddings[0]
@@ -365,7 +395,7 @@ class VectorKB:
                 logger.debug("Ollama unavailable for embedding", exc_info=True)
                 return False
 
-        self._store(source_type, source_id, thash, embedding)
+        self._store(source_type, source_id, thash, embedding, model, prefix)
         self._conn.commit()
         self.enforce_row_cap()
         return True
@@ -375,30 +405,36 @@ class VectorKB:
         items: list[tuple[str, str, str]],
         *,
         embeddings: list[list[float]] | None = None,
+        prefix: str = DOCUMENT_PREFIX,
     ) -> int:
         """Bulk upsert.  Each item is (source_type, source_id, text).
 
-        If *embeddings* is provided (matching length), uses them directly.
-        Otherwise, filters unchanged items, then embeds remaining in one
-        batched call.  Returns count of vectors stored/updated.
+        If *embeddings* is provided (matching length), uses them directly;
+        they must have been computed from the texts with *prefix* by the
+        configured model.  Otherwise, filters unchanged items, then embeds
+        the rest with *prefix* in one batched call.  Returns count of
+        vectors stored/updated.
         """
         if not items:
             return 0
 
+        model = self.config.embedding_model
         to_store: list[tuple[str, str, str, list[float]]] = []
 
         if embeddings and len(embeddings) == len(items):
             # Caller provided embeddings
             for (stype, sid, text), emb in zip(items, embeddings):
                 thash = _text_hash(text)
-                if emb and not self._is_current(_vector_id(stype, sid), thash):
+                if emb and not self._is_current(
+                    _vector_id(stype, sid), thash, model, prefix,
+                ):
                     to_store.append((stype, sid, thash, emb))
         else:
-            # Filter unchanged items by text_hash
+            # Filter unchanged items (same text, model and prefix)
             to_embed: list[tuple[str, str, str, str]] = []  # (stype, sid, hash, text)
             for stype, sid, text in items:
                 thash = _text_hash(text)
-                if not self._is_current(_vector_id(stype, sid), thash):
+                if not self._is_current(_vector_id(stype, sid), thash, model, prefix):
                     to_embed.append((stype, sid, thash, text))
             if not to_embed:
                 return 0
@@ -410,7 +446,9 @@ class VectorKB:
             to_embed = to_embed[:budget_left]
 
             try:
-                computed = self.compute_embeddings([t[3] for t in to_embed])
+                computed = self.compute_embeddings(
+                    [t[3] for t in to_embed], prefix=prefix,
+                )
             except (ConnectionError, OllamaError):
                 logger.debug("Ollama unavailable for batch embedding", exc_info=True)
                 return 0
@@ -422,7 +460,7 @@ class VectorKB:
             ]
 
         for stype, sid, thash, emb in to_store:
-            self._store(stype, sid, thash, emb)
+            self._store(stype, sid, thash, emb, model, prefix)
         self._conn.commit()
         if to_store:
             self.enforce_row_cap()
@@ -442,7 +480,7 @@ class VectorKB:
     ) -> list[VectorSearchResult]:
         """Embed *query_text* and find closest vectors by cosine similarity."""
         try:
-            embeddings = self.compute_embeddings([query_text])
+            embeddings = self.compute_embeddings([query_text], prefix=QUERY_PREFIX)
         except (ConnectionError, OllamaError):
             logger.debug("Ollama unavailable for search embedding")
             return []
@@ -568,19 +606,26 @@ class VectorKB:
         return cur.fetchone()[0]
 
     def purge_stale(self, max_age_days: int | None = None) -> int:
-        """Remove entries not updated for *max_age_days*
-        (default ``config.retention_days``)."""
+        """Remove entries not updated for *max_age_days* (default
+        ``config.retention_days``), and every vector made by a model other
+        than the configured text model (or the image embedder): after a
+        model change they are in another space."""
         days = self.config.retention_days if max_age_days is None else max_age_days
         cur = self._conn.execute(
             "DELETE FROM vector_store "
-            "WHERE updated_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?)",
-            (f"-{days} days",),
+            "WHERE updated_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?) "
+            "OR model NOT IN (?, ?)",
+            (f"-{days} days", self.config.embedding_model,
+             ImageEmbedder.MODEL_NAME),
         )
         self._conn.commit()
         deleted = cur.rowcount
         if deleted:
             self._index = None
-            logger.info("Purged %d stale vectors (>%dd old)", deleted, days)
+            logger.info(
+                "Purged %d vectors (>%dd old or not from %s)",
+                deleted, days, self.config.embedding_model,
+            )
         return deleted
 
     def enforce_row_cap(self, max_rows: int | None = None) -> int:

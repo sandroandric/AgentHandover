@@ -25,6 +25,7 @@ from agenthandover_worker.confidence import compute_v2_confidence
 from agenthandover_worker.dom import select_anchor
 from agenthandover_worker.event_helpers import display_name
 from agenthandover_worker.json_extract import extract_json
+from agenthandover_worker.model_profiles import STANDARD_TIER
 from agenthandover_worker.ollama import OllamaClient
 from agenthandover_worker.scene_annotator import as_compact
 
@@ -39,7 +40,7 @@ logger = logging.getLogger(__name__)
 class SOPGeneratorConfig:
     """Configuration for the VLM-based SOP generator."""
 
-    model: str = "qwen3.5:4b"
+    model: str = STANDARD_TIER.sop_model  # main() passes the configured model
     ollama_host: str = "http://localhost:11434"
     # First attempt; the token budget and context come from the model
     # profile.  30 min: 16GB machines need 10+ min per call.

@@ -284,20 +284,23 @@ agenthandover start all  # Start daemon + worker
 
 ### AI Models
 
-AgentHandover auto-detects your Mac's RAM during onboarding and recommends the best model tier:
+AgentHandover auto-detects your Mac's RAM during onboarding and recommends the best model tier. The small Qwen 3.5 4B model annotates every screen on every tier (it stays loaded and answers within the per-frame budget); the larger model writes Skills and behavioural syntheses, where quality matters and calls are rare:
 
-| RAM | Tier | Model | Download |
-|-----|------|-------|----------|
-| 8 GB | Standard | Qwen 3.5 (2B + 4B) | ~6 GB |
-| 16 GB | Recommended | Gemma 4 12B QAT | ~7 GB |
-| 24 GB | Performance | Gemma 4 12B QAT | ~7 GB |
-| 48 GB+ | Max Quality | Gemma 4 31B QAT | ~18 GB |
+| RAM | Tier | Screen annotation | Skill generation | Download |
+|-----|------|-------------------|------------------|----------|
+| 8 GB | Standard | Qwen 3.5 4B | Qwen 3.5 4B | ~4 GB |
+| 16 GB | Recommended | Qwen 3.5 4B | Gemma 4 12B QAT | ~11 GB |
+| 24 GB | Performance | Qwen 3.5 4B | Gemma 4 12B QAT | ~11 GB |
+| 48 GB+ | Max Quality | Qwen 3.5 4B | Gemma 4 31B QAT | ~22 GB |
 
-The Gemma 4 tiers use Google's QAT (Quantization-Aware Training) checkpoints — near-original quality at a much smaller footprint. They require **Ollama 0.30.6+** (install the [official app](https://ollama.com/download), or `brew install --cask ollama-app` — the Homebrew `ollama` *formula* does not bundle the GGUF runner). The 8 GB Qwen tier works on older Ollama. All models run fully local.
+The table lives in one place (`TIERS` in `worker/src/agenthandover_worker/model_profiles.py`, installed as `tiers.json`); onboarding, `agenthandover setup --vlm [--tier ID]`, `agenthandover doctor` and the worker all read it. `agenthandover bench --tier ID --cassette FILE` measures a tier's models on a recorded session's prompts (tok/s and agreement with the recorded answers).
+
+The Gemma 4 tiers use Google's QAT (Quantization-Aware Training) checkpoints — near-original quality at a much smaller footprint. They require **Ollama 0.34.0+** (install the [official app](https://ollama.com/download), or `brew install --cask ollama-app` — the Homebrew `ollama` *formula* does not bundle the GGUF runner). The 8 GB Qwen tier works on older Ollama. All models run fully local.
 
 ```bash
-# Or pull manually:
-ollama pull gemma4:12b-it-qat   # Recommended for 16 GB+ (~7 GB)
+# Or pull manually (Recommended tier):
+ollama pull qwen3.5:4b          # Screen annotation (~3.4 GB)
+ollama pull gemma4:12b-it-qat   # Skill generation (~7.2 GB)
 ollama pull nomic-embed-text    # Semantic search (~274 MB)
 ```
 

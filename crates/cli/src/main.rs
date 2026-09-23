@@ -71,6 +71,10 @@ enum Commands {
         /// Set up VLM only
         #[arg(long)]
         vlm: bool,
+        /// Model tier to set up (standard, recommended, performance,
+        /// max_quality); default: the config's tier, else the RAM's
+        #[arg(long)]
+        tier: Option<String>,
     },
     /// Run pre-flight checks
     Doctor,
@@ -116,6 +120,17 @@ enum Commands {
         /// Which agent to connect: claude-code, codex, openclaw, hermes, mcp
         agent: String,
         /// Options passed to the connector (codex: --path, --append, --force)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        options: Vec<String>,
+    },
+    /// Model bake-off: replay a journey cassette's prompts against a tier's
+    /// live models and report tok/s and a golden-diff score
+    Bench {
+        /// Tier to measure (standard, recommended, performance, max_quality)
+        #[arg(long)]
+        tier: String,
+        /// Options passed to the bench (--cassette PATH, --host URL,
+        /// --annotators a,b,c, --limit N, --out FILE)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         options: Vec<String>,
     },
@@ -226,7 +241,9 @@ fn main() -> Result<()> {
             SopsAction::Retry { failure_id } => commands::sops::retry(&failure_id),
         },
         Commands::Watch => commands::watch::run(),
-        Commands::Setup { check, extension, vlm } => commands::setup::run(check, extension, vlm),
+        Commands::Setup { check, extension, vlm, tier } => {
+            commands::setup::run(check, extension, vlm, tier.as_deref())
+        }
         Commands::Doctor => commands::doctor::run(),
         Commands::Uninstall { purge_data } => commands::uninstall::run(purge_data),
         Commands::Focus { action } => match action {
@@ -254,6 +271,21 @@ fn main() -> Result<()> {
                 Ok(s) => std::process::exit(s.code().unwrap_or(1)),
                 Err(_) => anyhow::bail!("Could not run agent connect. Is the worker installed?"),
             }
+        }
+        Commands::Bench { tier, options } => {
+            // The bench lives in the worker (it replays cassettes through
+            // the worker's Ollama client); run it with the worker's python.
+            let Some(python) = paths::find_venv_python() else {
+                anyhow::bail!("Could not find the worker's Python environment. Is the worker installed?");
+            };
+            let status = std::process::Command::new(python)
+                .args(["-m", "agenthandover_worker.bench", "--tier", &tier])
+                .args(&options)
+                .status()?;
+            if !status.success() {
+                std::process::exit(status.code().unwrap_or(1));
+            }
+            Ok(())
         }
         Commands::Export { format, sop, output } => {
             commands::export::run(&format, sop.as_deref(), output.as_deref())

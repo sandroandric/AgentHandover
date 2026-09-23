@@ -208,9 +208,11 @@ class TestAnnotationRequest:
             assert f'"{key}"' in sa.ANNOTATION_INSTRUCTIONS
 
     def test_default_annotation_model_is_qwen_4b(self):
-        from agenthandover_worker.config import VlmConfig
+        from agenthandover_worker.config import Config
+        from agenthandover_worker.model_profiles import TIERS
 
-        assert AnnotationConfig().model == VlmConfig().annotation_model == "qwen3.5:4b"
+        assert AnnotationConfig().model == Config().vlm.annotation_model == "qwen3.5:4b"
+        assert {tier.annotation_model for tier in TIERS} == {"qwen3.5:4b"}
 
     def test_invalid_output_is_not_asked_twice(self, tmp_path):
         rec = _Recorder({"response": '{"app": "Chrome", "loc', "done_reason": "length"})
