@@ -19,6 +19,7 @@ import uuid
 from typing import TYPE_CHECKING
 
 from agenthandover_worker.knowledge_base import KnowledgeBase
+from agenthandover_worker.redaction import redact
 
 if TYPE_CHECKING:
     from agenthandover_worker.llm_reasoning import LLMReasoner
@@ -295,9 +296,11 @@ class SessionLinker:
         if self._llm_reasoner is None:
             return None
 
+        # Intents are model summaries of the screen: redacted like every
+        # other screen-derived text before it reaches a prompt.
         prompt = (
             "Are these two task descriptions the same recurring workflow? "
-            f"Task A: '{intent_a}' Task B: '{intent_b}'. "
+            f"Task A: '{redact(intent_a)}' Task B: '{redact(intent_b)}'. "
             "Answer YES or NO."
         )
 

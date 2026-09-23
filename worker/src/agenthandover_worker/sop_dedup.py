@@ -393,8 +393,11 @@ def _resolve_conflict_with_llm(
     - ``step_a`` with ``step_b`` added to alternatives if keep both
     - ``None`` on failure / abstention
     """
-    action_a = step_a.get("step", step_a.get("action", ""))
-    action_b = step_b.get("step", step_b.get("action", ""))
+    from agenthandover_worker.redaction import redact
+
+    # Step text comes from the screen: redacted before the prompt.
+    action_a = redact(str(step_a.get("step", step_a.get("action", ""))))
+    action_b = redact(str(step_b.get("step", step_b.get("action", ""))))
 
     prompt = (
         f"Two versions of a procedure step differ. "

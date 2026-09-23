@@ -93,10 +93,13 @@ def analyze_style(
         )
         return {}
 
-    # Format samples for the prompt
+    # Format samples for the prompt.  They are what the user typed, so
+    # they are redacted (before the cut, which could split a secret).
+    from agenthandover_worker.redaction import redact
+
     sample_text = ""
     for i, t in enumerate(texts[:10], 1):
-        sample_text += f"\n[{i}] {t[:500]}"
+        sample_text += f"\n[{i}] {redact(t)[:500]}"
 
     prompt = _STYLE_PROMPT.format(samples=sample_text)
 
