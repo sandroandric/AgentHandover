@@ -106,8 +106,9 @@ atomic_writes = true
 
 [sop]
 # When false (default), generated SOPs are saved as drafts for human review
-# in the app before being exported. Set to true to auto-approve and export
-# immediately — use only if you trust the pipeline's output quality.
+# in the app. Set to true to mark them approved without review. Either way,
+# nothing is written where agents read (Skills, SOP files) until you
+# "Approve for agents" in the app.
 auto_approve = false
 
 [export]
