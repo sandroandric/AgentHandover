@@ -191,6 +191,19 @@ class VectorKB:
             row and row[0] == thash and row[1] == self.config.embedding_model
         )
 
+    def get_current(
+        self, source_type: str, source_id: str, text: str,
+    ) -> list[float] | None:
+        """The stored vector of *text* for this source, or None when the row
+        is missing, holds another text, or came from another model."""
+        row = self._conn.execute(
+            "SELECT embedding, dim, text_hash, model FROM vector_store WHERE id = ?",
+            (_vector_id(source_type, source_id),),
+        ).fetchone()
+        if not row or row[2] != _text_hash(text) or row[3] != self.config.embedding_model:
+            return None
+        return _decode_embedding(row[0], row[1])
+
     def upsert(
         self,
         source_type: str,

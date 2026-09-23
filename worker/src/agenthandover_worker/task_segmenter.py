@@ -24,6 +24,7 @@ import hashlib
 import json
 import logging
 import math
+import sqlite3
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -643,6 +644,25 @@ class TaskSegmenter:
         except OSError:
             logger.debug("Failed to save cluster label cache", exc_info=True)
 
+    def _cached_embeddings(
+        self, frames: list[AnnotatedFrame], texts: list[str],
+    ) -> list[list[float] | None]:
+        """Each frame's stored vector for exactly this text and model, or None."""
+        vkb = self._vector_kb
+        if vkb is None or vkb.config.embedding_model != self.config.embedding_model:
+            return [None] * len(frames)
+        cached: list[list[float] | None] = []
+        for frame, text in zip(frames, texts):
+            try:
+                cached.append(
+                    vkb.get_current("annotation", frame.event_id, text)
+                    if frame.event_id else None
+                )
+            except sqlite3.Error:
+                logger.debug("Vector KB lookup failed", exc_info=True)
+                cached.append(None)
+        return cached
+
     def segment(
         self,
         events: list[dict],
@@ -687,22 +707,31 @@ class TaskSegmenter:
             if proxy and len(proxy) > 20:
                 parts.append(proxy[:500])
             texts.append(CLUSTERING_PREFIX + " | ".join(parts))
+
+        # A frame embedded by an earlier pass keeps its vector in the vector
+        # KB (keyed by event id and text); only the others go to Ollama, so
+        # the 2-hourly pass over a 24-hour window never re-embeds a frame.
+        cached = self._cached_embeddings(frames, texts)
+        missing = [i for i, emb in enumerate(cached) if emb is None]
         try:
             embed_start = time.monotonic()
             embeddings = _compute_embeddings(
-                texts,
+                [texts[i] for i in missing],
                 model=self.config.embedding_model,
                 host=self.config.ollama_host,
-            )
+            ) if missing else []
             result.embedding_time_seconds = time.monotonic() - embed_start
 
-            for i, emb in enumerate(embeddings):
-                if i < len(frames):
+            for i, emb in enumerate(cached):
+                if emb is not None:
                     frames[i].embedding = emb
+            for i, emb in zip(missing, embeddings):
+                frames[i].embedding = emb
 
             logger.info(
-                "Computed %d embeddings in %.1fs",
+                "Computed %d embeddings in %.1fs (%d reused)",
                 len(embeddings), result.embedding_time_seconds,
+                len(frames) - len(missing),
             )
 
             # Store annotation embeddings in vector KB (piggybacks on
@@ -711,14 +740,9 @@ class TaskSegmenter:
                 try:
                     items = [
                         ("annotation", frames[i].event_id, texts[i])
-                        for i in range(len(frames))
-                        if i < len(embeddings) and embeddings[i]
+                        for i, emb in zip(missing, embeddings) if emb
                     ]
-                    valid_embs = [
-                        embeddings[i]
-                        for i in range(len(frames))
-                        if i < len(embeddings) and embeddings[i]
-                    ]
+                    valid_embs = [emb for emb in embeddings if emb]
                     stored = self._vector_kb.upsert_batch(
                         items, embeddings=valid_embs,
                     )

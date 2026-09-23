@@ -2278,11 +2278,13 @@ def _process_passive_discovery(
     continuity_tracker: "ContinuityTracker | None" = None,
     variant_detector: "VariantDetector | None" = None,
     evidence_normalizer: "EvidenceNormalizer | None" = None,
+    now: datetime | None = None,
 ) -> int:
     """Run passive discovery: segment annotations → generate SOPs.
 
     Called periodically (every 2 hours, on idle, or by CLI trigger).
-    Returns the number of SOPs generated.
+    Returns the number of SOPs generated.  *now* ends the annotation
+    window (default: the wall clock); a replay passes its virtual clock.
 
     Pipeline:
       1. Load recent annotated events from DB
@@ -2294,6 +2296,7 @@ def _process_passive_discovery(
     # Step 1: Load annotated events
     events = db.get_annotated_events_in_window(
         hours=segmenter.config.default_window_hours,
+        now=now or datetime.now(timezone.utc),
     )
     if not events:
         logger.debug("Passive discovery: no annotated events in window")
