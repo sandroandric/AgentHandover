@@ -1,3 +1,4 @@
+import AppKit
 import ApplicationServices
 import CoreGraphics
 import Foundation
@@ -39,6 +40,18 @@ struct ObservationDisplayInfo: Codable {
     }
 }
 
+/// One sleep of the Mac (`agenthandover_common::observation::SleepRecord`),
+/// timestamps in ISO 8601 UTC.
+struct ObservationSleepRecord: Codable, Equatable {
+    let sleptAt: String
+    let wokeAt: String
+
+    enum CodingKeys: String, CodingKey {
+        case sleptAt = "slept_at"
+        case wokeAt = "woke_at"
+    }
+}
+
 struct ObservationSnapshot: Codable {
     let accessibilityGranted: Bool
     let screenRecordingGranted: Bool
@@ -46,6 +59,7 @@ struct ObservationSnapshot: Codable {
     let focusedWindow: ObservationWindowInfo?
     let displayTopology: [ObservationDisplayInfo]
     let cursorGlobalPx: ObservationCursorPosition?
+    var lastSleep: ObservationSleepRecord? = nil
 
     enum CodingKeys: String, CodingKey {
         case accessibilityGranted = "accessibility_granted"
@@ -54,6 +68,57 @@ struct ObservationSnapshot: Codable {
         case focusedWindow = "focused_window"
         case displayTopology = "display_topology"
         case cursorGlobalPx = "cursor_global_px"
+        case lastSleep = "last_sleep"
+    }
+}
+
+/// Records the Mac's most recent sleep from NSWorkspace's `willSleep` and
+/// `didWake` notifications.  The daemon turns a new record into a
+/// `SystemSleep` boundary event.
+final class SleepMonitor {
+    private let lock = NSLock()
+    private var sleptAt: Date?
+    private var record: ObservationSleepRecord?
+    private var tokens: [NSObjectProtocol] = []
+
+    /// A monitor observing the shared workspace's notifications.
+    static func started() -> SleepMonitor {
+        let monitor = SleepMonitor()
+        let center = NSWorkspace.shared.notificationCenter
+        monitor.tokens = [
+            center.addObserver(
+                forName: NSWorkspace.willSleepNotification, object: nil, queue: nil
+            ) { [weak monitor] _ in monitor?.willSleep(at: Date()) },
+            center.addObserver(
+                forName: NSWorkspace.didWakeNotification, object: nil, queue: nil
+            ) { [weak monitor] _ in monitor?.didWake(at: Date()) },
+        ]
+        return monitor
+    }
+
+    deinit {
+        tokens.forEach { NSWorkspace.shared.notificationCenter.removeObserver($0) }
+    }
+
+    func willSleep(at date: Date) {
+        lock.lock(); defer { lock.unlock() }
+        sleptAt = date
+    }
+
+    /// A wake without a preceding sleep notification (the app started
+    /// while asleep) records nothing: there is no honest start time.
+    func didWake(at date: Date) {
+        lock.lock(); defer { lock.unlock() }
+        guard let start = sleptAt else { return }
+        let format = ISO8601DateFormatter()
+        record = ObservationSleepRecord(
+            sleptAt: format.string(from: start), wokeAt: format.string(from: date))
+        sleptAt = nil
+    }
+
+    var lastSleep: ObservationSleepRecord? {
+        lock.lock(); defer { lock.unlock() }
+        return record
     }
 }
 
@@ -62,6 +127,11 @@ struct ObservationSnapshot: Codable {
 /// This keeps all TCC-sensitive reads in AgentHandover.app so the daemon can
 /// consume observation metadata without directly touching Accessibility APIs.
 final class ObservationService {
+    private let sleepMonitor: SleepMonitor?
+
+    init(sleepMonitor: SleepMonitor? = nil) {
+        self.sleepMonitor = sleepMonitor
+    }
 
     func snapshot() -> ObservationSnapshot {
         let accessibilityGranted = PermissionChecker.isAccessibilityGranted()
@@ -74,8 +144,22 @@ final class ObservationService {
             secureFieldFocused: accessibilityGranted ? isSecureFieldFocused() : false,
             focusedWindow: accessibilityGranted ? getFocusedWindow(displays: displays) : nil,
             displayTopology: displays,
-            cursorGlobalPx: getCursorPosition()
+            cursorGlobalPx: getCursorPosition(),
+            lastSleep: sleepMonitor?.lastSleep
         )
+    }
+
+    /// The system-wide focused element with its ancestor chain, or nil when
+    /// Accessibility is not granted, nothing is focused, or the focused
+    /// element is a secure field (see `FocusedElementReader`).
+    func focusedElement(captureValues: Bool) -> ObservationFocusedElement? {
+        guard PermissionChecker.isAccessibilityGranted() else { return nil }
+        let systemWide = AXUIElementCreateSystemWide()
+        AXUIElementSetMessagingTimeout(systemWide, 0.1)
+        guard let focused = AXElementNode(element: systemWide)
+            .element(kAXFocusedUIElementAttribute as String) else { return nil }
+        AXUIElementSetMessagingTimeout(focused.element, 0.1)
+        return FocusedElementReader.read(focused: focused, captureValues: captureValues)
     }
 
     private func getDisplayTopology() -> [ObservationDisplayInfo] {
