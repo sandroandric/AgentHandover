@@ -24,6 +24,7 @@ from typing import Any, Callable
 from agenthandover_worker.clipboard_grounding import (
     clipboard_note,
     ground_clipboard_claims,
+    session_clipboard_kinds,
     ground_frame_texts,
 )
 from agenthandover_worker.confidence import compute_v2_confidence
@@ -35,6 +36,7 @@ from agenthandover_worker.model_scheduler import before_generation_call
 from agenthandover_worker.ollama import OllamaClient
 from agenthandover_worker.redaction import redact
 from agenthandover_worker.scene_annotator import as_compact
+from agenthandover_worker.step_grounding import ground_steps
 
 logger = logging.getLogger(__name__)
 
@@ -1659,6 +1661,19 @@ class SOPGenerator:
         # A copy or paste the clipboard did not record is not kept as one
         # (checked against the whole timeline's clipboard events).
         ground_clipboard_claims(template["steps"], timeline)
+        # Steps only where their frames show them, in the frames' order,
+        # with every typed line (``step_grounding``).
+        grounding = ground_steps(template["steps"], timeline, template["variables"])
+        if grounding["dropped"] or grounding["rewritten"] or grounding["added"]:
+            template["variables"] = _reconcile_variables(
+                template["steps"], template["variables"], template["slug"],
+            )
+        if grounding["dropped"]:
+            template["dropped_steps"] = grounding["dropped"]
+        # What the clipboard recorded in the whole session (None: no
+        # record), for the questions asked after it (``focus_questioner``).
+        kinds = session_clipboard_kinds(timeline)
+        template["session_clipboard"] = None if kinds is None else sorted(kinds)
 
         # Enrich confidence with annotation data from the timeline
         annotations = [

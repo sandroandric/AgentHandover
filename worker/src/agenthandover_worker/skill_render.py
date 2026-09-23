@@ -332,6 +332,10 @@ def _render_step(num: int, step: dict) -> list[str]:
     clipboard = (step.get("evidence") or {}).get("clipboard")
     if isinstance(clipboard, dict) and clipboard.get("reason"):
         lines.append(f"   Unconfirmed: {clipboard['reason']}")
+    # Part of the step named what its frames do not show and was cut.
+    grounding = (step.get("evidence") or {}).get("grounding")
+    if isinstance(grounding, dict) and grounding.get("status") == "rewritten":
+        lines.append(f"   Unconfirmed: {grounding.get('reason')}")
     # Any other observed parameter (DOM-derived steps carry e.g. ``value``).
     params = step.get("parameters")
     if isinstance(params, dict):
@@ -587,6 +591,11 @@ def body_sections(proc: dict) -> list[str]:
     contradictions = evidence.get("contradictions") or []
     if contradictions:
         ev_lines.append(f"- Contradictions recorded: {len(contradictions)}")
+    for dropped in evidence.get("dropped_steps") or []:
+        if isinstance(dropped, dict) and dropped.get("action"):
+            ev_lines.append(
+                f"- Not a step: \"{dropped['action']}\" ({dropped.get('reason') or 'unconfirmed'})"
+            )
     staleness = proc.get("staleness") or {}
     if staleness.get("last_confirmed"):
         ev_lines.append(f"- Last confirmed: {staleness['last_confirmed']}")
