@@ -675,7 +675,7 @@ fn step_vlm(check_only: bool, tier_arg: Option<&str>) -> Result<()> {
     let minimum = &table.minimum_ollama_version_for_gemma4;
     if needs_new_ollama {
         match &service_version {
-            Some(v) if !version_at_least(v, minimum) => {
+            Some(v) if !ollama::version_at_least(v, minimum) => {
                 println!(
                     "  {} Gemma 4 QAT models need Ollama {}+; you have {}. Update the app at {}.",
                     "✗".red(),
@@ -772,17 +772,6 @@ fn missing_models<'a>(models: &[&'a str], installed: &[String]) -> Vec<&'a str> 
         .collect()
 }
 
-/// `version` ("0.34.2-rc1") >= `minimum` ("0.34.0").
-fn version_at_least(version: &str, minimum: &str) -> bool {
-    let parse = |s: &str| -> Option<Vec<u64>> {
-        s.split('-').next()?.split('.').map(|p| p.parse().ok()).collect()
-    };
-    match (parse(version), parse(minimum)) {
-        (Some(have), Some(need)) => have >= need,
-        _ => false,
-    }
-}
-
 #[cfg(test)]
 mod vlm_tests {
     use super::*;
@@ -799,14 +788,6 @@ mod vlm_tests {
             missing_models(&["nomic-embed-text"], &["nomic-embed-text:v1.5".to_string()]),
             ["nomic-embed-text"]
         );
-    }
-
-    #[test]
-    fn compares_versions() {
-        assert!(version_at_least("0.34.2", "0.34.0"));
-        assert!(version_at_least("0.34.0-rc1", "0.34.0"));
-        assert!(!version_at_least("0.30.6", "0.34.0"));
-        assert!(!version_at_least("dev", "0.34.0"));
     }
 }
 

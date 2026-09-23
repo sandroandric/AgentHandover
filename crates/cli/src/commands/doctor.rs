@@ -7,7 +7,7 @@ use agenthandover_common::observation::{
 };
 
 use agenthandover_common::tiers;
-use crate::{ollama, paths};
+use crate::{machine, ollama, paths};
 
 /// Detect which install channel produced this AgentHandover installation.
 fn detect_install_channel() -> &'static str {
@@ -47,10 +47,12 @@ fn print_install_hint(channel: &str) {
     }
 }
 
-/// Counters for the three check result states.
+/// Counters for the check result states.  A warning does not fail doctor
+/// but is counted, so a summary never reads "all passed" over one.
 struct CheckCounts {
     passes: u32,
     skips: u32,
+    warnings: u32,
     failures: u32,
 }
 
@@ -59,6 +61,7 @@ impl CheckCounts {
         Self {
             passes: 0,
             skips: 0,
+            warnings: 0,
             failures: 0,
         }
     }
@@ -220,15 +223,14 @@ pub fn run() -> Result<()> {
         );
     }
 
-    // Check 15: Ollama reachable
-    let ollama_version = ollama::version(ollama::BASE_URL);
-    let ollama_ok = ollama_version.is_some();
-    if let Some(version) = &ollama_version {
-        check_pass(&mut counts, &format!("Ollama service ({version})"));
-    } else {
-        check_fail(&mut counts, "Ollama service");
-        eprintln!("  Fix: Install Ollama from https://ollama.com and run it");
-    }
+    // Check 15: the Ollama service (the configured host), its version
+    // against the minimum, the installs on this Mac and which one serves
+    // the port, and memory headroom for the configured tier.
+    let config_str = std::fs::read_to_string(&config_path).unwrap_or_default();
+    let host_url = read_config_string_field(&config_str, "vlm", "ollama_host").unwrap_or_default();
+    let report = machine::gather(&host_url, &configured_models(&config_str));
+    print_findings(&mut counts, &report.findings);
+    let ollama_ok = report.version.is_some();
 
     // Check 16: Required models pulled
     //
@@ -243,8 +245,6 @@ pub fn run() -> Result<()> {
     // Also: if config has `vlm.mode = "remote"`, skip the local model
     // check entirely — they're using a cloud provider.
     if ollama_ok {
-        let config_str = std::fs::read_to_string(&config_path).unwrap_or_default();
-
         let vlm_mode = read_config_string_field(&config_str, "vlm", "mode")
             .unwrap_or_else(|| "local".to_string());
 
@@ -257,16 +257,16 @@ pub fn run() -> Result<()> {
         } else {
             // Missing model keys come from the config's tier, else the
             // RAM tier, exactly as the worker resolves them.
-            let (_, annotation_model, sop_model) = tiers::resolve_models(
-                read_config_string_field(&config_str, "vlm", "tier").as_deref(),
-                read_config_string_field(&config_str, "vlm", "annotation_model").as_deref(),
-                read_config_string_field(&config_str, "vlm", "sop_model").as_deref(),
-            );
+            let machine::ConfiguredModels {
+                annotation: annotation_model,
+                sop: sop_model,
+                ..
+            } = configured_models(&config_str);
             let embedding_model = read_config_string_field(&config_str, "embedding", "model")
                 .unwrap_or_else(|| tiers::table().embedding_model.clone());
 
             // Over HTTP, as `setup` asks (see crate::ollama for why).
-            let installed = ollama::installed_models(ollama::BASE_URL).unwrap_or_default();
+            let installed = ollama::installed_models(&report.host.url).unwrap_or_default();
 
             // The standard tier runs one model for both jobs; deduplicate
             // so we don't report the same model twice.
@@ -295,8 +295,8 @@ pub fn run() -> Result<()> {
     // Summary
     println!();
     println!(
-        "Results: {} passed, {} skipped, {} failed",
-        counts.passes, counts.skips, counts.failures
+        "Results: {} passed, {} skipped, {} warning(s), {} failed",
+        counts.passes, counts.skips, counts.warnings, counts.failures
     );
     if counts.failures > 0 {
         println!(
@@ -304,6 +304,16 @@ pub fn run() -> Result<()> {
             "Some checks failed. See above for details."
                 .yellow()
                 .bold()
+        );
+    } else if counts.warnings > 0 {
+        println!(
+            "{}",
+            format!(
+                "Required checks passed, with {} warning(s): see WARN above",
+                counts.warnings
+            )
+            .yellow()
+            .bold()
         );
     } else if counts.skips > 0 {
         println!(
@@ -323,6 +333,40 @@ pub fn run() -> Result<()> {
         anyhow::bail!("{} doctor check(s) failed", counts.failures);
     }
     Ok(())
+}
+
+/// `agenthandover doctor --ollama-json`: the Ollama and memory report the
+/// app's onboarding shows (the same findings `doctor` prints).
+pub fn print_ollama_json() -> Result<()> {
+    let config_path = agenthandover_common::status::status_dir().join("config.toml");
+    let config_str = std::fs::read_to_string(config_path).unwrap_or_default();
+    let host_url = read_config_string_field(&config_str, "vlm", "ollama_host").unwrap_or_default();
+    let report = machine::gather(&host_url, &configured_models(&config_str));
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    Ok(())
+}
+
+/// The config's tier and models, as the worker resolves them.
+fn configured_models(config_str: &str) -> machine::ConfiguredModels {
+    let (tier, annotation, sop) = tiers::resolve_models(
+        read_config_string_field(config_str, "vlm", "tier").as_deref(),
+        read_config_string_field(config_str, "vlm", "annotation_model").as_deref(),
+        read_config_string_field(config_str, "vlm", "sop_model").as_deref(),
+    );
+    machine::ConfiguredModels { tier_label: tier.label.clone(), annotation, sop }
+}
+
+fn print_findings(counts: &mut CheckCounts, findings: &[machine::Finding]) {
+    for f in findings {
+        match f.level {
+            machine::Level::Pass => check_pass(counts, &f.title),
+            machine::Level::Warn => check_warn(counts, &f.title),
+            machine::Level::Fail => check_fail(counts, &f.title),
+        }
+        for line in &f.lines {
+            eprintln!("  {line}");
+        }
+    }
 }
 
 fn check_capture_servers(counts: &mut CheckCounts) {
@@ -457,6 +501,11 @@ fn check_pass(counts: &mut CheckCounts, name: &str) {
 fn check_fail(counts: &mut CheckCounts, name: &str) {
     counts.record_fail();
     println!("  {} {}", "FAIL".red(), name);
+}
+
+fn check_warn(counts: &mut CheckCounts, name: &str) {
+    counts.warnings += 1;
+    println!("  {} {}", "WARN".yellow(), name);
 }
 
 fn check_skip(counts: &mut CheckCounts, name: &str, reason: &str) {
