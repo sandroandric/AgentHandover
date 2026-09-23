@@ -101,20 +101,6 @@ struct OllamaReport: Decodable, Equatable {
     /// Run `<cli> doctor --ollama-json`.  Blocking; nil when the CLI is
     /// missing, fails, or prints something else.
     static func load(cliPath: String) -> OllamaReport? {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: cliPath)
-        process.arguments = ["doctor", "--ollama-json"]
-        let out = Pipe()
-        process.standardOutput = out
-        process.standardError = FileHandle.nullDevice
-        do {
-            try process.run()
-        } catch {
-            return nil
-        }
-        let data = out.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-        guard process.terminationStatus == 0 else { return nil }
-        return try? decode(data)
+        DoctorJSON.run(cliPath: cliPath, flag: "--ollama-json").flatMap { try? decode($0) }
     }
 }

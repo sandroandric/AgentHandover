@@ -62,6 +62,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Obse
     @Published var pendingOnboarding = false
     var hasTriggeredOnboarding = false
     private var onboardingWindow: NSWindow?
+    /// The open setup was for an install that had finished setup before
+    /// (an upgrade that lost a grant): it closes itself once the grants
+    /// are back.
+    private var setupForExistingInstall = false
     private var focusQAWindow: NSWindow?
 
     /// Single shared AppState used by onboarding, menu bar, and all windows.
@@ -114,7 +118,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Obse
             ServiceController.startWorker()
         }
 
-        if let step = onboardingStartStep() {
+        // Both grants back while the app runs: finish a setup that was only
+        // waiting for them, or resume observing.
+        MainActor.assumeIsolated {
+            sharedAppState.onPermissionsGranted = { [weak self] in self?.permissionsGranted() }
+        }
+
+        let launch = OnboardingProgress.launchAction(
+            defaults: .standard,
+            accessibilityGranted: PermissionChecker.isAccessibilityGranted(),
+            screenRecordingGranted: PermissionChecker.isScreenRecordingGranted()
+        )
+        if case .setup(let step) = launch {
             hasTriggeredOnboarding = true
 
             // Show in dock during onboarding
@@ -139,18 +154,61 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Obse
 
             registerLoginItemOnce()
 
-            // Onboarding done — start services if user hasn't paused.
-            // Off the main thread: startAll waits for the daemon.
-            let userPaused = UserDefaults.standard.bool(forKey: "observingPaused")
-            if !userPaused {
-                MainActor.assumeIsolated {
-                    sharedAppState.servicesStarting()
-                    observationToggle.start { [weak self] _ in
-                        self?.sharedAppState.refreshStatus()
-                    }
-                }
+            // Onboarding done: start services unless the user paused.
+            if launch == .observe {
+                MainActor.assumeIsolated { startObserving() }
             }
         }
+    }
+
+    /// Start capture off the main thread (startAll waits for the daemon).
+    @MainActor
+    private func startObserving() {
+        sharedAppState.userStopped = false
+        sharedAppState.servicesStarting()
+        observationToggle.start { [weak self] _ in
+            self?.sharedAppState.refreshStatus()
+        }
+    }
+
+    /// Both grants came back while the app runs (see
+    /// `OnboardingProgress.regrantAction`).
+    @MainActor
+    private func permissionsGranted() {
+        switch OnboardingProgress.regrantAction(
+            defaults: .standard,
+            setupOpen: onboardingWindow != nil,
+            setupForExistingInstall: setupForExistingInstall,
+            observing: sharedAppState.daemonRunning || observationToggle.isTransitioning
+        ) {
+        case .finishSetup: finishSetup()
+        case .observe: startObserving()
+        case .nothing: break
+        }
+    }
+
+    /// Setup finished (its last screen) or has nothing left to do (an
+    /// existing install's grants came back). A first install starts
+    /// paused; an existing install resumes what the user had.
+    @MainActor
+    private func finishSetup() {
+        let paused = OnboardingProgress.finish(in: .standard)
+        sharedAppState.userStopped = paused
+        onboardingWindow?.close()
+        onboardingWindow = nil
+        hideFromDock()
+        registerLoginItemOnce()
+        DispatchQueue.global(qos: .utility).async {
+            ServiceController.installNativeMessagingHostManifest()
+        }
+        // Capture without both grants would record nothing; the grants
+        // coming back starts it (permissionsGranted).
+        let granted = PermissionChecker.isAccessibilityGranted()
+            && PermissionChecker.isScreenRecordingGranted()
+        if !paused && granted && !sharedAppState.daemonRunning {
+            startObserving()
+        }
+        sharedAppState.refreshStatus()
     }
 
     /// Open AgentHandover at login so a reboot restores capture (the app
@@ -182,19 +240,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Obse
             return
         }
 
+        setupForExistingInstall = UserDefaults.standard.bool(forKey: OnboardingProgress.completedKey)
         let onboardingView = OnboardingView(initialStep: step ?? onboardingStartStep() ?? 0, onComplete: { [weak self] in
-            OnboardingProgress.finish(in: .standard)
-            // Default to paused — user chooses "Observe Me" or "Record" explicitly
-            UserDefaults.standard.set(true, forKey: "observingPaused")
-            self?.sharedAppState.userStopped = true
-            self?.onboardingWindow?.close()
-            self?.onboardingWindow = nil
-            self?.hideFromDock()
-            self?.registerLoginItemOnce()
-            // Install NM manifest on background (no services started yet)
-            DispatchQueue.global(qos: .utility).async {
-                ServiceController.installNativeMessagingHostManifest()
-            }
+            self?.finishSetup()
         })
         .environmentObject(sharedAppState)
         .frame(width: 660, height: 820)
@@ -202,6 +250,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Obse
         let hostingController = NSHostingController(rootView: onboardingView)
         let window = NSWindow(contentViewController: hostingController)
         window.title = "AgentHandover Setup"
+        // Setup's palette is light only (white and cream screens, navy
+        // text). In Dark Mode, system colours and controls inside it (a
+        // card's controlBackgroundColor, text fields) turned dark and left
+        // navy text on a dark fill; pinned to Aqua they match the palette.
+        window.appearance = NSAppearance(named: .aqua)
         window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
         window.setContentSize(NSSize(width: 660, height: 820))
         window.minSize = NSSize(width: 620, height: 720)
