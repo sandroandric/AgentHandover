@@ -12,10 +12,12 @@
  *        - Click intent tracking (click-capture)
  *        - Dwell / scroll-read   (dwell)
  *        - Secure field detection (secure-field)
+ *        - Form submissions      (form-submit)
  */
 
 import { captureSnapshot, noteInteraction } from './dom-capture';
 import { initClickCapture } from './click-capture';
+import { initFormSubmitCapture } from './form-submit';
 import { initSecureFieldDetection } from './secure-field';
 import { initDwellTracker, type DwellConfig } from './dwell-tracker';
 
@@ -269,6 +271,22 @@ sendToBackground('content_ready', {
       document.removeEventListener('click', onInteraction, true);
       document.removeEventListener('focusin', onInteraction, true);
       noteInteraction(null);
+    },
+  });
+}
+
+// --- Form Submissions (which form and control; never field values) ---
+{
+  let cleanupSubmit: (() => void) | null = null;
+
+  registerModule({
+    name: 'form-submit',
+    init() {
+      cleanupSubmit = initFormSubmitCapture(guardedSend);
+    },
+    destroy() {
+      cleanupSubmit?.();
+      cleanupSubmit = null;
     },
   });
 }

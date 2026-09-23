@@ -32,6 +32,16 @@ impl IdleDetector {
         }
     }
 
+    /// Seconds since the last left or right mouse-button press, by the same
+    /// HID query (a timestamp, not an event tap: nothing is intercepted and
+    /// no Input Monitoring permission is involved).
+    pub fn seconds_since_last_click(&self) -> f64 {
+        let since = |event_type| unsafe {
+            CGEventSourceSecondsSinceLastEventType(CGEventSourceStateID::HIDSystemState, event_type)
+        };
+        since(CGEventType::LeftMouseDown).min(since(CGEventType::RightMouseDown))
+    }
+
     pub fn is_idle(&self, threshold_seconds: f64) -> bool {
         self.seconds_since_last_input() >= threshold_seconds
     }
