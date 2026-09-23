@@ -15,11 +15,12 @@ the loop body's processors in the loop's order:
    (or the v1 path when the v2 pipeline is off);
 3. ``run_pipeline`` over one ``EventRetryGuard`` batch of unprocessed
    events, marking them processed and persisting VLM jobs;
-4. ``_process_annotations`` within main()'s daily ``AnnotationBudget``
-   (rolled on the clock's date) and ``_process_diffs``;
+4. ``_process_annotations`` within main()'s hourly and daily
+   ``AnnotationBudget`` (rolled on the clock) and ``_process_diffs``,
+   charged to it;
 5. ``_process_passive_discovery`` every 2 hours of *clock* time (the timer
    starts when the worker is built, as main() seeds it at loop entry)
-   while no focus session is pending;
+   while no focus session is pending, charged to the budget;
 6. ``_write_sops_index``.
 
 Not driven here, because they only exist inline in ``main()``: the VLM
@@ -48,7 +49,7 @@ from agenthandover_worker.annotation_cache import AnnotationCache
 from agenthandover_worker.config import load_config
 from agenthandover_worker.loop_guard import EventRetryGuard
 from agenthandover_worker.ollama import OllamaError
-from agenthandover_worker.scheduler import AnnotationBudget
+from agenthandover_worker.scheduler import AnnotationBudget, charged_to
 
 PASSIVE_DISCOVERY_INTERVAL = timedelta(seconds=7200)  # main(): _PASSIVE_DISCOVERY_INTERVAL
 
@@ -124,11 +125,8 @@ class JourneyWorker:
         cfg = load_config()
         self.cfg = cfg
         vlm_cfg = cfg.vlm
-        # Passive annotation's daily budget, as main() builds it.
-        self.annotation_budget = AnnotationBudget(
-            max_frames=vlm_cfg.annotation_max_frames_per_day,
-            max_compute_seconds=vlm_cfg.annotation_max_compute_minutes_per_day * 60.0,
-        )
+        # Passive model use's budget, as main() builds it.
+        self.annotation_budget = AnnotationBudget.from_config(vlm_cfg)
         features = cfg.features
         host = vlm_cfg.ollama_host
 
@@ -146,6 +144,8 @@ class JourneyWorker:
         self.vector_kb = None
         vector_kb = VectorKB(self.db_path, VectorKBConfig(
             embedding_model=cfg.embedding.model, ollama_host=host,
+            retention_days=cfg.embedding.retention_days,
+            max_rows=cfg.embedding.max_rows,
         ))
         try:
             embedding = vector_kb.compute_embeddings(["health check"])
@@ -456,7 +456,7 @@ class JourneyWorker:
         if self.scene_annotator is not None and not self.v2_schema_ok:
             self.v2_schema_ok = wm._check_v2_schema(db)
         if self.scene_annotator is not None and self.v2_schema_ok:
-            self.annotation_budget.roll(self.clock.now().date().isoformat())
+            self.annotation_budget.roll(self.clock.now())
             ann_stats = wm._process_annotations(
                 db, self.scene_annotator, self.screenshots_dir,
                 privacy_checker=self.privacy_checker,
@@ -466,7 +466,9 @@ class JourneyWorker:
             if ann_stats["annotated"] > 0:
                 self.activity_searcher.refresh_index()
         if self.frame_differ is not None and self.v2_schema_ok:
-            diff_stats = wm._process_diffs(db, self.frame_differ)
+            diff_stats = wm._process_diffs(
+                db, self.frame_differ, budget=self.annotation_budget,
+            )
 
         passive_sops = None
         if (
@@ -476,18 +478,19 @@ class JourneyWorker:
             and self._passive_discovery_due()
             and not (self.state_dir / "focus-session.json").exists()
         ):
-            passive_sops = wm._process_passive_discovery(
-                db,
-                knowledge_base=self.knowledge_base,
-                segmenter=self.task_segmenter,
-                sop_generator=self.sop_generator,
-                sop_auto_approve=self.sop_auto_approve,
-                continuity_tracker=self.continuity_tracker,
-                variant_detector=self.variant_detector,
-                evidence_normalizer=self.evidence_normalizer,
-                now=self.clock.now(),
-                **writers,
-            )
+            with charged_to(self.annotation_budget):
+                passive_sops = wm._process_passive_discovery(
+                    db,
+                    knowledge_base=self.knowledge_base,
+                    segmenter=self.task_segmenter,
+                    sop_generator=self.sop_generator,
+                    sop_auto_approve=self.sop_auto_approve,
+                    continuity_tracker=self.continuity_tracker,
+                    variant_detector=self.variant_detector,
+                    evidence_normalizer=self.evidence_normalizer,
+                    now=self.clock.now(),
+                    **writers,
+                )
             self._last_passive_discovery = self.clock.now()
             if passive_sops > 0:
                 wm._write_sops_index(db, self.knowledge_base)

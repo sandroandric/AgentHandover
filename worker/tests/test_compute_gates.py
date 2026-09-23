@@ -28,6 +28,7 @@ from agenthandover_worker.annotation_cache import (
     AnnotationCache,
     CacheKey,
     cache_key,
+    normalise_screen_text,
     simhash64,
 )
 from agenthandover_worker.db import WorkerDB
@@ -106,7 +107,7 @@ class TestAnnotationBudget:
             )
 
         budget = AnnotationBudget(max_frames=1500, max_compute_seconds=5 * 60)
-        budget.roll("2026-09-23")
+        budget.roll(datetime(2026, 9, 23, 12, 0))
         with WorkerDB(events_db) as db, \
                 patch.object(annotator, "ready", return_value=True), \
                 patch.object(annotator, "annotate_event", side_effect=annotate):
@@ -155,8 +156,9 @@ class TestAnnotationBudget:
 
     def test_counters_start_over_on_a_new_local_day_and_persist(self, events_db):
         budget = AnnotationBudget(max_frames=10, max_compute_seconds=60)
-        budget.roll("2026-09-22")
-        budget.charge(30.0)
+        budget.roll(datetime(2026, 9, 22, 12, 0))
+        budget.charge_frame(model_call=True)
+        budget.charge_compute(30.0)
         with WorkerDB(events_db) as db:
             db.set_state("annotation_budget", budget.to_json())
             restored = AnnotationBudget(max_frames=10, max_compute_seconds=60)
@@ -164,9 +166,9 @@ class TestAnnotationBudget:
         assert (restored.date, restored.frames, restored.compute_seconds) == (
             "2026-09-22", 1, 30.0,
         )
-        restored.roll("2026-09-22")
+        restored.roll(datetime(2026, 9, 22, 12, 30))
         assert restored.frames == 1
-        restored.roll("2026-09-23")
+        restored.roll(datetime(2026, 9, 23, 0, 5))
         assert (restored.frames, restored.compute_seconds) == (0, 0.0)
 
 
@@ -196,7 +198,7 @@ class TestAnnotationCache:
         assert cache.lookup(near) is not None
         far = CacheKey(key.app, key.title_hash, key.ocr_simhash ^ 0b1111)
         assert cache.lookup(far) is None
-        assert simhash64(_SCREEN.upper()) == key.ocr_simhash  # case-insensitive
+        assert simhash64(normalise_screen_text(_SCREEN.upper())) == key.ocr_simhash  # case-insensitive
         cache.close()
 
     def test_different_screen_title_or_app_misses(self, events_db):

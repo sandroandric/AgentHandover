@@ -33,6 +33,37 @@ _TOKEN_RE = re.compile(r"\w+", re.UNICODE)
 _MASK64 = (1 << 64) - 1
 
 
+# Screen text that changes while the screen shows the same thing: a relative
+# time ("5s ago", "updated 3 min ago", "just now"), a clock, an editor's
+# cursor position.  Each becomes one token, then every run of digits
+# becomes "0", before the simhash.  The window title is hashed as is, so
+# two screens that differ only in a number still need the same title to
+# share an annotation.
+_UNIT = (
+    r"(?:s|secs?|seconds?|m|mins?|minutes?|h|hrs?|hours?|d|days?|w|wks?|weeks?"
+    r"|mo|mos|months?|y|yrs?|years?)"
+)
+_RELATIVE_TIME_RE = re.compile(
+    rf"\b(?:(?:\d+|an?|a few)\s*{_UNIT}\s+ago|just now|moments? ago)\b", re.IGNORECASE,
+)
+_CLOCK_RE = re.compile(
+    r"\b\d{1,2}:\d{2}(?::\d{2})?(?:\s*[ap]\.?m\b\.?)?", re.IGNORECASE,
+)
+_TEXT_POSITION_RE = re.compile(
+    r"\b(?:Ln|Line)\s*\d+\s*,\s*(?:Col|Column)\s*\d+\b", re.IGNORECASE,
+)
+_DIGITS_RE = re.compile(r"\d+")
+
+
+def normalise_screen_text(text: str) -> str:
+    """*text* with its volatile parts folded, for the cache key only (the
+    prompt gets the real text)."""
+    text = _RELATIVE_TIME_RE.sub(" _reltime_ ", text)
+    text = _CLOCK_RE.sub(" _clock_ ", text)
+    text = _TEXT_POSITION_RE.sub(" _textpos_ ", text)
+    return _DIGITS_RE.sub("0", text)
+
+
 def simhash64(text: str) -> int:
     """64-bit simhash of *text*'s lowercased word tokens (unsigned)."""
     weights = [0] * 64
@@ -62,7 +93,7 @@ def cache_key(app: str, title: str, ocr_text: str) -> CacheKey | None:
     return CacheKey(
         app=app,
         title_hash=hashlib.sha256(title.encode()).hexdigest()[:32],
-        ocr_simhash=simhash64(ocr_text),
+        ocr_simhash=simhash64(normalise_screen_text(ocr_text)),
     )
 
 
