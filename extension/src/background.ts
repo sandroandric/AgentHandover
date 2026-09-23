@@ -5,7 +5,8 @@
  *   1. Keep the native messaging connection to the local daemon alive
  *      across service-worker restarts.
  *   2. Listen for messages from content scripts and relay them onward.
- *   3. Report navigations of the active tab (`tabs.onUpdated`, no DOM).
+ *   3. Report navigations of the active tab (`tabs.onUpdated`, no DOM) and
+ *      switches to another tab or window, so the daemon knows the page.
  *
  * This service worker is the single coordination point between the
  * per-tab content scripts and the local daemon process.
@@ -141,6 +142,32 @@ chrome.tabs.onUpdated.addListener(
 
 chrome.tabs.onRemoved.addListener((tabId: number) => {
   lastNavigatedUrl.delete(tabId);
+});
+
+/**
+ * A tab switch (or a switch between browser windows) changes the page on
+ * screen without a navigation.  Report it the same way, so the daemon
+ * always knows the page it is about to capture and can check it against
+ * `[privacy.zones] blocked_urls` first.
+ */
+function reportActiveTab(tab: chrome.tabs.Tab | undefined): void {
+  if (!tab || tab.id === undefined || !tab.url) return;
+  lastNavigatedUrl.set(tab.id, tab.url);
+  forwardToDaemon(
+    // `activated`: the page was already loaded; the user switched to it.
+    { type: 'navigation_change', payload: { title: tab.title ?? '', activated: true } },
+    tab.id,
+    tab.url,
+  );
+}
+
+chrome.tabs.onActivated.addListener((info: chrome.tabs.TabActiveInfo) => {
+  chrome.tabs.get(info.tabId, (tab) => reportActiveTab(tab));
+});
+
+chrome.windows.onFocusChanged.addListener((windowId: number) => {
+  if (windowId === chrome.windows.WINDOW_ID_NONE) return;
+  chrome.tabs.query({ active: true, windowId }, (tabs) => reportActiveTab(tabs[0]));
 });
 
 // ---------------------------------------------------------------------------

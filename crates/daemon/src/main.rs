@@ -172,6 +172,7 @@ async fn main() -> Result<()> {
         screenshot_format: app_config.observer.screenshot_format.clone(),
         screenshot_quality: app_config.observer.screenshot_quality,
         screenshot_scale: app_config.observer.screenshot_scale,
+        zones: app_config.privacy.zones.clone(),
         screenshots_dir: {
             // Screenshots dir lives alongside the database
             let data_dir = if cfg!(target_os = "macos") {
@@ -183,6 +184,8 @@ async fn main() -> Result<()> {
             std::fs::create_dir_all(&dir).ok();
             dir
         },
+        // Sockets and the state dir: the standard locations.
+        ..ObserverConfig::default()
     };
 
     // Channel for observer -> storage communication
@@ -807,7 +810,15 @@ fn note_browser_transition(event: &agenthandover_common::event::Event) {
     let Some(kind) = native_messaging::browser_transition_kind(&event.kind) else {
         return;
     };
-    let transition = BrowserTransition { kind, at: chrono::Utc::now() };
+    // The page URL (already origin + path) lets the observer check
+    // `[privacy.zones] blocked_urls` before it captures the page.
+    let url = event
+        .metadata
+        .get("url")
+        .and_then(|v| v.as_str())
+        .filter(|u| *u != "unknown")
+        .map(str::to_string);
+    let transition = BrowserTransition { kind, at: chrono::Utc::now(), url };
     let dir = agenthandover_common::status::data_dir();
     if let Err(e) = write_browser_transition(&dir, &transition) {
         warn!("Failed to write browser transition: {}", e);

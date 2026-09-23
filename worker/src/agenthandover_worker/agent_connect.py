@@ -210,6 +210,8 @@ def prune_claude_skills(skills_dir: Path) -> list[str]:
     are removed, so a user's own Skills are never touched.  Returns the
     removed slugs.
     """
+    from agenthandover_worker.claude_skill_writer import forget_export
+
     removed: list[str] = []
     for proc in _load_procedures():
         if proc.get("lifecycle_state") == "agent_ready":
@@ -220,6 +222,7 @@ def prune_claude_skills(skills_dir: Path) -> list[str]:
         slug = slugify(ident)
         if _is_generated(skills_dir / slug / "SKILL.md"):
             shutil.rmtree(skills_dir / slug, ignore_errors=True)
+            forget_export(skills_dir / slug)
             removed.append(slug)
     return removed
 

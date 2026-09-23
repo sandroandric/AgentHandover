@@ -171,14 +171,11 @@ pub fn decode_jpeg_to_bgra(jpeg: &[u8]) -> Result<(usize, usize, Vec<u8>), Captu
     Ok((width, height, bgra))
 }
 
-/// Capture one frame without blocking the async runtime: the socket read and
-/// JPEG decode run on the blocking pool, and the whole call is bounded by
-/// `CAPTURE_TIMEOUT` so a wedged app cannot stall the observer tick.
-pub async fn capture_frame(scale: f64, quality: u8) -> Result<CapturedFrame, CaptureError> {
-    capture_frame_at(capture_socket_path(), scale, quality, CAPTURE_TIMEOUT).await
-}
-
-/// `capture_frame` against an explicit socket path and bound.
+/// Capture one frame from the app's capture socket at `path` without
+/// blocking the async runtime: the socket read and JPEG decode run on the
+/// blocking pool, and the whole call is bounded by `timeout`
+/// (`CAPTURE_TIMEOUT` for the observer) so a wedged app cannot stall the
+/// observer tick.
 pub async fn capture_frame_at(
     path: PathBuf,
     scale: f64,

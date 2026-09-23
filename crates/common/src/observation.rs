@@ -6,9 +6,9 @@
 //! whether the grants are in place. One client for both.
 //!
 //! Every request is bounded by [`SNAPSHOT_TIMEOUT`] so a wedged app cannot
-//! stall the caller. The async entry point ([`snapshot_async`]) is what the
-//! daemon's observer tick uses; it bounds the whole round trip and logs a
-//! rate-limited warning on timeout. The blocking entry points
+//! stall the caller. The async entry point ([`snapshot_at_async`]) is what
+//! the daemon's observer tick uses (with its own [`WarnLimiter`]); it bounds the whole round trip and logs a
+//! rate-limited warning naming the failing step on any failure. The blocking entry points
 //! ([`snapshot`], [`snapshot_at`]) serve synchronous callers: the daemon's
 //! health and control replies, and `agenthandover doctor`.
 
@@ -21,8 +21,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 /// Upper bound for one snapshot round trip (connect + request + response).
 pub const SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// A wedged app is reported at most once per this interval.
-const WARN_INTERVAL_SECS: u64 = 60;
+/// A failing snapshot is reported at most once per this interval.
+pub const WARN_INTERVAL_SECS: u64 = 30;
 
 const SNAPSHOT_REQUEST: &[u8] = b"{\"command\":\"snapshot\"}\n";
 
@@ -51,7 +51,7 @@ pub enum SnapshotError {
     BadResponse(String),
 }
 
-/// Rate limiter for the "observation socket timed out" warning.
+/// Rate limiter for the "observation snapshot unavailable" warning.
 pub struct WarnLimiter {
     last_warn_secs: AtomicU64,
 }
@@ -81,8 +81,6 @@ impl Default for WarnLimiter {
     }
 }
 
-static TIMEOUT_WARNINGS: WarnLimiter = WarnLimiter::new();
-
 /// `<data dir>/sockets/observation.sock`, served by ObservationServer.swift.
 pub fn observation_socket_path() -> PathBuf {
     crate::status::socket_dir().join("observation.sock")
@@ -104,8 +102,10 @@ fn parse_response(line: &str) -> Result<ObservationSnapshot, SnapshotError> {
 /// Async snapshot from the observation server at `path`.
 ///
 /// The whole round trip is bounded by `timeout`, so a wedged app cannot
-/// stall the observer tick. A timeout logs a warning, rate-limited by
-/// `limiter`, so a stalled app is visible in the daemon log.
+/// stall the observer tick. Every failure logs a warning naming the step
+/// that failed (connect, send, read, parse, or the timeout), rate-limited
+/// by `limiter`, so a missing or wedged app is visible in the daemon log.
+/// The observer treats a failed snapshot as unsafe and captures nothing.
 #[cfg(unix)]
 pub async fn snapshot_at_async(
     path: &Path,
@@ -115,45 +115,52 @@ pub async fn snapshot_at_async(
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
     let round_trip = async {
-        let mut stream = tokio::net::UnixStream::connect(path).await?;
-        stream.write_all(SNAPSHOT_REQUEST).await?;
+        let mut stream = tokio::net::UnixStream::connect(path)
+            .await
+            .map_err(|e| ("connect", SnapshotError::Io(e)))?;
+        stream
+            .write_all(SNAPSHOT_REQUEST)
+            .await
+            .map_err(|e| ("send request", SnapshotError::Io(e)))?;
         let mut response = String::new();
-        BufReader::new(stream).read_line(&mut response).await?;
-        parse_response(&response)
+        BufReader::new(stream)
+            .read_line(&mut response)
+            .await
+            .map_err(|e| ("read reply", SnapshotError::Io(e)))?;
+        parse_response(&response).map_err(|e| ("parse reply", e))
     };
 
-    match tokio::time::timeout(timeout, round_trip).await {
-        Ok(result) => result,
-        Err(_) => {
-            let now = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-            if limiter.should_warn(now) {
-                tracing::warn!(
-                    socket = %path.display(),
-                    timeout_ms = timeout.as_millis() as u64,
-                    "Observation socket did not answer in time; the app may be wedged \
-                     (capture skipped this tick, warning repeats at most once a minute)"
-                );
-            }
-            Err(SnapshotError::Timeout(timeout))
-        }
+    let (step, err) = match tokio::time::timeout(timeout, round_trip).await {
+        Ok(Ok(snapshot)) => return Ok(snapshot),
+        Ok(Err(failure)) => failure,
+        Err(_) => ("wait for reply", SnapshotError::Timeout(timeout)),
+    };
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    if limiter.should_warn(now) {
+        tracing::warn!(
+            socket = %path.display(),
+            step,
+            error = %err,
+            "Observation snapshot unavailable (step: {step}); nothing is captured \
+             until the app answers (warning repeats at most every {WARN_INTERVAL_SECS} s)"
+        );
     }
-}
-
-/// Snapshot of app-owned observation state for the daemon's async observer
-/// loop, `None` on any failure. Bounded by [`SNAPSHOT_TIMEOUT`].
-#[cfg(unix)]
-pub async fn snapshot_async() -> Option<ObservationSnapshot> {
-    snapshot_at_async(&observation_socket_path(), SNAPSHOT_TIMEOUT, &TIMEOUT_WARNINGS)
-        .await
-        .ok()
+    Err(err)
 }
 
 #[cfg(not(unix))]
-pub async fn snapshot_async() -> Option<ObservationSnapshot> {
-    None
+pub async fn snapshot_at_async(
+    _path: &Path,
+    _timeout: Duration,
+    _limiter: &WarnLimiter,
+) -> Result<ObservationSnapshot, SnapshotError> {
+    Err(SnapshotError::Io(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "observation socket requires a Unix platform",
+    )))
 }
 
 /// Blocking snapshot from the observation server at `socket_path`.
@@ -317,7 +324,8 @@ mod tests {
         assert!(elapsed < Duration::from_millis(2500), "tick blocked for {elapsed:?}");
         let text = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
         assert!(text.contains("WARN"), "no warning logged: {text}");
-        assert!(text.contains("Observation socket did not answer in time"), "{text}");
+        assert!(text.contains("Observation snapshot unavailable"), "{text}");
+        assert!(text.contains("wait for reply"), "{text}");
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -359,11 +367,11 @@ mod tests {
     }
 
     #[test]
-    fn warning_is_rate_limited_to_once_a_minute() {
+    fn warning_is_rate_limited_to_once_per_interval() {
         let limiter = WarnLimiter::new();
         assert!(limiter.should_warn(1_000));
         assert!(!limiter.should_warn(1_010));
-        assert!(!limiter.should_warn(1_059));
-        assert!(limiter.should_warn(1_060));
+        assert!(!limiter.should_warn(1_029));
+        assert!(limiter.should_warn(1_030));
     }
 }

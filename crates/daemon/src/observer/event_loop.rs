@@ -1,6 +1,7 @@
 use anyhow::Result;
-use chrono::Utc;
+use chrono::{Local, Utc};
 use agenthandover_common::browser_transition::{BrowserTransitionKind, BrowserTransitionWatch};
+use agenthandover_common::config::PrivacyZonesConfig;
 use agenthandover_common::event::*;
 use agenthandover_common::redaction::Redactor;
 use agenthandover_storage::artifact_store::ArtifactStore;
@@ -16,6 +17,8 @@ use tracing::{info, debug, warn, error};
 use uuid::Uuid;
 
 use super::capture_policy::{ocr_words, CapturePolicy, CaptureTrigger, FrameDecision};
+use super::privacy_zones::{PrivacyZones, Zone};
+use crate::observation::{snapshot_at_async, WarnLimiter, SNAPSHOT_TIMEOUT};
 use crate::capture::dhash;
 
 /// Messages sent from the observer to the storage writer.
@@ -49,6 +52,15 @@ pub struct ObserverConfig {
     pub screenshot_scale: f64,
     /// Directory for plain JPEG screenshots (VLM annotation pipeline).
     pub screenshots_dir: PathBuf,
+    /// `[privacy.zones]`: evaluated every tick before any capture request.
+    pub zones: PrivacyZonesConfig,
+    /// The app's observation socket (window, permissions, secure field).
+    pub observation_socket: PathBuf,
+    /// The app's capture socket (frames).
+    pub capture_socket: PathBuf,
+    /// Data dir holding the focus-recording signal and the browser
+    /// transition file.
+    pub state_dir: PathBuf,
 }
 
 impl Default for ObserverConfig {
@@ -64,6 +76,10 @@ impl Default for ObserverConfig {
             screenshot_quality: 70,
             screenshot_scale: 0.5,
             screenshots_dir: PathBuf::from("/tmp/agenthandover-screenshots"),
+            zones: PrivacyZonesConfig::default(),
+            observation_socket: agenthandover_common::observation::observation_socket_path(),
+            capture_socket: agenthandover_common::observation::capture_socket_path(),
+            state_dir: agenthandover_common::status::data_dir(),
         }
     }
 }
@@ -77,6 +93,13 @@ impl Default for ObserverConfig {
 /// `browser_transition`), a mouse click, a clipboard change
 /// (`clipboard_changed`, set by the clipboard monitor), every 2 s during a
 /// focus recording, and otherwise as a heartbeat once a minute.
+///
+/// Privacy comes first each tick: a tick whose observation snapshot failed
+/// records nothing (the secure-field check cannot run), a focused secure
+/// field records nothing, and `[privacy.zones]` is evaluated for the focused
+/// window (app, title, and the browser's page URL) before the shutter: a
+/// blocked window gets no frame, no OCR and no title, a metadata-only window
+/// gets its app-switch and title events but no frame.
 ///
 /// When `capture_paused` is `true` AND there is no active focus recording
 /// session, the loop skips all event capture (AppSwitch, WindowTitleChange,
@@ -101,6 +124,11 @@ pub async fn run_observer_loop(
         Instant::now(),
     );
     let mut last_tick = Instant::now();
+    let zones = PrivacyZones::new(&config.zones);
+    let snapshot_warnings = WarnLimiter::new();
+    // The browser's current page (origin + path), from the extension's
+    // navigations, tab switches, clicks and form submits.
+    let mut browser_url: Option<String> = None;
 
     // Mouse clicks are read from the HID system's "seconds since last
     // mouse-down" (no event tap, nothing intercepted).
@@ -108,7 +136,7 @@ pub async fn run_observer_loop(
     let idle_detector = crate::platform::IdleDetector::new();
 
     // Focus recording session tracking; browser transitions share the dir.
-    let state_dir = agenthandover_common::status::data_dir();
+    let state_dir = config.state_dir.clone();
     let mut active_focus_session_id: Option<String> = None;
     let mut browser_watch = BrowserTransitionWatch::since(Utc::now());
 
@@ -166,6 +194,10 @@ pub async fn run_observer_loop(
                 // tick so one that happened while paused never fires later.
                 let clipboard_transition = clipboard_changed.swap(false, Ordering::AcqRel);
                 let browser_transition = browser_watch.poll(&state_dir);
+                if let Some(url) = browser_transition.as_ref().and_then(|t| t.url.clone()) {
+                    browser_url = Some(url);
+                }
+                let browser_transition = browser_transition.map(|t| t.kind);
 
                 // If capture is paused and no active focus recording, skip
                 // all event capture this tick. Focus recordings always run
@@ -178,55 +210,59 @@ pub async fn run_observer_loop(
 
                 // 1. Pull app-owned observation state. The app is the sole
                 // TCC principal for Accessibility and Screen Recording.
-                let observation = crate::observation::snapshot_async().await;
+                // Without a snapshot the secure-field check cannot run, so
+                // the tick is unsafe: capture nothing, and leave the last
+                // app/title as they were so no transition is fabricated.
+                // (The failure is warned, rate-limited, by the client.)
+                let Ok(observation) = snapshot_at_async(
+                    &config.observation_socket,
+                    SNAPSHOT_TIMEOUT,
+                    &snapshot_warnings,
+                )
+                .await
+                else {
+                    continue;
+                };
 
                 // 2. Check for secure field — if focused, skip all capture.
-                if observation
-                    .as_ref()
-                    .map(|snapshot| {
-                        snapshot.accessibility_granted && snapshot.secure_field_focused
-                    })
-                    .unwrap_or(false)
-                {
+                let Some(zone) = privacy_zone(&zones, &observation, browser_url.as_deref()) else {
                     debug!("Secure field focused — skipping capture");
                     continue;
-                }
+                };
 
                 // 3. Observation metadata comes from the app-owned socket.
-                let display_topology = observation
-                    .as_ref()
-                    .map(|snapshot| snapshot.display_topology.clone())
-                    .unwrap_or_default();
+                let display_topology = observation.display_topology.clone();
 
                 let primary_display_id = display_topology
                     .first()
                     .map(|d| d.display_id.clone())
                     .unwrap_or_else(|| "unknown".to_string());
 
-                let window = observation
-                    .as_ref()
-                    .and_then(|snapshot| {
-                        if snapshot.accessibility_granted {
-                            snapshot.focused_window.clone()
-                        } else {
-                            None
-                        }
-                    });
+                let observed_window = if observation.accessibility_granted {
+                    observation.focused_window.clone()
+                } else {
+                    None
+                };
+                let cursor_global_px = if observation.accessibility_granted {
+                    observation.cursor_global_px.clone()
+                } else {
+                    None
+                };
 
-                let cursor_global_px = observation
-                    .as_ref()
-                    .and_then(|snapshot| {
-                        if snapshot.accessibility_granted {
-                            snapshot.cursor_global_px.clone()
-                        } else {
-                            None
-                        }
-                    });
+                // The privacy zone (above) is known before anything is
+                // recorded. A blocked window's title is withheld from every
+                // event; only the app switch into it is recorded.
+                let window = observed_window.clone().map(|mut w| {
+                    if zone == Zone::Blocked {
+                        w.title.clear();
+                    }
+                    w
+                });
 
                 // 4. Collect this tick's transitions, cheapest first.
                 let mut transitions: Vec<CaptureTrigger> = Vec::new();
-                let current_title = window.as_ref().map(|w| w.title.clone());
-                let current_app = window.as_ref().map(|w| w.app_id.clone());
+                let current_title = observed_window.as_ref().map(|w| w.title.clone());
+                let current_app = observed_window.as_ref().map(|w| w.app_id.clone());
 
                 // App switch detection
                 if current_app != last_app_id {
@@ -245,11 +281,12 @@ pub async fn run_observer_loop(
                         // Query AppleScript state for known native apps
                         #[cfg(target_os = "macos")]
                         {
-                            let should_query = if let Some(last) = applescript_last_query.get(to.as_str()) {
-                                last.elapsed() >= applescript_throttle
-                            } else {
-                                true
-                            };
+                            // App state (page URL, document, message) is
+                            // content: never read for a zoned window.
+                            let should_query = zone == Zone::Full
+                                && applescript_last_query
+                                    .get(to.as_str())
+                                    .is_none_or(|last| last.elapsed() >= applescript_throttle);
 
                             if should_query {
                                 // Try by bundle ID first, then by app name (async, off executor)
@@ -289,9 +326,9 @@ pub async fn run_observer_loop(
                     last_app_id = current_app.clone();
                 }
 
-                // Title change detection
+                // Title change detection (not recorded for a blocked window)
                 if current_title != last_window_title {
-                    if last_window_title.is_some() {
+                    if last_window_title.is_some() && zone != Zone::Blocked {
                         let mut event = make_event(
                             EventKind::WindowTitleChange,
                             &window,
@@ -327,6 +364,11 @@ pub async fn run_observer_loop(
 
                 // 5. At most one frame per tick, only when something happened
                 // (or the heartbeat / focus interval is due) and budget remains.
+                // A blocked or metadata-only window never reaches the shutter.
+                if zone != Zone::Full {
+                    debug!(zone = zone.as_str(), "Privacy zone: no frame");
+                    continue;
+                }
                 if !config.capture_screenshots || artifact_store.is_none() {
                     continue;
                 }
@@ -336,7 +378,13 @@ pub async fn run_observer_loop(
                 else {
                     continue;
                 };
-                let Some(kept) = capture_kept_frame(&mut policy, trigger, focus_recording, &config).await
+                let gate = PrivacyGate {
+                    zones: &zones,
+                    warnings: &snapshot_warnings,
+                    browser_url: browser_url.as_deref(),
+                };
+                let Some(kept) =
+                    capture_kept_frame(&mut policy, trigger, focus_recording, &config, &gate).await
                 else {
                     continue;
                 };
@@ -354,6 +402,14 @@ pub async fn run_observer_loop(
                 }
                 if let Some(ocr) = kept.ocr {
                     event.metadata["ocr"] = ocr;
+                }
+                // The page the frame shows, so the worker's zone check (the
+                // second line) sees the URL too.
+                if let (Some(url), Some(w)) = (&browser_url, &window) {
+                    let app = super::privacy_zones::strip_pid_prefix(&w.app_id).to_lowercase();
+                    if super::privacy_zones::is_browser(&app) {
+                        event.metadata["url"] = serde_json::Value::String(url.clone());
+                    }
                 }
                 event.metadata["capture_trigger"] = serde_json::Value::String(trigger.as_str().to_string());
                 if focus_recording {
@@ -432,8 +488,48 @@ struct KeptFrame {
     ocr: Option<serde_json::Value>,
 }
 
+/// The zone of the snapshot's focused window, or `None` when a secure
+/// (password) field is focused and nothing may be recorded.
+fn privacy_zone(
+    zones: &PrivacyZones,
+    observation: &crate::observation::ObservationSnapshot,
+    browser_url: Option<&str>,
+) -> Option<Zone> {
+    if !observation.accessibility_granted {
+        return Some(Zone::Full);
+    }
+    if observation.secure_field_focused {
+        return None;
+    }
+    Some(observation.focused_window.as_ref().map_or(Zone::Full, |w| {
+        zones.zone(&w.app_id, &w.title, browser_url, Local::now().time())
+    }))
+}
+
+/// What a captured frame is checked against once it is in hand.
+struct PrivacyGate<'a> {
+    zones: &'a PrivacyZones,
+    warnings: &'a WarnLimiter,
+    browser_url: Option<&'a str>,
+}
+
+impl PrivacyGate<'_> {
+    /// Whether the window on screen *now* may still be recorded: the user
+    /// can switch to a blocked window, or focus a password field, while
+    /// the frame is being taken. A failed snapshot is a no.
+    async fn still_allows(&self, config: &ObserverConfig) -> bool {
+        let Ok(now) = snapshot_at_async(&config.observation_socket, SNAPSHOT_TIMEOUT, self.warnings).await
+        else {
+            return false;
+        };
+        privacy_zone(self.zones, &now, self.browser_url) == Some(Zone::Full)
+    }
+}
+
 /// Capture one frame for `trigger` and run it through the policy, cheapest
-/// check first: the block-mean signature against the last kept frame, then
+/// check first: the privacy zone of the window on screen once the frame is
+/// in hand (it may have changed during the capture), the block-mean
+/// signature against the last kept frame, then
 /// (heartbeats only) fast OCR against the last kept frame's words, then, for
 /// a frame that is kept, accurate OCR and the JPEG write. Nothing reaches
 /// disk for a dropped frame. `None` when the capture failed or the frame
@@ -443,8 +539,14 @@ async fn capture_kept_frame(
     trigger: CaptureTrigger,
     focus_recording: bool,
     config: &ObserverConfig,
+    gate: &PrivacyGate<'_>,
 ) -> Option<KeptFrame> {
-    let (width, height, bgra, jpeg) = grab_frame(config.screenshot_scale, config.screenshot_quality).await?;
+    let (width, height, bgra, jpeg) =
+        grab_frame(&config.capture_socket, config.screenshot_scale, config.screenshot_quality).await?;
+    if !gate.still_allows(config).await {
+        debug!("The window changed to a private one during the capture, dropping the frame");
+        return None;
+    }
     let signature = dhash::compute_signature(&bgra, width, height)?;
 
     let mut pixels = bgra;
@@ -480,11 +582,12 @@ async fn capture_kept_frame(
 /// Capture one frame from the app's capture socket: `(width, height, BGRA
 /// pixels, JPEG bytes)`. Transient socket errors are retried twice.
 #[cfg(target_os = "macos")]
-async fn grab_frame(scale: f64, quality: u8) -> Option<(usize, usize, Vec<u8>, Vec<u8>)> {
+async fn grab_frame(socket: &Path, scale: f64, quality: u8) -> Option<(usize, usize, Vec<u8>, Vec<u8>)> {
+    use crate::capture::screenshot::{capture_frame_at, CAPTURE_TIMEOUT};
     const MAX_RETRIES: u32 = 2;
 
     for attempt in 0..=MAX_RETRIES {
-        match crate::capture::screenshot::capture_frame(scale, quality).await {
+        match capture_frame_at(socket.to_path_buf(), scale, quality, CAPTURE_TIMEOUT).await {
             Ok(frame) => {
                 debug!(
                     width = frame.width,
@@ -508,7 +611,7 @@ async fn grab_frame(scale: f64, quality: u8) -> Option<(usize, usize, Vec<u8>, V
 }
 
 #[cfg(not(target_os = "macos"))]
-async fn grab_frame(_scale: f64, _quality: u8) -> Option<(usize, usize, Vec<u8>, Vec<u8>)> {
+async fn grab_frame(_socket: &Path, _scale: f64, _quality: u8) -> Option<(usize, usize, Vec<u8>, Vec<u8>)> {
     None
 }
 

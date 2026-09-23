@@ -38,7 +38,7 @@ Covers:
 from __future__ import annotations
 
 import json
-from datetime import datetime, time as dt_time
+from datetime import datetime, time as dt_time, timezone
 from unittest.mock import patch
 
 import pytest
@@ -53,6 +53,12 @@ from agenthandover_worker.privacy_zones import (
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _local_iso(hour: int, minute: int) -> str:
+    """An ISO timestamp (UTC, as the daemon stores it) for a local time."""
+    local = datetime(2026, 3, 11, hour, minute).astimezone()
+    return local.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def _make_event(
@@ -395,12 +401,12 @@ class TestAutoPauseDuringWindow:
             assert checker.is_auto_paused() is True
 
     def test_event_blocked_during_auto_pause(self) -> None:
+        # The event's own (local) time decides, not when the worker gets to it.
         config = PrivacyZoneConfig(auto_pause=["09:00-17:00"])
         checker = PrivacyZoneChecker(config)
-        with patch("agenthandover_worker.privacy_zones.datetime") as mock_dt:
-            mock_dt.now.return_value.time.return_value = dt_time(12, 0)
-            event = _make_event(app="Visual Studio Code")
-            assert checker.check_event(event) == ObservationTier.BLOCKED
+        event = _make_event(app="Visual Studio Code")
+        event["timestamp"] = _local_iso(12, 0)
+        assert checker.check_event(event) == ObservationTier.BLOCKED
 
 
 # ---------------------------------------------------------------------------
@@ -419,10 +425,24 @@ class TestAutoPauseOutsideWindow:
     def test_event_allowed_outside_auto_pause(self) -> None:
         config = PrivacyZoneConfig(auto_pause=["09:00-17:00"])
         checker = PrivacyZoneChecker(config)
-        with patch("agenthandover_worker.privacy_zones.datetime") as mock_dt:
-            mock_dt.now.return_value.time.return_value = dt_time(20, 0)
-            event = _make_event(app="Visual Studio Code")
-            assert checker.check_event(event) == ObservationTier.FULL
+        event = _make_event(app="Visual Studio Code")
+        event["timestamp"] = _local_iso(20, 0)
+        assert checker.check_event(event) == ObservationTier.FULL
+
+    def test_frame_from_a_paused_window_stays_blocked_when_processed_later(self) -> None:
+        """Captured at 12:00 inside the window, annotated at 20:00 outside it."""
+        checker = PrivacyZoneChecker(PrivacyZoneConfig(auto_pause=["09:00-17:00"]))
+        event = _make_event(app="Visual Studio Code")
+        event["timestamp"] = _local_iso(12, 0)
+
+        class _Evening(datetime):
+            @classmethod
+            def now(cls, tz=None):  # the worker reaches the frame at 20:00
+                return datetime(2026, 3, 11, 20, 0)
+
+        with patch("agenthandover_worker.privacy_zones.datetime", _Evening):
+            assert not checker.is_auto_paused()
+            assert checker.check_event(event) == ObservationTier.BLOCKED
 
 
 # ---------------------------------------------------------------------------
@@ -888,3 +908,87 @@ class TestEventWithDictMetadataJSON:
             "metadata_json": {"url": "https://github.com"},
         }
         assert checker.check_event(event) == ObservationTier.FULL
+
+
+# ---------------------------------------------------------------------------
+# Events as the daemon writes them (WP-V2)
+# ---------------------------------------------------------------------------
+
+
+def _daemon_event(app_id: str, title: str = "", url: str = "") -> dict:
+    """A DwellSnapshot row as the daemon stores it: ``app_id`` carries the
+    ``pid:<pid>:`` prefix for native windows, a bundle id for browser events."""
+    metadata = {"screenshot_path": "/tmp/x.jpg"}
+    if url:
+        metadata["url"] = url
+    return {
+        "id": "daemon-frame",
+        "timestamp": "2026-03-11T10:00:00Z",
+        "kind_json": json.dumps({"DwellSnapshot": {}}),
+        "window_json": json.dumps({
+            "window_id": "7", "app_id": app_id, "title": title,
+            "bounds_global_px": [0, 0, 10, 10], "z_order": 0, "is_fullscreen": False,
+        }),
+        "metadata_json": json.dumps(metadata),
+    }
+
+
+class TestDaemonShapedEvents:
+    def test_pid_prefix_is_stripped_so_the_default_list_matches(self) -> None:
+        checker = PrivacyZoneChecker()
+        event = _daemon_event("pid:4242:1Password", "Vault")
+        assert checker.check_event(event) == ObservationTier.BLOCKED
+
+    def test_configured_pattern_is_case_insensitive(self) -> None:
+        checker = PrivacyZoneChecker(PrivacyZoneConfig(blocked=["SIGNAL*"]))
+        assert checker.check_event(_daemon_event("pid:1:signal")) == ObservationTier.BLOCKED
+
+    def test_title_is_a_candidate(self) -> None:
+        checker = PrivacyZoneChecker(PrivacyZoneConfig(blocked=["*payslip*"]))
+        event = _daemon_event("pid:1:Preview", "Payslip-2026-08.pdf")
+        assert checker.check_event(event) == ObservationTier.BLOCKED
+        assert checker.check_event(_daemon_event("pid:1:Preview", "cat.png")) == ObservationTier.FULL
+
+    def test_metadata_only_by_app_name(self) -> None:
+        checker = PrivacyZoneChecker(PrivacyZoneConfig(metadata_only=["messages"]))
+        assert checker.check_event(_daemon_event("pid:9:Messages", "Alice")) == (
+            ObservationTier.METADATA_ONLY
+        )
+
+    def test_browser_frame_url_is_checked(self) -> None:
+        checker = PrivacyZoneChecker(PrivacyZoneConfig(blocked_urls=["*vault.example.com*"]))
+        event = _daemon_event("pid:3:Google Chrome", "Vault", url="https://VAULT.example.com/items")
+        assert checker.check_event(event) == ObservationTier.BLOCKED
+
+    def test_extension_event_bundle_id_is_a_candidate(self) -> None:
+        checker = PrivacyZoneChecker(PrivacyZoneConfig(blocked=["com.google.chrome"]))
+        assert checker.check_event(_daemon_event("com.google.Chrome", "x")) == ObservationTier.BLOCKED
+
+    def test_ordinary_window_is_full(self) -> None:
+        checker = PrivacyZoneChecker()
+        assert checker.check_event(_daemon_event("pid:5:TextEdit", "notes.txt")) == ObservationTier.FULL
+
+
+def _rust_string_list(source: str, name: str) -> set[str]:
+    import re
+
+    block = re.search(rf"pub const {name}: &\[&str\] = &\[(.*?)\];", source, re.S)
+    assert block, name
+    return set(re.findall(r'"([^"]*)"', block.group(1)))
+
+
+def test_default_lists_match_the_daemon() -> None:
+    """The daemon applies the same defaults before capture; the lists must
+    not drift apart."""
+    from pathlib import Path
+
+    rust = (
+        Path(__file__).resolve().parents[2]
+        / "crates" / "daemon" / "src" / "observer" / "privacy_zones.rs"
+    ).read_text(encoding="utf-8")
+    assert _rust_string_list(rust, "DEFAULT_BLOCKED_APPS") == set(
+        PrivacyZoneChecker._DEFAULT_BLOCKED
+    )
+    assert _rust_string_list(rust, "DEFAULT_BLOCKED_URLS") == set(
+        PrivacyZoneChecker._DEFAULT_BLOCKED_URLS
+    )

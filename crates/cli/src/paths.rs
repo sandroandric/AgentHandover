@@ -197,7 +197,8 @@ pub fn find_daemon_binary() -> Option<PathBuf> {
 
 /// Return all Native Messaging Hosts directories for supported Chromium browsers.
 ///
-/// Supports Chrome, Chromium, Brave, and Edge on macOS and Linux.
+/// Supports Chrome, Chromium, Brave, Edge, Comet and Arc on macOS; Chrome,
+/// Chromium, Brave and Edge on Linux.
 pub fn native_messaging_hosts_dirs() -> Vec<PathBuf> {
     let home = match std::env::var("HOME") {
         Ok(h) => h,
@@ -213,6 +214,7 @@ pub fn native_messaging_hosts_dirs() -> Vec<PathBuf> {
             "BraveSoftware/Brave-Browser/NativeMessagingHosts",
             "Microsoft Edge/NativeMessagingHosts",
             "Comet/NativeMessagingHosts",
+            "Arc/User Data/NativeMessagingHosts",
         ] {
             dirs.push(
                 PathBuf::from(&home)

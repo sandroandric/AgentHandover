@@ -144,10 +144,15 @@ auto_promote = false
 # max_autonomous_actions_per_hour = 20
 
 [privacy.zones]
+# Enforced by the daemon before it captures a frame, and again by the worker
+# on stored events. App patterns match the app name and the window title;
+# URL patterns match the browser's current page (origin + path). Globs,
+# case-insensitive. Password managers and banking/login URLs are always
+# blocked in addition to these lists.
 # Apps that are always observed at full fidelity
-# full_observation = ["com.apple.Safari", "com.google.Chrome"]
+# full_observation = ["Safari", "Google Chrome"]
 # Apps where only metadata (app name, timestamp) is captured — no screenshots
-# metadata_only = ["com.apple.Messages"]
+# metadata_only = ["Messages"]
 # Apps that are completely blocked from observation (glob patterns)
 # blocked = ["1Password*", "Bitwarden*", "LastPass*", "KeePassXC*", "Keychain Access"]
 # URL patterns that are always blocked (glob patterns, case-insensitive)

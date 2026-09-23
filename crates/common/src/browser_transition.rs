@@ -5,9 +5,10 @@
 //! form submit it receives cannot reach the observer loop in memory. The
 //! bridge overwrites one small file in the data dir with the latest
 //! transition; the observer reads it each tick and fires the shutter when
-//! its timestamp is newer than the last one it saw. Only the kind and the
-//! time are written: the event itself (URL, target) goes to SQLite as
-//! before.
+//! its timestamp is newer than the last one it saw. The kind, the time and
+//! the page URL (origin + path, as stored) are written: the observer checks
+//! the URL against `[privacy.zones] blocked_urls` before it captures. The
+//! event itself goes to SQLite as before.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -30,6 +31,9 @@ pub enum BrowserTransitionKind {
 pub struct BrowserTransition {
     pub kind: BrowserTransitionKind,
     pub at: DateTime<Utc>,
+    /// The active page's URL, origin + path only.
+    #[serde(default)]
+    pub url: Option<String>,
 }
 
 /// Replace the transition file in `dir` (write to a temp file, then rename,
@@ -64,13 +68,13 @@ impl BrowserTransitionWatch {
     }
 
     /// The transition in `dir` if it is newer than the last one returned.
-    pub fn poll(&mut self, dir: &Path) -> Option<BrowserTransitionKind> {
+    pub fn poll(&mut self, dir: &Path) -> Option<BrowserTransition> {
         let transition = read_browser_transition(dir)?;
         if self.last_seen.is_some_and(|seen| transition.at <= seen) {
             return None;
         }
         self.last_seen = Some(transition.at);
-        Some(transition.kind)
+        Some(transition)
     }
 }
 
@@ -89,18 +93,20 @@ mod tests {
         let first = BrowserTransition {
             kind: BrowserTransitionKind::Navigation,
             at: start + Duration::milliseconds(10),
+            url: Some("https://vault.example.com/items".into()),
         };
         write_browser_transition(dir.path(), &first).unwrap();
-        assert_eq!(read_browser_transition(dir.path()), Some(first));
-        assert_eq!(watch.poll(dir.path()), Some(BrowserTransitionKind::Navigation));
+        assert_eq!(read_browser_transition(dir.path()), Some(first.clone()));
+        assert_eq!(watch.poll(dir.path()), Some(first));
         assert_eq!(watch.poll(dir.path()), None, "same transition twice");
 
         let second = BrowserTransition {
             kind: BrowserTransitionKind::FormSubmit,
             at: start + Duration::milliseconds(20),
+            url: None,
         };
         write_browser_transition(dir.path(), &second).unwrap();
-        assert_eq!(watch.poll(dir.path()), Some(BrowserTransitionKind::FormSubmit));
+        assert_eq!(watch.poll(dir.path()).map(|t| t.kind), Some(BrowserTransitionKind::FormSubmit));
     }
 
     #[test]
@@ -109,10 +115,24 @@ mod tests {
         let old = BrowserTransition {
             kind: BrowserTransitionKind::Click,
             at: Utc::now() - Duration::seconds(30),
+            url: None,
         };
         write_browser_transition(dir.path(), &old).unwrap();
         let mut watch = BrowserTransitionWatch::since(Utc::now());
         assert_eq!(watch.poll(dir.path()), None);
+    }
+
+    #[test]
+    fn a_file_without_url_from_an_older_bridge_still_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(BROWSER_TRANSITION_FILE),
+            br#"{"kind":"click","at":"2026-09-23T10:00:00Z"}"#,
+        )
+        .unwrap();
+        let t = read_browser_transition(dir.path()).unwrap();
+        assert_eq!(t.kind, BrowserTransitionKind::Click);
+        assert_eq!(t.url, None);
     }
 
     #[test]
