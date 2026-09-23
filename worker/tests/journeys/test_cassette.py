@@ -22,6 +22,7 @@ import pytest
 from agenthandover_worker import behavioral_synthesizer, model_profiles
 from agenthandover_worker import scene_annotator, sop_generator, task_segmenter
 from agenthandover_worker.llm_reasoning import LLMReasoner, ReasoningConfig
+from agenthandover_worker.ollama import OllamaClient
 from agenthandover_worker.vector_kb import VectorKB, VectorKBConfig
 from journeys.cassette import (
     Cassette,
@@ -81,6 +82,8 @@ def call_sites(host: str, tmp_path: Path) -> dict:
             ["open report"], model="nomic-embed-text", host=host
         ),
         "version": lambda: model_profiles.check_ollama_version(host),
+        "unload": lambda: OllamaClient(host).unload("qwen3.5:4b"),
+        "ps": lambda: OllamaClient(host).ps(),
     }
 
 
@@ -181,8 +184,11 @@ def test_selftest_cassette_is_hand_written_and_valid():
     paths = {e["path"] for e in entries.values()}
     assert paths == {
         "/api/generate", "/api/chat", "/api/embed", "/api/tags", "/api/version",
+        "/api/ps",
     }
     for entry in entries.values():
+        if entry["response"].get("done_reason") == "unload":
+            continue  # Ollama's answer to an unload carries no timings
         if entry["path"] in ("/api/generate", "/api/chat"):
             for field in ("prompt_eval_count", "eval_count", "eval_duration",
                           "total_duration"):
@@ -202,8 +208,10 @@ def test_replay_through_every_production_call_site(tmp_path):
     assert len(answers["kb_embed"]) == 2 and all(answers["kb_embed"])
     assert len(answers["segment_embed"]) == 1 and answers["segment_embed"][0]
     assert answers["version"] == "0.30.6"
-    # Every answer came from the cassette and carries Ollama's timing.
-    assert len(cassette.served) == 7
+    assert answers["unload"] is None
+    assert [m["name"] for m in answers["ps"]] == ["qwen3.5:4b"]
+    # Every answer came from the cassette; the model calls carry Ollama's timing.
+    assert len(cassette.served) == 9
     assert cassette.model_seconds() > 0
 
 
