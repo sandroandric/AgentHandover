@@ -284,11 +284,12 @@ pub async fn run_observer_loop(
                         // Query AppleScript state for known native apps
                         #[cfg(target_os = "macos")]
                         {
-                            let should_query = if let Some(last) = applescript_last_query.get(to.as_str()) {
-                                last.elapsed() >= applescript_throttle
-                            } else {
-                                true
-                            };
+                            // App state (page URL, document, message) is
+                            // content: never read for a zoned window.
+                            let should_query = zone == Zone::Full
+                                && applescript_last_query
+                                    .get(to.as_str())
+                                    .is_none_or(|last| last.elapsed() >= applescript_throttle);
 
                             if should_query {
                                 // Try by bundle ID first, then by app name (async, off executor)
