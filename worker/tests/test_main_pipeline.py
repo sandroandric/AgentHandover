@@ -527,6 +527,27 @@ class TestCheckExportTrigger:
     def _write_cache(self, state_dir: Path, templates: list[dict]) -> None:
         (state_dir / "sop-templates-cache.json").write_text(json.dumps(templates))
 
+    def _approved(self, tmp_path: Path, *slugs: str, draft: tuple[str, ...] = ()):
+        """A procedure writer whose knowledge base holds *slugs* approved
+        for agents (and *draft* as drafts): the export trigger writes only
+        what passes the hand-off gate."""
+        from agenthandover_worker.evidence_tracker import EvidenceTracker
+        from agenthandover_worker.knowledge_base import KnowledgeBase
+        from agenthandover_worker.procedure_schema import sop_to_procedure
+        from agenthandover_worker.procedure_writer import ProcedureWriter
+
+        kb = KnowledgeBase(root=tmp_path / "kb")
+        kb.ensure_structure()
+        for slug in (*slugs, *draft):
+            proc = sop_to_procedure({
+                "slug": slug, "title": slug.title(), "task_description": f"Do {slug}.",
+                "outcome": f"{slug} is done.", "steps": [{"step": "Open the page"}],
+            })
+            proc["lifecycle_state"] = "agent_ready" if slug in slugs else "draft"
+            proc["constraints"]["trust_level"] = "suggest" if slug in slugs else "observe"
+            kb.save_procedure(proc)
+        return ProcedureWriter(kb=kb, evidence=EvidenceTracker(kb))
+
     def test_unsupported_format_is_noop(self, tmp_path: Path, monkeypatch):
         from agenthandover_worker import main as main_mod
         monkeypatch.setattr(main_mod, "_status_dir", lambda: tmp_path)
@@ -549,7 +570,9 @@ class TestCheckExportTrigger:
         sops_dir = tmp_path / "workspace" / "openclaw" / "sops"
         sops_dir.mkdir(parents=True)
         writer = MagicMock()
-        main_mod._check_export_trigger(trigger, openclaw_writer=writer, sops_dir=sops_dir)
+        main_mod._check_export_trigger(trigger, openclaw_writer=writer, sops_dir=sops_dir,
+            procedure_writer=self._approved(tmp_path, "test"),
+        )
 
         # OpenClaw writer should NOT have been called (format is skill-md only)
         writer.write_sop.assert_not_called()
@@ -566,9 +589,11 @@ class TestCheckExportTrigger:
         trigger = self._trigger("openclaw")
 
         writer = MagicMock()
-        main_mod._check_export_trigger(trigger, openclaw_writer=writer, sops_dir=tmp_path / "sops")
+        main_mod._check_export_trigger(trigger, openclaw_writer=writer, sops_dir=tmp_path / "sops",
+            procedure_writer=self._approved(tmp_path, "test"),
+        )
 
-        writer.write_sop.assert_called_once()
+        writer.write_procedure.assert_called_once()
 
     def test_generic_export(self, tmp_path: Path, monkeypatch):
         from agenthandover_worker import main as main_mod
@@ -581,7 +606,9 @@ class TestCheckExportTrigger:
         writer = MagicMock()
         sops_dir = tmp_path / "sops"
         sops_dir.mkdir(parents=True)
-        main_mod._check_export_trigger(trigger, openclaw_writer=writer, sops_dir=sops_dir)
+        main_mod._check_export_trigger(trigger, openclaw_writer=writer, sops_dir=sops_dir,
+            procedure_writer=self._approved(tmp_path, "test"),
+        )
 
         # OpenClaw writer NOT called
         writer.write_sop.assert_not_called()
@@ -598,7 +625,9 @@ class TestCheckExportTrigger:
         trigger = self._trigger("skill-md", output_dir=str(custom_output))
 
         writer = MagicMock()
-        main_mod._check_export_trigger(trigger, openclaw_writer=writer, sops_dir=tmp_path / "sops")
+        main_mod._check_export_trigger(trigger, openclaw_writer=writer, sops_dir=tmp_path / "sops",
+            procedure_writer=self._approved(tmp_path, "test"),
+        )
 
         # Skills should be written to custom_output/skills/
         assert (custom_output / "skills").exists()
@@ -615,12 +644,31 @@ class TestCheckExportTrigger:
         trigger = self._trigger("openclaw", sop_slug="wanted")
 
         writer = MagicMock()
-        main_mod._check_export_trigger(trigger, openclaw_writer=writer, sops_dir=tmp_path / "sops")
+        main_mod._check_export_trigger(trigger, openclaw_writer=writer, sops_dir=tmp_path / "sops",
+            procedure_writer=self._approved(tmp_path, "wanted", "unwanted"),
+        )
 
-        # _export_via_adapter calls write_sop per template; only "wanted" passes filter
-        writer.write_sop.assert_called_once()
-        sop_arg = writer.write_sop.call_args[0][0]
-        assert sop_arg["slug"] == "wanted"
+        # only "wanted" passes the slug filter
+        writer.write_procedure.assert_called_once()
+        proc_arg = writer.write_procedure.call_args[0][0]
+        assert proc_arg["id"] == "wanted"
+
+    def test_a_draft_is_not_exported(self, tmp_path: Path, monkeypatch):
+        """The CLI export writes only procedures approved for agents."""
+        from agenthandover_worker import main as main_mod
+        monkeypatch.setattr(main_mod, "_status_dir", lambda: tmp_path)
+
+        self._write_cache(tmp_path, [
+            {"slug": "ready", "title": "Ready", "steps": []},
+            {"slug": "drafted", "title": "Drafted", "steps": []},
+        ])
+        writer = MagicMock()
+        main_mod._check_export_trigger(
+            self._trigger("openclaw"), openclaw_writer=writer, sops_dir=tmp_path / "sops",
+            procedure_writer=self._approved(tmp_path, "ready", draft=("drafted",)),
+        )
+        assert [c.args[0]["id"] for c in writer.write_procedure.call_args_list] == ["ready"]
+        writer.write_sop.assert_not_called()
 
     def test_empty_cache_exports_nothing(self, tmp_path: Path, monkeypatch):
         from agenthandover_worker import main as main_mod
@@ -646,7 +694,8 @@ class TestCheckExportTrigger:
 
         default_writer = MagicMock()
         main_mod._check_export_trigger(
-            trigger, openclaw_writer=default_writer, sops_dir=tmp_path / "sops"
+            trigger, openclaw_writer=default_writer, sops_dir=tmp_path / "sops",
+            procedure_writer=self._approved(tmp_path, "test"),
         )
 
         # Default writer should NOT be called because output_dir triggers
@@ -666,10 +715,12 @@ class TestCheckExportTrigger:
         sops_dir = tmp_path / "workspace" / "openclaw" / "sops"
         sops_dir.mkdir(parents=True)
         writer = MagicMock()
-        main_mod._check_export_trigger(trigger, openclaw_writer=writer, sops_dir=sops_dir)
+        main_mod._check_export_trigger(trigger, openclaw_writer=writer, sops_dir=sops_dir,
+            procedure_writer=self._approved(tmp_path, "test"),
+        )
 
         # OpenClaw writer called (no output_dir → uses default writer)
-        writer.write_sop.assert_called_once()
+        writer.write_procedure.assert_called_once()
         # SKILL.md created
         assert (sops_dir.parent.parent / "skills").exists()
         # Generic created (GenericWriter nests under sops/ subdirectory)

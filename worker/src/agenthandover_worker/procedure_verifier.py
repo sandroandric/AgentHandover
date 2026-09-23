@@ -20,8 +20,7 @@ from agenthandover_worker.knowledge_base import KnowledgeBase
 
 logger = logging.getLogger(__name__)
 
-# Minimum freshness score to consider a procedure reliable for execution
-_MIN_FRESHNESS_FOR_EXECUTION = 0.3
+from agenthandover_worker.staleness_detector import MIN_FRESHNESS as _MIN_FRESHNESS_FOR_EXECUTION
 
 # Trust levels that permit agent execution
 _EXECUTABLE_TRUST_LEVELS = frozenset({

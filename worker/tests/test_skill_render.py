@@ -74,7 +74,8 @@ def focus_procedure() -> dict:
             "context": "",
         }],
         "constraints": {
-            "trust_level": "observe",
+            # Approval for agents grants "suggest" (lifecycle_manager).
+            "trust_level": "suggest",
             "guardrails": ["Never add a domain to the cart or pay for anything"],
         },
         "voice_profile": {

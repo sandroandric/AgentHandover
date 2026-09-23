@@ -711,11 +711,16 @@ class TestProcessFocusSessionsV2:
                     screenshots_dir=str(tmp_path),
                 )
 
-        assert result == 1
+        # The draft is kept for review and written to no agent directory
+        # (the hand-off gate: only procedures approved for agents).
+        assert result == 0
         assert mock_processor.process_session.call_count == 1
-        assert mock_writer.write_sop.call_count == 1
+        assert mock_writer.write_sop.call_count == 0
+        assert mock_writer.write_procedure.call_count == 0
         # The writer keeps its own catalogue; the pipeline writes none.
         assert mock_index.update_index.call_count == 0
+        with WorkerDB(db_path) as db:
+            assert [r["slug"] for r in db.get_generated_sops()] == ["check-domain-availability"]
         # Signal file should be removed
         assert not signal_path.exists()
 
@@ -817,9 +822,10 @@ class TestFocusSOPValidationRegenerates:
             tmp_path, "sess-regen", [bad, good],
         )
         assert processor.process_session.call_count == 2
-        assert exported == 1
+        assert exported == 0  # a draft: nothing is handed off before approval
         with WorkerDB(db_path) as db:
             assert db.get_failed_generations() == []
+            assert len(db.get_generated_sops()) == 1
 
     def test_still_invalid_after_regeneration_is_recorded_for_retry(self, tmp_path):
         def bad():

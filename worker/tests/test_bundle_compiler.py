@@ -88,6 +88,10 @@ def _save_procedure(kb, slug, lifecycle_state="observed", trust_level="observe",
         "confidence_avg": 0.9,
         "apps_involved": ["Chrome"],
         "source": "test",
+        # The ledger's required slots: goal (from the task description),
+        # steps and done criteria (the outcome).
+        "task_description": f"Do the {slug} task.",
+        "outcome": "The thing is done.",
     }
     proc = sop_to_procedure(template)
     proc["constraints"]["trust_level"] = trust_level
@@ -365,3 +369,48 @@ class TestEdgeCases:
         assert len(bundles) == 2
         slugs = {b.slug for b in bundles}
         assert slugs == {"multi1", "multi2"}
+
+
+# ===================================================================
+# Ledger and the hand-off gate (WP-L1)
+# ===================================================================
+
+class TestLedgerGate:
+    def test_an_unknown_required_slot_blocks_readiness_and_targets(
+        self, kb, compiler_with_adapters, tmp_path,
+    ):
+        _save_procedure(
+            kb, "nogoal", lifecycle_state="agent_ready", trust_level="autonomous",
+            task_description="", outcome="",
+        )
+        bundle = compiler_with_adapters.compile("nogoal")
+        assert bundle.readiness.can_execute is False
+        assert bundle.readiness.handoff is False
+        assert "Not yet known: goal, done_criteria" in bundle.readiness.reasons
+        assert {"goal", "done_criteria"} <= set(bundle.readiness.not_yet_known)
+        assert bundle.compiled_outputs == []
+        assert not list((tmp_path / "target_a").rglob("*.md"))
+
+    def test_an_approved_suggest_procedure_is_written(self, kb, compiler_with_adapters):
+        _save_procedure(kb, "approved", lifecycle_state="agent_ready", trust_level="suggest")
+        bundle = compiler_with_adapters.compile("approved")
+        # Handed off (Skills written) though not executable unattended.
+        assert bundle.readiness.handoff is True
+        assert bundle.readiness.can_execute is False
+        assert len(bundle.compiled_outputs) == 4
+
+    def test_a_draft_is_never_written(self, kb, compiler_with_adapters):
+        _save_procedure(kb, "drafted", lifecycle_state="draft", trust_level="autonomous")
+        assert compiler_with_adapters.compile("drafted").compiled_outputs == []
+
+    def test_assess_writes_nothing(self, kb, compiler_with_adapters, tmp_path):
+        from agenthandover_worker.ledger import derive_knowledge, confidence
+
+        _save_procedure(kb, "looked", lifecycle_state="agent_ready", trust_level="autonomous")
+        before = (tmp_path / "procedures" / "looked.json").read_bytes()
+        proc, readiness = compiler_with_adapters.assess("looked")
+        assert readiness.handoff is True and readiness.can_execute is True
+        assert readiness.ledger_confidence == confidence(derive_knowledge(proc))
+        assert (tmp_path / "procedures" / "looked.json").read_bytes() == before
+        assert not list((tmp_path / "target_a").rglob("*.md"))
+        assert compiler_with_adapters.assess("missing") is None

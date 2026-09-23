@@ -787,3 +787,72 @@ class TestTokenFile:
         token = load_or_create_token(path)
         assert token and token != "existing-token"
         assert path.read_text().strip() == token
+
+
+class TestBundleEndpoint:
+    """GET /bundle/<slug> reads; POST /bundle/<slug> compiles (WP-L1 #125)."""
+
+    @pytest.fixture()
+    def bundle_server(self, tmp_path: Path):
+        from agenthandover_worker.bundle_compiler import BundleCompiler
+        from agenthandover_worker.claude_skill_writer import ClaudeSkillWriter
+        from agenthandover_worker.lifecycle_manager import LifecycleManager
+        from agenthandover_worker.procedure_schema import sop_to_procedure
+        from agenthandover_worker.procedure_verifier import ProcedureVerifier
+
+        kb = KnowledgeBase(root=tmp_path / "kb")
+        kb.ensure_structure()
+        for slug, state in (("approved", "agent_ready"), ("drafted", "draft")):
+            proc = sop_to_procedure({
+                "slug": slug, "title": slug.title(), "task_description": f"Do {slug}.",
+                "outcome": "Done.", "steps": [{"step": "Open the page"}],
+            })
+            proc["lifecycle_state"] = state
+            proc["constraints"]["trust_level"] = "suggest"
+            kb.save_procedure(proc)
+        skills = tmp_path / "skills"
+        compiler = BundleCompiler(
+            kb=kb, lifecycle=LifecycleManager(kb), verifier=ProcedureVerifier(kb),
+            adapters={"claude_skill": ClaudeSkillWriter(skills_dir=skills)},
+        )
+        srv = QueryAPIServer(kb, port=_free_port(), bundle_compiler=compiler)
+        srv.start()
+        time.sleep(0.1)
+        yield srv, kb, skills
+        srv.stop()
+
+    def test_get_writes_nothing(self, bundle_server) -> None:
+        srv, kb, skills = bundle_server
+        before = (kb.root / "procedures" / "approved.json").read_bytes()
+        status, body = _get(srv.port, "/bundle/approved")
+        assert status == 200
+        assert body["readiness"]["handoff"] is True
+        assert body["compiled_outputs"] == []
+        assert "trigger" in body["readiness"]["not_yet_known"]
+        assert not skills.exists()
+        assert (kb.root / "procedures" / "approved.json").read_bytes() == before
+
+    def test_post_compiles_then_get_shows_the_stored_outputs(self, bundle_server) -> None:
+        srv, _kb, skills = bundle_server
+        status, body = _post(srv, "/bundle/approved", {})
+        assert status == 200
+        [output] = body["compiled_outputs"]
+        assert output["adapter_name"] == "claude_skill"
+        assert (skills / "approved" / "SKILL.md").is_file()
+
+        _, got = _get(srv.port, "/bundle/approved")
+        assert [o["adapter_name"] for o in got["compiled_outputs"]] == ["claude_skill"]
+        assert got["compiled_outputs"][0]["sha256"] == output["sha256"]
+
+    def test_post_on_a_draft_writes_nothing(self, bundle_server) -> None:
+        srv, _kb, skills = bundle_server
+        status, body = _post(srv, "/bundle/drafted", {})
+        assert status == 200
+        assert body["readiness"]["handoff"] is False
+        assert body["compiled_outputs"] == []
+        assert not (skills / "drafted").exists()
+
+    def test_unknown_slug_is_404(self, bundle_server) -> None:
+        srv, _kb, _skills = bundle_server
+        assert _get(srv.port, "/bundle/nope")[0] == 404
+        assert _post(srv, "/bundle/nope", {})[0] == 404

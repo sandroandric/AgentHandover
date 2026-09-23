@@ -67,6 +67,38 @@ def test_approve_for_agents_walks_to_agent_ready_and_writes_the_skill(
         }
 
 
+def test_auto_approved_draft_reaches_no_agent_until_approved_for_agents(
+    events_db, worker, clock, temp_home, cassette,
+) -> None:
+    """The export ``[sop] auto_approve`` runs right after a focus recording
+    (``_focus_v2_export``, every adapter the worker has) writes the draft
+    to no agent directory: every export goes through the hand-off gate.
+    The same slug appears after promotion."""
+    from agenthandover_worker import main as wm
+
+    run = start_focus_run(
+        events_db=events_db, worker=worker, clock=clock,
+        temp_home=temp_home, cassette=cassette, adapter="claude-skill",
+    )
+    draft = tick_until_skill(run, clock)
+    slug = draft["id"]
+    skills = temp_home.path / ".claude" / "skills"
+    openclaw = run.worker.sops_dir
+    exported = wm._focus_v2_export(
+        sop_templates=[draft], title=draft["title"], inference_time=0.0,
+        **run.worker._export_kwargs(),
+    )
+
+    assert exported == 0
+    assert run.worker.knowledge_base.get_procedure(slug)["lifecycle_state"] == "draft"
+    assert not (skills / slug).exists()
+    assert not [p for p in openclaw.rglob("*") if slug in p.name]
+
+    approve_for_agents(run, clock, slug)
+
+    assert (skills / slug / "SKILL.md").is_file()
+
+
 def test_claude_skill_adapter_writes_only_the_skill_and_the_index_command(
     events_db, worker, clock, temp_home, cassette,
 ) -> None:

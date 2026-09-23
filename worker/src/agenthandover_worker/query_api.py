@@ -270,6 +270,9 @@ class QueryAPIHandler(http.server.BaseHTTPRequestHandler):
                 self._handle_semantic_search()
             elif path == "/recall":
                 self._handle_recall()
+            elif _BUNDLE_SLUG_RE.match(path):
+                slug = _BUNDLE_SLUG_RE.match(path).group(1)  # type: ignore[union-attr]
+                self._handle_bundle_compile(slug)
             else:
                 self._send_error(404, f"Not found: {path}")
         except Exception:
@@ -460,63 +463,90 @@ class QueryAPIHandler(http.server.BaseHTTPRequestHandler):
             "count": len(results),
         })
 
+    def _bundle_extras(self, slug: str) -> tuple[dict | None, dict | None]:
+        """Preflight summary and execution stats for the bundle responses."""
+        preflight = None
+        verifier = getattr(self.server, "procedure_verifier", None)
+        if verifier is not None:
+            try:
+                pf_result = verifier.preflight(slug)
+                preflight = {
+                    "can_execute": pf_result.can_execute,
+                    "can_draft": pf_result.can_draft,
+                    "errors": [{"name": c.name, "detail": c.detail} for c in pf_result.errors],
+                    "warnings": [{"name": c.name, "detail": c.detail} for c in pf_result.warnings],
+                }
+            except Exception:
+                logger.debug("Preflight failed for %s", slug, exc_info=True)
+        execution_stats = None
+        exec_monitor = getattr(self.server, "execution_monitor", None)
+        if exec_monitor is not None:
+            try:
+                execution_stats = exec_monitor.get_success_rate(slug)
+            except Exception:
+                logger.debug("Execution stats failed for %s", slug, exc_info=True)
+        return preflight, execution_stats
+
+    def _send_bundle(self, slug: str, procedure: dict, readiness, compiled_outputs: list[dict]) -> None:
+        from dataclasses import asdict as _asdict
+
+        preflight, execution_stats = self._bundle_extras(slug)
+        self._send_json({
+            "slug": slug,
+            "executable": readiness.can_execute,
+            "procedure": procedure,
+            "lifecycle_state": readiness.lifecycle_state,
+            "trust_level": readiness.trust_level,
+            "freshness_score": readiness.freshness,
+            "readiness": _asdict(readiness),
+            "compiled_outputs": compiled_outputs,
+            "preflight": preflight,
+            "execution_stats": execution_stats,
+            "chain": procedure.get("chain", {}),
+            "recurrence": procedure.get("recurrence", {}),
+        })
+
+    def _handle_bundle_compile(self, slug: str) -> None:
+        """POST /bundle/<slug>: compile the procedure now (writes every
+        adapter target when it passes the hand-off gate, stores
+        ``compiled_outputs``) and return the bundle."""
+        bundle_compiler = getattr(self.server, "bundle_compiler", None)
+        if bundle_compiler is None:
+            self._send_error(503, "Bundle compiler not available")
+            return
+        from dataclasses import asdict as _asdict
+
+        bundle = bundle_compiler.compile(slug)
+        if bundle is None:
+            self._send_error(404, f"Procedure not found: {slug}")
+            return
+        kb: KnowledgeBase = self.server.knowledge_base  # type: ignore[attr-defined]
+        self._send_bundle(
+            slug, kb.get_procedure(slug) or {}, bundle.readiness,
+            [_asdict(co) for co in bundle.compiled_outputs],
+        )
+
     def _handle_bundle(self, slug: str) -> None:
-        """Return a complete agent handoff bundle for a procedure."""
-        # Try BundleCompiler first, fall back to manual assembly
+        """GET /bundle/<slug>: the handoff bundle, without side effects.
+
+        Readiness is computed now (lifecycle, trust, freshness, preflight
+        and the ledger's required slots); ``compiled_outputs`` are the ones
+        stored by the last compile.  Nothing is written: compiling is
+        ``POST /bundle/<slug>``.
+        """
         bundle_compiler = getattr(self.server, "bundle_compiler", None)
         if bundle_compiler is not None:
-            try:
-                from dataclasses import asdict as _asdict
-                bundle = bundle_compiler.compile(slug)
-                if bundle is None:
-                    self._send_error(404, f"Procedure not found: {slug}")
-                    return
-
-                # Load the full procedure for the response body
-                kb: KnowledgeBase = self.server.knowledge_base  # type: ignore[attr-defined]
-                procedure = kb.get_procedure(slug) or {}
-
-                # Run preflight if verifier is available
-                preflight = None
-                verifier = getattr(self.server, "procedure_verifier", None)
-                if verifier is not None:
-                    try:
-                        pf_result = verifier.preflight(slug)
-                        preflight = {
-                            "can_execute": pf_result.can_execute,
-                            "can_draft": pf_result.can_draft,
-                            "errors": [{"name": c.name, "detail": c.detail} for c in pf_result.errors],
-                            "warnings": [{"name": c.name, "detail": c.detail} for c in pf_result.warnings],
-                        }
-                    except Exception:
-                        pass
-
-                # Execution stats
-                execution_stats = None
-                exec_monitor = getattr(self.server, "execution_monitor", None)
-                if exec_monitor is not None:
-                    try:
-                        execution_stats = exec_monitor.get_success_rate(slug)
-                    except Exception:
-                        pass
-
-                self._send_json({
-                    "slug": bundle.slug,
-                    "executable": bundle.readiness.can_execute,
-                    "procedure": procedure,
-                    "lifecycle_state": bundle.readiness.lifecycle_state,
-                    "trust_level": bundle.readiness.trust_level,
-                    "freshness_score": bundle.readiness.freshness,
-                    "readiness": _asdict(bundle.readiness),
-                    "compiled_outputs": [_asdict(co) for co in bundle.compiled_outputs],
-                    "preflight": preflight,
-                    "execution_stats": execution_stats,
-                    "chain": procedure.get("chain", {}),
-                    "recurrence": procedure.get("recurrence", {}),
-                })
+            assessed = bundle_compiler.assess(slug)
+            if assessed is None:
+                self._send_error(404, f"Procedure not found: {slug}")
                 return
-            except Exception:
-                logger.debug("BundleCompiler failed, falling back", exc_info=True)
+            procedure, readiness = assessed
+            stored = procedure.get("compiled_outputs") or {}
+            self._send_bundle(slug, procedure, readiness, [
+                {"adapter_name": name, **info}
+                for name, info in stored.items() if isinstance(info, dict)
+            ])
+            return
 
         kb: KnowledgeBase = self.server.knowledge_base  # type: ignore[attr-defined]
         procedure = kb.get_procedure(slug)
@@ -538,37 +568,19 @@ class QueryAPIHandler(http.server.BaseHTTPRequestHandler):
         # Build staleness info
         staleness = procedure.get("staleness", {})
 
-        # Run preflight check if verifier is available
-        preflight = None
-        verifier = getattr(self.server, "procedure_verifier", None)
-        if verifier is not None:
-            try:
-                result = verifier.preflight(slug)
-                preflight = {
-                    "can_execute": result.can_execute,
-                    "can_draft": result.can_draft,
-                    "errors": [{"name": c.name, "detail": c.detail} for c in result.errors],
-                    "warnings": [{"name": c.name, "detail": c.detail} for c in result.warnings],
-                }
-            except Exception:
-                pass
-
+        preflight, execution_stats = self._bundle_extras(slug)
         export_paths = procedure_export_paths(kb, slug)
 
-        # Execution history
-        exec_monitor = getattr(self.server, "execution_monitor", None)
-        execution_stats = None
-        if exec_monitor is not None:
-            try:
-                execution_stats = exec_monitor.get_success_rate(slug)
-            except Exception:
-                pass
-
         # Determine executability for the fallback path
+        from agenthandover_worker.ledger import readiness as ledger_readiness, unknown_slots
         _executable = False
         if preflight is not None and preflight.get("can_execute"):
             _lifecycle = procedure.get("lifecycle_state", "observed")
-            if _lifecycle == "agent_ready" and trust_level in ("execute_with_approval", "autonomous"):
+            if (
+                _lifecycle == "agent_ready"
+                and trust_level in ("execute_with_approval", "autonomous")
+                and ledger_readiness(procedure).ready
+            ):
                 _executable = True
 
         bundle = {
@@ -586,6 +598,7 @@ class QueryAPIHandler(http.server.BaseHTTPRequestHandler):
                 "procedure": constraints,
                 "global": global_constraints,
             },
+            "not_yet_known": unknown_slots(procedure),
             "preflight": preflight,
             "export_paths": export_paths,
             "execution_stats": execution_stats,
@@ -778,6 +791,7 @@ class QueryAPIHandler(http.server.BaseHTTPRequestHandler):
         from agenthandover_worker.staleness_detector import procedure_freshness
         from agenthandover_worker.bundle_compiler import BundleCompiler
         from agenthandover_worker.lifecycle_manager import ProcedureLifecycle
+        from agenthandover_worker.ledger import readiness as ledger_readiness
 
         verifier = getattr(self.server, "procedure_verifier", None)
         procedures = kb.list_procedures()
@@ -812,6 +826,7 @@ class QueryAPIHandler(http.server.BaseHTTPRequestHandler):
                 trust_level=trust_level,
                 freshness=freshness,
                 preflight=preflight,
+                unknown_required=ledger_readiness(proc).unknown_required,
             )
 
             # STRICT: only include if can_execute is True
@@ -848,6 +863,7 @@ class QueryAPIHandler(http.server.BaseHTTPRequestHandler):
         from agenthandover_worker.staleness_detector import procedure_freshness
         from agenthandover_worker.bundle_compiler import BundleCompiler
         from agenthandover_worker.lifecycle_manager import ProcedureLifecycle
+        from agenthandover_worker.ledger import readiness as ledger_readiness
 
         procedures = kb.list_procedures()
         available = []
@@ -871,6 +887,7 @@ class QueryAPIHandler(http.server.BaseHTTPRequestHandler):
                 lifecycle_state=lifecycle,
                 trust_level=trust_level,
                 freshness=freshness,
+                unknown_required=ledger_readiness(proc).unknown_required,
             )
 
             available.append({

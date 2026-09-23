@@ -6,9 +6,13 @@ export adapter, and checksums for change detection.
 
 Key design:
 - compute_readiness() is a STATIC method — pure function from
-  (lifecycle, trust, freshness, preflight)
-- compile() loads procedure, computes readiness, compiles all targets,
-  stores compiled_outputs, returns ProcedureBundle
+  (lifecycle, trust, freshness, preflight, the ledger's unknown required
+  slots)
+- assess() computes a procedure's readiness without writing anything
+  (the query API's GET /bundle/<slug>)
+- compile() assesses, writes every adapter target when the procedure
+  passes the one hand-off gate (``ledger.handoff_gate``), stores
+  compiled_outputs, returns ProcedureBundle
 - compile_target() calls adapter.write_procedure(), computes SHA-256
   of output file, returns CompiledOutput
 - needs_recompile() compares SHA-256 of canonical procedure JSON
@@ -29,9 +33,12 @@ from pathlib import Path
 
 from agenthandover_worker.export_adapter import SOPExportAdapter
 from agenthandover_worker.knowledge_base import KnowledgeBase
+from agenthandover_worker.ledger import (
+    handoff_gate, readiness as ledger_readiness, refresh_knowledge, unknown_slots,
+)
 from agenthandover_worker.lifecycle_manager import LifecycleManager, ProcedureLifecycle
 from agenthandover_worker.procedure_verifier import ProcedureVerifier, PreflightResult
-from agenthandover_worker.staleness_detector import procedure_freshness
+from agenthandover_worker.staleness_detector import MIN_FRESHNESS, procedure_freshness
 
 logger = logging.getLogger(__name__)
 
@@ -64,7 +71,7 @@ _DRAFTABLE_LIFECYCLE_STATES = frozenset({
     ProcedureLifecycle.AGENT_READY,
 })
 
-_MIN_FRESHNESS = 0.3
+_MIN_FRESHNESS = MIN_FRESHNESS
 
 
 @dataclass
@@ -80,6 +87,12 @@ class ReadinessResult:
     trust_level: str = "observe"
     freshness: float = 0.0
     has_preflight_errors: bool = False
+    # The hand-off gate (ledger.handoff_gate): written to agent directories.
+    handoff: bool = False
+    # Ledger slots still unknown (the packet's "Not yet known" section).
+    not_yet_known: list[str] = field(default_factory=list)
+    # The ledger's grounded fraction (share of tracked slots known).
+    ledger_confidence: float = 0.0
 
 
 @dataclass
@@ -121,6 +134,9 @@ class ProcedureBundle:
                 "trust_level": self.readiness.trust_level,
                 "freshness": self.readiness.freshness,
                 "has_preflight_errors": self.readiness.has_preflight_errors,
+                "handoff": self.readiness.handoff,
+                "not_yet_known": self.readiness.not_yet_known,
+                "ledger_confidence": self.readiness.ledger_confidence,
             },
             "compiled_outputs": [
                 {
@@ -182,8 +198,13 @@ class BundleCompiler:
         trust_level: str,
         freshness: float,
         preflight: PreflightResult | None = None,
+        unknown_required: list[str] | None = None,
     ) -> ReadinessResult:
         """Compute readiness from inputs. Pure function, no side effects.
+
+        *unknown_required* are the ledger's required slots still
+        ``unknown`` (``ledger.readiness``); any of them blocks both
+        execution and drafting.
 
         Readiness rules:
         - can_execute requires ALL of:
@@ -247,6 +268,11 @@ class BundleCompiler:
                 f"requires 'draft' or higher for drafting"
             )
 
+        # Ledger check: an agent cannot act without the required slots
+        ledger_ok = not unknown_required
+        if not ledger_ok:
+            reasons.append("Not yet known: " + ", ".join(unknown_required or []))
+
         # Freshness check
         freshness_ok = freshness >= _MIN_FRESHNESS
         if not freshness_ok:
@@ -259,12 +285,14 @@ class BundleCompiler:
             lifecycle_allows_exec
             and trust_allows_exec
             and freshness_ok
+            and ledger_ok
             and not has_preflight_errors
         )
         can_draft = (
             lifecycle_allows_draft
             and trust_allows_draft
             and freshness_ok
+            and ledger_ok
             and not has_preflight_errors
         )
 
@@ -279,41 +307,46 @@ class BundleCompiler:
             has_preflight_errors=has_preflight_errors,
         )
 
-    def compile(self, slug: str) -> ProcedureBundle | None:
-        """Compile a procedure into an agent-ready bundle.
-
-        Loads the procedure, computes readiness, compiles all registered
-        adapter targets, stores compiled_outputs on the procedure, and
-        returns a ProcedureBundle.
+    def assess(self, slug: str) -> tuple[dict, ReadinessResult] | None:
+        """The procedure and its readiness, computed now; writes nothing.
 
         Returns None if the procedure does not exist.
         """
         proc = self._kb.get_procedure(slug)
         if proc is None:
+            return None
+        ledger = ledger_readiness(proc)
+        readiness = self.compute_readiness(
+            lifecycle_state=self._lifecycle.get_state(slug),
+            trust_level=(proc.get("constraints") or {}).get("trust_level", "observe"),
+            freshness=procedure_freshness(proc),
+            preflight=self._verifier.preflight(slug),
+            unknown_required=ledger.unknown_required,
+        )
+        readiness.handoff = handoff_gate(proc).ok
+        readiness.not_yet_known = unknown_slots(proc)
+        readiness.ledger_confidence = ledger.confidence
+        return proc, readiness
+
+    def compile(self, slug: str) -> ProcedureBundle | None:
+        """Compile a procedure into an agent-ready bundle.
+
+        Assesses the procedure, writes every registered adapter target
+        when it passes the hand-off gate (``ledger.handoff_gate``: the same
+        check the MCP server and the connectors apply), stores
+        compiled_outputs on the procedure, and returns a ProcedureBundle.
+
+        Returns None if the procedure does not exist.
+        """
+        assessed = self.assess(slug)
+        if assessed is None:
             logger.warning("Cannot compile nonexistent procedure: %s", slug)
             return None
+        proc, readiness = assessed
 
-        # Gather inputs for readiness
-        lifecycle_state = self._lifecycle.get_state(slug)
-        constraints = proc.get("constraints", {})
-        trust_level = constraints.get("trust_level", "observe")
-        freshness = procedure_freshness(proc)
-        preflight = self._verifier.preflight(slug)
-
-        # Compute readiness
-        readiness = self.compute_readiness(
-            lifecycle_state=lifecycle_state,
-            trust_level=trust_level,
-            freshness=freshness,
-            preflight=preflight,
-        )
-
-        # Only compile adapter targets (write to agent-visible directories)
-        # when the procedure is fully executable.  Draft/reviewed/verified
-        # procedures must NOT be written to live agent workspaces — only
-        # agent_ready procedures with sufficient trust pass this gate.
+        # Agent-visible directories get only procedures that pass the gate.
         compiled_outputs: list[CompiledOutput] = []
-        if readiness.can_execute:
+        if readiness.handoff:
             for adapter_name, adapter in self._adapters.items():
                 try:
                     output = self.compile_target(proc, adapter_name, adapter)
@@ -324,13 +357,11 @@ class BundleCompiler:
                         adapter_name, slug, exc_info=True,
                     )
         else:
-            logger.debug(
-                "Skipping adapter compilation for '%s': not ready "
-                "(can_execute=%s, can_draft=%s)",
-                slug, readiness.can_execute, readiness.can_draft,
-            )
+            logger.debug("Skipping adapter compilation for '%s': %s",
+                         slug, "; ".join(handoff_gate(proc).reasons))
 
-        # Compute procedure checksum
+        # Checksum the procedure as it will be saved (ledger included).
+        refresh_knowledge(proc)
         checksum = _procedure_checksum(proc)
         now_iso = datetime.now(timezone.utc).isoformat()
 

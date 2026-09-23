@@ -144,7 +144,7 @@ struct FAQView: View {
                     FAQItem(
                         id: "approve",
                         question: "Do I need to approve Skills before agents can use them?",
-                        answer: "Focus Recording Skills are auto-approved and immediately available to agents. Passive observation Skills start as drafts that you can review in the Workflows screen before approving."
+                        answer: "Yes. Every Skill, recorded or observed, starts as a draft. Agents see it only after you choose Approve for agents, and only while it is fresh and its goal, steps and done criteria are known. The Skill page shows what AgentHandover knows and what it still doesn't; agents are told to ask about the rest."
                     ),
                 ]
             ),

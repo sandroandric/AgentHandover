@@ -101,8 +101,16 @@ class KnowledgeBase:
         The file is named by the procedure's ``id`` (slug).  Overwrites
         any existing procedure with the same id.
 
+        Every save recomputes the procedure's learning ledger
+        (``procedure["knowledge"]``, :func:`ledger.refresh_knowledge`) in
+        place, so the file on disk always says what is known, hypothesised
+        and unknown about the procedure as saved.
+
         Returns the path to the written file.
         """
+        from agenthandover_worker.ledger import refresh_knowledge
+
+        refresh_knowledge(procedure)
         slug = _sanitize_slug(
             procedure.get("id", procedure.get("slug", "unknown"))
         )

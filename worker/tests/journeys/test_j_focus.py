@@ -12,6 +12,7 @@ import re
 import statistics
 
 from agenthandover_worker.frame_differ import DIFF_SYSTEM_PROMPT
+from agenthandover_worker.ledger import readiness, validate_knowledge
 from agenthandover_worker.model_profiles import get_profile
 from agenthandover_worker.scene_annotator import annotation_system_prompt
 from agenthandover_worker.skill_render import render_packet
@@ -109,6 +110,35 @@ def focus_budget_seconds(served: list[dict]) -> float:
         statistics.median(kinds["diff"]) if kinds["diff"] else 0.0
     )
     return KEYFRAMES * per_keyframe + sum(kinds["other"])
+
+
+def test_focus_recording_fills_the_ledger(
+    events_db, worker, clock, temp_home, cassette,
+) -> None:
+    """After one recording the stored ledger says what was learned: the
+    steps are known from the recorded frames, the goal is a hypothesis
+    from this one instance, and what starts the task is still unknown
+    (the packet says so instead of assuming)."""
+    run, proc, packet = _run(events_db, worker, clock, temp_home, cassette)
+    stored = run.worker.knowledge_base.get_procedure(proc["id"])
+    knowledge = stored["knowledge"]
+    assert validate_knowledge(knowledge) == []
+    session = run.fixture.manifest["focus_session"]["session_id"]
+    instance = {"kind": "instance", "id": session}
+
+    steps = knowledge["steps"]
+    assert steps["status"] == "known" and steps["source"] == "observation"
+    frames = {e["id"] for e in steps["evidence"] if e["kind"] == "frame"}
+    cited = {f for s in stored["steps"] for f in s["evidence"]["frames"]}
+    assert frames == cited and frames
+    assert instance in steps["evidence"]
+
+    assert knowledge["goal"]["status"] == "hypothesis"
+    assert knowledge["goal"]["evidence"] == [instance]
+    assert knowledge["trigger"]["status"] == "unknown"
+    assert knowledge["trigger"]["evidence"] == []
+    assert "Trigger" in packet.section("Not yet known")
+    assert readiness(stored).ready
 
 
 def test_focus_packet_has_no_assumed_text(

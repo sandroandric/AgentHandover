@@ -29,6 +29,7 @@ from agenthandover_worker.config import EXPORT_ADAPTERS, load_config
 from agenthandover_worker.confidence import ConfidenceScorer, is_native_app_context
 from agenthandover_worker.db import WorkerDB
 from agenthandover_worker.episode_builder import EpisodeBuilder
+from agenthandover_worker.evidence_tracker import ObservationEvidence, append_observation
 from agenthandover_worker.exporter import IndexGenerator
 from agenthandover_worker.focus_processor import FocusProcessor
 from agenthandover_worker.frame_differ import DiffConfig, FrameDiffer
@@ -145,35 +146,33 @@ def _export_via_adapter(
     sop_templates: list[dict],
     procedure_writer: "ProcedureWriter | None",
 ) -> list[Path]:
-    """Export SOPs via *adapter*, preferring v3 procedure rendering.
+    """Export, via *adapter*, the templates whose v3 procedure passes the
+    hand-off gate (``ledger.handoff_gate``: approved for agents, no
+    required slot unknown, trust above observe, fresh).
 
-    For each template, if a v3 procedure exists in the knowledge base
-    (i.e. ``procedure_writer`` already saved it), the adapter's
-    ``write_procedure()`` is used for richer output.  Falls back to
-    ``write_sop()`` when no v3 procedure is available or when the v3
-    path raises.
-
-    Returns the list of written file paths.
+    A draft, or a template with no procedure in the knowledge base, is
+    never written where agents read; it is written once a human approves
+    it (the promote trigger and the lifecycle pass's
+    ``BundleCompiler.compile_all``).  Returns the written file paths.
     """
+    from agenthandover_worker.ledger import handoff_gate
+
     kb = procedure_writer._kb if procedure_writer is not None else None
     paths: list[Path] = []
     for template in sop_templates:
         slug = template.get("slug", "unknown")
         proc = kb.get_procedure(slug) if kb is not None else None
+        if proc is None or not handoff_gate(proc).ok:
+            logger.debug("Not exporting %s via %s: not approved for agents",
+                         slug, type(adapter).__name__)
+            continue
         try:
-            if proc is not None:
-                paths.append(adapter.write_procedure(proc))
-            else:
-                paths.append(adapter.write_sop(template))
+            paths.append(adapter.write_procedure(proc))
         except Exception:
-            # Fall back to SOP template rendering
-            try:
-                paths.append(adapter.write_sop(template))
-            except Exception:
-                logger.warning(
-                    "Export failed for %s via %s",
-                    slug, type(adapter).__name__, exc_info=True,
-                )
+            logger.warning(
+                "Export failed for %s via %s",
+                slug, type(adapter).__name__, exc_info=True,
+            )
     return paths
 
 
@@ -1998,6 +1997,12 @@ def _process_focus_sessions_v2(
                 merge_existing_procedure(
                     procedure_dict, existing_proc, keep_lifecycle=False,
                 )
+        # This recording is one instance of the procedure: the ledger's
+        # evidence for what was learned from it.
+        append_observation(procedure_dict, ObservationEvidence(
+            date=str(focus_events[0].get("timestamp") or "")[:10], type="focus",
+            duration_minutes=0, session_id=session_id, event_count=len(focus_events),
+        ), once_per_session=True)
         if behavioral_synthesizer is not None:
             try:
                 # Prefer the rich per-frame observations stashed by the
@@ -3546,8 +3551,11 @@ def _process_lifecycle_promote_trigger(
 
     ``slug`` (app) or ``procedure_slug`` (CLI) names the procedure.  The
     target is reached by walking the promotion chain one valid transition
-    at a time.  Promoting to ``agent_ready`` first approves a pending draft
-    through *approve*; a draft that fails approval (lint) is not promoted.
+    at a time.  Promoting to ``agent_ready`` first lints a pending draft; a
+    draft that fails lint is not promoted.  Once the procedure is
+    ``agent_ready`` its review record is approved and exported through
+    *approve* (every export passes the hand-off gate, which a draft never
+    does, so the export has to follow the promotion).
     Claude Code commands are refreshed whenever the procedure enters or
     leaves ``agent_ready``; on entering it, the procedure is also written
     as a Claude Code Skill when *claude_skill_writer* is configured (the
@@ -3571,9 +3579,13 @@ def _process_lifecycle_promote_trigger(
 
     logger.info("Processing lifecycle promote trigger: %s → %s", slug, to_state)
 
+    record = None
     if target is ProcedureLifecycle.AGENT_READY and db is not None and approve is not None:
         record = db.get_generated_sop_by_slug(slug)
-        if record is not None and record.get("status") == "draft" and not approve(slug):
+        template = record.get("sop_json") if record is not None else None
+        if record is not None and record.get("status") == "draft" and not (
+            isinstance(template, dict) and template and _lint_and_log(template, "approval")
+        ):
             logger.warning("Not promoting %s: its draft could not be approved", slug)
             return
 
@@ -3591,6 +3603,8 @@ def _process_lifecycle_promote_trigger(
     after = lifecycle_manager.get_state(slug)
     if before == after or ProcedureLifecycle.AGENT_READY not in (before, after):
         return
+    if after is ProcedureLifecycle.AGENT_READY and record is not None:
+        approve(slug)  # type: ignore[misc]  # set with record above
     if after is ProcedureLifecycle.AGENT_READY and claude_skill_writer is not None:
         proc = knowledge_base.get_procedure(slug) if knowledge_base is not None else None
         if proc is not None:
@@ -4792,20 +4806,20 @@ def main(argv: list[str] | None = None) -> None:
         bundle_adapters["skill_md"] = skill_md_writer
     if claude_skill_writer is not None:
         bundle_adapters["claude_skill"] = claude_skill_writer
+    from agenthandover_worker.procedure_verifier import ProcedureVerifier
+    procedure_verifier = ProcedureVerifier(knowledge_base, runtime_validator=runtime_validator)
+    bundle_compiler = BundleCompiler(
+        kb=knowledge_base,
+        lifecycle=lifecycle_manager,
+        verifier=procedure_verifier,
+        adapters=bundle_adapters,
+    )
 
     # Phase 4: Start query API server (if enabled in config)
     query_api_server = None
     try:
         if cfg.knowledge.query_api_enabled:
             from agenthandover_worker.query_api import TOKEN_FILE, QueryAPIServer
-            from agenthandover_worker.procedure_verifier import ProcedureVerifier
-            procedure_verifier = ProcedureVerifier(knowledge_base, runtime_validator=runtime_validator)
-            bundle_compiler = BundleCompiler(
-                kb=knowledge_base,
-                lifecycle=lifecycle_manager,
-                verifier=procedure_verifier,
-                adapters=bundle_adapters,
-            )
             _api_port = cfg.knowledge.query_api_port
             query_api_server = QueryAPIServer(
                 knowledge_base=knowledge_base,
@@ -5764,6 +5778,12 @@ def main(argv: list[str] | None = None) -> None:
                                 logger.info("Lifecycle: %d auto-transition(s)", len(transitions))
                         except Exception:
                             logger.debug("Lifecycle auto-transitions failed", exc_info=True)
+                        # Write what the gate now lets through (approved
+                        # since the last pass); drafts are never written.
+                        try:
+                            bundle_compiler.compile_all()
+                        except Exception:
+                            logger.warning("Bundle compile failed", exc_info=True)
 
                     # Phase 5: Curation queue refresh
                     try:

@@ -33,9 +33,13 @@ def _connect(env: dict, cwd: Path, *args: str) -> subprocess.CompletedProcess:
 
 def test_codex_and_hermes_keep_the_users_files(temp_home, kb_root, tmp_path: Path) -> None:
     proc = sop_to_procedure(generated_sop_template("check_domain_availability"))
+    # Approved for agents (the approval grants trust "suggest") with a goal,
+    # so the hand-off gate lets it through.
     proc.update({
         "id": SLUG, "slug": SLUG, "title": "Check Domain Availability",
+        "goal": "Find out whether a domain is free to register and what it costs.",
         "lifecycle_state": "agent_ready",
+        "constraints": {"trust_level": "suggest", "guardrails": []},
     })
     kb = KnowledgeBase(root=kb_root)
     kb.ensure_structure()
