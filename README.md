@@ -199,7 +199,7 @@ Exposes 8 tools:
 
 | Tool | What it does |
 |------|-------------|
-| `list_ready_skills` | Skills ready for execution (all gates passed) |
+| `list_ready_skills` | Approved Skills that pass the hand-off gate (no required slot unknown, trust above observe, fresh), plus the approved ones held back and why |
 | `get_skill(slug)` | Full Skill with steps, strategy, voice, guardrails + execution protocol |
 | `search_skills(query)` | Semantic search -- find Skills by meaning |
 | `list_all_skills` | All Skills including drafts |
@@ -257,8 +257,10 @@ web page cannot reach the API.
 
 ```bash
 curl http://localhost:9477/ready              # Agent-ready Skills
-curl http://localhost:9477/bundle/my-workflow  # Full handoff bundle
+curl http://localhost:9477/bundle/my-workflow  # Handoff bundle (read only)
 TOKEN=$(cat ~/Library/Application\ Support/agenthandover/query-api-token)
+curl -X POST http://localhost:9477/bundle/my-workflow \
+  -H "X-AgentHandover-Token: $TOKEN"          # Compile it for every adapter
 curl -X POST http://localhost:9477/search/semantic \
   -H "X-AgentHandover-Token: $TOKEN" \
   -d '{"query": "deploy to production"}'      # Semantic search

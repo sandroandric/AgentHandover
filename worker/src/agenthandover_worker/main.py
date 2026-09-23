@@ -4809,20 +4809,20 @@ def main(argv: list[str] | None = None) -> None:
         bundle_adapters["skill_md"] = skill_md_writer
     if claude_skill_writer is not None:
         bundle_adapters["claude_skill"] = claude_skill_writer
+    from agenthandover_worker.procedure_verifier import ProcedureVerifier
+    procedure_verifier = ProcedureVerifier(knowledge_base, runtime_validator=runtime_validator)
+    bundle_compiler = BundleCompiler(
+        kb=knowledge_base,
+        lifecycle=lifecycle_manager,
+        verifier=procedure_verifier,
+        adapters=bundle_adapters,
+    )
 
     # Phase 4: Start query API server (if enabled in config)
     query_api_server = None
     try:
         if cfg.knowledge.query_api_enabled:
             from agenthandover_worker.query_api import TOKEN_FILE, QueryAPIServer
-            from agenthandover_worker.procedure_verifier import ProcedureVerifier
-            procedure_verifier = ProcedureVerifier(knowledge_base, runtime_validator=runtime_validator)
-            bundle_compiler = BundleCompiler(
-                kb=knowledge_base,
-                lifecycle=lifecycle_manager,
-                verifier=procedure_verifier,
-                adapters=bundle_adapters,
-            )
             _api_port = cfg.knowledge.query_api_port
             query_api_server = QueryAPIServer(
                 knowledge_base=knowledge_base,
@@ -5781,6 +5781,12 @@ def main(argv: list[str] | None = None) -> None:
                                 logger.info("Lifecycle: %d auto-transition(s)", len(transitions))
                         except Exception:
                             logger.debug("Lifecycle auto-transitions failed", exc_info=True)
+                        # Write what the gate now lets through (approved
+                        # since the last pass); drafts are never written.
+                        try:
+                            bundle_compiler.compile_all()
+                        except Exception:
+                            logger.warning("Bundle compile failed", exc_info=True)
 
                     # Phase 5: Curation queue refresh
                     try:
