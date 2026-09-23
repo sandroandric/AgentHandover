@@ -97,7 +97,7 @@ final class AgentDetectorTests: XCTestCase {
 
     @MainActor
     func testConnectedStateComesFromClaudeMcpList() throws {
-        let detector = AgentDetector(home: home, claudeBinary: try stubClaude(list: connected), mcpCommand: "/x/agenthandover-mcp")
+        let detector = AgentDetector(home: home, claudeBinary: try stubClaude(list: connected), codexBinary: nil, mcpCommand: "/x/agenthandover-mcp")
         let agent = try XCTUnwrap(claudeCode(detected(detector)))
         XCTAssertTrue(agent.isConnected)
         XCTAssertFalse(agent.isBusy)
@@ -113,13 +113,13 @@ final class AgentDetectorTests: XCTestCase {
         try FileManager.default.createDirectory(at: claudeDir, withIntermediateDirectories: true)
         try #"{"mcpServers": {"agenthandover": {"command": "agenthandover-mcp"}}}"#
             .write(to: claudeDir.appendingPathComponent("settings.json"), atomically: true, encoding: .utf8)
-        let detector = AgentDetector(home: home, claudeBinary: try stubClaude(list: absent), mcpCommand: "/x/agenthandover-mcp")
+        let detector = AgentDetector(home: home, claudeBinary: try stubClaude(list: absent), codexBinary: nil, mcpCommand: "/x/agenthandover-mcp")
         XCTAssertEqual(claudeCode(detected(detector))?.isConnected, false)
     }
 
     @MainActor
     func testAFailingRegistrationIsNotConnected() throws {
-        let detector = AgentDetector(home: home, claudeBinary: try stubClaude(list: failing), mcpCommand: "/x/agenthandover-mcp")
+        let detector = AgentDetector(home: home, claudeBinary: try stubClaude(list: failing), codexBinary: nil, mcpCommand: "/x/agenthandover-mcp")
         let agent = try XCTUnwrap(claudeCode(detected(detector)))
         XCTAssertFalse(agent.isConnected)
         XCTAssertNotNil(agent.failure)
@@ -132,7 +132,7 @@ final class AgentDetectorTests: XCTestCase {
         let detector = AgentDetector(
             home: home,
             claudeBinary: try stubClaude(list: absent, listAfterAdd: connected),
-            mcpCommand: "/usr/local/bin/agenthandover-mcp"
+            codexBinary: nil, mcpCommand: "/usr/local/bin/agenthandover-mcp"
         )
         XCTAssertEqual(claudeCode(detected(detector))?.isConnected, false)
         connect(detector, "claude-code")
@@ -155,7 +155,7 @@ final class AgentDetectorTests: XCTestCase {
         let detector = AgentDetector(
             home: home,
             claudeBinary: try stubClaude(list: failing, listAfterAdd: connected),
-            mcpCommand: "/x/agenthandover-mcp"
+            codexBinary: nil, mcpCommand: "/x/agenthandover-mcp"
         )
         _ = detected(detector)
         connect(detector, "claude-code")
@@ -171,7 +171,7 @@ final class AgentDetectorTests: XCTestCase {
     @MainActor
     func testAFailedAddIsShown() throws {
         let detector = AgentDetector(
-            home: home, claudeBinary: try stubClaude(list: absent, addStatus: 1), mcpCommand: "/x/agenthandover-mcp"
+            home: home, claudeBinary: try stubClaude(list: absent, addStatus: 1), codexBinary: nil, mcpCommand: "/x/agenthandover-mcp"
         )
         _ = detected(detector)
         connect(detector, "claude-code")
@@ -185,7 +185,7 @@ final class AgentDetectorTests: XCTestCase {
         try FileManager.default.createDirectory(
             at: home.appendingPathComponent(".claude"), withIntermediateDirectories: true
         )
-        let detector = AgentDetector(home: home, claudeBinary: nil, mcpCommand: "/x/agenthandover-mcp")
+        let detector = AgentDetector(home: home, claudeBinary: nil, codexBinary: nil, mcpCommand: "/x/agenthandover-mcp")
         XCTAssertNotNil(claudeCode(detected(detector)))
         connect(detector, "claude-code")
         let agent = try XCTUnwrap(claudeCode(detector.agents))
@@ -204,7 +204,7 @@ final class AgentDetectorTests: XCTestCase {
         try #"{"agents": {"defaults": {"model": "m"}}, "mcp": {"servers": {"docs": {"command": "d"}}}}"#
             .write(to: config, atomically: true, encoding: .utf8)
 
-        let detector = AgentDetector(home: home, claudeBinary: nil, mcpCommand: "/x/agenthandover-mcp")
+        let detector = AgentDetector(home: home, claudeBinary: nil, codexBinary: nil, mcpCommand: "/x/agenthandover-mcp")
         XCTAssertEqual(detected(detector).first { $0.id == "openclaw" }?.isConnected, false)
         connect(detector, "openclaw")
 
@@ -229,7 +229,7 @@ final class AgentDetectorTests: XCTestCase {
         let json5 = "// my settings\n{\n  agents: { defaults: { model: \"m\" } },\n}\n"
         try json5.write(to: config, atomically: true, encoding: .utf8)
 
-        let detector = AgentDetector(home: home, claudeBinary: nil, mcpCommand: "/x/agenthandover-mcp")
+        let detector = AgentDetector(home: home, claudeBinary: nil, codexBinary: nil, mcpCommand: "/x/agenthandover-mcp")
         _ = detected(detector)
         connect(detector, "openclaw")
 
@@ -249,10 +249,133 @@ final class AgentDetectorTests: XCTestCase {
         try FileManager.default.createDirectory(at: cursor, withIntermediateDirectories: true)
         let config = cursor.appendingPathComponent("mcp.json")
         try "not json".write(to: config, atomically: true, encoding: .utf8)
-        let detector = AgentDetector(home: home, claudeBinary: nil, mcpCommand: "/x/agenthandover-mcp")
+        let detector = AgentDetector(home: home, claudeBinary: nil, codexBinary: nil, mcpCommand: "/x/agenthandover-mcp")
         _ = detected(detector)
         connect(detector, "cursor")
         XCTAssertEqual(try String(contentsOf: config, encoding: .utf8), "not json")
         XCTAssertEqual(detector.agents.first { $0.id == "cursor" }?.isConnected, false)
+    }
+
+    // MARK: - Codex
+    //
+    // Real-life finding (test Mac, 2026-09-23): pairing wrote
+    // ~/.codex/mcp.json, which Codex does not read. Codex reads
+    // ~/.codex/config.toml; its CLI (`codex mcp add`, `codex mcp list
+    // --json`) edits and reads that file. The stub below records its argv
+    // and prints what codex-cli 0.153 prints.
+
+    private var codexLog: URL { root.appendingPathComponent("codex-argv.log") }
+
+    private let codexListed = """
+        [{"name": "agenthandover", "enabled": true, "disabled_reason": null,
+          "transport": {"type": "stdio", "command": "/x/agenthandover-mcp", "args": []}},
+         {"name": "other", "enabled": true, "transport": {"type": "stdio", "command": "x"}}]
+        """
+
+    private func stubCodex(listAfterAdd: String, addStatus: Int32 = 0) throws -> String {
+        let added = root.appendingPathComponent("codex-added").path
+        let after = root.appendingPathComponent("codex-list-after.json")
+        try listAfterAdd.write(to: after, atomically: true, encoding: .utf8)
+        let script = root.appendingPathComponent("codex")
+        try """
+            #!/bin/sh
+            echo "$*" >> '\(codexLog.path)'
+            if [ "$1 $2 $3" = "mcp list --json" ]; then
+                echo "WARNING: proceeding, even though we could not update PATH" >&2
+                if [ -f '\(added)' ]; then cat '\(after.path)'; else echo '[]'; fi
+            elif [ "$1 $2" = "mcp add" ]; then
+                if [ \(addStatus) -eq 0 ]; then touch '\(added)'; echo "Added global MCP server '$3'."; else echo "Error: invalid config.toml" >&2; fi
+                exit \(addStatus)
+            fi
+            """.write(to: script, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script.path)
+        return script.path
+    }
+
+    private func codexCalls() -> [String] {
+        ((try? String(contentsOf: codexLog, encoding: .utf8)) ?? "")
+            .split(separator: "\n").map(String.init)
+    }
+
+    func testCodexListParsing() {
+        XCTAssertTrue(CodexCLI.listsServer(codexListed))
+        XCTAssertFalse(CodexCLI.listsServer("[]"))
+        XCTAssertFalse(CodexCLI.listsServer(#"[{"name": "agenthandover", "enabled": false}]"#))
+        XCTAssertFalse(CodexCLI.listsServer(#"[{"name": "agenthandover-dev", "enabled": true}]"#))
+        XCTAssertFalse(CodexCLI.listsServer("Error: no config"))
+    }
+
+    @MainActor
+    func testCodexConnectRunsCodexMcpAddAndIsConnectedOnlyWhenListed() throws {
+        let detector = AgentDetector(
+            home: home, claudeBinary: nil,
+            codexBinary: try stubCodex(listAfterAdd: codexListed),
+            mcpCommand: "/x/agenthandover-mcp"
+        )
+        let before = try XCTUnwrap(detected(detector).first { $0.id == "codex" })
+        XCTAssertFalse(before.isConnected)
+        XCTAssertFalse(before.isBusy)
+        XCTAssertEqual(before.configPath.path, home.appendingPathComponent(".codex/config.toml").path)
+
+        connect(detector, "codex")
+
+        XCTAssertEqual(codexCalls(), [
+            "mcp list --json",
+            "mcp add agenthandover -- /x/agenthandover-mcp",
+            "mcp list --json",
+        ])
+        let agent = try XCTUnwrap(detector.agents.first { $0.id == "codex" })
+        XCTAssertTrue(agent.isConnected)
+        XCTAssertNil(agent.failure)
+        // The app itself writes nothing under ~/.codex.
+        XCTAssertFalse(FileManager.default.fileExists(atPath: home.appendingPathComponent(".codex").path))
+    }
+
+    @MainActor
+    func testCodexAddThatDoesNotShowUpInTheListIsNotConnected() throws {
+        let detector = AgentDetector(
+            home: home, claudeBinary: nil,
+            codexBinary: try stubCodex(listAfterAdd: "[]"),
+            mcpCommand: "/x/agenthandover-mcp"
+        )
+        _ = detected(detector)
+        connect(detector, "codex")
+        let agent = try XCTUnwrap(detector.agents.first { $0.id == "codex" })
+        XCTAssertFalse(agent.isConnected)
+        XCTAssertEqual(agent.failure, "Codex does not list the AgentHandover MCP server.")
+    }
+
+    @MainActor
+    func testCodexFailedAddIsShown() throws {
+        let detector = AgentDetector(
+            home: home, claudeBinary: nil,
+            codexBinary: try stubCodex(listAfterAdd: codexListed, addStatus: 1),
+            mcpCommand: "/x/agenthandover-mcp"
+        )
+        _ = detected(detector)
+        connect(detector, "codex")
+        let agent = try XCTUnwrap(detector.agents.first { $0.id == "codex" })
+        XCTAssertFalse(agent.isConnected)
+        XCTAssertTrue(agent.failure?.contains("invalid config.toml") ?? false, agent.failure ?? "")
+    }
+
+    @MainActor
+    func testTheOldCodexMcpJsonEntryIsNotConnected() throws {
+        let codexDir = home.appendingPathComponent(".codex")
+        try FileManager.default.createDirectory(at: codexDir, withIntermediateDirectories: true)
+        try #"{"mcpServers": {"agenthandover": {"command": "agenthandover-mcp"}}}"#
+            .write(to: codexDir.appendingPathComponent("mcp.json"), atomically: true, encoding: .utf8)
+        let detector = AgentDetector(
+            home: home, claudeBinary: nil,
+            codexBinary: try stubCodex(listAfterAdd: codexListed),
+            mcpCommand: "/x/agenthandover-mcp"
+        )
+        XCTAssertEqual(detected(detector).first { $0.id == "codex" }?.isConnected, false)
+    }
+
+    @MainActor
+    func testWithoutTheCodexCLICodexIsNotListed() {
+        let detector = AgentDetector(home: home, claudeBinary: nil, codexBinary: nil, mcpCommand: "/x/agenthandover-mcp")
+        XCTAssertNil(detected(detector).first { $0.id == "codex" })
     }
 }
