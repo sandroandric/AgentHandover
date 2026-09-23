@@ -127,6 +127,21 @@ class TestDefaultBlockedApps:
         checker = PrivacyZoneChecker()
         assert checker.check_app("", "Keychain Access") == ObservationTier.BLOCKED
 
+    @pytest.mark.parametrize("owner", [
+        "SecurityAgent", "coreautha", "loginwindow", "universalAccessAuthWarn",
+        "Passwords", "ScreenSaverEngine", "UserNotificationCenter",
+    ])
+    def test_system_authentication_uis_blocked(self, owner: str) -> None:
+        """WP-F1: macOS password prompts, Touch ID, the login window,
+        permission dialogs, Apple's Passwords app, the screen saver and
+        system alerts, matched on the owner name of ``pid:<pid>:<name>``."""
+        event = {
+            "id": "e", "timestamp": "2026-03-11T10:00:00.000Z",
+            "kind_json": json.dumps({"type": "DwellSnapshot"}),
+            "window_json": json.dumps({"app_id": f"pid:9:{owner}", "title": ""}),
+        }
+        assert PrivacyZoneChecker().check_event(event) == ObservationTier.BLOCKED
+
 
 # ---------------------------------------------------------------------------
 # Test 2: Default Blocked URLs
