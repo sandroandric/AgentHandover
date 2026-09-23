@@ -457,9 +457,13 @@ impl Default for ConstraintsConfig {
     }
 }
 
+/// `[privacy.zones]`, enforced by the daemon before capture
+/// (`observer::privacy_zones`) and by the worker on stored events. App
+/// patterns are case-insensitive globs matched against the app name and the
+/// window title; URL patterns against the browser's page URL.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PrivacyZonesConfig {
-    /// Apps observed at full fidelity (bundle IDs or names).
+    /// Apps observed at full fidelity (overrides `blocked`, defaults included).
     #[serde(default)]
     pub full_observation: Vec<String>,
     /// Apps where only metadata is captured.

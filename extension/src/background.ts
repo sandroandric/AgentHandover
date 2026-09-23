@@ -154,7 +154,8 @@ function reportActiveTab(tab: chrome.tabs.Tab | undefined): void {
   if (!tab || tab.id === undefined || !tab.url) return;
   lastNavigatedUrl.set(tab.id, tab.url);
   forwardToDaemon(
-    { type: 'navigation_change', payload: { title: tab.title ?? '' } },
+    // `activated`: the page was already loaded; the user switched to it.
+    { type: 'navigation_change', payload: { title: tab.title ?? '', activated: true } },
     tab.id,
     tab.url,
   );

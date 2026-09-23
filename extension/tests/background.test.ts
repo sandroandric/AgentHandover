@@ -269,7 +269,7 @@ describe('navigation events', () => {
     expect(sent).toHaveLength(2);
     expect(sent[0]).toMatchObject({
       type: 'navigation_change',
-      payload: { tabId: 8, url: 'https://vault.example/items', title: 'Vault' },
+      payload: { tabId: 8, url: 'https://vault.example/items', title: 'Vault', activated: true },
     });
     expect(sent[1]).toMatchObject({
       type: 'navigation_change',
