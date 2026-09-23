@@ -5,7 +5,7 @@
     "kind": "generated",
     "by": "worker/tests/journeys/record/generate_passive_privacy.py"
   },
-  "schema_version": 3,
+  "schema_version": 4,
   "recorded_start": "2026-09-15T10:00:00.400892+00:00",
   "recorded_end": "2026-09-15T10:00:58.000051+00:00",
   "secrets": {

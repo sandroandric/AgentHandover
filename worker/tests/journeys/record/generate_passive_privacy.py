@@ -156,13 +156,13 @@ def build() -> Generator:
                ONEPASSWORD_APP, "1Password")
     gen.passive_frame(2.1, ONEPASSWORD_APP, "1Password", [
         "1Password", "Personal", "All Items", "GitHub",
-        "username  sandro@example.com", f"password  {PASSWORD}",
+        "username  jordan@example.com", f"password  {PASSWORD}",
         "website  github.com/login", "Copy",
     ])
     gen.clipboard_without_preview(9.6, PASSWORD)
     gen.native(12.0, {"type": "AppSwitch", "from_app": ONEPASSWORD_APP, "to_app": CHROME_APP},
-               CHROME_APP, "Inbox (3) - sandro@example.com - Gmail")
-    gen.passive_frame(30.2, CHROME_APP, "Inbox (3) - sandro@example.com - Gmail", [
+               CHROME_APP, "Inbox (3) - jordan@example.com - Gmail")
+    gen.passive_frame(30.2, CHROME_APP, "Inbox (3) - jordan@example.com - Gmail", [
         "mail.google.com/mail/u/0/#inbox", "Gmail", "Compose", "Inbox 3",
         "New Message", "To  ops@example.com", "Subject  staging login",
         f"The staging GitHub password is {PASSWORD}", "Send",
