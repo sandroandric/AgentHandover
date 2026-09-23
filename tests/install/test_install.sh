@@ -193,6 +193,12 @@ check_installed_prefix() {
     check "install marker written" test -f "${dd}/config.toml.bak"
 
     local plist="${p}/LaunchAgents/com.agenthandover.worker.plist"
+    check "worker plist: Label is the worker's" \
+        test "$(plist_value "${plist}" Label)" = "com.agenthandover.worker"
+    check "worker plist: attributed to the app in Login Items" \
+        test "$(plist_value "${plist}" AssociatedBundleIdentifiers.0)" = "com.agenthandover.app"
+    check "worker plist: ProcessType Background" \
+        test "$(plist_value "${plist}" ProcessType)" = "Background"
     check "worker plist: RunAtLoad true" test "$(plist_value "${plist}" RunAtLoad)" = "true"
     check "worker plist: KeepAlive.SuccessfulExit false" \
         test "$(plist_value "${plist}" KeepAlive.SuccessfulExit)" = "false"
