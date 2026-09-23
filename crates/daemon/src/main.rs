@@ -387,6 +387,7 @@ async fn main() -> Result<()> {
                                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                                 .snapshot(std::time::Instant::now()),
                         ),
+                        app_state_consent: app_state_consent(),
                     };
                     if let Err(e) = agenthandover_common::status::write_status_file(
                         "daemon-status.json",
@@ -836,6 +837,21 @@ async fn run_native_messaging_bridge() -> Result<()> {
 
 /// Hand a browser click, navigation or form submit to the observer through
 /// the transition file (the bridge is Chrome's process, not the observer's).
+/// The Automation consent of each app an app-state read was attempted for
+/// (`[privacy] read_app_state`); None before the first attempt.
+fn app_state_consent(
+) -> Option<std::collections::BTreeMap<String, agenthandover_common::status::AutomationConsent>> {
+    #[cfg(target_os = "macos")]
+    {
+        let seen = agenthandover_daemon::platform::applescript::consent_snapshot();
+        (!seen.is_empty()).then_some(seen)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
+}
+
 fn note_browser_transition(event: &agenthandover_common::event::Event) {
     use agenthandover_common::browser_transition::{write_browser_transition, BrowserTransition};
 

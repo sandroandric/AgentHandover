@@ -65,6 +65,40 @@ pub fn version(base: &str) -> Option<String> {
     value.get("version")?.as_str().map(str::to_string)
 }
 
+/// `version` ("0.34.2-rc1") >= `minimum` ("0.34.0"); false for a version
+/// that is not dotted numbers ("dev").
+pub fn version_at_least(version: &str, minimum: &str) -> bool {
+    let parse = |s: &str| -> Option<Vec<u64>> {
+        s.split('-').next()?.split('.').map(|p| p.parse().ok()).collect()
+    };
+    match (parse(version), parse(minimum)) {
+        (Some(have), Some(need)) => have >= need,
+        _ => false,
+    }
+}
+
+/// The models the service has loaded now (`GET /api/ps`), each with the
+/// bytes it occupies (weights plus its context); None when the service is
+/// not reachable or the answer is not a model list.
+pub fn loaded_models(base: &str) -> Option<Vec<(String, u64)>> {
+    ps_models(&get(base, "/api/ps")?)
+}
+
+/// `(name, size)` of each model in a `GET /api/ps` response.
+pub fn ps_models(ps_json: &str) -> Option<Vec<(String, u64)>> {
+    let value: serde_json::Value = serde_json::from_str(ps_json).ok()?;
+    let models = value.get("models")?.as_array()?;
+    Some(
+        models
+            .iter()
+            .filter_map(|m| {
+                let name = m.get("name")?.as_str()?.to_string();
+                Some((name, m.get("size").and_then(|s| s.as_u64()).unwrap_or(0)))
+            })
+            .collect(),
+    )
+}
+
 /// One line of the `POST /api/pull` stream.
 #[derive(Debug, PartialEq)]
 pub enum PullEvent {
@@ -173,6 +207,32 @@ mod tests {
         assert_eq!(tag_names("<html>"), None);
         assert_eq!(tag_names(r#"{"error":"x"}"#), None);
         assert_eq!(tag_names(r#"{"models":[]}"#), Some(vec![]));
+    }
+
+    #[test]
+    fn compares_versions() {
+        assert!(version_at_least("0.34.2", "0.34.0"));
+        assert!(version_at_least("0.34.0-rc1", "0.34.0"));
+        assert!(version_at_least("0.34.0", "0.34.0"));
+        assert!(version_at_least("1.0.0", "0.34.0"));
+        assert!(!version_at_least("0.30.6", "0.34.0"));
+        assert!(!version_at_least("0.9.99", "0.34.0"));
+        assert!(!version_at_least("dev", "0.34.0"));
+    }
+
+    #[test]
+    fn loaded_models_come_from_api_ps() {
+        let ps = r#"{"models":[{"name":"qwen3.5:4b","size":4100000000,"size_vram":0},
+                               {"name":"nomic-embed-text:latest","size":300000000}]}"#;
+        assert_eq!(
+            ps_models(ps).unwrap(),
+            vec![
+                ("qwen3.5:4b".to_string(), 4_100_000_000),
+                ("nomic-embed-text:latest".to_string(), 300_000_000)
+            ]
+        );
+        assert_eq!(ps_models(r#"{"models":[]}"#), Some(vec![]));
+        assert_eq!(ps_models("<html>"), None);
     }
 
     #[test]

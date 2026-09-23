@@ -1,0 +1,94 @@
+{
+  "host": {
+    "url": "http://localhost:11434",
+    "local": true,
+    "port": 11434
+  },
+  "version": "0.30.6",
+  "minimum": "0.34.0",
+  "installs": [
+    {
+      "kind": "Ollama.app",
+      "path": "/Applications/Ollama.app",
+      "version": "0.30.6"
+    },
+    {
+      "kind": "Homebrew",
+      "path": "/opt/homebrew/Cellar/ollama/0.34.2",
+      "version": "0.34.2"
+    }
+  ],
+  "launch_items": [
+    {
+      "label": "homebrew.mxcl.ollama",
+      "plist": "/Users/me/Library/LaunchAgents/homebrew.mxcl.ollama.plist",
+      "program": "/opt/homebrew/opt/ollama/bin/ollama"
+    }
+  ],
+  "serving": {
+    "pid": 812,
+    "executable": "/Applications/Ollama.app/Contents/Resources/ollama"
+  },
+  "findings": [
+    {
+      "level": "fail",
+      "title": "Ollama 0.30.6 is older than 0.34.0",
+      "lines": [
+        "AgentHandover's models need Ollama 0.34.0 or later; http://localhost:11434 answers with 0.30.6.",
+        "Homebrew 0.34.2 is installed, but Ollama.app 0.30.6 (pid 812, /Applications/Ollama.app/Contents/Resources/ollama) is serving port 11434.",
+        "Fix: To keep Homebrew 0.34.2: quit Ollama.app (menu bar icon > Quit), remove it from System Settings > General > Login Items and move /Applications/Ollama.app to the Trash; then brew services restart ollama."
+      ]
+    },
+    {
+      "level": "warn",
+      "title": "Ollama is installed 2 times",
+      "lines": [
+        "Installed: Ollama.app 0.30.6 at /Applications/Ollama.app",
+        "Installed: Homebrew 0.34.2 at /opt/homebrew/Cellar/ollama/0.34.2",
+        "Started at login by homebrew.mxcl.ollama (/Users/me/Library/LaunchAgents/homebrew.mxcl.ollama.plist), runs /opt/homebrew/opt/ollama/bin/ollama",
+        "Serving port 11434: Ollama.app 0.30.6 (pid 812, /Applications/Ollama.app/Contents/Resources/ollama).",
+        "Only one server can listen on port 11434; whichever starts first after login wins, so the version you get can change at every restart. Keep one:",
+        "  To keep Ollama.app 0.30.6: brew services stop ollama && brew uninstall ollama; then open /Applications/Ollama.app.",
+        "  To keep Homebrew 0.34.2: quit Ollama.app (menu bar icon > Quit), remove it from System Settings > General > Login Items and move /Applications/Ollama.app to the Trash; then brew services restart ollama."
+      ]
+    },
+    {
+      "level": "warn",
+      "title": "Memory for the Recommended tier: needs 8.5 GB, 7.1 GB available now",
+      "lines": [
+        "Available is free, inactive and speculative memory (3.0 GB) plus the models Ollama has loaded (4.1 GB); other apps use the rest.",
+        "Fix: close memory-heavy apps, or choose the Standard tier (needs 5.4 GB): agenthandover setup --vlm --tier standard"
+      ]
+    },
+    {
+      "level": "warn",
+      "title": "Swap in use: 44.0 GB (more than 8.0 GB)",
+      "lines": [
+        "The Mac is short of memory; the worker does not load the Skills model while this lasts.",
+        "Fix: close memory-heavy apps, or restart the Mac."
+      ]
+    }
+  ],
+  "headroom": {
+    "available_bytes": 7100000000,
+    "free_bytes": 3000000000,
+    "loaded_bytes": 4100000000,
+    "swap_used_bytes": 44000000000,
+    "free_disk_bytes": 40000000000,
+    "need_bytes": 8470000000,
+    "tiers": [
+      {
+        "id": "standard",
+        "label": "Standard",
+        "need_bytes": 5370000000,
+        "fits": true
+      },
+      {
+        "id": "recommended",
+        "label": "Recommended",
+        "need_bytes": 8470000000,
+        "fits": false
+      }
+    ]
+  }
+}

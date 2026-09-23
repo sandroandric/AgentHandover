@@ -45,6 +45,40 @@ pub struct DaemonStatus {
     /// (`agenthandover status --compute`). Absent from older daemons.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compute: Option<CaptureCompute>,
+    /// `[privacy] read_app_state`: whether macOS lets AgentHandover read
+    /// each app it tried (by app name), asked without prompting.  Absent
+    /// until an app-state read was attempted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_state_consent: Option<BTreeMap<String, AutomationConsent>>,
+}
+
+/// macOS's Automation (Apple Events) consent for AgentHandover to query
+/// one app, from `AEDeterminePermissionToAutomateTarget` without a prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AutomationConsent {
+    Granted,
+    /// Turned off in System Settings > Privacy & Security > Automation.
+    Denied,
+    /// macOS has not asked the user yet.
+    NotAsked,
+    /// The app was not running when asked.
+    NotRunning,
+    /// Any other answer (an older macOS, an error).
+    Unknown,
+}
+
+impl AutomationConsent {
+    /// The consent an `AEDeterminePermissionToAutomateTarget` status means.
+    pub fn from_status(status: i32) -> Self {
+        match status {
+            0 => Self::Granted,
+            -1743 => Self::Denied,   // errAEEventNotPermitted
+            -1744 => Self::NotAsked, // errAEEventWouldRequireUserConsent
+            -600 => Self::NotRunning, // procNotFound
+            _ => Self::Unknown,
+        }
+    }
 }
 
 /// Capture-side counters: frames taken from the app's capture socket,

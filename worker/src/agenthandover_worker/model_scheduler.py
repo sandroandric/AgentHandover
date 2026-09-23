@@ -34,7 +34,17 @@ out waiting for llama-server to start").  The worker therefore runs each tick in
   memory: need 8.2 GB, 3.1 GB free") and are retried on the next tick;
   after :data:`FALLBACK_AFTER_SECONDS` they run on the annotation model
   instead, which is already resident, and the worker status says so.  A
-  focus recording is always processed, on the SOP model.
+  focus recording is always processed, on the SOP model, unless the Mac
+  is already swapping hard or its disk is nearly full (below).
+* before loading the SOP model it also checks the swap in use
+  (``sysctl vm.swapusage``) against :data:`SWAP_LIMIT_BYTES` and the free
+  disk against :data:`DISK_FLOOR_BYTES` (swap files live on the startup
+  disk, so a full disk means swap cannot grow).  Either one refuses the
+  load: batched jobs wait with the reason in the status, as for memory,
+  and a focus recording is processed on the resident annotation model
+  instead, which loads nothing.  A Mac that loaded a 7 GB model with tens
+  of GB already swapped out has run out of memory altogether (seen on the
+  16 GB test Mac: a kernel panic, the compressor full, ~44 GB of swap).
 * a load that fails (Ollama answers 5xx or times out) defers the phase with
   an exponential backoff: the calls raise ``OllamaUnavailable``, which the
   generators treat as "try again later", never as a failed Skill.  A load
@@ -53,6 +63,7 @@ from __future__ import annotations
 
 import logging
 import re
+import shutil
 import subprocess
 import time
 from dataclasses import dataclass
@@ -81,6 +92,12 @@ MEMORY_MARGIN_BYTES = 1 * GB
 # Batched work that has waited this long for memory runs on the annotation
 # model instead.
 FALLBACK_AFTER_SECONDS = 6 * 3600
+
+# The SOP model is not loaded while more swap than this is in use or less
+# disk than this is free (swap cannot grow).  ``agenthandover doctor`` warns
+# at the same values (crates/cli/src/machine.rs pins them to these).
+SWAP_LIMIT_BYTES = 8 * GB
+DISK_FLOOR_BYTES = 10 * GB
 
 # A failed SOP-model load is retried after this, doubling up to the cap.
 LOAD_BACKOFF_SECONDS = 60.0
@@ -121,6 +138,40 @@ def free_memory_bytes() -> int | None:
     except (OSError, subprocess.SubprocessError):
         return None
     return parse_vm_stat(out)
+
+
+_SWAP_USED_RE = re.compile(r"used\s*=\s*([\d.]+)([KMGT])")
+_UNITS = {"K": 1024, "M": 1024 ** 2, "G": 1024 ** 3, "T": 1024 ** 4}
+
+
+def parse_swapusage(text: str) -> int | None:
+    """Bytes of swap in use from ``sysctl vm.swapusage`` output
+    (``total = 2048.00M  used = 971.81M  free = 1076.19M  (encrypted)``),
+    or None when the output does not have them."""
+    match = _SWAP_USED_RE.search(text)
+    if match is None:
+        return None
+    return int(float(match.group(1)) * _UNITS[match.group(2)])
+
+
+def swap_used_bytes() -> int | None:
+    """Swap in use now, or None when it cannot be read (not macOS)."""
+    try:
+        out = subprocess.run(
+            ["sysctl", "-n", "vm.swapusage"],
+            capture_output=True, text=True, timeout=5, check=True,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return parse_swapusage(out)
+
+
+def free_disk_bytes() -> int | None:
+    """Free space on the startup disk, where macOS keeps its swap files."""
+    try:
+        return shutil.disk_usage("/").free
+    except OSError:
+        return None
 
 
 def before_generation_call(component: object) -> None:
@@ -166,8 +217,8 @@ class GenerationPlan:
 class ModelScheduler:
     """The switch between the annotation and the generation phase.
 
-    *clock* returns seconds (wall clock); *free_memory* returns bytes or
-    None.  Components registered with :meth:`register` (anything with a
+    *clock* returns seconds (wall clock); *free_memory*, *swap_used* and
+    *free_disk* return bytes or None (unknown).  Components registered with :meth:`register` (anything with a
     ``config.model``, such as the SOP generator, the synthesizer and the
     generation reasoner) are pointed at the annotation model while a
     fallback phase runs, and back afterwards.
@@ -181,12 +232,16 @@ class ModelScheduler:
         sop_model: str,
         clock: Callable[[], float] = time.time,
         free_memory: Callable[[], int | None] = free_memory_bytes,
+        swap_used: Callable[[], int | None] = swap_used_bytes,
+        free_disk: Callable[[], int | None] = free_disk_bytes,
     ) -> None:
         self.client = client
         self.annotation_model = annotation_model
         self.sop_model = sop_model
         self._clock = clock
         self._free_memory = free_memory
+        self._swap_used = swap_used
+        self._free_disk = free_disk
         self._components: list[object] = []
         self._due_since: dict[str, float] = {}
         self._plan_model = sop_model
@@ -287,7 +342,32 @@ class ModelScheduler:
         ):
             return GenerationPlan(run=False)
 
-        short = self._memory_short()
+        try:
+            loaded: list[dict] | None = self.client.ps()
+        except OllamaError as exc:
+            logger.debug("Ollama /api/ps unavailable: %s", exc)
+            loaded = None
+        if loaded is not None:
+            self._learn_sizes(loaded)
+            if any(_same_model(m.get("name", ""), self.sop_model) for m in loaded):
+                # Already loaded: nothing to load, nothing to check.
+                self.reason = None
+                return self._run(self.sop_model, jobs)
+
+        pressure = self._pressure()
+        if pressure is not None:
+            if urgent or now - oldest >= FALLBACK_AFTER_SECONDS:
+                self.reason = (
+                    f"generating on {self.annotation_model}: not loading "
+                    f"{self.sop_model}, {pressure}"
+                )
+                logger.warning("%s", self.reason)
+                return self._run(self.annotation_model, jobs, fallback=True)
+            self.reason = f"waiting: {pressure}"
+            logger.info("Generation deferred, %s", self.reason)
+            return GenerationPlan(run=False)
+
+        short = self._memory_short(loaded) if loaded is not None else None
         if short is None:
             self.reason = None
             return self._run(self.sop_model, jobs)
@@ -423,23 +503,34 @@ class ModelScheduler:
         gb = MODEL_SIZES_GB.get(model)
         return int(gb * GB) if gb else None
 
-    def _memory_short(self) -> tuple[int, int] | None:
-        """``(need, free)`` bytes when the SOP model does not fit, else None;
-        *free* counts the annotation model's memory, which the phase frees.
+    def _pressure(self) -> str | None:
+        """Why no model may be loaded now (swap in use over
+        :data:`SWAP_LIMIT_BYTES`, free disk under :data:`DISK_FLOOR_BYTES`),
+        or None.  An unknown value is no reason to refuse."""
+        swap = self._swap_used()
+        if swap is not None and swap > SWAP_LIMIT_BYTES:
+            return (
+                f"{_gb(swap)} of swap in use (limit {_gb(SWAP_LIMIT_BYTES)}): "
+                "the Mac is short of memory"
+            )
+        disk = self._free_disk()
+        if disk is not None and disk < DISK_FLOOR_BYTES:
+            return (
+                f"{_gb(disk)} of disk free (floor {_gb(DISK_FLOOR_BYTES)}): "
+                "swap cannot grow"
+            )
+        return None
 
-        Fits when it is already loaded, or when free memory plus what
-        unloading the annotation model returns covers its size and the
-        margin.  An unknown size, free memory or loaded set is no reason
-        to wait: the load itself then decides.
+    def _memory_short(self, loaded: list[dict]) -> tuple[int, int] | None:
+        """``(need, free)`` bytes when the SOP model (not in *loaded*, the
+        ``/api/ps`` list) does not fit, else None; *free* counts the
+        annotation model's memory, which the phase frees.
+
+        Fits when free memory plus what unloading the annotation model
+        returns covers its size and the margin.  An unknown size or free
+        memory is no reason to wait: the load itself then decides.  (Nor is
+        an unknown loaded set: the caller does not ask then.)
         """
-        try:
-            loaded = self.client.ps()
-        except OllamaError as exc:
-            logger.debug("Ollama /api/ps unavailable: %s", exc)
-            return None
-        self._learn_sizes(loaded)
-        if any(_same_model(m.get("name", ""), self.sop_model) for m in loaded):
-            return None
         size = self._size_of(self.sop_model)
         free = self._free_memory()
         if size is None or free is None:

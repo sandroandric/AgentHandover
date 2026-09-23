@@ -2,10 +2,21 @@
 //!
 //! Queries known macOS apps via `osascript -e` to extract context like
 //! current folder, document name, email subject, etc.
+//!
+//! Only with the user's consent: each query first asks macOS, without a
+//! prompt, whether AgentHandover may send Apple Events to the app
+//! (`AEDeterminePermissionToAutomateTarget`, `askUserIfNeeded = false`).
+//! When it may not (denied, or never asked), the query is skipped
+//! silently; the answer per app is kept for the daemon status, where
+//! `agenthandover doctor` reports the apps that are not granted.  macOS
+//! asks the user only from the app's onboarding, where the option is
+//! explained.
 
+use agenthandover_common::status::AutomationConsent;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::process::Command;
+use std::sync::Mutex;
 use std::time::Duration;
 use tracing::{debug, warn};
 
@@ -159,6 +170,86 @@ end tell"#
     Some(script.to_string())
 }
 
+/// The last consent seen per app name.
+static CONSENT: Mutex<BTreeMap<String, AutomationConsent>> = Mutex::new(BTreeMap::new());
+
+/// The Automation consent last seen for each app a read was attempted for.
+pub fn consent_snapshot() -> BTreeMap<String, AutomationConsent> {
+    CONSENT.lock().unwrap_or_else(|p| p.into_inner()).clone()
+}
+
+fn record_consent(app_name: &str, consent: AutomationConsent) {
+    CONSENT
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .insert(app_name.to_string(), consent);
+}
+
+/// Apple Event Manager, in CoreServices.
+mod ae {
+    use std::ffi::c_void;
+
+    #[repr(C)]
+    pub struct AEDesc {
+        pub descriptor_type: u32,
+        pub data_handle: *mut c_void,
+    }
+
+    /// 'bund': an address by bundle identifier.
+    pub const TYPE_APPLICATION_BUNDLE_ID: u32 = u32::from_be_bytes(*b"bund");
+    /// '****': any event class and id.
+    pub const TYPE_WILD_CARD: u32 = u32::from_be_bytes(*b"****");
+
+    #[link(name = "CoreServices", kind = "framework")]
+    extern "C" {
+        pub fn AECreateDesc(
+            type_code: u32,
+            data_ptr: *const c_void,
+            data_size: isize,
+            result: *mut AEDesc,
+        ) -> i16;
+        pub fn AEDisposeDesc(desc: *mut AEDesc) -> i16;
+        pub fn AEDeterminePermissionToAutomateTarget(
+            target: *const AEDesc,
+            event_class: u32,
+            event_id: u32,
+            ask_user_if_needed: u8,
+        ) -> i32;
+    }
+}
+
+/// Whether macOS lets this process (AgentHandover.app, which spawned the
+/// daemon and owns its privacy grants) send Apple Events to `bundle_id`.
+/// Never shows a prompt.
+pub fn automation_consent(bundle_id: &str) -> AutomationConsent {
+    let mut target = ae::AEDesc {
+        descriptor_type: 0,
+        data_handle: std::ptr::null_mut(),
+    };
+    // SAFETY: AECreateDesc copies `bundle_id`'s bytes into `target`, which
+    // is disposed of below; the permission call only reads it.
+    let status = unsafe {
+        if ae::AECreateDesc(
+            ae::TYPE_APPLICATION_BUNDLE_ID,
+            bundle_id.as_ptr().cast(),
+            bundle_id.len() as isize,
+            &mut target,
+        ) != 0
+        {
+            return AutomationConsent::Unknown;
+        }
+        let status = ae::AEDeterminePermissionToAutomateTarget(
+            &target,
+            ae::TYPE_WILD_CARD,
+            ae::TYPE_WILD_CARD,
+            0,
+        );
+        ae::AEDisposeDesc(&mut target);
+        status
+    };
+    AutomationConsent::from_status(status)
+}
+
 /// Run an AppleScript via `osascript -e` with a 500ms timeout.
 /// Returns the stdout output or None on failure/timeout.
 fn run_osascript(script: &str) -> Option<String> {
@@ -219,12 +310,30 @@ fn parse_output(output: &str) -> HashMap<String, String> {
 }
 
 /// Query the state of a known app by its display name.
-/// Returns None if the app is unsupported, not running, or query fails.
+/// Returns None if the app is unsupported, not running, not granted to
+/// AgentHandover (see the module docs), or the query fails.
 pub fn query_app_state(app_name: &str) -> Option<AppState> {
+    query_app_state_with(app_name, automation_consent, run_osascript)
+}
+
+/// [`query_app_state`] with the consent check and the script runner given.
+fn query_app_state_with(
+    app_name: &str,
+    consent: impl Fn(&str) -> AutomationConsent,
+    run: impl Fn(&str) -> Option<String>,
+) -> Option<AppState> {
     let script = build_script(app_name)?;
     let bundle_id = bundle_id_for_app(app_name)?;
+    let app_name = app_name_for_bundle_id(bundle_id).unwrap_or(app_name);
 
-    let output = run_osascript(&script)?;
+    let granted = consent(bundle_id);
+    record_consent(app_name, granted);
+    if granted != AutomationConsent::Granted {
+        debug!(app = app_name, consent = ?granted, "App state not read: not granted");
+        return None;
+    }
+
+    let output = run(&script)?;
     let properties = parse_output(&output);
 
     if properties.is_empty() {
@@ -374,6 +483,61 @@ mod tests {
         let script = build_script("Finder");
         assert!(script.is_some());
         assert!(script.unwrap().contains("Finder"));
+    }
+
+    #[test]
+    fn an_app_that_is_not_granted_is_never_queried() {
+        use std::cell::Cell;
+        for consent in [
+            AutomationConsent::Denied,
+            AutomationConsent::NotAsked,
+            AutomationConsent::NotRunning,
+            AutomationConsent::Unknown,
+        ] {
+            let ran = Cell::new(false);
+            let state = query_app_state_with(
+                "notes",
+                |bid| {
+                    assert_eq!(bid, "com.apple.Notes");
+                    consent
+                },
+                |_| {
+                    ran.set(true);
+                    Some("document_name:x".into())
+                },
+            );
+            assert!(state.is_none());
+            assert!(!ran.get(), "osascript ran for {consent:?}");
+            assert_eq!(consent_snapshot().get("Notes"), Some(&consent));
+        }
+        let state = query_app_state_with(
+            "TextEdit",
+            |_| AutomationConsent::Granted,
+            |_| Some("document_name:Draft\n".into()),
+        )
+        .unwrap();
+        assert_eq!(state.app_id, "com.apple.TextEdit");
+        assert_eq!(state.properties["document_name"], "Draft");
+        assert_eq!(consent_snapshot().get("TextEdit"), Some(&AutomationConsent::Granted));
+    }
+
+    /// The real call links and answers at once, without a prompt: the test
+    /// runner has no consent for an app that does not exist.
+    #[test]
+    fn the_consent_call_returns_without_prompting() {
+        assert_ne!(
+            automation_consent("com.agenthandover.no-such-app"),
+            AutomationConsent::Granted
+        );
+    }
+
+    #[test]
+    fn consent_codes() {
+        assert_eq!(AutomationConsent::from_status(0), AutomationConsent::Granted);
+        assert_eq!(AutomationConsent::from_status(-1743), AutomationConsent::Denied);
+        assert_eq!(AutomationConsent::from_status(-1744), AutomationConsent::NotAsked);
+        assert_eq!(AutomationConsent::from_status(-600), AutomationConsent::NotRunning);
+        assert_eq!(AutomationConsent::from_status(-50), AutomationConsent::Unknown);
     }
 
     #[test]

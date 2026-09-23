@@ -6,8 +6,9 @@ use agenthandover_common::observation::{
     capture_socket_path, observation_socket_path, snapshot_at,
 };
 
+use agenthandover_common::status::AutomationConsent;
 use agenthandover_common::tiers;
-use crate::{ollama, paths};
+use crate::{machine, ollama, paths};
 
 /// Detect which install channel produced this AgentHandover installation.
 fn detect_install_channel() -> &'static str {
@@ -47,10 +48,12 @@ fn print_install_hint(channel: &str) {
     }
 }
 
-/// Counters for the three check result states.
+/// Counters for the check result states.  A warning does not fail doctor
+/// but is counted, so a summary never reads "all passed" over one.
 struct CheckCounts {
     passes: u32,
     skips: u32,
+    warnings: u32,
     failures: u32,
 }
 
@@ -59,6 +62,7 @@ impl CheckCounts {
         Self {
             passes: 0,
             skips: 0,
+            warnings: 0,
             failures: 0,
         }
     }
@@ -220,15 +224,25 @@ pub fn run() -> Result<()> {
         );
     }
 
-    // Check 15: Ollama reachable
-    let ollama_version = ollama::version(ollama::BASE_URL);
-    let ollama_ok = ollama_version.is_some();
-    if let Some(version) = &ollama_version {
-        check_pass(&mut counts, &format!("Ollama service ({version})"));
-    } else {
-        check_fail(&mut counts, "Ollama service");
-        eprintln!("  Fix: Install Ollama from https://ollama.com and run it");
-    }
+    // Check 15: the Ollama service (the configured host), its version
+    // against the minimum, the installs on this Mac and which one serves
+    // the port, and memory headroom for the configured tier.
+    let config_str = std::fs::read_to_string(&config_path).unwrap_or_default();
+    let host_url = read_config_string_field(&config_str, "vlm", "ollama_host").unwrap_or_default();
+    let report = machine::gather(&host_url, &configured_models(&config_str));
+    print_findings(&mut counts, &report.findings);
+    let ollama_ok = report.version.is_some();
+
+    // Check 15b: `[privacy] read_app_state` (opt-in): the apps macOS has
+    // not let AgentHandover read, from the daemon's status.
+    let read_app_state = read_config_string_field(&config_str, "privacy", "read_app_state")
+        .is_some_and(|v| v == "true");
+    let consent = agenthandover_common::status::read_status_file::<
+        agenthandover_common::status::DaemonStatus,
+    >("daemon-status.json")
+    .ok()
+    .and_then(|s| s.app_state_consent);
+    print_findings(&mut counts, &app_state_findings(read_app_state, consent.as_ref()));
 
     // Check 16: Required models pulled
     //
@@ -243,8 +257,6 @@ pub fn run() -> Result<()> {
     // Also: if config has `vlm.mode = "remote"`, skip the local model
     // check entirely — they're using a cloud provider.
     if ollama_ok {
-        let config_str = std::fs::read_to_string(&config_path).unwrap_or_default();
-
         let vlm_mode = read_config_string_field(&config_str, "vlm", "mode")
             .unwrap_or_else(|| "local".to_string());
 
@@ -257,16 +269,16 @@ pub fn run() -> Result<()> {
         } else {
             // Missing model keys come from the config's tier, else the
             // RAM tier, exactly as the worker resolves them.
-            let (_, annotation_model, sop_model) = tiers::resolve_models(
-                read_config_string_field(&config_str, "vlm", "tier").as_deref(),
-                read_config_string_field(&config_str, "vlm", "annotation_model").as_deref(),
-                read_config_string_field(&config_str, "vlm", "sop_model").as_deref(),
-            );
+            let machine::ConfiguredModels {
+                annotation: annotation_model,
+                sop: sop_model,
+                ..
+            } = configured_models(&config_str);
             let embedding_model = read_config_string_field(&config_str, "embedding", "model")
                 .unwrap_or_else(|| tiers::table().embedding_model.clone());
 
             // Over HTTP, as `setup` asks (see crate::ollama for why).
-            let installed = ollama::installed_models(ollama::BASE_URL).unwrap_or_default();
+            let installed = ollama::installed_models(&report.host.url).unwrap_or_default();
 
             // The standard tier runs one model for both jobs; deduplicate
             // so we don't report the same model twice.
@@ -295,8 +307,8 @@ pub fn run() -> Result<()> {
     // Summary
     println!();
     println!(
-        "Results: {} passed, {} skipped, {} failed",
-        counts.passes, counts.skips, counts.failures
+        "Results: {} passed, {} skipped, {} warning(s), {} failed",
+        counts.passes, counts.skips, counts.warnings, counts.failures
     );
     if counts.failures > 0 {
         println!(
@@ -304,6 +316,16 @@ pub fn run() -> Result<()> {
             "Some checks failed. See above for details."
                 .yellow()
                 .bold()
+        );
+    } else if counts.warnings > 0 {
+        println!(
+            "{}",
+            format!(
+                "Required checks passed, with {} warning(s): see WARN above",
+                counts.warnings
+            )
+            .yellow()
+            .bold()
         );
     } else if counts.skips > 0 {
         println!(
@@ -323,6 +345,98 @@ pub fn run() -> Result<()> {
         anyhow::bail!("{} doctor check(s) failed", counts.failures);
     }
     Ok(())
+}
+
+/// `agenthandover doctor --ollama-json`: the Ollama and memory report the
+/// app's onboarding shows (the same findings `doctor` prints).
+pub fn print_ollama_json() -> Result<()> {
+    let config_path = agenthandover_common::status::status_dir().join("config.toml");
+    let config_str = std::fs::read_to_string(config_path).unwrap_or_default();
+    let host_url = read_config_string_field(&config_str, "vlm", "ollama_host").unwrap_or_default();
+    let report = machine::gather(&host_url, &configured_models(&config_str));
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    Ok(())
+}
+
+/// The config's tier and models, as the worker resolves them.
+fn configured_models(config_str: &str) -> machine::ConfiguredModels {
+    let (tier, annotation, sop) = tiers::resolve_models(
+        read_config_string_field(config_str, "vlm", "tier").as_deref(),
+        read_config_string_field(config_str, "vlm", "annotation_model").as_deref(),
+        read_config_string_field(config_str, "vlm", "sop_model").as_deref(),
+    );
+    machine::ConfiguredModels {
+        tier_label: tier.label.clone(),
+        annotation,
+        sop,
+        local: read_config_string_field(config_str, "vlm", "mode").as_deref() != Some("remote"),
+    }
+}
+
+/// What doctor says about `[privacy] read_app_state`: nothing when it is
+/// off; otherwise which apps macOS lets AgentHandover read (the daemon
+/// records the answer it gets, asked without a prompt, per app).
+fn app_state_findings(
+    enabled: bool,
+    consent: Option<&std::collections::BTreeMap<String, AutomationConsent>>,
+) -> Vec<machine::Finding> {
+    use machine::{Finding, Level};
+    if !enabled {
+        return vec![];
+    }
+    let Some(consent) = consent.filter(|c| !c.is_empty()) else {
+        return vec![Finding {
+            level: Level::Pass,
+            title: "Reading open documents (on; no supported app opened yet)".into(),
+            lines: vec![],
+        }];
+    };
+    let granted: Vec<&str> = consent
+        .iter()
+        .filter(|(_, c)| **c == AutomationConsent::Granted)
+        .map(|(a, _)| a.as_str())
+        .collect();
+    let mut lines = Vec::new();
+    for (app, c) in consent {
+        match c {
+            AutomationConsent::Denied => lines.push(format!(
+                "{app}: turned off. Fix: System Settings > Privacy & Security > Automation >                  AgentHandover: turn on {app}."
+            )),
+            AutomationConsent::NotAsked => lines.push(format!(
+                "{app}: macOS has not asked yet; AgentHandover asks the next time you switch                  to {app} while it runs."
+            )),
+            AutomationConsent::Unknown => {
+                lines.push(format!("{app}: macOS gave no answer; it is not read."))
+            }
+            AutomationConsent::Granted | AutomationConsent::NotRunning => {}
+        }
+    }
+    if lines.is_empty() {
+        let title = if granted.is_empty() {
+            "Reading open documents (on)".to_string()
+        } else {
+            format!("Reading open documents (on: {})", granted.join(", "))
+        };
+        return vec![Finding { level: Level::Pass, title, lines }];
+    }
+    vec![Finding {
+        level: Level::Warn,
+        title: format!("Reading open documents: {} app(s) not granted", lines.len()),
+        lines,
+    }]
+}
+
+fn print_findings(counts: &mut CheckCounts, findings: &[machine::Finding]) {
+    for f in findings {
+        match f.level {
+            machine::Level::Pass => check_pass(counts, &f.title),
+            machine::Level::Warn => check_warn(counts, &f.title),
+            machine::Level::Fail => check_fail(counts, &f.title),
+        }
+        for line in &f.lines {
+            eprintln!("  {line}");
+        }
+    }
 }
 
 fn check_capture_servers(counts: &mut CheckCounts) {
@@ -457,6 +571,11 @@ fn check_pass(counts: &mut CheckCounts, name: &str) {
 fn check_fail(counts: &mut CheckCounts, name: &str) {
     counts.record_fail();
     println!("  {} {}", "FAIL".red(), name);
+}
+
+fn check_warn(counts: &mut CheckCounts, name: &str) {
+    counts.warnings += 1;
+    println!("  {} {}", "WARN".yellow(), name);
 }
 
 fn check_skip(counts: &mut CheckCounts, name: &str, reason: &str) {
@@ -622,23 +741,7 @@ fn launch_agents_dir() -> std::path::PathBuf {
 }
 
 fn free_disk_gb() -> u64 {
-    #[cfg(unix)]
-    {
-        use std::ffi::CString;
-        let c_path = CString::new("/").unwrap();
-        unsafe {
-            let mut stat: libc::statvfs = std::mem::zeroed();
-            if libc::statvfs(c_path.as_ptr(), &mut stat) == 0 {
-                stat.f_bavail as u64 * stat.f_frsize as u64 / (1024 * 1024 * 1024)
-            } else {
-                0
-            }
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        0
-    }
+    machine::free_disk_now().unwrap_or(0) / (1024 * 1024 * 1024)
 }
 
 fn check_native_messaging_manifest() -> bool {
@@ -768,6 +871,30 @@ mod tests {
         let (level, detail) = heartbeat_verdict(Some(hung), now(), |_| true);
         assert_eq!(level, HeartbeatLevel::Warn);
         assert!(detail.contains("600s ago"), "{detail}");
+    }
+
+    #[test]
+    fn app_state_reads_report_the_apps_not_granted() {
+        use std::collections::BTreeMap;
+        use AutomationConsent::*;
+        assert!(app_state_findings(false, None).is_empty());
+        let none = app_state_findings(true, None);
+        assert_eq!(none[0].level, machine::Level::Pass);
+
+        let mut seen = BTreeMap::new();
+        seen.insert("Notes".to_string(), Granted);
+        seen.insert("Safari".to_string(), NotRunning);
+        let ok = app_state_findings(true, Some(&seen));
+        assert_eq!(ok[0].level, machine::Level::Pass);
+        assert_eq!(ok[0].title, "Reading open documents (on: Notes)");
+
+        seen.insert("Mail".to_string(), Denied);
+        seen.insert("TextEdit".to_string(), NotAsked);
+        let warn = app_state_findings(true, Some(&seen));
+        assert_eq!(warn[0].level, machine::Level::Warn);
+        assert_eq!(warn[0].title, "Reading open documents: 2 app(s) not granted");
+        assert!(warn[0].lines[0].starts_with("Mail: turned off. Fix: System Settings"));
+        assert!(warn[0].lines[1].starts_with("TextEdit: macOS has not asked yet"));
     }
 
     #[test]

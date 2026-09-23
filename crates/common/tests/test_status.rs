@@ -25,6 +25,7 @@ fn sample_daemon_status() -> DaemonStatus {
         artifacts_purged: None,
         bytes_freed: None,
         compute: None,
+        app_state_consent: None,
     }
 }
 
@@ -234,6 +235,7 @@ fn daemon_status_with_extension_message_roundtrip() {
         artifacts_purged: None,
         bytes_freed: None,
         compute: None,
+        app_state_consent: None,
     };
 
     let json = serde_json::to_string_pretty(&status).expect("serialize");

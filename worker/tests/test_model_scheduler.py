@@ -23,8 +23,11 @@ from agenthandover_worker.model_scheduler import (
     LOAD_BACKOFF_SECONDS,
     LOAD_START_SECONDS,
     LOAD_TIMEOUT_SECONDS,
+    DISK_FLOOR_BYTES,
+    SWAP_LIMIT_BYTES,
     ModelScheduler,
     before_generation_call,
+    parse_swapusage,
     parse_vm_stat,
 )
 from agenthandover_worker.ollama import OllamaClient, OllamaTimeout, OllamaUnavailable, Response
@@ -112,10 +115,13 @@ class Clock:
 
 
 def _scheduler(fake, *, free=16 * GB, clock=None, annotation=QWEN, sop=GEMMA):
-    memory = {"free": free}
+    """*memory* holds ``free``, ``swap`` (bytes in use) and ``disk`` (bytes
+    free); the tests change them between ticks."""
+    memory = {"free": free, "swap": 0, "disk": 100 * GB}
     scheduler = ModelScheduler(
         fake, annotation_model=annotation, sop_model=sop,
         clock=clock or Clock(), free_memory=lambda: memory["free"],
+        swap_used=lambda: memory["swap"], free_disk=lambda: memory["disk"],
     )
     return scheduler, memory
 
@@ -387,6 +393,100 @@ def test_free_memory_counts_free_inactive_and_speculative_pages():
     assert parse_vm_stat(VM_STAT) == 16384 * (89886 + 244299 + 9644)
     assert parse_vm_stat("Pages free: 1.\n") is None
     assert parse_vm_stat("") is None
+
+
+def test_swap_usage_is_read_from_sysctl():
+    # `sysctl -n vm.swapusage` on a Mac; units are binary.
+    assert parse_swapusage(
+        "total = 2048.00M  used = 971.81M  free = 1076.19M  (encrypted)\n"
+    ) == int(971.81 * 1024 ** 2)
+    assert parse_swapusage(
+        "vm.swapusage: total = 45056.00M  used = 44.10G  free = 1.00G  (encrypted)"
+    ) == int(44.10 * 1024 ** 3)
+    assert parse_swapusage("total = 0.00M  used = 0.00M  free = 0.00M") == 0
+    assert parse_swapusage("") is None
+    assert parse_swapusage("vm.swapusage: unknown oid") is None
+
+
+def test_heavy_swap_refuses_the_load_then_it_runs_when_swap_drops():
+    """The test Mac panicked loading a 7 GB model with ~44 GB swapped out:
+    enough free pages is not enough when the Mac is already swapping."""
+    fake = FakeOllama({QWEN: QWEN_SIZE})
+    scheduler, memory = _scheduler(fake, free=16 * GB)
+    component = FakeGenerator(fake)
+    scheduler.register(component)
+    memory["swap"] = 44 * GB
+
+    assert scheduler.plan_generation(urgent=False, due={"daily": True}).run is False
+    assert scheduler.reason == (
+        "waiting: 44.0 GB of swap in use (limit 8.0 GB): the Mac is short of memory"
+    )
+    assert scheduler.status()["generation_waiting"] == scheduler.reason
+    assert ("unload", QWEN) not in fake.log
+    assert GEMMA not in _generations(fake.log)
+
+    memory["swap"] = SWAP_LIMIT_BYTES  # at the limit is not over it
+    assert scheduler.plan_generation(urgent=False, due={"daily": True}).allows("daily")
+    assert scheduler.reason is None
+    component.call()
+    assert ("load", GEMMA, GEMMA_CTX) in fake.log
+
+
+def test_a_nearly_full_disk_refuses_the_load():
+    fake = FakeOllama({QWEN: QWEN_SIZE})
+    scheduler, memory = _scheduler(fake)
+    memory["disk"] = DISK_FLOOR_BYTES - 1
+    assert scheduler.plan_generation(urgent=False, due={"daily": True}).run is False
+    assert scheduler.reason == (
+        "waiting: 10.0 GB of disk free (floor 10.0 GB): swap cannot grow"
+    )
+
+
+def test_a_focus_recording_under_swap_pressure_runs_on_the_resident_model():
+    """A stopped focus recording is processed, but loads nothing: the
+    resident annotation model writes it, and the status says why."""
+    fake = FakeOllama({QWEN: QWEN_SIZE})
+    scheduler, memory = _scheduler(fake)
+    component = FakeGenerator(fake)
+    scheduler.register(component)
+    memory["swap"] = 20 * GB
+
+    plan = scheduler.plan_generation(urgent=True, due={})
+    assert plan.run and plan.fallback and plan.model == QWEN
+    assert scheduler.status()["generation_waiting"] == (
+        f"generating on {QWEN}: not loading {GEMMA}, 20.0 GB of swap in use "
+        "(limit 8.0 GB): the Mac is short of memory"
+    )
+    component.call()
+    assert ("unload", QWEN) not in fake.log
+    assert GEMMA not in _generations(fake.log)
+    assert fake.log[-1] == ("generate", QWEN, get_profile(QWEN).sop_num_ctx)
+
+
+def test_batched_work_under_swap_pressure_falls_back_after_the_wait():
+    clock = Clock()
+    fake = FakeOllama({QWEN: QWEN_SIZE})
+    scheduler, memory = _scheduler(fake, clock=clock)
+    memory["swap"] = 20 * GB
+    assert scheduler.plan_generation(urgent=False, due={"daily": True}).run is False
+    clock.now += FALLBACK_AFTER_SECONDS
+    plan = scheduler.plan_generation(urgent=False, due={"daily": True})
+    assert plan.allows("daily") and plan.fallback and plan.model == QWEN
+
+
+def test_pressure_does_not_matter_once_the_sop_model_is_loaded_or_when_unknown():
+    fake = FakeOllama({GEMMA: GEMMA_SIZE})
+    scheduler, memory = _scheduler(fake)
+    memory["swap"] = 40 * GB
+    memory["disk"] = 0
+    plan = scheduler.plan_generation(urgent=False, due={"daily": True})
+    assert plan.run and not plan.fallback
+
+    fake = FakeOllama({QWEN: QWEN_SIZE})
+    scheduler, memory = _scheduler(fake)
+    memory["swap"] = None
+    memory["disk"] = None
+    assert scheduler.plan_generation(urgent=False, due={"daily": True}).run is True
 
 
 # ---------------------------------------------------------------------------

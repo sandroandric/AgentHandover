@@ -32,6 +32,10 @@
          Bug caught 2026-04-10 — affected all v0.2.0 users. -->
     <key>LSUIElement</key>
     <true/>
+    <!-- Shown when macOS asks, per app, to let AgentHandover read its
+         open document ([privacy] read_app_state, opt-in in onboarding). -->
+    <key>NSAppleEventsUsageDescription</key>
+    <string>AgentHandover reads the name of the open document, page or message to understand your workflow. It never acts in the app.</string>
     <key>NSHumanReadableCopyright</key>
     <string>Copyright 2026 Sandro Andric. Apache 2.0 License.</string>
     <key>SUPublicEDKey</key>

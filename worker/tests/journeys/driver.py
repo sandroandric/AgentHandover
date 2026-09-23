@@ -32,8 +32,9 @@ the loop body's processors in the loop's order:
    start does.
 
 The scheduler runs on the journey clock and, unless a journey passes
-``free_memory``, sees memory to spare (the host's real ``vm_stat`` would
-make a replay depend on the machine running it).
+``free_memory``, sees memory to spare, no swap in use and disk to spare
+(the host's real ``vm_stat``, swap and disk would make a replay depend on
+the machine running it).
 
 Not driven here, because they only exist inline in ``main()``: the VLM
 fallback job runner (needs ``VLMWorker``), the idle-gate shortcut for
@@ -322,6 +323,8 @@ class JourneyWorker:
             sop_model=vlm_cfg.sop_model,
             clock=lambda: clock.now().timestamp(),
             free_memory=free_memory,
+            swap_used=lambda: 0,
+            free_disk=lambda: 100 * GB,
         )
         self.model_scheduler.register(
             self.sop_generator, self.behavioral_synthesizer, llm_reasoner,

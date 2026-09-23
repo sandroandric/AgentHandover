@@ -20,7 +20,7 @@ enable_clipboard_preview = false
 clipboard_preview_max_chars = 200
 secure_field_drop = true
 capture_input_values = false     # include <input>/<textarea> values in browser DOM snapshots
-read_app_state = false           # read the open document/page/message from Safari, Mail, Notes... via AppleScript (macOS asks per app)
+read_app_state = false           # read the open document/page/message from Safari, Mail, Notes... via AppleScript; opt in during onboarding (macOS asks per app; apps not granted are skipped, `agenthandover doctor` lists them)
 
 [browser]
 extension_id = "jpemkdcihaijkolbkankcldmiimmmnfo"
@@ -50,7 +50,7 @@ max_compute_minutes_per_day = 20
 # backend = "ollama"           # "ollama", "openai-compat", "mock"
 # timeout_seconds = 120
 # --- ollama specific ---
-# ollama_host = "http://localhost:11434"
+# ollama_host = "http://localhost:11434"   # another host: doctor checks only its version, not installs or memory
 # --- openai-compat specific ---
 # api_key = ""                 # or set AGENTHANDOVER_API_KEY / OPENAI_API_KEY env var
 # base_url = ""                # for local providers (vLLM, LM Studio, etc.)

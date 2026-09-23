@@ -3,6 +3,7 @@ use clap::{Parser, Subcommand};
 
 mod commands;
 mod display;
+mod machine;
 mod ollama;
 mod paths;
 mod trigger;
@@ -88,7 +89,12 @@ enum Commands {
         shell_remove: bool,
     },
     /// Run pre-flight checks
-    Doctor,
+    Doctor {
+        /// Print only the Ollama and memory checks, as JSON (what the
+        /// app's onboarding shows)
+        #[arg(long)]
+        ollama_json: bool,
+    },
     /// Uninstall AgentHandover
     Uninstall {
         /// Also remove user data (database, SOPs, config)
@@ -258,7 +264,8 @@ fn main() -> Result<()> {
         Commands::Setup { check, extension, vlm, tier, .. } => {
             commands::setup::run(check, extension, vlm, tier.as_deref())
         }
-        Commands::Doctor => commands::doctor::run(),
+        Commands::Doctor { ollama_json: false } => commands::doctor::run(),
+        Commands::Doctor { ollama_json: true } => commands::doctor::print_ollama_json(),
         Commands::Uninstall { purge_data } => commands::uninstall::run(purge_data),
         Commands::Focus { action } => match action {
             FocusAction::Start { title } => commands::focus::start(&title),
