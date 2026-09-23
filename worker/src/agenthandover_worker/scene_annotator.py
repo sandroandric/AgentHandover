@@ -64,7 +64,7 @@ TASK_CONTEXT_FIELDS = {"is_workflow", "what_doing", "next_likely"}
 # Caps on list lengths in the schema: they bound the output, which the
 # compact schema keeps near 120 tokens (``ann_num_predict`` is 300).
 _MAX_TEXT_ITEMS = 4
-_MAX_VISIBLE_ITEMS = 6
+_MAX_VISIBLE_ITEMS = 4
 
 
 def _string_list(max_items: int = _MAX_TEXT_ITEMS) -> dict:
@@ -181,32 +181,20 @@ You get one moment of the user's screen as text: the WINDOW (from the OS),
 the PAGE ELEMENTS (from the browser, when the app is a browser) and the OCR
 TEXT of the screen.  Some requests also attach the screenshot.
 
-Answer with this JSON object:
-{
-  "app": "<application name>",
-  "location": "<URL, file path, or place in the app>",
-  "task_context": {
-    "is_workflow": <true for a structured, repeatable task; false for browsing, chatting, reading>,
-    "what_doing": "<one sentence: the specific task, naming the titles, people, channels or subjects it involves>",
-    "next_likely": "<a few words: the probable next action>"
-  },
-  "ui_state": {
-    "active_element": "<the focused or just-clicked control, with its label; empty if unclear>",
-    "modal": "<an open dialog, menu or popup; empty if none>"
-  },
-  "key_text": {
-    "typed_text": "<text the user is typing or has just typed or pasted, verbatim; empty if none>",
-    "urls": ["<URLs the task is about>"],
-    "emails": ["<email addresses the task is about>"]
-  },
-  "visible_items": [{"label": "<one entry of a list the user picks from>", "chosen": <true for the entry the user opens or picks>}],
-  "needs_vision": <true only if the text is not enough to tell what the user is doing>
-}
+Answer with one JSON object, written compactly (no indentation):
+{"app":"<application name>",
+"location":"<URL, file path, or place in the app>",
+"task_context":{"is_workflow":<true for a structured, repeatable task; false for browsing, chatting, reading>,"what_doing":"<one sentence: the specific task, naming the app and the titles, people, channels or subjects it involves>","next_likely":"<a few words: the probable next action>"},
+"ui_state":{"active_element":"<the focused or just-clicked control, with its label; empty if unclear>","modal":"<an open dialog, menu or popup; empty if none>"},
+"key_text":{"typed_text":"<text the user is typing or has just typed or pasted, verbatim; empty if none>","urls":["<URLs the task is about>"],"emails":["<email addresses the task is about>"]},
+"visible_items":[{"label":"<an entry of the list the user picks from>","chosen":<true for the entry the user opens or picks>}],
+"needs_vision":<true only if the text is not enough to tell what the user is doing>}
 
 Keep the answer short.  The screen's text is stored separately, so do not
 copy headings, labels or body text; quote only what a field asks for.
-visible_items: only for list-like screens (search results, feeds, inboxes,
-menus), at most 6 entries, the chosen one included; otherwise [].
+visible_items: only when the user is picking from a list (search results,
+a feed, an inbox, a menu): the chosen entry, if any, and at most 3 others,
+each label a few words; otherwise [].
 
 WINDOW, when provided, is authoritative (from the OS): copy its app into
 "app" and its url into "location"; do not infer them from the screen.
