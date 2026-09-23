@@ -33,7 +33,8 @@ from agenthandover_worker.exporter import IndexGenerator
 from agenthandover_worker.focus_processor import FocusProcessor
 from agenthandover_worker.frame_differ import DiffConfig, FrameDiffer
 from agenthandover_worker.negative_demo import NegativeDemoPruner
-from agenthandover_worker.ollama import OllamaError
+from agenthandover_worker.model_scheduler import ModelScheduler
+from agenthandover_worker.ollama import OllamaClient, OllamaError
 from agenthandover_worker.ops_telemetry import MODEL_USAGE
 from agenthandover_worker.export_adapter import SOPExportAdapter
 from agenthandover_worker.openclaw_writer import OpenClawWriter
@@ -760,6 +761,7 @@ def _write_worker_status(
     v2_annotation_enabled: bool = False,
     annotation_paused_reason: str | None = None,
     annotation_budget: dict | None = None,
+    model_schedule: dict | None = None,
 ) -> None:
     """Atomically write worker-status.json (tmp + fsync + rename).
 
@@ -793,6 +795,10 @@ def _write_worker_status(
         status["annotation_paused_reason"] = annotation_paused_reason
         if annotation_budget is not None:
             status["annotation_budget"] = annotation_budget
+    if model_schedule is not None:
+        # Which model writes Skills, and why generation waits (memory, a
+        # failed load), on a tier with two models.
+        status["model_schedule"] = model_schedule
     # Tokens and Ollama timings per model since the worker started.
     status["model_calls"] = MODEL_USAGE.snapshot()
     sdir = _status_dir()
@@ -2178,7 +2184,6 @@ def _process_focus_sessions_v2(
                             "Failed to save pending SOP to DB", exc_info=True,
                         )
                     _clear_focus_signal(signal_path)
-                    focus_processor.annotate_remaining(db)
                     return 0  # Don't export yet — wait for answers
             except Exception:
                 logger.warning(
@@ -2252,9 +2257,9 @@ def _process_focus_sessions_v2(
             title, lint_error or result.error,
         )
 
-    # Clear signal file, then annotate the keyframes the SOP did not need.
+    # Clear the signal.  The keyframes the SOP did not need are annotated
+    # in the next tick's annotation phase (``annotate_remaining``).
     _clear_focus_signal(signal_path)
-    focus_processor.annotate_remaining(db)
     return exported
 
 
@@ -2345,6 +2350,28 @@ def _focus_v2_export(
     _save_sop_cache(sop_templates)
 
     return exported
+
+
+def _focus_work_ready(state_dir: Path, db: "WorkerDB") -> str | None:
+    """Focus work the user is waiting for, which the generation phase
+    never batches or holds back for memory: ``"answers"`` when the
+    post-recording questions were answered or skipped, ``"session"`` when
+    a stopped recording has its events in the database, else None."""
+    from agenthandover_worker.focus_questioner import read_focus_questions
+
+    questions = read_focus_questions(state_dir)
+    if questions is not None and questions.get("status") in ("answered", "skipped"):
+        return "answers"
+    try:
+        signal = json.loads((state_dir / "focus-session.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(signal, dict) or signal.get("status") != "stopped":
+        return None
+    session_id = signal.get("session_id")
+    if session_id and db.get_focus_session_events(session_id):
+        return "session"
+    return None
 
 
 def _check_focus_answers(
@@ -2765,6 +2792,15 @@ def _process_passive_discovery(
             _generate_passive, "passive", task_label,
         )
 
+        if result.deferred:
+            # Ollama unreachable or the model failed to load: no failure
+            # recorded, the segments stay pending for the next pass.
+            logger.warning(
+                "Passive discovery deferred at '%s': %s",
+                task_label[:60], result.error,
+            )
+            break
+
         if lint_error or not result.success or not result.sop:
             # Record failure for retry tracking
             try:
@@ -3074,7 +3110,6 @@ def _process_retry_triggers(
                         "Retry failed again for focus session '%s': %s",
                         title, result.error,
                     )
-                focus_processor.annotate_remaining(db)
             else:
                 logger.warning(
                     "Retry: no events found for focus session %s", source_id,
@@ -4309,7 +4344,9 @@ def main(argv: list[str] | None = None) -> None:
     # LLMReasoner stays as a local import because it's not at module level —
     # the worker/llm_reasoning module is deliberately loaded lazily here.
     vlm_queue = VLMFallbackQueue()
-    from agenthandover_worker.llm_reasoning import LLMReasoner, ReasoningConfig
+    from agenthandover_worker.llm_reasoning import (
+        LLMReasoner, ReasoningConfig, annotation_reasoner,
+    )
     llm_reasoner = LLMReasoner(
         config=ReasoningConfig(
             model=vlm_cfg.reasoner_model, ollama_host=vlm_cfg.ollama_host,
@@ -4387,7 +4424,10 @@ def main(argv: list[str] | None = None) -> None:
         activity_classifier = ActivityClassifier(
             profile=knowledge_base.get_profile(),
             policy=user_policy,
-            llm_reasoner=llm_reasoner,
+            # It classifies frames in the annotation phase: annotation model.
+            llm_reasoner=annotation_reasoner(
+                vlm_cfg.annotation_model, vlm_cfg.ollama_host, vlm_queue,
+            ),
         )
     pattern_detector = PatternDetector(knowledge_base)
     constraint_manager = ConstraintManager(knowledge_base)
@@ -4876,6 +4916,15 @@ def main(argv: list[str] | None = None) -> None:
         max_compute_seconds=vlm_cfg.annotation_max_compute_minutes_per_day * 60.0,
     )
     annotation_paused_reason: str | None = None
+    # Annotation first, then Skills, one model loaded at a time.
+    model_scheduler = ModelScheduler(
+        OllamaClient(vlm_cfg.ollama_host),
+        annotation_model=vlm_cfg.annotation_model,
+        sop_model=vlm_cfg.sop_model,
+    )
+    model_scheduler.register(sop_generator, behavioral_synthesizer, llm_reasoner)
+    if focus_processor is not None:
+        focus_processor.before_generation = model_scheduler.enter_generation
     # SOP mining input seen by the last run_pipeline (see its docstring).
     mining_watermark: dict = {}
 
@@ -5042,60 +5091,6 @@ def main(argv: list[str] | None = None) -> None:
                 # processed instead of staying pending forever.
                 _sweep_stale_focus_session(_status_dir(), focus_max_session_hours)
 
-                # Process any completed focus recording sessions first.
-                # Use v2 VLM pipeline when available (semantic SOPs from
-                # screen annotations), fall back to v1 (episode builder +
-                # translator + PrefixSpan).
-                if focus_processor is not None and v2_schema_ok:
-                    focus_sops = _process_focus_sessions_v2(
-                        db,
-                        focus_processor=focus_processor,
-                        openclaw_writer=sop_writer,
-                        skill_md_writer=skill_md_writer,
-                        claude_skill_writer=claude_skill_writer,
-                        index_generator=index_generator,
-                        screenshots_dir=screenshots_dir,
-                        sop_auto_approve=sop_auto_approve,
-                        procedure_writer=procedure_writer,
-                        kb_export_adapter=kb_export_adapter,
-                        behavioral_synthesizer=behavioral_synthesizer,
-                        focus_questioner=focus_questioner_inst,
-                        knowledge_base=knowledge_base,
-                        vector_kb=vector_kb,
-                        ollama_host=vlm_cfg.ollama_host,
-                        # Use the SAME model the user configured for SOP
-                        # generation (from config.toml) for Q&A question
-                        # generation too. Previous versions hardcoded
-                        # qwen3.5:4b via ReasoningConfig's default, which
-                        # silently failed for Gemma-4-only users (16GB+
-                        # recommended tier) because they never pulled qwen.
-                        qna_model=vlm_cfg.sop_model,
-                    )
-                else:
-                    focus_sops = _process_focus_sessions(
-                        db,
-                        episode_builder=episode_builder,
-                        clipboard_linker=clipboard_linker,
-                        translator=translator,
-                        scorer=scorer,
-                        vlm_queue=vlm_queue,
-                        sop_inducer=sop_inducer,
-                        sop_enhancer=sop_enhancer,
-                        openclaw_writer=sop_writer,
-                        skill_md_writer=skill_md_writer,
-                        claude_skill_writer=claude_skill_writer,
-                        index_generator=index_generator,
-                        sop_auto_approve=sop_auto_approve,
-                        procedure_writer=procedure_writer,
-                        kb_export_adapter=kb_export_adapter,
-                    )
-                if focus_sops > 0:
-                    total_sops_generated += focus_sops
-                    logger.info(
-                        "Focus recording: generated %d SOP(s)!", focus_sops
-                    )
-                    _write_sops_index(db, knowledge_base)
-
                 unprocessed = db.get_unprocessed_events(
                     limit=event_guard.batch_limit
                 )
@@ -5211,6 +5206,14 @@ def main(argv: list[str] | None = None) -> None:
                                 len(vlm_completed_events),
                             )
 
+                # --- Annotation phase (model_scheduler.py) ---
+                # Every frame this tick annotates, on the annotation model:
+                # the last focus session's leftover keyframes, passive
+                # frames and frame diffs.
+                model_scheduler.begin_annotation()
+                if focus_processor is not None and v2_schema_ok:
+                    focus_processor.annotate_remaining(db)
+
                 # --- v2 Scene Annotation Pipeline ---
                 # Process unannotated screenshots and compute frame diffs.
                 # Schema is checked once before the main loop; this fallback
@@ -5308,9 +5311,12 @@ def main(argv: list[str] | None = None) -> None:
                             diff_stats["failed"],
                         )
 
-                # --- v2 Passive Discovery (periodic) ---
-                # Run task segmenter + passive SOP generation every 2 hours,
-                # or when user has been idle for 5+ minutes.
+                # --- Generation phase (model_scheduler.py) ---
+                # SOP generation, synthesis, Q&A and the daily model jobs,
+                # on the SOP model, once this tick's frames are annotated.
+                # Passive discovery is due every 2 hours, or when the user
+                # has been idle for 5+ minutes.
+                should_segment = False
                 if (
                     task_segmenter is not None
                     and sop_generator is not None
@@ -5339,38 +5345,112 @@ def main(argv: list[str] | None = None) -> None:
                     if _focus_pending:
                         should_segment = False
 
-                    if should_segment:
-                        try:
-                            pd_sops = _process_passive_discovery(
-                                db,
-                                knowledge_base=knowledge_base,
-                                segmenter=task_segmenter,
-                                sop_generator=sop_generator,
-                                openclaw_writer=sop_writer,
-                                skill_md_writer=skill_md_writer,
-                                claude_skill_writer=claude_skill_writer,
-                                index_generator=index_generator,
-                                sop_auto_approve=sop_auto_approve,
-                                procedure_writer=procedure_writer,
-                                kb_export_adapter=kb_export_adapter,
-                                continuity_tracker=continuity_tracker,
-                                variant_detector=variant_detector,
-                                evidence_normalizer=evidence_normalizer,
+                today_local = datetime.now().date().isoformat()
+                focus_work = _focus_work_ready(_status_dir(), db)
+                gen_plan = model_scheduler.plan_generation(
+                    urgent=focus_work is not None,
+                    due={
+                        "passive_discovery": should_segment,
+                        "daily": today_local != daily_jobs_date,
+                    },
+                )
+
+                # Completed focus recordings, never batched or held for
+                # memory: the v2 VLM pipeline when available (semantic SOPs
+                # from screen annotations; its keyframes are annotated
+                # before its hook switches to the generation model), else
+                # v1 (episode builder + translator + PrefixSpan).  Answered
+                # questions export with the generation model loaded.
+                focus_sops = 0
+                if focus_processor is not None and v2_schema_ok:
+                    if (
+                        focus_work != "answers"
+                        or model_scheduler.enter_generation()
+                    ):
+                        focus_sops = _process_focus_sessions_v2(
+                            db,
+                            focus_processor=focus_processor,
+                            openclaw_writer=sop_writer,
+                            skill_md_writer=skill_md_writer,
+                            claude_skill_writer=claude_skill_writer,
+                            index_generator=index_generator,
+                            screenshots_dir=screenshots_dir,
+                            sop_auto_approve=sop_auto_approve,
+                            procedure_writer=procedure_writer,
+                            kb_export_adapter=kb_export_adapter,
+                            behavioral_synthesizer=behavioral_synthesizer,
+                            focus_questioner=focus_questioner_inst,
+                            knowledge_base=knowledge_base,
+                            vector_kb=vector_kb,
+                            ollama_host=vlm_cfg.ollama_host,
+                            # Q&A questions on the generation phase's model
+                            # (the configured SOP model): never a hardcoded
+                            # default, which silently failed for users who
+                            # never pulled it (fixed in v0.2.3).
+                            qna_model=model_scheduler.generation_model,
+                        )
+                else:
+                    focus_sops = _process_focus_sessions(
+                        db,
+                        episode_builder=episode_builder,
+                        clipboard_linker=clipboard_linker,
+                        translator=translator,
+                        scorer=scorer,
+                        vlm_queue=vlm_queue,
+                        sop_inducer=sop_inducer,
+                        sop_enhancer=sop_enhancer,
+                        openclaw_writer=sop_writer,
+                        skill_md_writer=skill_md_writer,
+                        claude_skill_writer=claude_skill_writer,
+                        index_generator=index_generator,
+                        sop_auto_approve=sop_auto_approve,
+                        procedure_writer=procedure_writer,
+                        kb_export_adapter=kb_export_adapter,
+                    )
+                if focus_sops > 0:
+                    total_sops_generated += focus_sops
+                    logger.info(
+                        "Focus recording: generated %d SOP(s)!", focus_sops
+                    )
+                    _write_sops_index(db, knowledge_base)
+
+                # --- v2 Passive Discovery (periodic) ---
+                if (
+                    should_segment
+                    and gen_plan.allows("passive_discovery")
+                    and model_scheduler.enter_generation()
+                ):
+                    try:
+                        pd_sops = _process_passive_discovery(
+                            db,
+                            knowledge_base=knowledge_base,
+                            segmenter=task_segmenter,
+                            sop_generator=sop_generator,
+                            openclaw_writer=sop_writer,
+                            skill_md_writer=skill_md_writer,
+                            claude_skill_writer=claude_skill_writer,
+                            index_generator=index_generator,
+                            sop_auto_approve=sop_auto_approve,
+                            procedure_writer=procedure_writer,
+                            kb_export_adapter=kb_export_adapter,
+                            continuity_tracker=continuity_tracker,
+                            variant_detector=variant_detector,
+                            evidence_normalizer=evidence_normalizer,
+                        )
+                        if pd_sops > 0:
+                            total_passive_sops += pd_sops
+                            total_sops_generated += pd_sops
+                            logger.info(
+                                "Passive discovery: generated %d SOP(s)!",
+                                pd_sops,
                             )
-                            if pd_sops > 0:
-                                total_passive_sops += pd_sops
-                                total_sops_generated += pd_sops
-                                logger.info(
-                                    "Passive discovery: generated %d SOP(s)!",
-                                    pd_sops,
-                                )
-                                _write_sops_index(db, knowledge_base)
-                        except Exception:
-                            logger.warning(
-                                "Passive discovery failed",
-                                exc_info=True,
-                            )
-                        _last_passive_discovery = _now_mono_pd
+                            _write_sops_index(db, knowledge_base)
+                    except Exception:
+                        logger.warning(
+                            "Passive discovery failed",
+                            exc_info=True,
+                        )
+                    _last_passive_discovery = _now_mono_pd
 
                 # Write status file after each cycle (heartbeat).
                 # Use authoritative DB count for pending VLM jobs (the
@@ -5399,6 +5479,7 @@ def main(argv: list[str] | None = None) -> None:
                     v2_diffs_today=total_v2_diffs,
                     annotation_paused_reason=annotation_paused_reason,
                     annotation_budget=annotation_budget.status(),
+                    model_schedule=model_scheduler.status(),
                 )
 
                 # Refresh sops-index.json (throttled to every 5s)
@@ -5406,8 +5487,9 @@ def main(argv: list[str] | None = None) -> None:
 
                 # --- Once-per-day jobs: the first tick of each local day,
                 # keyed on the date persisted when they last ran. ---
-                today_local = datetime.now().date().isoformat()
-                run_daily = today_local != daily_jobs_date
+                run_daily = (
+                    gen_plan.allows("daily") and model_scheduler.enter_generation()
+                )
 
                 # Episode store cleanup
                 if run_daily:
@@ -5802,6 +5884,9 @@ def main(argv: list[str] | None = None) -> None:
                     )
                     db.set_state(DAILY_JOBS_STATE_KEY, today_local)
                     daily_jobs_date = today_local
+
+                # End of the generation phase: unload the SOP model.
+                model_scheduler.end_generation()
 
                 # Any iteration that gets here without raising is healthy,
                 # whether or not it had events to process.

@@ -27,7 +27,7 @@ from datetime import datetime, timezone
 from typing import Any, TYPE_CHECKING
 
 from agenthandover_worker.json_extract import clean_model_text, extract_json
-from agenthandover_worker.model_profiles import STANDARD_TIER
+from agenthandover_worker.model_profiles import STANDARD_TIER, get_profile
 from agenthandover_worker.ollama import OllamaClient
 
 if TYPE_CHECKING:
@@ -73,6 +73,11 @@ class ReasoningConfig:
     num_predict: int = 4000
     timeout: float = 1800.0
     think: bool = True
+    # Ollama context size; None means the model profile's ``sop_num_ctx``,
+    # the context every generation-phase call on that model uses (Ollama
+    # reloads a model whose num_ctx changes).  The annotation-phase
+    # reasoner (the activity classifier's) passes ``ann_num_ctx``.
+    num_ctx: int | None = None
 
 
 @dataclass
@@ -322,7 +327,7 @@ class LLMReasoner:
             system=system,
             options={
                 "num_predict": num_predict or self.config.num_predict,
-                "num_ctx": 16384,
+                "num_ctx": self.config.num_ctx or get_profile(self.config.model).sop_num_ctx,
                 "temperature": 0.3,
             },
             think=use_think,
@@ -369,3 +374,26 @@ class LLMReasoner:
             return False
 
         return None
+
+
+# A frame classification is one category name.
+CLASSIFIER_NUM_PREDICT = 16
+
+
+def annotation_reasoner(
+    model: str, ollama_host: str, vlm_queue: "VLMFallbackQueue | None" = None,
+) -> LLMReasoner:
+    """The reasoner for calls made while frames are annotated (the activity
+    classifier): on the annotation model with its ``ann_num_ctx``, so it
+    neither loads the SOP model nor reloads the annotation model with
+    another context size between two frames."""
+    return LLMReasoner(
+        config=ReasoningConfig(
+            model=model,
+            ollama_host=ollama_host,
+            num_predict=CLASSIFIER_NUM_PREDICT,
+            think=False,
+            num_ctx=get_profile(model).ann_num_ctx,
+        ),
+        vlm_queue=vlm_queue,
+    )

@@ -1,0 +1,393 @@
+"""Phase-ordered model use: annotate first, then write Skills, one model at a time.
+
+On a tier whose annotation model (``qwen3.5:4b``) differs from its SOP model
+(``gemma4:12b-it-qat`` on 16 and 24 GB Macs), the two do not fit in memory
+together once ordinary apps are open: Ollama evicts one to load the other,
+and under pressure a load can fail ("timed out waiting for llama-server to
+start").  The worker therefore runs each tick in two phases:
+
+1. the **annotation phase**: every frame it annotates this tick (focus
+   keyframes, passive frames, frame diffs, the activity classifier), on the
+   annotation model;
+2. the **generation phase**, only when generation work is pending: SOP
+   generation, behavioural synthesis, Q&A and the daily model jobs, on the
+   SOP model.
+
+:class:`ModelScheduler` owns the switch between them:
+
+* before the generation phase it unloads the annotation model and loads the
+  SOP model (with the context size the calls use, so they do not reload it);
+  after the phase it unloads the SOP model.  The embedding model is never
+  unloaded.  What is loaded is read from Ollama's ``/api/ps``.
+* non-urgent generation work (passive discovery, the daily jobs) is
+  batched: it runs once :data:`GENERATION_BATCH_JOBS` jobs are due or the
+  oldest has waited :data:`GENERATION_BATCH_WAIT_SECONDS`.  A focus
+  recording the user stopped, or answered questions, never wait.
+* before loading the SOP model it checks free memory (``vm_stat``: free +
+  inactive + speculative pages, plus what unloading the annotation model
+  gives back) against the SOP model's size and :data:`MEMORY_MARGIN_BYTES`.
+  Without room, batched work waits ("waiting for memory: need 8.2 GB,
+  3.1 GB free") and is retried on the next tick; after
+  :data:`FALLBACK_AFTER_SECONDS` it runs on the annotation model instead,
+  which is already resident, and the worker status says so.  A focus
+  recording is always processed.
+* a load that fails (Ollama answers 5xx or times out) defers the phase with
+  an exponential backoff; nothing generated is marked failed.
+
+On a tier with one model for both (Standard) none of this applies: the
+generation phase runs whenever work is due, as before.
+"""
+
+from __future__ import annotations
+
+import logging
+import re
+import subprocess
+import time
+from dataclasses import dataclass
+from typing import Callable
+
+from agenthandover_worker.model_profiles import MODEL_SIZES_GB, get_profile
+from agenthandover_worker.ollama import OllamaClient, OllamaError
+
+logger = logging.getLogger(__name__)
+
+GB = 1_000_000_000  # decimal, as ``ollama list`` and the tier table count
+
+# Batching of generation work that nobody is waiting for.  The worker has
+# two such jobs (a passive-discovery pass and the daily model jobs); both
+# due at once is a full batch, otherwise the older one waits at most M.
+GENERATION_BATCH_JOBS = 2
+GENERATION_BATCH_WAIT_SECONDS = 30 * 60
+
+# Headroom over the SOP model's size (its /api/ps size includes the context
+# at the calls' num_ctx; the tier table's download size does not, and the
+# margin covers that context, about 1 GB for gemma4:12b at 16384).
+MEMORY_MARGIN_BYTES = 1 * GB
+# Batched work that has waited this long for memory runs on the annotation
+# model instead.
+FALLBACK_AFTER_SECONDS = 6 * 3600
+
+# A failed SOP-model load is retried after this, doubling up to the cap.
+LOAD_BACKOFF_SECONDS = 60.0
+LOAD_BACKOFF_MAX_SECONDS = 30 * 60.0
+# Ollama's own load timeout is 5 minutes; wait a little longer for its answer.
+LOAD_TIMEOUT_SECONDS = 360.0
+GENERATION_KEEP_ALIVE = "5m"
+
+
+# ---------------------------------------------------------------------------
+# Free memory
+# ---------------------------------------------------------------------------
+
+_PAGE_SIZE_RE = re.compile(r"page size of (\d+) bytes")
+_PAGES_RE = re.compile(r"^Pages (free|inactive|speculative):\s+(\d+)\.?\s*$", re.M)
+
+
+def parse_vm_stat(text: str) -> int | None:
+    """Bytes in free, inactive and speculative pages of ``vm_stat`` output,
+    or None when the output does not have them."""
+    size = _PAGE_SIZE_RE.search(text)
+    pages = {name: int(count) for name, count in _PAGES_RE.findall(text)}
+    if size is None or set(pages) != {"free", "inactive", "speculative"}:
+        return None
+    return int(size.group(1)) * sum(pages.values())
+
+
+def free_memory_bytes() -> int | None:
+    """Memory the system can hand to a model load now, or None when it
+    cannot be read (not macOS)."""
+    try:
+        out = subprocess.run(
+            ["vm_stat"], capture_output=True, text=True, timeout=5, check=True,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return parse_vm_stat(out)
+
+
+def _gb(n: int) -> str:
+    return f"{n / GB:.1f} GB"
+
+
+def _same_model(a: str, b: str) -> bool:
+    """Ollama names: a bare name means its ``:latest`` tag."""
+    def norm(name: str) -> str:
+        return name if ":" in name else f"{name}:latest"
+    return norm(a) == norm(b)
+
+
+# ---------------------------------------------------------------------------
+# Scheduler
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class GenerationPlan:
+    """What this tick's generation phase may run."""
+
+    run: bool
+    model: str = ""
+    # The batched jobs due now; a plan that runs lets all of them run.
+    jobs: frozenset[str] = frozenset()
+    fallback: bool = False
+
+    def allows(self, job: str) -> bool:
+        return self.run and job in self.jobs
+
+
+class ModelScheduler:
+    """The switch between the annotation and the generation phase.
+
+    *clock* returns seconds (wall clock); *free_memory* returns bytes or
+    None.  Components registered with :meth:`register` (anything with a
+    ``config.model``, such as the SOP generator, the synthesizer and the
+    generation reasoner) are pointed at the annotation model while a
+    fallback phase runs, and back afterwards.
+    """
+
+    def __init__(
+        self,
+        client: OllamaClient,
+        *,
+        annotation_model: str,
+        sop_model: str,
+        clock: Callable[[], float] = time.time,
+        free_memory: Callable[[], int | None] = free_memory_bytes,
+    ) -> None:
+        self.client = client
+        self.annotation_model = annotation_model
+        self.sop_model = sop_model
+        self._clock = clock
+        self._free_memory = free_memory
+        self._components: list[object] = []
+        self._due_since: dict[str, float] = {}
+        self._plan_model = sop_model
+        self._generating = False
+        self._startup_checked = False
+        self._backoff_until = 0.0
+        self._load_failures = 0
+        # The loaded size (bytes) Ollama reported for a model, from /api/ps.
+        self._sizes: dict[str, int] = {}
+        # Why generation is not running (or runs on the fallback), for the
+        # worker status; None while it runs normally.
+        self.reason: str | None = None
+
+    @property
+    def split(self) -> bool:
+        """True when annotation and Skills use different models."""
+        return not _same_model(self.annotation_model, self.sop_model)
+
+    @property
+    def generation_model(self) -> str:
+        """The model this tick's generation phase writes with."""
+        return self._plan_model
+
+    def register(self, *components: object) -> None:
+        self._components.extend(c for c in components if c is not None)
+
+    def status(self) -> dict | None:
+        """The ``model_schedule`` block of ``worker-status.json`` (None on a
+        one-model tier)."""
+        if not self.split:
+            return None
+        return {
+            "annotation_model": self.annotation_model,
+            "sop_model": self.sop_model,
+            "generation_model": self._plan_model,
+            "generation_waiting": self.reason,
+            "fallback": not _same_model(self._plan_model, self.sop_model),
+        }
+
+    # -- phases ---------------------------------------------------------
+
+    def begin_annotation(self) -> None:
+        """Start the annotation phase: no SOP model left loaded.
+
+        Normally :meth:`end_generation` unloaded it; this also covers a tick
+        that raised mid-phase and, once, a SOP model left loaded by an
+        earlier worker run (read from ``/api/ps``)."""
+        if not self.split:
+            return
+        if self._generating:
+            self.end_generation()
+        if self._startup_checked:
+            return
+        try:
+            loaded = self.client.ps()
+        except OllamaError as exc:
+            logger.debug("Ollama /api/ps unavailable: %s", exc)
+            return
+        self._startup_checked = True
+        self._learn_sizes(loaded)
+        if any(_same_model(m.get("name", ""), self.sop_model) for m in loaded):
+            self._unload(self.sop_model)
+
+    def plan_generation(
+        self, *, urgent: bool, due: dict[str, bool],
+    ) -> GenerationPlan:
+        """Decide whether this tick has a generation phase.
+
+        *urgent* is work the user is waiting for (a stopped focus recording,
+        answered questions); *due* names the batched jobs and whether each
+        is due now.
+        """
+        now = self._clock()
+        if not self._generating:
+            self._plan_model = self.sop_model
+        for job, is_due in due.items():
+            if is_due:
+                self._due_since.setdefault(job, now)
+            else:
+                self._due_since.pop(job, None)
+        jobs = frozenset(self._due_since)
+        if not self.split:
+            return self._run(self.sop_model, jobs)
+        if not urgent and not jobs:
+            return GenerationPlan(run=False)
+        if now < self._backoff_until:
+            return GenerationPlan(run=False)
+        oldest = min(self._due_since.values(), default=now)
+        if (
+            not urgent
+            and len(jobs) < GENERATION_BATCH_JOBS
+            and now - oldest < GENERATION_BATCH_WAIT_SECONDS
+        ):
+            return GenerationPlan(run=False)
+
+        short = self._memory_short()
+        if short is None:
+            self.reason = None
+            return self._run(self.sop_model, jobs)
+        need, free = short
+        if urgent:
+            logger.warning(
+                "Memory is short for %s (need %s, %s free); processing the "
+                "recorded session anyway after unloading %s",
+                self.sop_model, _gb(need), _gb(free), self.annotation_model,
+            )
+            self.reason = None
+            return self._run(self.sop_model, jobs)
+        if now - oldest >= FALLBACK_AFTER_SECONDS:
+            self.reason = (
+                f"generating on {self.annotation_model}: {self.sop_model} "
+                f"needs {_gb(need)}, {_gb(free)} free for "
+                f"{(now - oldest) / 3600:.0f} h"
+            )
+            logger.warning("%s", self.reason)
+            return self._run(self.annotation_model, jobs, fallback=True)
+        self.reason = f"waiting for memory: need {_gb(need)}, {_gb(free)} free"
+        logger.info("Generation deferred, %s", self.reason)
+        return GenerationPlan(run=False)
+
+    def enter_generation(self) -> bool:
+        """Switch to the generation model before the first generation call
+        of a phase (later calls in the phase return at once).
+
+        Unloads the annotation model and loads the generation model with the
+        context size its calls use.  False when the load failed: the phase
+        is deferred with a backoff and nothing is generated.
+        """
+        if not self.split or self._generating:
+            return True
+        now = self._clock()
+        if now < self._backoff_until:
+            return False
+        model = self._plan_model
+        if not _same_model(model, self.annotation_model):
+            self._unload(self.annotation_model)
+        try:
+            self.client.preload(
+                model, GENERATION_KEEP_ALIVE,
+                options={"num_predict": 1, "num_ctx": get_profile(model).sop_num_ctx},
+                timeout=LOAD_TIMEOUT_SECONDS,
+            )
+        except OllamaError as exc:
+            self._load_failures += 1
+            delay = min(
+                LOAD_BACKOFF_SECONDS * 2 ** (self._load_failures - 1),
+                LOAD_BACKOFF_MAX_SECONDS,
+            )
+            self._backoff_until = now + delay
+            self.reason = f"Ollama could not load {model} ({exc}); retrying in {delay:.0f} s"
+            logger.warning("Generation deferred: %s", self.reason)
+            self._plan_model = self.sop_model
+            return False
+        self._load_failures = 0
+        self._generating = True
+        for component in self._components:
+            component.config.model = model  # type: ignore[attr-defined]
+        return True
+
+    def end_generation(self) -> None:
+        """End the generation phase: unload its model (unless it is the
+        annotation model, which the next phase needs) and point the
+        components back at the SOP model."""
+        if not self._generating:
+            return
+        model = self._plan_model
+        self._generating = False
+        self._plan_model = self.sop_model
+        for component in self._components:
+            component.config.model = self.sop_model  # type: ignore[attr-defined]
+        try:
+            self._learn_sizes(self.client.ps())
+        except OllamaError as exc:
+            logger.debug("Ollama /api/ps unavailable: %s", exc)
+        if not _same_model(model, self.annotation_model):
+            self._unload(model)
+
+    # -- internals ------------------------------------------------------
+
+    def _run(self, model: str, jobs: frozenset[str], *, fallback: bool = False) -> GenerationPlan:
+        self._due_since.clear()
+        self._plan_model = model
+        return GenerationPlan(run=True, model=model, jobs=jobs, fallback=fallback)
+
+    def _unload(self, model: str) -> None:
+        try:
+            self.client.unload(model)
+        except OllamaError as exc:
+            logger.debug("Unloading %s failed: %s", model, exc)
+
+    def _learn_sizes(self, loaded: list[dict]) -> None:
+        for entry in loaded:
+            name, size = entry.get("name", ""), entry.get("size")
+            if name and isinstance(size, int) and size > 0:
+                self._sizes[name] = size
+
+    def _size_of(self, model: str) -> int | None:
+        for name, size in self._sizes.items():
+            if _same_model(name, model):
+                return size
+        gb = MODEL_SIZES_GB.get(model)
+        return int(gb * GB) if gb else None
+
+    def _memory_short(self) -> tuple[int, int] | None:
+        """``(need, free)`` bytes when the SOP model does not fit, else None;
+        *free* counts the annotation model's memory, which the phase frees.
+
+        Fits when it is already loaded, or when free memory plus what
+        unloading the annotation model returns covers its size and the
+        margin.  An unknown size, free memory or loaded set is no reason
+        to wait: the load itself then decides.
+        """
+        try:
+            loaded = self.client.ps()
+        except OllamaError as exc:
+            logger.debug("Ollama /api/ps unavailable: %s", exc)
+            return None
+        self._learn_sizes(loaded)
+        if any(_same_model(m.get("name", ""), self.sop_model) for m in loaded):
+            return None
+        size = self._size_of(self.sop_model)
+        free = self._free_memory()
+        if size is None or free is None:
+            return None
+        reclaim = sum(
+            m.get("size") or 0 for m in loaded
+            if _same_model(m.get("name", ""), self.annotation_model)
+        )
+        need = size + MEMORY_MARGIN_BYTES
+        available = free + reclaim
+        return None if available >= need else (need, available)

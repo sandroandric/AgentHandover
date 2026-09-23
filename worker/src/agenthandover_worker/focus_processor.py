@@ -19,6 +19,7 @@ import logging
 import re
 from datetime import timedelta
 from pathlib import Path
+from typing import Callable
 
 from agenthandover_worker.dom import url_host
 from agenthandover_worker.event_helpers import (
@@ -152,6 +153,10 @@ class FocusProcessor:
         # Keyframes of the last session that wait for annotate_remaining().
         self._remaining: list[dict] = []
         self._remaining_dir: str | Path = ""
+        # Called once the keyframes are annotated, before the SOP call: the
+        # worker's switch to the generation model
+        # (``ModelScheduler.enter_generation``).  False defers the session.
+        self.before_generation: Callable[[], bool] | None = None
 
     def process_session(
         self,
@@ -279,7 +284,12 @@ class FocusProcessor:
             ]
         ]
 
-        # Step 4: Generate SOP
+        # Step 4: Generate SOP, on the generation model
+        if self.before_generation is not None and not self.before_generation():
+            return GeneratedSOP(
+                sop={}, success=False, deferred=True,
+                error="Generation deferred: the SOP model could not be loaded",
+            )
         return self.sop_generator.generate_from_focus(timeline, title)
 
     @staticmethod
@@ -623,9 +633,10 @@ class FocusProcessor:
     def annotate_remaining(self, db: object) -> dict:
         """Annotate the last session's keyframes that the SOP did not need.
 
-        Called once the session's Skill is written (or its generation has
-        failed), so they never delay it.  Frames Ollama cannot take now
-        stay pending with their screenshots.
+        Called in the annotation phase of the tick after the session's
+        Skill is written (or its generation has failed), so they never
+        delay it and never sit between two generation calls.  Frames Ollama
+        cannot take now stay pending with their screenshots.
         """
         rest, self._remaining = self._remaining, []
         if not rest or not self.annotator.ready():

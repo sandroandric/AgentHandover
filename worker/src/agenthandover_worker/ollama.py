@@ -1,8 +1,9 @@
 """The one Ollama HTTP client.
 
 Every model call the worker makes (annotation, frame diffs, SOP
-generation, behavioral synthesis, reasoning, embeddings, the tags probe
-and the version check) goes through :class:`OllamaClient`.  Callers build
+generation, behavioral synthesis, reasoning, embeddings, the tags probe,
+the version check, and the loaded-model list and unloads of
+``model_scheduler``) goes through :class:`OllamaClient`.  Callers build
 the request fields; this module owns the transport, the error
 classification and the usage counters.
 
@@ -188,6 +189,22 @@ class OllamaClient:
             keep_alive=keep_alive, timeout=timeout,
         )
 
+    def unload(self, model: str, timeout: float | None = 30.0) -> None:
+        """Ask Ollama to unload *model* now (an empty prompt with
+        ``keep_alive: 0``).  A model that is not loaded is left alone:
+        Ollama answers without loading it."""
+        self._request(
+            "POST", "/api/generate",
+            {"model": model, "prompt": "", "stream": False, "keep_alive": 0},
+            timeout,
+        )
+
+    def ps(self, timeout: float | None = 5.0) -> list[dict]:
+        """GET ``/api/ps``: the loaded models, each a dict with at least
+        ``name`` and ``size`` (bytes, weights plus context)."""
+        reply = self._request("GET", "/api/ps", None, timeout)
+        return [m for m in reply.get("models") or [] if isinstance(m, dict)]
+
     def embed(
         self,
         model: str,
@@ -281,10 +298,12 @@ class OllamaClient:
                     f"model {model!r} not available at {self.host} ({path})"
                 ) from exc
             if exc.code >= 500:
-                # Ollama answers 5xx while a model fails to load or runs out
-                # of memory: the server is there but cannot serve now.
+                # Ollama answers 5xx while a model fails to load ("timed out
+                # waiting for llama-server to start") or runs out of memory:
+                # the server is there but cannot serve now.
                 raise OllamaUnavailable(
-                    f"Ollama HTTP {exc.code} at {self.host}{path}: {exc.reason}"
+                    f"Ollama HTTP {exc.code} at {self.host}{path}: "
+                    f"{_error_detail(exc) or exc.reason}"
                 ) from exc
             raise OllamaBadResponse(
                 f"Ollama HTTP {exc.code} at {self.host}{path}: {exc.reason}"
@@ -315,3 +334,12 @@ class OllamaClient:
                 f"Ollama at {self.host}{path} sent {type(reply).__name__}, not an object"
             )
         return reply
+
+
+def _error_detail(exc: urllib.error.HTTPError) -> str:
+    """The ``error`` field of an Ollama error body, or ""."""
+    try:
+        body = json.loads(exc.read().decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return ""
+    return str(body.get("error") or "") if isinstance(body, dict) else ""
