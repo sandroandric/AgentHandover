@@ -75,6 +75,21 @@ pub struct ObserverConfig {
     /// Frames taken, kept and gated, capture and OCR milliseconds; the
     /// health watcher publishes them in `daemon-status.json`.
     pub capture_stats: SharedCaptureStats,
+    /// Seconds since the last mouse click anywhere on the system (a click
+    /// since the previous tick fires the shutter). Tests replace it: the
+    /// real value follows whoever is using the machine running them.
+    pub seconds_since_last_click: fn() -> f64,
+}
+
+/// The system's time since the last left or right mouse-down.
+#[cfg(target_os = "macos")]
+fn system_seconds_since_last_click() -> f64 {
+    crate::platform::IdleDetector::new().seconds_since_last_click()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn system_seconds_since_last_click() -> f64 {
+    f64::INFINITY
 }
 
 impl Default for ObserverConfig {
@@ -97,6 +112,7 @@ impl Default for ObserverConfig {
             capture_input_values: false,
             read_app_state: false,
             capture_stats: CaptureStats::shared(),
+            seconds_since_last_click: system_seconds_since_last_click,
         }
     }
 }
@@ -151,7 +167,6 @@ pub async fn run_observer_loop(
     // Mouse clicks are read from the HID system's "seconds since last
     // mouse-down" (no event tap, nothing intercepted).
     #[cfg(target_os = "macos")]
-    let idle_detector = crate::platform::IdleDetector::new();
 
     // Focus recording session tracking; browser transitions share the dir.
     let state_dir = config.state_dir.clone();
@@ -375,12 +390,9 @@ pub async fn run_observer_loop(
                 }
 
                 // A mouse button went down since the previous tick.
-                #[cfg(target_os = "macos")]
-                if idle_detector.seconds_since_last_click() < tick_elapsed.as_secs_f64() {
+                if (config.seconds_since_last_click)() < tick_elapsed.as_secs_f64() {
                     transitions.push(CaptureTrigger::Click);
                 }
-                #[cfg(not(target_os = "macos"))]
-                let _ = tick_elapsed;
 
                 if clipboard_transition {
                     transitions.push(CaptureTrigger::Clipboard);

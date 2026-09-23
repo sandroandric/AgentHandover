@@ -45,22 +45,32 @@ fn window_reply(app_id: &str, title: &str) -> String {
 }
 
 /// Serve `replies` in order, one per connection; the last one repeats.
-fn fake_observation_server(path: &Path, replies: Vec<String>) {
+/// How many window queries the fake observation server has answered, and
+/// how many scripted replies it holds.
+struct Served {
+    count: Arc<AtomicUsize>,
+    scripted: usize,
+}
+
+fn fake_observation_server(path: &Path, replies: Vec<String>) -> Served {
     let listener = UnixListener::bind(path).unwrap();
+    let count = Arc::new(AtomicUsize::new(0));
+    let served = Served { count: Arc::clone(&count), scripted: replies.len() };
     tokio::spawn(async move {
-        let mut i = 0usize;
         loop {
             let Ok((stream, _)) = listener.accept().await else { return };
+            let i = count.load(Ordering::SeqCst);
             let reply = replies[i.min(replies.len() - 1)].clone();
-            i += 1;
             let mut reader = BufReader::new(stream);
             let mut line = String::new();
             let _ = reader.read_line(&mut line).await;
             let stream = reader.get_mut();
             let _ = stream.write_all(reply.as_bytes()).await;
             let _ = stream.write_all(b"\n").await;
+            count.fetch_add(1, Ordering::SeqCst);
         }
     });
+    served
 }
 
 /// A real frame as the app sends it: magic, width, height, length, JPEG.
@@ -131,13 +141,25 @@ fn harness_with(zones: PrivacyZonesConfig, serve_frames: bool) -> Harness {
         observation_socket: root.join("observation.sock"),
         capture_socket: root.join("capture.sock"),
         state_dir,
+        // No clicks: the real value would follow the person using this Mac.
+        seconds_since_last_click: || f64::INFINITY,
         ..Default::default()
     };
     Harness { _dir: dir, root, config, captures }
 }
 
 /// Run the loop for `run_for`, then shut it down; return every event sent.
-async fn run_loop(config: ObserverConfig, root: &Path, run_for: Duration) -> Vec<Event> {
+/// Run the observer for at least `run_for`, and, with a fake observation
+/// server, until it has answered every scripted reply plus two more ticks
+/// (ticks run one after another, so the last scripted window has been
+/// fully handled). A fixed wall time alone made the counts depend on how
+/// busy the machine was.
+async fn run_loop(
+    config: ObserverConfig,
+    root: &Path,
+    served: Option<&Served>,
+    run_for: Duration,
+) -> Vec<Event> {
     let (tx, mut rx) = mpsc::channel(1000);
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let store = Arc::new(ArtifactStore::new(root.join("artifacts"), [7u8; 32]));
@@ -150,6 +172,13 @@ async fn run_loop(config: ObserverConfig, root: &Path, run_for: Duration) -> Vec
         Arc::new(AtomicBool::new(false)),
     ));
     tokio::time::sleep(run_for).await;
+    if let Some(served) = served {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while served.count.load(Ordering::SeqCst) < served.scripted + 2 {
+            assert!(Instant::now() < deadline, "the observer stopped polling the fake server");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
     shutdown_tx.send(true).unwrap();
     handle.await.unwrap().unwrap();
     let mut events = Vec::new();
@@ -225,7 +254,7 @@ async fn missing_observation_socket_captures_nothing_and_warns_once() {
     )
     .unwrap();
 
-    let events = run_loop(h.config, &h.root, Duration::from_millis(600)).await;
+    let events = run_loop(h.config, &h.root, None, Duration::from_millis(600)).await;
 
     assert_eq!(h.captures.load(Ordering::SeqCst), 0, "no capture request");
     assert_eq!(frames(&events), 0);
@@ -246,7 +275,7 @@ async fn missing_observation_socket_captures_nothing_and_warns_once() {
 #[tokio::test(flavor = "current_thread")]
 async fn blocked_app_never_reaches_the_shutter() {
     let h = harness(PrivacyZonesConfig::default());
-    fake_observation_server(
+    let served = fake_observation_server(
         &h.config.observation_socket,
         vec![
             window_reply("pid:10:TextEdit", "notes.txt"),
@@ -255,7 +284,7 @@ async fn blocked_app_never_reaches_the_shutter() {
         ],
     );
     let stats = Arc::clone(&h.config.capture_stats);
-    let events = run_loop(h.config, &h.root, Duration::from_millis(500)).await;
+    let events = run_loop(h.config, &h.root, Some(&served), Duration::from_millis(500)).await;
     let compute = stats.lock().unwrap().snapshot(Instant::now());
     assert_eq!(compute.since_start.frames_captured, 0);
     assert_eq!(compute.since_start.frames_gated_by_reason.get("privacy_zone"), Some(&1));
@@ -276,7 +305,7 @@ async fn blocked_app_never_reaches_the_shutter() {
 #[tokio::test(flavor = "current_thread")]
 async fn unblocked_app_switch_requests_a_frame() {
     let h = harness(PrivacyZonesConfig::default());
-    fake_observation_server(
+    let served = fake_observation_server(
         &h.config.observation_socket,
         vec![
             window_reply("pid:10:TextEdit", "notes.txt"),
@@ -284,7 +313,7 @@ async fn unblocked_app_switch_requests_a_frame() {
         ],
     );
     let stats = Arc::clone(&h.config.capture_stats);
-    let events = run_loop(h.config, &h.root, Duration::from_millis(500)).await;
+    let events = run_loop(h.config, &h.root, Some(&served), Duration::from_millis(500)).await;
     assert!(h.captures.load(Ordering::SeqCst) >= 1, "the app switch requested a frame");
     // The fake socket closes without a frame: counted as a failed capture.
     let compute = stats.lock().unwrap().snapshot(Instant::now());
@@ -301,14 +330,14 @@ async fn configured_title_pattern_blocks() {
         blocked: vec!["*payslip*".into()],
         ..Default::default()
     });
-    fake_observation_server(
+    let served = fake_observation_server(
         &h.config.observation_socket,
         vec![
             window_reply("pid:10:TextEdit", "notes.txt"),
             window_reply("pid:12:Preview", "PAYSLIP-2026-08.pdf"),
         ],
     );
-    let events = run_loop(h.config, &h.root, Duration::from_millis(500)).await;
+    let events = run_loop(h.config, &h.root, Some(&served), Duration::from_millis(500)).await;
     assert_eq!(h.captures.load(Ordering::SeqCst), 0);
     assert_eq!(frames(&events), 0);
 }
@@ -321,7 +350,7 @@ async fn metadata_only_app_gets_events_but_no_frame() {
         metadata_only: vec!["Messages".into()],
         ..Default::default()
     });
-    fake_observation_server(
+    let served = fake_observation_server(
         &h.config.observation_socket,
         vec![
             window_reply("pid:10:TextEdit", "notes.txt"),
@@ -329,7 +358,7 @@ async fn metadata_only_app_gets_events_but_no_frame() {
             window_reply("pid:13:Messages", "Bob"),
         ],
     );
-    let events = run_loop(h.config, &h.root, Duration::from_millis(500)).await;
+    let events = run_loop(h.config, &h.root, Some(&served), Duration::from_millis(500)).await;
     assert_eq!(h.captures.load(Ordering::SeqCst), 0);
     assert_eq!(frames(&events), 0);
     assert_eq!(app_switches(&events)[0].2, "Alice", "metadata keeps the title");
@@ -362,11 +391,11 @@ async fn blocked_page_url_in_the_browser_is_not_captured() {
             },
         )
         .unwrap();
-        fake_observation_server(
+        let served = fake_observation_server(
             &h.config.observation_socket,
             vec![window_reply("pid:20:Google Chrome", "Example")],
         );
-        let _ = run_loop(h.config, &h.root, Duration::from_millis(500)).await;
+        let _ = run_loop(h.config, &h.root, Some(&served), Duration::from_millis(500)).await;
         let captured = h.captures.load(Ordering::SeqCst) >= 1;
         assert_eq!(captured, expect_capture, "url {url}");
     }
@@ -377,7 +406,7 @@ async fn blocked_page_url_in_the_browser_is_not_captured() {
 #[tokio::test(flavor = "current_thread")]
 async fn a_failed_tick_does_not_fabricate_a_transition() {
     let h = harness(PrivacyZonesConfig::default());
-    fake_observation_server(
+    let served = fake_observation_server(
         &h.config.observation_socket,
         vec![
             window_reply("pid:10:TextEdit", "notes.txt"),
@@ -386,7 +415,7 @@ async fn a_failed_tick_does_not_fabricate_a_transition() {
             window_reply("pid:10:TextEdit", "notes.txt"),
         ],
     );
-    let events = run_loop(h.config, &h.root, Duration::from_millis(500)).await;
+    let events = run_loop(h.config, &h.root, Some(&served), Duration::from_millis(500)).await;
     assert!(events.is_empty(), "no events: {events:?}");
     assert_eq!(h.captures.load(Ordering::SeqCst), 0);
 }
@@ -403,7 +432,7 @@ fn jpegs_in(dir: &Path) -> usize {
 async fn an_allowed_window_keeps_its_frame() {
     let h = harness_with(PrivacyZonesConfig::default(), true);
     let shots = h.config.screenshots_dir.clone();
-    fake_observation_server(
+    let served = fake_observation_server(
         &h.config.observation_socket,
         vec![
             window_reply("pid:10:TextEdit", "notes.txt"),
@@ -411,7 +440,7 @@ async fn an_allowed_window_keeps_its_frame() {
         ],
     );
     let stats = Arc::clone(&h.config.capture_stats);
-    let events = run_loop(h.config, &h.root, Duration::from_millis(800)).await;
+    let events = run_loop(h.config, &h.root, Some(&served), Duration::from_millis(800)).await;
     assert_eq!(frames(&events), 1, "{events:?}");
     assert_eq!(jpegs_in(&shots), 1);
     // WP-C1: daemon-status.json's capture counters see the same frame.
@@ -428,7 +457,7 @@ async fn an_allowed_window_keeps_its_frame() {
 async fn system_password_prompt_never_reaches_the_shutter() {
     let h = harness_with(PrivacyZonesConfig::default(), true);
     let shots = h.config.screenshots_dir.clone();
-    fake_observation_server(
+    let served = fake_observation_server(
         &h.config.observation_socket,
         vec![
             window_reply("pid:10:TextEdit", "notes.txt"),
@@ -436,7 +465,7 @@ async fn system_password_prompt_never_reaches_the_shutter() {
             window_reply("pid:9:SecurityAgent", "Password"),
         ],
     );
-    let events = run_loop(h.config, &h.root, Duration::from_millis(800)).await;
+    let events = run_loop(h.config, &h.root, Some(&served), Duration::from_millis(800)).await;
     assert_eq!(h.captures.load(Ordering::SeqCst), 0, "no capture request for SecurityAgent");
     assert_eq!(frames(&events), 0, "no frame row: {events:?}");
     assert_eq!(jpegs_in(&shots), 0, "no file");
@@ -453,7 +482,7 @@ async fn system_password_prompt_never_reaches_the_shutter() {
 async fn a_switch_to_a_blocked_window_during_the_capture_drops_the_frame() {
     let h = harness_with(PrivacyZonesConfig::default(), true);
     let shots = h.config.screenshots_dir.clone();
-    fake_observation_server(
+    let served = fake_observation_server(
         &h.config.observation_socket,
         vec![
             window_reply("pid:10:TextEdit", "notes.txt"),
@@ -464,7 +493,7 @@ async fn a_switch_to_a_blocked_window_during_the_capture_drops_the_frame() {
         ],
     );
     let stats = Arc::clone(&h.config.capture_stats);
-    let events = run_loop(h.config, &h.root, Duration::from_millis(800)).await;
+    let events = run_loop(h.config, &h.root, Some(&served), Duration::from_millis(800)).await;
     assert!(h.captures.load(Ordering::SeqCst) >= 1, "the capture was taken");
     let compute = stats.lock().unwrap().snapshot(Instant::now());
     assert_eq!(compute.since_start.frames_captured, 1);
