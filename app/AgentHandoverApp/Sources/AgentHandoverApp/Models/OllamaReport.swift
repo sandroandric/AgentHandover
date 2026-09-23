@@ -28,6 +28,11 @@ struct OllamaReport: Decodable, Equatable {
         let level: Level
         let title: String
         let lines: [String]
+
+        /// The onboarding icon, as `doctor` marks the line: FAIL or WARN.
+        var symbolName: String {
+            level == .fail ? "xmark.octagon.fill" : "exclamationmark.triangle.fill"
+        }
     }
 
     struct TierNeed: Decodable, Equatable {

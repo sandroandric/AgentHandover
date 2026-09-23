@@ -1498,8 +1498,7 @@ struct OnboardingView: View {
                 ForEach(Array(report.problems.enumerated()), id: \.offset) { _, finding in
                     VStack(alignment: .leading, spacing: 3) {
                         HStack(spacing: 6) {
-                            Image(systemName: finding.level == .fail
-                                ? "xmark.octagon.fill" : "exclamationmark.triangle.fill")
+                            Image(systemName: finding.symbolName)
                                 .foregroundColor(finding.level == .fail ? .red : warmOrange)
                                 .font(.system(size: 12))
                             Text(finding.title)

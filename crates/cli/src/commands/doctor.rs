@@ -225,7 +225,8 @@ pub fn run() -> Result<()> {
     }
 
     // Check 15: the Ollama service (the configured host), its version
-    // against the minimum, the installs on this Mac and which one serves
+    // against the minimum (a failure only when a configured model is
+    // Gemma 4, a warning otherwise), the installs on this Mac and which one serves
     // the port, and memory headroom for the configured tier.
     let config_str = std::fs::read_to_string(&config_path).unwrap_or_default();
     let host_url = read_config_string_field(&config_str, "vlm", "ollama_host").unwrap_or_default();
@@ -895,6 +896,47 @@ mod tests {
         assert_eq!(warn[0].title, "Reading open documents: 2 app(s) not granted");
         assert!(warn[0].lines[0].starts_with("Mail: turned off. Fix: System Settings"));
         assert!(warn[0].lines[1].starts_with("TextEdit: macOS has not asked yet"));
+    }
+
+    /// An old Ollama fails only when the models the worker would use (the
+    /// config's explicit models, else its tier's, else the RAM tier's)
+    /// include a Gemma 4 tag; the shipped tier table decides the tiers.
+    #[test]
+    fn an_old_ollama_fails_only_for_configured_gemma4_models() {
+        let level = |config: &str| {
+            let m = configured_models(config);
+            let host = machine::parse_host("http://localhost:11434");
+            let findings = machine::diagnose_service(&machine::ServiceFacts {
+                host: &host,
+                version: Some("0.30.6"),
+                minimum: &tiers::table().minimum_ollama_version_for_gemma4,
+                models: &[m.annotation.as_str(), m.sop.as_str()],
+                installs: &[],
+                launch_items: &[],
+                serving: None,
+            });
+            assert_eq!(findings[0].title, "Ollama 0.30.6 is older than 0.34.0");
+            findings[0].level
+        };
+        use machine::Level::{Fail, Warn};
+        assert_eq!(level("[vlm]\ntier = \"standard\"\n"), Warn);
+        assert_eq!(level("[vlm]\ntier = \"recommended\"\n"), Warn);
+        assert_eq!(level("[vlm]\ntier = \"performance\"\n"), Fail);
+        assert_eq!(level("[vlm]\ntier = \"max_quality\"\n"), Fail);
+        // Explicit models win over the tier, either way.
+        assert_eq!(level("[vlm]\ntier = \"recommended\"\nsop_model = \"gemma4:12b-it-qat\"\n"), Fail);
+        assert_eq!(
+            level("[vlm]\ntier = \"performance\"\nannotation_model = \"qwen3.5:4b\"\nsop_model = \"qwen3.5:4b\"\n"),
+            Warn
+        );
+        // No [vlm] section: this Mac's RAM tier, as the worker resolves it.
+        let ram_tier = tiers::recommended_tier();
+        let expected = if ollama::is_gemma4(&ram_tier.annotation_model) || ollama::is_gemma4(&ram_tier.sop_model) {
+            Fail
+        } else {
+            Warn
+        };
+        assert_eq!(level(""), expected);
     }
 
     #[test]

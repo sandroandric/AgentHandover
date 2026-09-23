@@ -65,6 +65,12 @@ pub fn version(base: &str) -> Option<String> {
     value.get("version")?.as_str().map(str::to_string)
 }
 
+/// A Gemma 4 tag (`gemma4:12b-it-qat`): the models that need the tier
+/// table's `minimum_ollama_version_for_gemma4`.
+pub fn is_gemma4(model: &str) -> bool {
+    model.starts_with("gemma4")
+}
+
 /// `version` ("0.34.2-rc1") >= `minimum` ("0.34.0"); false for a version
 /// that is not dotted numbers ("dev").
 pub fn version_at_least(version: &str, minimum: &str) -> bool {

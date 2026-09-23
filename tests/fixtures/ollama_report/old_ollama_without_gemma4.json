@@ -1,0 +1,64 @@
+{
+  "host": {
+    "url": "http://localhost:11434",
+    "local": true,
+    "port": 11434
+  },
+  "version": "0.30.6",
+  "minimum": "0.34.0",
+  "installs": [
+    {
+      "kind": "Ollama.app",
+      "path": "/Applications/Ollama.app",
+      "version": "0.30.6"
+    }
+  ],
+  "launch_items": [],
+  "serving": {
+    "pid": 812,
+    "executable": "/Applications/Ollama.app/Contents/Resources/ollama"
+  },
+  "findings": [
+    {
+      "level": "warn",
+      "title": "Ollama 0.30.6 is older than 0.34.0",
+      "lines": [
+        "AgentHandover's models need Ollama 0.34.0 or later; http://localhost:11434 answers with 0.30.6.",
+        "Only the Gemma 4 models require it: the configured models (qwen3.5:4b) are not Gemma 4, so this is a warning. Update before choosing a Gemma 4 tier.",
+        "Fix: update Ollama.app (menu bar icon > Restart to update), or download the current version from https://ollama.com/download"
+      ]
+    },
+    {
+      "level": "pass",
+      "title": "Memory for the Standard tier: needs 4.7 GB, 9.0 GB available now",
+      "lines": []
+    },
+    {
+      "level": "pass",
+      "title": "Swap in use: 1.0 GB",
+      "lines": []
+    }
+  ],
+  "headroom": {
+    "available_bytes": 9000000000,
+    "free_bytes": 9000000000,
+    "loaded_bytes": 0,
+    "swap_used_bytes": 1000000000,
+    "free_disk_bytes": 40000000000,
+    "need_bytes": 4670000000,
+    "tiers": [
+      {
+        "id": "standard",
+        "label": "Standard",
+        "need_bytes": 4670000000,
+        "fits": true
+      },
+      {
+        "id": "recommended",
+        "label": "Recommended",
+        "need_bytes": 8470000000,
+        "fits": true
+      }
+    ]
+  }
+}

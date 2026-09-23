@@ -671,7 +671,7 @@ fn step_vlm(check_only: bool, tier_arg: Option<&str>) -> Result<()> {
         return Ok(());
     }
 
-    let needs_new_ollama = missing.iter().any(|m| m.starts_with("gemma4"));
+    let needs_new_ollama = missing.iter().any(|m| ollama::is_gemma4(m));
     let minimum = &table.minimum_ollama_version_for_gemma4;
     if needs_new_ollama {
         match &service_version {

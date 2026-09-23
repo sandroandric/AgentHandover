@@ -335,7 +335,11 @@ pub struct ServiceFacts<'a> {
     pub host: &'a Host,
     /// `GET /api/version`; None when the service does not answer.
     pub version: Option<&'a str>,
+    /// The tier table's minimum for Gemma 4 models.
     pub minimum: &'a str,
+    /// The configured annotation and Skills models: a service below the
+    /// minimum fails only when one of them is a Gemma 4 tag.
+    pub models: &'a [&'a str],
     pub installs: &'a [Install],
     pub launch_items: &'a [LaunchItem],
     pub serving: Option<&'a Serving>,
@@ -414,6 +418,12 @@ fn keep_only(keep: &Install, facts: &ServiceFacts) -> String {
 
 /// The service's findings: whether it answers, its version against the
 /// minimum, and (on this Mac) more than one install or launch item.
+///
+/// Below the minimum is a failure when a configured model is a Gemma 4
+/// tag, which that version cannot pull or run.  Otherwise it is a warning
+/// with the same explanation and fix: people keep the Ollama they have, and
+/// the other models run on older versions (qwen3.5:4b on 0.30.6, on the
+/// test Mac), but a Gemma 4 tier needs the update.
 pub fn diagnose_service(facts: &ServiceFacts) -> Vec<Finding> {
     let mut out = Vec::new();
     let host = facts.host;
@@ -456,6 +466,16 @@ pub fn diagnose_service(facts: &ServiceFacts) -> Vec<Finding> {
                 "AgentHandover's models need Ollama {} or later; {} answers with {v}.",
                 facts.minimum, host.url
             )];
+            let needs_it = facts.models.iter().any(|m| ollama::is_gemma4(m));
+            if !needs_it {
+                let mut models: Vec<&str> = facts.models.to_vec();
+                models.dedup();
+                lines.push(format!(
+                    "Only the Gemma 4 models require it: the configured models ({}) are not \
+                     Gemma 4, so this is a warning. Update before choosing a Gemma 4 tier.",
+                    models.join(", ")
+                ));
+            }
             let serving = facts.serving_install().filter(|_| host.local);
             let newer = facts.installs.iter().find(|i| {
                 Some(*i) != serving
@@ -491,7 +511,7 @@ pub fn diagnose_service(facts: &ServiceFacts) -> Vec<Finding> {
                 });
             }
             out.push(finding(
-                Level::Fail,
+                if needs_it { Level::Fail } else { Level::Warn },
                 format!("Ollama {v} is older than {}", facts.minimum),
                 lines,
             ));
@@ -792,6 +812,7 @@ pub fn gather(host_url: &str, models: &ConfiguredModels) -> Report {
         host: &host,
         version: version.as_deref(),
         minimum: &table.minimum_ollama_version_for_gemma4,
+        models: &[models.annotation.as_str(), models.sop.as_str()],
         installs: &installs,
         launch_items: &launch_items,
         serving: serving.as_ref(),
@@ -935,8 +956,11 @@ mod tests {
         items: &'a [LaunchItem],
         serving: Option<&'a Serving>,
     ) -> ServiceFacts<'a> {
-        ServiceFacts { host, version, minimum: MIN, installs, launch_items: items, serving }
+        ServiceFacts { host, version, minimum: MIN, models: GEMMA_SPLIT, installs, launch_items: items, serving }
     }
+
+    /// Qwen annotating, Gemma 4 writing Skills (the Performance tier).
+    const GEMMA_SPLIT: &[&str] = &["qwen3.5:4b", "gemma4:12b-it-qat"];
 
     fn text(f: &Finding) -> String {
         format!("{}\n{}", f.title, f.lines.join("\n"))
@@ -1047,6 +1071,60 @@ mod tests {
         let installs = [Install { kind: HOMEBREW, path: "/opt/homebrew/Cellar/ollama/0.30.0".into(), version: Some("0.30.0".into()) }];
         let f = diagnose_service(&facts(&host, Some("0.30.0"), &installs, &[], None));
         assert!(text(&f[0]).contains("Fix: brew upgrade ollama && brew services restart ollama"));
+    }
+
+    /// Below the minimum fails when a configured model is Gemma 4, whichever
+    /// role it has.
+    #[test]
+    fn an_old_ollama_fails_when_a_configured_model_is_gemma4() {
+        let host = local();
+        let installs = [Install { kind: APP, path: "/Applications/Ollama.app".into(), version: Some("0.30.6".into()) }];
+        for models in [
+            &["qwen3.5:4b", "gemma4:12b-it-qat"][..],
+            &["gemma4:31b-it-qat", "gemma4:31b-it-qat"][..],
+            &["gemma4:12b-it-qat", "qwen3.5:4b"][..],
+        ] {
+            let f = diagnose_service(&ServiceFacts { models, ..facts(&host, Some("0.30.6"), &installs, &[], None) });
+            assert_eq!(f[0].level, Level::Fail, "{models:?}");
+            assert_eq!(f[0].title, "Ollama 0.30.6 is older than 0.34.0");
+            assert!(!text(&f[0]).contains("so this is a warning"), "{}", text(&f[0]));
+        }
+    }
+
+    /// Below the minimum only warns when no configured model is Gemma 4
+    /// (qwen3.5:4b runs on 0.30.6), with the same explanation and fix.
+    #[test]
+    fn an_old_ollama_warns_when_no_configured_model_is_gemma4() {
+        let host = local();
+        let installs = [Install { kind: APP, path: "/Applications/Ollama.app".into(), version: Some("0.30.6".into()) }];
+        let qwen = ["qwen3.5:4b", "qwen3.5:4b"];
+        let f = diagnose_service(&ServiceFacts { models: &qwen, ..facts(&host, Some("0.30.6"), &installs, &[], None) });
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].level, Level::Warn);
+        assert_eq!(f[0].title, "Ollama 0.30.6 is older than 0.34.0");
+        assert_eq!(
+            f[0].lines,
+            [
+                "AgentHandover's models need Ollama 0.34.0 or later; http://localhost:11434 answers with 0.30.6.",
+                "Only the Gemma 4 models require it: the configured models (qwen3.5:4b) are not Gemma 4, \
+                 so this is a warning. Update before choosing a Gemma 4 tier.",
+                "Fix: update Ollama.app (menu bar icon > Restart to update), or download the current \
+                 version from https://ollama.com/download",
+            ]
+        );
+        // The other fixes are unchanged too: a newer install that is not
+        // serving, and a remote host.
+        let both = [
+            Install { kind: APP, path: "/Applications/Ollama.app".into(), version: Some("0.34.2".into()) },
+            Install { kind: HOMEBREW, path: "/opt/homebrew/Cellar/ollama/0.30.0".into(), version: Some("0.30.0".into()) },
+        ];
+        let f = diagnose_service(&ServiceFacts { models: &qwen, ..facts(&host, Some("0.30.0"), &both, &[], None) });
+        assert_eq!(f[0].level, Level::Warn);
+        assert!(text(&f[0]).contains("Fix: To keep Ollama.app 0.34.2: brew services stop ollama"), "{}", text(&f[0]));
+        let remote = parse_host("http://gpu-box.lan:11434");
+        let f = diagnose_service(&ServiceFacts { models: &qwen, ..facts(&remote, Some("0.30.6"), &[], &[], None) });
+        assert_eq!(f[0].level, Level::Warn);
+        assert!(text(&f[0]).contains("Fix: update Ollama on that host"), "{}", text(&f[0]));
     }
 
     /// The test Mac after a reboot: Ollama.app 0.30.6 took the port before
@@ -1281,12 +1359,51 @@ mod tests {
             findings,
             headroom: Some(headroom),
         };
-        let json = serde_json::to_string_pretty(&report).unwrap() + "\n";
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/fixtures/ollama_report/app_serving_ahead_of_formula.json");
+        pin_fixture("app_serving_ahead_of_formula.json", &report);
+    }
+
+    /// The same for an old Ollama on a tier without Gemma 4: a warning the
+    /// app shows as one.
+    #[test]
+    fn the_warning_report_matches_the_apps_fixture() {
+        let host = local();
+        let installs = [Install { kind: APP, path: "/Applications/Ollama.app".into(), version: Some("0.30.6".into()) }];
+        let serving = Serving { pid: 812, executable: "/Applications/Ollama.app/Contents/Resources/ollama".into() };
+        let qwen = ["qwen3.5:4b", "qwen3.5:4b"];
+        let mut findings = diagnose_service(&ServiceFacts {
+            models: &qwen,
+            ..facts(&host, Some("0.30.6"), &installs, &[], Some(&serving))
+        });
+        let (headroom, more) = diagnose_headroom(
+            &tiers(),
+            &mem(9 * GB, &[], Some(GB), Some(40 * GB)),
+            "Standard",
+            "qwen3.5:4b",
+            "qwen3.5:4b",
+        );
+        findings.extend(more);
+        let report = Report {
+            host,
+            version: Some("0.30.6".into()),
+            minimum: MIN.into(),
+            installs: installs.to_vec(),
+            launch_items: vec![],
+            serving: Some(serving),
+            findings,
+            headroom: Some(headroom),
+        };
+        pin_fixture("old_ollama_without_gemma4.json", &report);
+    }
+
+    /// `report` as JSON equals tests/fixtures/ollama_report/`name`
+    /// (written instead with AH_WRITE_FIXTURES set).
+    fn pin_fixture(name: &str, report: &Report) {
+        let json = serde_json::to_string_pretty(report).unwrap() + "\n";
+        let path = format!("{}/../../tests/fixtures/ollama_report/{name}", env!("CARGO_MANIFEST_DIR"));
         if std::env::var_os("AH_WRITE_FIXTURES").is_some() {
-            std::fs::write(path, &json).unwrap();
+            std::fs::write(&path, &json).unwrap();
         }
-        assert_eq!(json, std::fs::read_to_string(path).unwrap(), "rerun with AH_WRITE_FIXTURES=1 to update");
+        assert_eq!(json, std::fs::read_to_string(&path).unwrap(), "rerun with AH_WRITE_FIXTURES=1 to update");
     }
 
     #[test]
