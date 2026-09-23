@@ -58,6 +58,22 @@ pub fn app_name_for_bundle_id(bundle_id: &str) -> Option<&'static str> {
         .map(|(name, _)| *name)
 }
 
+/// The known app a window's `app_id` belongs to, as its AppleScript name.
+///
+/// The app reports native windows as `pid:<pid>:<owner name>`; tests and
+/// older rows use a bundle id or a bare name. All three resolve here.
+pub fn app_name_for_app_id(app_id: &str) -> Option<&'static str> {
+    if let Some(name) = app_name_for_bundle_id(app_id) {
+        return Some(name);
+    }
+    let owner = crate::observer::privacy_zones::strip_pid_prefix(app_id);
+    let lower = owner.to_lowercase();
+    KNOWN_APPS
+        .iter()
+        .find(|(n, _)| n.to_lowercase() == lower)
+        .map(|(name, _)| *name)
+}
+
 /// Build an AppleScript snippet for the given app name.
 fn build_script(app_name: &str) -> Option<String> {
     let lower = app_name.to_lowercase();
@@ -251,6 +267,16 @@ pub async fn query_app_state_async(app_name: String) -> Option<AppState> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn app_id_forms_resolve_to_the_known_app() {
+        assert_eq!(app_name_for_app_id("pid:412:Mail"), Some("Mail"));
+        assert_eq!(app_name_for_app_id("pid:9:notes"), Some("Notes"));
+        assert_eq!(app_name_for_app_id("com.apple.finder"), Some("Finder"));
+        assert_eq!(app_name_for_app_id("TextEdit"), Some("TextEdit"));
+        assert_eq!(app_name_for_app_id("pid:412:Microsoft Excel"), None);
+        assert_eq!(app_name_for_app_id("com.example.Mail"), None);
+    }
     use super::*;
 
     #[test]

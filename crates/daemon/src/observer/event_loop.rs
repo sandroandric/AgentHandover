@@ -318,18 +318,9 @@ pub async fn run_observer_loop(
                                     .is_none_or(|last| last.elapsed() >= applescript_throttle);
 
                             if should_query {
-                                // Try by bundle ID first, then by app name (async, off executor)
-                                let app_name_to_query: Option<String> = if crate::platform::applescript::is_supported_bundle_id(to) {
-                                    crate::platform::applescript::app_name_for_bundle_id(to)
-                                        .map(|n| n.to_string())
-                                } else {
-                                    let short_name = to.rsplit('.').next().unwrap_or(to);
-                                    if crate::platform::applescript::is_supported_app(short_name) {
-                                        Some(short_name.to_string())
-                                    } else {
-                                        None
-                                    }
-                                };
+                                let app_name_to_query =
+                                    crate::platform::applescript::app_name_for_app_id(to)
+                                        .map(str::to_string);
                                 let app_state = if let Some(name) = app_name_to_query {
                                     crate::platform::applescript::query_app_state_async(name).await
                                 } else {
