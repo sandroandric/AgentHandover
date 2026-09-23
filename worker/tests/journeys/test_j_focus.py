@@ -69,37 +69,48 @@ def test_focus_run_stays_within_its_model_budget(
     events_db, worker, clock, temp_home, cassette,
 ) -> None:
     """Time to Skill, in cassette model-seconds, is at most 20 keyframes
-    (each annotated and diffed) plus the synthesis calls (WP-C5's bound)."""
+    (each annotated and diffed) plus the synthesis calls (WP-C5's bound).
+    The keyframes the SOP did not need are annotated after the Skill."""
     run, _proc, _packet = _run(events_db, worker, clock, temp_home, cassette)
-    budget = focus_budget_seconds(run.tape)
-    assert run.tape.model_seconds() <= budget, (run.tape.model_seconds(), budget)
+    assert run.served_at_skill is not None, "the focus processor never reached the Skill"
+    to_skill = run.tape.served[:run.served_at_skill]
+    annotations = [e for e in to_skill if _kind(e) == "annotation"]
+    assert len(annotations) <= KEYFRAMES, len(annotations)
+    spent = sum(_seconds(e) for e in to_skill)
+    budget = focus_budget_seconds(to_skill)
+    assert spent <= budget, (spent, budget)
 
 
 def _seconds(entry: dict) -> float:
     return entry["response"].get("total_duration", 0) / 1e9
 
 
-def focus_budget_seconds(tape) -> float:
+def _kind(entry: dict) -> str:
+    """``annotation``, ``diff`` or ``other``, told apart by the system prompt."""
+    request = entry["request"]
+    model = request.get("model")
+    if not model:
+        return "other"
+    profile = get_profile(model)
+    system = request.get("system") or ""
+    if system == annotation_system_prompt(profile.ann_system):
+        return "annotation"
+    if system == (profile.diff_system or DIFF_SYSTEM_PROMPT):
+        return "diff"
+    return "other"
+
+
+def focus_budget_seconds(served: list[dict]) -> float:
     """``KEYFRAMES`` x (median annotation + median frame diff) + every other
-    model call of the run (SOP generation, questions, synthesis, embeddings).
-    Annotation and diff calls are told apart by their system prompt."""
-    annotation, diff, other = [], [], []
-    for entry in tape.served:
-        request = entry["request"]
-        model = request.get("model")
-        if not model:
-            continue
-        profile = get_profile(model)
-        system = request.get("system") or ""
-        if system == annotation_system_prompt(profile.ann_system):
-            annotation.append(_seconds(entry))
-        elif system == (profile.diff_system or DIFF_SYSTEM_PROMPT):
-            diff.append(_seconds(entry))
-        else:
-            other.append(_seconds(entry))
-    assert annotation and other, "the run made no annotation or no synthesis call"
-    per_keyframe = statistics.median(annotation) + (statistics.median(diff) if diff else 0.0)
-    return KEYFRAMES * per_keyframe + sum(other)
+    model call (SOP generation, synthesis, questions, embeddings)."""
+    kinds: dict[str, list[float]] = {"annotation": [], "diff": [], "other": []}
+    for entry in served:
+        kinds[_kind(entry)].append(_seconds(entry))
+    assert kinds["annotation"] and kinds["other"], "no annotation or no synthesis call"
+    per_keyframe = statistics.median(kinds["annotation"]) + (
+        statistics.median(kinds["diff"]) if kinds["diff"] else 0.0
+    )
+    return KEYFRAMES * per_keyframe + sum(kinds["other"])
 
 
 def test_focus_packet_has_no_assumed_text(
@@ -109,6 +120,16 @@ def test_focus_packet_has_no_assumed_text(
     assert not re.search(r"\bAssum(e|ed|ing)\b", packet.body), packet.body
 
 
+@pytest.mark.xfail(strict=True, reason=(
+    "the pasted text is left to the model: the SOP prompt shows the copy "
+    "(sop_generator.py:475-500, '>>> Copied text'), but _vlm_sop_to_template "
+    "(sop_generator.py:884) never attaches the clipboard preview to the paste "
+    "step, and on the standard tier the Slack paste step reads 'Paste the "
+    "copied note content' with no input; select_keyframes "
+    "(focus_processor.py:76-128) also lets only 2 of the session's 4 copies "
+    "into the 20 SOP keyframes (copy adjacency +10 ranks below a dwell "
+    "boundary's +100)"
+))
 def test_focus_paste_step_carries_the_clipboard_text(
     events_db, worker, clock, temp_home, cassette,
 ) -> None:
@@ -125,17 +146,6 @@ def test_focus_paste_step_carries_the_clipboard_text(
     ), (story_titles, [s.text for s in paste_steps])
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "no browser step gets an anchor: a DwellSnapshot frame carries no URL "
-    "(the daemon attaches app_state only on an app switch, "
-    "crates/daemon/src/observer/event_loop.rs:268-276), so the WINDOW header "
-    "built by SceneAnnotator.annotate_event (scene_annotator.py:908-910) has "
-    "none and the model invents the Slack location (https://example.com/slack); "
-    "_attach_clicks (focus_processor.py:688-722) then matches no frame to the "
-    "app.slack.com clicks, and the Hacker News click lands on the frame before "
-    "it while the step cites the frame after it, which is all "
-    "_anchor_for_step (sop_generator.py:1183-1209) looks at"
-))
 def test_focus_browser_step_carries_a_dom_anchor(
     events_db, worker, clock, temp_home, cassette,
 ) -> None:

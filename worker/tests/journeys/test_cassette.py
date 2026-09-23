@@ -428,10 +428,26 @@ def test_slow_delays_the_next_n_answers(tmp_path):
         _get(cassette.host, "/__cassette/down?n=5")
         status, body = _get(cassette.host, "/__cassette/reset")
         assert json.loads(body) == {
-            "down": 0, "slow_seconds": 0.0, "slow_remaining": None,
+            "down": 0, "slow_seconds": 0.0, "slow_remaining": None, "slow_path": None,
         }
         assert _get(cassette.host, "/__cassette/slow")[0] == 400
         assert _get(cassette.host, "/__cassette/nope")[0] == 404
+
+
+def test_slow_with_a_path_delays_only_requests_to_that_path(tmp_path):
+    with open_cassette(SELFTEST, record=False) as cassette:
+        _get(cassette.host, "/__cassette/slow?seconds=0.3&n=1&path=/api/generate")
+        start = time.monotonic()
+        call_sites(cassette.host, tmp_path)["version"]()
+        assert time.monotonic() - start < 0.3
+        assert cassette.fault_state()["slow_remaining"] == 1
+        start = time.monotonic()
+        call_sites(cassette.host, tmp_path)["annotate"]()
+        assert time.monotonic() - start >= 0.3
+        assert [path for path, _request in cassette.delayed] == ["/api/generate"]
+        assert cassette.fault_state() == {
+            "down": 0, "slow_seconds": 0.0, "slow_remaining": None, "slow_path": None,
+        }
 
 
 # ---------------------------------------------------------------------------

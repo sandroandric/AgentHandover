@@ -34,6 +34,10 @@ class FocusRun:
     tape: Cassette
     ticks: list[dict] = field(default_factory=list)
     questions_skipped: int = 0
+    # How many model calls the cassette had served when the Skill was
+    # written: the focus processor annotates the keyframes the SOP did not
+    # need (``annotate_remaining``) only after that.
+    served_at_skill: int | None = None
 
     def procedures(self) -> list[dict]:
         return self.worker.knowledge_base.list_procedures()
@@ -73,7 +77,17 @@ def start_focus_run(
             assert json.load(reply)["down"] == ollama_down_for
     fixture = events_db("focus_dailynews", rebase_to=clock.now())
     fixture.write_focus_signal(temp_home.data_dir)
-    return FocusRun(fixture=fixture, worker=worker(fixture, adapter=adapter), tape=tape)
+    run = FocusRun(fixture=fixture, worker=worker(fixture, adapter=adapter), tape=tape)
+    processor = run.worker.focus_processor
+    annotate_remaining = processor.annotate_remaining
+
+    def remaining_after_the_skill(db):
+        if run.served_at_skill is None:
+            run.served_at_skill = len(tape.served)
+        return annotate_remaining(db)
+
+    processor.annotate_remaining = remaining_after_the_skill
+    return run
 
 
 def tick_until_skill(run: FocusRun, clock: Clock, *, max_ticks: int = 6) -> dict:

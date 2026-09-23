@@ -10,6 +10,7 @@ journey never reaches a service running on the machine.
 
 from __future__ import annotations
 
+import json
 import socket
 from contextlib import ExitStack
 from dataclasses import dataclass
@@ -53,16 +54,21 @@ class TempHome:
 
     def configure(
         self, *, ollama_host: str, tier: str = "standard", extra: str = "",
+        vlm: dict | None = None,
     ) -> None:
-        """Write ``config.toml``; ``extra`` is appended verbatim (more TOML sections).
+        """Write ``config.toml``; ``extra`` is appended verbatim (more TOML
+        sections), ``vlm`` holds more ``[vlm]`` keys.
 
         ``tier`` names the RAM tier whose models the worker runs, so a
         journey's model calls (and its cassette keys) do not depend on the
         RAM of the machine running the test.
         """
+        vlm_lines = "".join(
+            f"{key} = {json.dumps(value)}\n" for key, value in (vlm or {}).items()
+        )
         self.config_file.parent.mkdir(parents=True, exist_ok=True)
         self.config_file.write_text(
-            f'[vlm]\nollama_host = "{ollama_host}"\ntier = "{tier}"\n\n'
+            f'[vlm]\nollama_host = "{ollama_host}"\ntier = "{tier}"\n{vlm_lines}\n'
             "[knowledge]\nquery_api_enabled = false\n"
             + (f"\n{extra}\n" if extra else ""),
             encoding="utf-8",
@@ -99,15 +105,17 @@ def events_db(temp_home: TempHome) -> Callable[..., LoadedFixture]:
 
 @pytest.fixture()
 def cassette(temp_home: TempHome) -> Callable[..., Cassette]:
-    """``cassette(journey, record=None)``: start the journey's cassette and point
-    the worker's config at it.  A replay miss fails the test at teardown."""
+    """``cassette(journey, record=None, tier="standard", vlm=None)``: start the
+    journey's cassette and point the worker's config at it (``vlm``: more
+    ``[vlm]`` keys).  A replay miss fails the test at teardown."""
     with ExitStack() as stack:
 
         def start(
             journey: str, *, record: bool | None = None, tier: str = "standard",
+            vlm: dict | None = None,
         ) -> Cassette:
             tape = stack.enter_context(open_cassette(journey, record=record))
-            temp_home.configure(ollama_host=tape.host, tier=tier)
+            temp_home.configure(ollama_host=tape.host, tier=tier, vlm=vlm)
             return tape
 
         yield start
