@@ -433,19 +433,33 @@ def build_mcp_server():
     return mcp
 
 
-def main():
+def main(argv: list[str] | None = None):
     """Entry point for `agenthandover-mcp` command."""
-    import sys
+    import argparse
+
+    from agenthandover_worker import __version__
+
+    parser = argparse.ArgumentParser(
+        prog="agenthandover-mcp",
+        description=(
+            "Serve the Skills AgentHandover learned to an MCP client. "
+            "Speaks MCP over stdio by default; an MCP client (Claude Code, "
+            "Cursor, ...) starts this command itself."
+        ),
+    )
+    parser.add_argument(
+        "--sse", action="store_true",
+        help="serve over HTTP server-sent events instead of stdio",
+    )
+    parser.add_argument(
+        "--version", action="version", version=f"%(prog)s {__version__}",
+    )
+    args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.WARNING)
 
     server = build_mcp_server()
-
-    transport = "stdio"
-    if "--sse" in sys.argv:
-        transport = "sse"
-
-    server.run(transport=transport)
+    server.run(transport="sse" if args.sse else "stdio")
 
 
 if __name__ == "__main__":

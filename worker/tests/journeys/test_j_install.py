@@ -40,12 +40,6 @@ def test_install_journey() -> None:
     assert result.returncode == 0 and summary.group(2) == "0", "\n".join(failures) or output[-4000:]
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "WP-I1/WP-I2: agenthandover-mcp has no --help: mcp_server.main "
-    "(mcp_server.py:394-406) ignores every argument but --sse and starts the "
-    "stdio server, so '--help' prints nothing and exits 0 only because stdin "
-    "is at EOF (from a terminal it waits for an MCP client)"
-))
 def test_mcp_console_script_answers_help(tmp_path: Path) -> None:
     script = Path(sys.executable).parent / "agenthandover-mcp"
     if not script.is_file():

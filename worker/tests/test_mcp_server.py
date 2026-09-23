@@ -319,3 +319,46 @@ class TestKeywordFallback:
 
     def test_no_overlap_returns_nothing(self, search):
         assert search("deploy kubernetes") == []
+
+
+class TestCommandLine:
+    """``agenthandover-mcp`` parses its arguments before it builds a server:
+    ``--help`` and ``--version`` answer and exit, an unknown argument is an
+    error, and nothing starts a server by accident."""
+
+    def _main(self, argv):
+        from agenthandover_worker import mcp_server
+
+        with patch.object(mcp_server, "build_mcp_server") as build:
+            mcp_server.main(argv)
+        return build
+
+    def test_help_prints_usage_and_starts_nothing(self, capsys):
+        with pytest.raises(SystemExit) as exit_:
+            self._main(["--help"])
+        assert exit_.value.code == 0
+        out = capsys.readouterr().out
+        assert out.startswith("usage: agenthandover-mcp")
+        assert "--sse" in out
+
+    def test_version(self, capsys):
+        from agenthandover_worker import __version__
+
+        with pytest.raises(SystemExit) as exit_:
+            self._main(["--version"])
+        assert exit_.value.code == 0
+        assert capsys.readouterr().out.strip() == f"agenthandover-mcp {__version__}"
+
+    def test_unknown_argument_exits_2_with_a_message(self, capsys):
+        with pytest.raises(SystemExit) as exit_:
+            self._main(["--port", "9000"])
+        assert exit_.value.code == 2
+        assert "unrecognized arguments: --port 9000" in capsys.readouterr().err
+
+    def test_default_transport_is_stdio(self):
+        build = self._main([])
+        build.return_value.run.assert_called_once_with(transport="stdio")
+
+    def test_sse_flag(self):
+        build = self._main(["--sse"])
+        build.return_value.run.assert_called_once_with(transport="sse")
