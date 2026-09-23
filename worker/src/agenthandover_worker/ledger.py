@@ -50,7 +50,8 @@ Rules the derivation follows (see :func:`_observed`):
 - ``known`` needs at least one evidence pointer; a value without any
   evidence is at most a ``hypothesis``.
 - Recorded steps are ``known`` when they cite the frames they were
-  written from; every other observed value is inferred by a model from
+  written from; a typed answer that revised steps is part of the
+  evidence (``answer`` pointers next to the frames); every other observed value is inferred by a model from
   the recording(s) and stays a ``hypothesis`` until a user answer (or a
   later learner) grounds it.  ``inputs`` becomes ``known`` once two or
   more instances were observed (the values were seen to vary), and
@@ -164,13 +165,22 @@ def _instances(proc: dict) -> list[dict]:
 
 
 def _step_frames(proc: dict) -> list[dict]:
+    """The frames the steps cite and the answers that revised steps (a
+    step whose evidence ``source`` is ``user_answer`` points at its
+    clarification)."""
     frames: list[dict] = []
+    answers: list[dict] = []
     for step in proc.get("steps") or []:
         if isinstance(step, dict):
             ev = step.get("evidence")
             for frame in (ev.get("frames") or []) if isinstance(ev, dict) else []:
                 frames.append({"kind": "frame", "id": str(frame)})
-    return _dedup(frames)
+            origin = ev.get("user_answer") if isinstance(ev, dict) else None
+            if isinstance(origin, dict) and isinstance(origin.get("clarification"), int):
+                answers.append(
+                    {"kind": "answer", "id": f"agent_clarifications.{origin['clarification']}"}
+                )
+    return _dedup(frames + answers)
 
 
 def _first_filled(proc: dict, paths: tuple[str, ...]) -> str | None:

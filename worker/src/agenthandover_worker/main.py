@@ -1444,25 +1444,9 @@ def _process_focus_sessions(
     # Query events tagged with this focus session ID
     focus_events = db.get_focus_session_events(session_id)
     if not focus_events:
-        import time as _time
-        try:
-            file_age = _time.time() - signal_path.stat().st_mtime
-        except OSError:
-            file_age = 0
-        if file_age > 300:
-            logger.warning(
-                "Focus session '%s' (%s) has 0 events %.0fs after stop — cleaning up.",
-                title, session_id, file_age,
-            )
-            _clear_focus_signal(signal_path)
-            return 0
-
-        logger.info(
-            "Focus session '%s' (%s) has no events yet, will retry next cycle",
-            title,
-            session_id,
-        )
+        _close_empty_focus_session(state_dir, signal_path, signal)
         return 0
+    (state_dir / FOCUS_RESULT_FILE).unlink(missing_ok=True)
 
     logger.info(
         "Processing focus session '%s' (%s): %d events",
@@ -1734,6 +1718,7 @@ def _process_focus_sessions_v2(
         kb_export_adapter=kb_export_adapter,
         knowledge_base=knowledge_base,
         vector_kb=vector_kb,
+        sop_generator=getattr(focus_processor, "sop_generator", None),
     )
     if pending_export is not None:
         return pending_export
@@ -1763,27 +1748,12 @@ def _process_focus_sessions_v2(
     # Query events tagged with this focus session ID
     focus_events = db.get_focus_session_events(session_id)
     if not focus_events:
-        # Use the signal file's mtime (= when session was stopped/written)
-        # not started_at, so long recordings don't get cleaned up prematurely.
-        import time as _time
-        try:
-            file_age = _time.time() - signal_path.stat().st_mtime
-        except OSError:
-            file_age = 0
-        if file_age > 300:
-            logger.warning(
-                "Focus v2 session '%s' (%s) has 0 events %.0fs after stop — "
-                "daemon was likely not running. Cleaning up.",
-                title, session_id, file_age,
-            )
-            _clear_focus_signal(signal_path)
-            return 0
-
-        logger.info(
-            "Focus v2 session '%s' (%s) has no events yet, will retry",
-            title, session_id,
-        )
+        # Observation was off (the daemon was down): closed as nothing
+        # recorded once the grace after the stop has passed.
+        _close_empty_focus_session(state_dir, signal_path, signal)
         return 0
+    # A session with events: the previous session's outcome is old news.
+    (state_dir / FOCUS_RESULT_FILE).unlink(missing_ok=True)
 
     logger.info(
         "Focus v2: processing session '%s' (%s): %d events",
@@ -2272,8 +2242,13 @@ def _check_focus_answers(
     kb_export_adapter: "KnowledgeBaseExportAdapter | None" = None,
     knowledge_base=None,
     vector_kb=None,
+    sop_generator: "SOPGenerator | None" = None,
 ) -> int | None:
     """Check for pending focus Q&A answers and complete export if ready.
+
+    The typed answers revise the steps they concern through one call on
+    *sop_generator* (the SOP model, in the generation phase: focus answers
+    make the phase urgent), see :func:`_revise_steps_from_answers`.
 
     Returns:
         Number of SOPs exported if answers were processed.
@@ -2335,6 +2310,8 @@ def _check_focus_answers(
                 "Failed to merge focus Q&A answers for '%s'",
                 title, exc_info=True,
             )
+        if sop_generator is not None:
+            _revise_steps_from_answers(procedure_dict, qa_result, sop_generator, title)
 
     sop_templates = [procedure_dict]
 
@@ -2386,6 +2363,41 @@ def _check_focus_answers(
         title, exported, qa_status,
     )
     return exported
+
+
+def _revise_steps_from_answers(
+    procedure: dict, qa_result: "FocusQAResult", sop_generator: "SOPGenerator", title: str,
+) -> list[dict]:
+    """Apply the typed answers of a focus session to the steps they
+    concern (in place): one ``SOPGenerator.revise`` call for all of them
+    (none when no typed answer may change a step), validated and applied
+    by ``focus_questioner.apply_answer_revisions``.  Accepted guesses
+    change nothing.  When the model is unavailable or its answer is
+    unusable, the steps stay as recorded: the answers are still in the
+    Skill's clarifications.  Returns the applied revisions."""
+    from agenthandover_worker.focus_questioner import (
+        answer_revision_prompt,
+        apply_answer_revisions,
+    )
+
+    prompt = answer_revision_prompt(procedure, qa_result)
+    if prompt is None:
+        return []
+    try:
+        response = sop_generator.revise(prompt)
+    except ConnectionError as exc:
+        logger.warning(
+            "Focus v2 '%s': the typed answers could not revise the steps "
+            "(model unavailable: %s); they stay in the clarifications", title, exc,
+        )
+        return []
+    except (ValueError, TimeoutError, RuntimeError) as exc:
+        logger.warning(
+            "Focus v2 '%s': the answer revision was unusable (%s); steps unchanged",
+            title, exc,
+        )
+        return []
+    return apply_answer_revisions(procedure, qa_result, response)
 
 
 def _process_passive_discovery(
@@ -3786,6 +3798,81 @@ def _sweep_stale_focus_session(
         signal.get("title", ""), signal.get("session_id", ""),
         age_seconds / 3600, max_session_hours,
     )
+    return True
+
+
+# How a stopped focus session ended when it ended without a Skill the user
+# can wait for, for the app's menu (``focus-result.json``, next to the
+# signal): ``session_id``, ``title``, ``status``, ``message`` (what to
+# show), ``stopped_at`` and ``closed_at`` (ISO 8601).  Removed when the
+# next session with events is processed.
+FOCUS_RESULT_FILE = "focus-result.json"
+FOCUS_NOTHING_RECORDED = "nothing_recorded"
+# A stopped session with no events yet is waited for this long after the
+# stop (the daemon's last frames may still be on their way), then closed.
+EMPTY_SESSION_GRACE_SECONDS = 120.0
+# Sessions whose "no events yet" wait was logged (once each, not every tick).
+_EMPTY_SESSIONS_LOGGED: set[str] = set()
+
+
+def _focus_stop_time(signal: dict, signal_path: Path) -> float | None:
+    """When the session was stopped (epoch seconds): the signal's
+    ``stopped_at`` when it has one, else when the signal file was last
+    written (the stop rewrote it)."""
+    from agenthandover_worker.event_helpers import parse_timestamp
+
+    stopped = parse_timestamp(signal.get("stopped_at"))
+    if stopped is not None:
+        return stopped.timestamp()
+    try:
+        return signal_path.stat().st_mtime
+    except OSError:
+        return None
+
+
+def _close_empty_focus_session(
+    state_dir: Path, signal_path: Path, signal: dict, *, now: float | None = None,
+) -> bool:
+    """A stopped focus session with no events: wait
+    ``EMPTY_SESSION_GRACE_SECONDS`` after the stop, then close it: write
+    ``focus-result.json`` (``nothing_recorded``, observation was off) and
+    remove the signal, so the app stops showing "Analyzing" and says what
+    happened.  The wait is logged once.  Returns True when closed."""
+    session_id = str(signal.get("session_id") or "")
+    title = str(signal.get("title") or "")
+    now = time.time() if now is None else now
+    stopped = _focus_stop_time(signal, signal_path)
+    waited = now - stopped if stopped is not None else EMPTY_SESSION_GRACE_SECONDS
+    if waited < EMPTY_SESSION_GRACE_SECONDS:
+        if session_id not in _EMPTY_SESSIONS_LOGGED:
+            _EMPTY_SESSIONS_LOGGED.add(session_id)
+            logger.info(
+                "Focus session '%s' (%s) has no events yet; waiting up to %.0f s "
+                "after its stop", title, session_id, EMPTY_SESSION_GRACE_SECONDS,
+            )
+        return False
+    _EMPTY_SESSIONS_LOGGED.discard(session_id)
+
+    def iso(seconds: float) -> str:
+        return datetime.fromtimestamp(seconds, timezone.utc).isoformat()
+
+    try:
+        _atomic_write_result(state_dir / FOCUS_RESULT_FILE, {
+            "session_id": session_id,
+            "title": title,
+            "status": FOCUS_NOTHING_RECORDED,
+            "message": "Nothing was recorded: observation was off during this session",
+            "stopped_at": iso(stopped) if stopped is not None else None,
+            "closed_at": iso(now),
+        })
+    except OSError:
+        logger.warning("Could not write %s", FOCUS_RESULT_FILE, exc_info=True)
+    logger.warning(
+        "Focus session '%s' (%s) recorded no events (%.0f s after its stop): "
+        "observation was off; closed as nothing recorded",
+        title, session_id, waited,
+    )
+    _clear_focus_signal(signal_path)
     return True
 
 

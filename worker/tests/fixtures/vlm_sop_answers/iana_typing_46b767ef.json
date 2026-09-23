@@ -1,0 +1,65 @@
+{
+  "title": "Note the IANA reserved domains",
+  "short_title": "Note IANA reserved domains",
+  "tags": ["documentation"],
+  "description": "Write down the domains IANA reserves for documentation in a TextEdit note.",
+  "outcome": "A TextEdit document lists the reserved documentation domains and their source.",
+  "when_to_use": "When you need the reserved example domains at hand.",
+  "prerequisites": ["Safari", "TextEdit"],
+  "steps": [
+    {
+      "step_number": 1,
+      "action": "Open TextEdit and create a new document.",
+      "description": "Start a blank document for the notes.",
+      "app": "TextEdit",
+      "location": "Untitled",
+      "input": "",
+      "verify": "An empty TextEdit window is open.",
+      "frames": [2]
+    },
+    {
+      "step_number": 2,
+      "action": "Open Safari and navigate to the IANA reserved domains page.",
+      "description": "The page lists the reserved domains.",
+      "app": "Safari",
+      "location": "https://www.iana.org/domains/reserved",
+      "input": "",
+      "verify": "The IANA-managed Reserved Domains page is shown.",
+      "frames": [1]
+    },
+    {
+      "step_number": 3,
+      "action": "Scroll down the page and click the 'Example Domain' link.",
+      "description": "Open the Example Domain entry to see the reserved names.",
+      "app": "Safari",
+      "location": "https://www.iana.org/domains/reserved",
+      "input": "",
+      "verify": "The Example Domain page opens.",
+      "frames": [1]
+    },
+    {
+      "step_number": 4,
+      "action": "Switch back to TextEdit and type the reserved domain list.",
+      "description": "Write the domains into the document.",
+      "app": "TextEdit",
+      "location": "Untitled",
+      "input": "",
+      "verify": "The document shows the domains.",
+      "frames": [3, 4]
+    },
+    {
+      "step_number": 5,
+      "action": "Select the typed text in the TextEdit document.",
+      "description": "Highlight what was written.",
+      "app": "TextEdit",
+      "location": "Untitled",
+      "input": "",
+      "verify": "The text is highlighted.",
+      "frames": [5]
+    }
+  ],
+  "success_criteria": ["The document lists example.com, example.net and example.org."],
+  "variables": [],
+  "common_errors": ["TextEdit may open the file browser instead of a new document; press Cmd-N."],
+  "apps_involved": ["Safari", "TextEdit"]
+}

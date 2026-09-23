@@ -25,10 +25,12 @@ _CLAIM = re.compile(r"\b(copy|copies|copied|copying|paste|pastes|pasted|pasting)
 
 # The requests the no-clipboard run makes that the focus_dailynews cassette
 # does not hold: the SOP prompt carries the "no copy, cut or paste was
-# recorded" note and the frames' copy wording rewritten (WP-Q1); the
-# annotations and diffs replay as they are.
+# recorded" note and the frames' copy wording rewritten (WP-Q1), and so does
+# the questions call (WP-Q2b: the same note, and the synthesized text's copy
+# wording rewritten); the annotations and diffs replay as they are.
 NO_CLIPBOARD_MISSING_KEYS: tuple[str, ...] = (
     "5c9d3d77a4f54ff7b8a52e0e48a54e0b1acc5889921e04e2f817b2d9413efc00",  # the SOP call
+    "758a0d834fd2b061d439d7823256d6b8b901b8a4967c590e3213e6e65348925d",  # the questions call
 )
 _ENTRIES = load_entries(CASSETTE_DIR / "focus_dailynews.jsonl")
 needs_no_clipboard_recording = pytest.mark.skipif(
@@ -36,7 +38,7 @@ needs_no_clipboard_recording = pytest.mark.skipif(
     and os.environ.get("AH_RECORD") != "1",
     reason=(
         "cassettes/focus_dailynews.jsonl lacks the requests of the recording "
-        "without its clipboard events (WP-Q1): "
+        "without its clipboard events (WP-Q1, WP-Q2b): "
         + ", ".join(k for k in NO_CLIPBOARD_MISSING_KEYS if k not in _ENTRIES)
         + " (and the calls they unblock); re-record with AH_RECORD=1 on the test Mac"
     ),

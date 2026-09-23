@@ -102,7 +102,10 @@ def _step_evidence(evidence: object) -> dict:
     cited frames recorded them, ``focused_fields`` (the Accessibility
     focused element) and ``shell_commands`` (exact commands), and
     ``clipboard`` when the step's copy/paste wording was rewritten for want
-    of a clipboard event (``clipboard_grounding``)."""
+    of a clipboard event (``clipboard_grounding``), ``grounding`` when the
+    step was cut to what its frames show or added for a typed line
+    (``step_grounding``), and ``source`` / ``user_answer`` when a typed
+    answer revised it (``focus_questioner.apply_answer_revisions``)."""
     evidence = evidence if isinstance(evidence, dict) else {}
     result = {
         key: list(evidence.get(key) or [])
@@ -111,8 +114,11 @@ def _step_evidence(evidence: object) -> dict:
     for key in ("focused_fields", "shell_commands"):
         if evidence.get(key):
             result[key] = list(evidence[key])
-    if isinstance(evidence.get("clipboard"), dict):
-        result["clipboard"] = dict(evidence["clipboard"])
+    for key in ("clipboard", "grounding", "user_answer"):
+        if isinstance(evidence.get(key), dict):
+            result[key] = dict(evidence[key])
+    if evidence.get("source"):
+        result["source"] = str(evidence["source"])
     return result
 
 
@@ -357,6 +363,9 @@ def sop_to_procedure(sop_template: dict) -> dict:
     # workflow_observations log), recurrence and value.
     if sop_template.get("observations"):
         procedure["evidence"]["observations"] = list(sop_template["observations"])
+    # Steps the model wrote that no recorded frame shows (``step_grounding``).
+    if sop_template.get("dropped_steps"):
+        procedure["evidence"]["dropped_steps"] = list(sop_template["dropped_steps"])
     if sop_template.get("recurrence"):
         procedure["recurrence"].update(sop_template["recurrence"])
     if sop_template.get("value"):

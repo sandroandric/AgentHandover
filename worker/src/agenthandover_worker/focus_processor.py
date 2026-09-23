@@ -20,7 +20,11 @@ import re
 from datetime import timedelta
 from pathlib import Path
 
-from agenthandover_worker.clipboard_grounding import attach_clipboard_events, event_kind
+from agenthandover_worker.clipboard_grounding import (
+    attach_clipboard_events,
+    event_kind,
+    ground_frame_texts,
+)
 from agenthandover_worker.dom import url_host
 from agenthandover_worker.event_helpers import (
     display_name,
@@ -34,7 +38,7 @@ from agenthandover_worker.scene_annotator import (
     page_for_event,
     skip_record,
 )
-from agenthandover_worker.frame_differ import FrameDiffer
+from agenthandover_worker.frame_differ import FrameDiffer, content_lines
 from agenthandover_worker.sop_generator import SOPGenerator, GeneratedSOP
 
 logger = logging.getLogger(__name__)
@@ -289,11 +293,14 @@ class FocusProcessor:
         )
 
         # Rich per-frame observations for the single behavioral synthesis
-        # call that main.py runs after SOP generation.
+        # call that main.py runs after SOP generation, with the frames'
+        # copy/paste wording the clipboard did not record rewritten (as
+        # the SOP prompt's frames are): the synthesis wrote "copying the
+        # title" into the strategy of a session that copied nothing.
         self._last_rich_observations = [
             [
                 self._build_pre_analysis_obs(f)
-                for f in timeline if f.get("annotation")
+                for f in ground_frame_texts(timeline, timeline) if f.get("annotation")
             ]
         ]
 
@@ -830,6 +837,9 @@ class FocusProcessor:
         - clipboard_context: the copy made from this frame, if any
         - clipboard_events: the copies and pastes recorded since the
           previous frame (``clipboard_grounding.attach_clipboard_events``)
+        - content_text: the screen text's document lines, without the
+          window chrome (``frame_differ.content_lines``)
+        - kind: the capture's event kind (``DwellSnapshot``, ...)
         """
         timeline = []
 
@@ -889,6 +899,11 @@ class FocusProcessor:
                 "clipboard_context": clipboard_ctx,
                 "focused_field": focused_field(fresh),
                 "shell_commands": [],
+                # The document's lines without the window chrome (located
+                # by the frame's geometry) and the capture's kind, for the
+                # step checks (``step_grounding``).
+                "content_text": content_lines(fresh, as_compact(annotation))[0],
+                "kind": self._extract_event_kind(fresh),
             })
 
         self._attach_clicks(db, timeline)
