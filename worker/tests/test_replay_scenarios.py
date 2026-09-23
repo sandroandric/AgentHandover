@@ -10,6 +10,8 @@ functions, the same ones ``Scorer.score_scenario`` uses.
 
 from __future__ import annotations
 
+import os
+
 import pytest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -24,7 +26,7 @@ from eval.scorer import (
     readiness_truth,
     segmentation_truth,
 )
-from journeys.cassette import open_cassette
+from journeys.cassette import CASSETTE_DIR, open_cassette
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures" / "replay"
 
@@ -32,10 +34,15 @@ FIXTURES_DIR = Path(__file__).parent / "fixtures" / "replay"
 pytestmark = pytest.mark.eval
 
 
+EVAL_CASSETTE = CASSETTE_DIR / "eval_replay.jsonl"
+
+
 @pytest.fixture()
 def ollama_host():
     """Real nomic-embed-text vectors for the segmenter, from the recorded
-    ``eval_replay`` cassette (``AH_RECORD=1`` re-records)."""
+    ``eval_replay`` cassette (record: ``AH_RECORD=1 AH_RECORD_UPSTREAM=<ollama>``)."""
+    if not EVAL_CASSETTE.exists() and os.environ.get("AH_RECORD") != "1":
+        pytest.skip("eval_replay cassette not recorded yet (AH_RECORD=1 records it)")
     with open_cassette("eval_replay") as tape:
         yield tape.host
 

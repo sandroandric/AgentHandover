@@ -6,6 +6,7 @@ Run with: ``pytest -m eval worker/tests/test_scorecard.py``
 from __future__ import annotations
 
 import json
+import os
 
 import pytest
 from pathlib import Path
@@ -13,12 +14,22 @@ from pathlib import Path
 from eval.replay_runner import ReplayScenario, ReplayRunner
 from eval.scorer import Scorer, ScenarioScore
 from eval.scorecard import Scorecard
-from journeys.cassette import open_cassette
+from journeys.cassette import CASSETTE_DIR, open_cassette
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures" / "replay"
 BASELINE_PATH = Path(__file__).parent / "eval" / "baseline_scorecard.json"
 
-pytestmark = pytest.mark.eval
+EVAL_CASSETTE = CASSETTE_DIR / "eval_replay.jsonl"
+
+pytestmark = [
+    pytest.mark.eval,
+    # Segmentation embeds with the real model: without its recording the
+    # scorecard cannot be computed (AH_RECORD=1 records it).
+    pytest.mark.skipif(
+        not EVAL_CASSETTE.exists() and os.environ.get("AH_RECORD") != "1",
+        reason="eval_replay cassette not recorded yet",
+    ),
+]
 
 
 def _run_all_scenarios(tmp_path: Path) -> Scorecard:
