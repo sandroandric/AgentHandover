@@ -16,6 +16,14 @@ A fixture is a directory under ``fixtures/``:
     directory and writes a 1x1 placeholder JPEG there (the cassette carries
     the model answers, so frame pixels are not needed).
 
+``annotations.jsonl.gz`` (optional)
+    What the worker's scene annotator wrote for some rows: ``id``,
+    ``annotation_status`` and ``scene_annotation_json``.  A passive fixture
+    carries the annotated stream this way (its frames have no pixels to
+    annotate); loading applies it to the daemon rows.
+``labels.json`` (optional)
+    Ground truth for scoring a replay of the fixture.
+
 ``load_fixture`` optionally moves the whole recording in time (whole
 seconds, so each timestamp keeps the daemon's exact text format) so that
 code reading the wall clock sees a recent session.
@@ -38,6 +46,8 @@ FIXTURES_DIR = Path(__file__).parent / "fixtures"
 PLACEHOLDER_JPEG = FIXTURES_DIR / "placeholder_1x1.jpg"
 SCREENSHOTS_TOKEN = "{screenshots_dir}"
 EVENTS_FILE = "events.jsonl.gz"
+ANNOTATIONS_FILE = "annotations.jsonl.gz"
+LABELS_FILE = "labels.json"
 
 # The columns EventStore::insert_event writes (crates/storage/src/lib.rs).
 # Everything else (processed, annotation_status, created_at, ...) takes the
@@ -84,6 +94,18 @@ def read_manifest(name: str) -> dict:
 def read_rows(name: str) -> list[dict]:
     with gzip.open(FIXTURES_DIR / name / EVENTS_FILE, "rt", encoding="utf-8") as fh:
         return [json.loads(line) for line in fh if line.strip()]
+
+
+def read_annotations(name: str) -> list[dict]:
+    path = FIXTURES_DIR / name / ANNOTATIONS_FILE
+    if not path.is_file():
+        return []
+    with gzip.open(path, "rt", encoding="utf-8") as fh:
+        return [json.loads(line) for line in fh if line.strip()]
+
+
+def read_labels(name: str) -> dict:
+    return json.loads((FIXTURES_DIR / name / LABELS_FILE).read_text(encoding="utf-8"))
 
 
 def write_rows(fixture_dir: Path, rows: list[dict]) -> None:
@@ -215,6 +237,13 @@ def load_fixture(
             f"INSERT INTO events ({', '.join(DAEMON_COLUMNS)}) "
             f"VALUES ({', '.join('?' for _ in DAEMON_COLUMNS)})",
             rows,
+        )
+        conn.executemany(
+            "UPDATE events SET annotation_status = ?, scene_annotation_json = ? WHERE id = ?",
+            [
+                (ann["annotation_status"], ann["scene_annotation_json"], ann["id"])
+                for ann in read_annotations(name)
+            ],
         )
         conn.commit()
     finally:
