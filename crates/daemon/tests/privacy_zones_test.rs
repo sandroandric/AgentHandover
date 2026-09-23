@@ -405,6 +405,32 @@ async fn an_allowed_window_keeps_its_frame() {
     assert_eq!(jpegs_in(&shots), 1);
 }
 
+/// A macOS password prompt (`SecurityAgent`, owner of the "... wants to
+/// make changes" dialog) is blocked by default: with frames on offer, the
+/// switch into it fires no shutter and writes no frame row and no JPEG.
+#[tokio::test(flavor = "current_thread")]
+async fn system_password_prompt_never_reaches_the_shutter() {
+    let h = harness_with(PrivacyZonesConfig::default(), true);
+    let shots = h.config.screenshots_dir.clone();
+    fake_observation_server(
+        &h.config.observation_socket,
+        vec![
+            window_reply("pid:10:TextEdit", "notes.txt"),
+            window_reply("pid:9:SecurityAgent", ""),
+            window_reply("pid:9:SecurityAgent", "Password"),
+        ],
+    );
+    let events = run_loop(h.config, &h.root, Duration::from_millis(800)).await;
+    assert_eq!(h.captures.load(Ordering::SeqCst), 0, "no capture request for SecurityAgent");
+    assert_eq!(frames(&events), 0, "no frame row: {events:?}");
+    assert_eq!(jpegs_in(&shots), 0, "no file");
+    assert_eq!(
+        app_switches(&events),
+        vec![("pid:10:TextEdit".into(), "pid:9:SecurityAgent".into(), String::new())],
+        "the switch is metadata only"
+    );
+}
+
 /// The user switches to 1Password while the frame is being taken: the
 /// frame in hand is checked against the window on screen now, and dropped.
 #[tokio::test(flavor = "current_thread")]

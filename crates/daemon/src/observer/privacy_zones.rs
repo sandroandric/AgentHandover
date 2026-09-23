@@ -33,6 +33,16 @@ pub const DEFAULT_BLOCKED_APPS: &[&str] = &[
     "Dashlane",
     "KeePassXC",
     "Keychain Access",
+    // macOS authentication and system UIs: password prompts, Touch ID,
+    // the login window, permission dialogs, Apple's Passwords app, the
+    // screen saver's unlock prompt and system alerts.
+    "SecurityAgent",
+    "coreautha",
+    "loginwindow",
+    "universalAccessAuthWarn",
+    "Passwords",
+    "ScreenSaverEngine",
+    "UserNotificationCenter",
 ];
 
 /// URL patterns always blocked (the worker's `_DEFAULT_BLOCKED_URLS`).
@@ -344,6 +354,26 @@ mod tests {
         let z = zones(&[], &[], &[]);
         assert_eq!(z.zone("pid:77:1Password", "", None, noon()), Zone::Blocked);
         assert_eq!(z.zone("pid:77:Keychain Access", "Login", None, noon()), Zone::Blocked);
+    }
+
+    #[test]
+    fn defaults_block_system_authentication_uis() {
+        let z = zones(&[], &[], &[]);
+        for app in [
+            "SecurityAgent",
+            "coreautha",
+            "loginwindow",
+            "universalAccessAuthWarn",
+            "Passwords",
+            "ScreenSaverEngine",
+            "UserNotificationCenter",
+        ] {
+            let app_id = format!("pid:9:{app}");
+            assert_eq!(z.zone(&app_id, "", None, noon()), Zone::Blocked, "{app}");
+        }
+        // Matching is on the whole owner name: an app merely containing one
+        // of these names is not blocked.
+        assert_eq!(z.zone("pid:9:Passwords Helper Notes", "", None, noon()), Zone::Full);
     }
 
     #[test]
