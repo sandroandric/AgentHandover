@@ -184,6 +184,7 @@ async fn main() -> Result<()> {
             std::fs::create_dir_all(&dir).ok();
             dir
         },
+        capture_input_values: app_config.privacy.capture_input_values,
     };
 
     // Channel for observer -> storage communication

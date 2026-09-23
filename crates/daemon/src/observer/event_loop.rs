@@ -2,6 +2,7 @@ use anyhow::Result;
 use chrono::Utc;
 use agenthandover_common::event::*;
 use agenthandover_common::redaction::Redactor;
+use crate::observation::{ObservationSnapshot, SleepRecord};
 use agenthandover_storage::artifact_store::ArtifactStore;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -42,6 +43,9 @@ pub struct ObserverConfig {
     pub screenshot_scale: f64,
     /// Directory for plain JPEG screenshots (VLM annotation pipeline).
     pub screenshots_dir: PathBuf,
+    /// `[privacy] capture_input_values`: whether the focused element's
+    /// `AXValue` is read (never for a secure field).
+    pub capture_input_values: bool,
 }
 
 impl Default for ObserverConfig {
@@ -58,6 +62,7 @@ impl Default for ObserverConfig {
             screenshot_quality: 70,
             screenshot_scale: 0.5,
             screenshots_dir: PathBuf::from("/tmp/agenthandover-screenshots"),
+            capture_input_values: false,
         }
     }
 }
@@ -88,6 +93,7 @@ pub async fn run_observer_loop(
     let mut screenshot_count_this_minute: u32 = 0;
     let mut last_minute_reset = Utc::now();
     let mut last_dhash: u64 = 0;
+    let mut last_sleep: Option<SleepRecord> = None;
 
     // Idle detector: uses CGEventSourceSecondsSinceLastEventType to detect
     // keyboard/mouse/trackpad activity. We use this to reset the dwell tracker
@@ -225,6 +231,28 @@ pub async fn run_observer_loop(
                         }
                     });
 
+                // 3b. A sleep the app saw since the last tick is a boundary:
+                // no episode or task segment may span it.
+                if let Some(sleep) = new_sleep(&last_sleep, &observation) {
+                    let mut event = make_event(
+                        EventKind::SystemSleep {
+                            slept_at: sleep.slept_at,
+                            woke_at: sleep.woke_at,
+                        },
+                        &None,
+                        &display_topology,
+                        &primary_display_id,
+                        None,
+                    );
+                    // Ordered before anything captured after the wake.
+                    event.timestamp = sleep.woke_at;
+                    tag_focus_session(&mut event, &active_focus_session_id);
+                    let _ = tx.send(ObserverMessage::Event { event }).await;
+                    info!(slept_at = %sleep.slept_at, woke_at = %sleep.woke_at, "System sleep boundary");
+                    dwell.on_manipulation_input();
+                    last_sleep = Some(sleep);
+                }
+
                 // 4. Check for focus/title changes
                 let current_title = window.as_ref().map(|w| w.title.clone());
                 let current_app = window.as_ref().map(|w| w.app_id.clone());
@@ -355,6 +383,8 @@ pub async fn run_observer_loop(
                                 &primary_display_id,
                                 cursor_global_px.clone(),
                             );
+                            event.focused_element =
+                                focused_element_for(&observation, config.capture_input_values).await;
 
                             if result.raw_pixels.is_some() {
                                 screenshot_count_this_minute += 1;
@@ -427,6 +457,8 @@ pub async fn run_observer_loop(
                         &primary_display_id,
                         cursor_global_px.clone(),
                     );
+                    event.focused_element =
+                        focused_element_for(&observation, config.capture_input_values).await;
 
                     if let Some(result) = captured_result {
                         if result.raw_pixels.is_some() {
@@ -494,6 +526,8 @@ pub async fn run_observer_loop(
                         &primary_display_id,
                         cursor_global_px.clone(),
                     );
+                    event.focused_element =
+                        focused_element_for(&observation, config.capture_input_values).await;
 
                     if let Some(result) = captured_result {
                         if result.raw_pixels.is_some() {
@@ -805,6 +839,28 @@ fn detect_spanning_displays(
     }
 }
 
+/// The sleep in `observation` when it is not the one `last` already
+/// reported.
+fn new_sleep(
+    last: &Option<SleepRecord>,
+    observation: &Option<ObservationSnapshot>,
+) -> Option<SleepRecord> {
+    let sleep = observation.as_ref()?.last_sleep.clone()?;
+    (last.as_ref() != Some(&sleep)).then_some(sleep)
+}
+
+/// The focused element for a snapshot event, read by the app; None when
+/// the app has no Accessibility grant or did not answer.
+async fn focused_element_for(
+    observation: &Option<ObservationSnapshot>,
+    capture_values: bool,
+) -> Option<FocusedElement> {
+    if !observation.as_ref().is_some_and(|s| s.accessibility_granted) {
+        return None;
+    }
+    crate::observation::focused_element_async(capture_values).await
+}
+
 /// Tag an event with the active focus session ID, if any.
 fn tag_focus_session(event: &mut Event, focus_session_id: &Option<String>) {
     if let Some(ref session_id) = focus_session_id {
@@ -834,12 +890,35 @@ fn redact_event(event: &mut Event, redactor: &Redactor) {
                 *hash = redactor.redact(hash);
             }
         }
+        EventKind::ShellCommand { cwd, command } => {
+            *cwd = redactor.redact(cwd);
+            *command = redactor.redact(command);
+        }
         _ => {}
     }
 
     // Redact window title
     if let Some(ref mut win) = event.window {
         win.title = redactor.redact(&win.title);
+    }
+
+    // Redact every text the focused element carries
+    if let Some(ref mut element) = event.focused_element {
+        let redact = |text: &mut Option<String>| {
+            if let Some(t) = text {
+                *t = redactor.redact(t);
+            }
+        };
+        redact(&mut element.title);
+        redact(&mut element.description);
+        redact(&mut element.value);
+        redact(&mut element.column_header);
+        redact(&mut element.document);
+        redact(&mut element.url);
+        for ancestor in &mut element.ancestors {
+            redact(&mut ancestor.title);
+            redact(&mut ancestor.description);
+        }
     }
 
     // Redact metadata_json string values recursively
@@ -894,6 +973,90 @@ mod tests {
             display_ids_spanned: None,
             focused_element: None,
         }
+    }
+
+    #[test]
+    fn test_redact_event_focused_element_texts() {
+        let redactor = Redactor::new();
+        let mut event = make_test_event_with_kind(EventKind::DwellSnapshot);
+        event.focused_element = Some(FocusedElement {
+            role: "AXTextField".into(),
+            title: Some("Token".into()),
+            value: Some("ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijkl".into()),
+            ancestors: vec![AxAncestor {
+                role: "AXGroup".into(),
+                description: Some("password: hunter2".into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+
+        redact_event(&mut event, &redactor);
+
+        let element = event.focused_element.unwrap();
+        assert_eq!(element.title.as_deref(), Some("Token"));
+        assert_eq!(element.value.as_deref(), Some("[REDACTED_GITHUB_TOKEN]"));
+        assert!(!element.ancestors[0].description.as_ref().unwrap().contains("hunter2"));
+    }
+
+    #[test]
+    fn test_redact_event_shell_command() {
+        let redactor = Redactor::new();
+        let mut event = make_test_event_with_kind(EventKind::ShellCommand {
+            cwd: "/Users/me/app".into(),
+            command: "curl -u me:ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijkl https://api.example.com/x".into(),
+        });
+        redact_event(&mut event, &redactor);
+        match event.kind {
+            EventKind::ShellCommand { cwd, command } => {
+                assert_eq!(cwd, "/Users/me/app");
+                assert!(!command.contains("ghp_ABCDEFGHIJ"), "{command}");
+                assert!(command.starts_with("curl -u me:"), "the rest of the command stays: {command}");
+            }
+            other => panic!("kind changed: {other:?}"),
+        }
+    }
+
+    fn snapshot_with_sleep(sleep: Option<SleepRecord>) -> Option<ObservationSnapshot> {
+        let mut snapshot: ObservationSnapshot = serde_json::from_value(serde_json::json!({
+            "accessibility_granted": true,
+            "screen_recording_granted": true,
+            "secure_field_focused": false,
+            "focused_window": null,
+            "display_topology": [],
+            "cursor_global_px": null,
+        }))
+        .unwrap();
+        snapshot.last_sleep = sleep;
+        Some(snapshot)
+    }
+
+    #[test]
+    fn test_new_sleep_reports_each_sleep_once() {
+        let at = |h: u32| chrono::TimeZone::with_ymd_and_hms(&Utc, 2026, 9, 21, h, 0, 0).unwrap();
+        let first = SleepRecord { slept_at: at(1), woke_at: at(7) };
+        let second = SleepRecord { slept_at: at(12), woke_at: at(13) };
+
+        assert_eq!(new_sleep(&None, &None), None, "no snapshot");
+        assert_eq!(new_sleep(&None, &snapshot_with_sleep(None)), None, "never slept");
+        assert_eq!(new_sleep(&None, &snapshot_with_sleep(Some(first.clone()))), Some(first.clone()));
+        assert_eq!(
+            new_sleep(&Some(first.clone()), &snapshot_with_sleep(Some(first.clone()))),
+            None,
+            "already reported"
+        );
+        assert_eq!(
+            new_sleep(&Some(first), &snapshot_with_sleep(Some(second.clone()))),
+            Some(second)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_no_focused_element_without_accessibility() {
+        let mut snapshot = snapshot_with_sleep(None);
+        snapshot.as_mut().unwrap().accessibility_granted = false;
+        assert!(focused_element_for(&snapshot, true).await.is_none());
+        assert!(focused_element_for(&None, true).await.is_none());
     }
 
     #[test]
