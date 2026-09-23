@@ -41,6 +41,7 @@ from agenthandover_worker.dom import accessible_name, flatten_dom, implicit_role
 from agenthandover_worker.event_helpers import display_name, is_bundle_id, parse_json_field
 from agenthandover_worker.json_extract import extract_json
 from agenthandover_worker.model_profiles import STANDARD_TIER
+from agenthandover_worker.ops_telemetry import COMPUTE
 from agenthandover_worker.privacy_zones import is_system_ui
 from agenthandover_worker.ollama import (  # noqa: F401 - OllamaUnavailable re-exported
     OllamaClient,
@@ -800,6 +801,7 @@ def _call_ollama_vlm(
     format: dict | str | None = None,
     keep_alive: str | None = None,
     extra_options: dict | None = None,
+    call_type: str = "annotation",
 ) -> tuple[str, float]:
     """Call Ollama's /api/generate with an optional image.
 
@@ -820,6 +822,8 @@ def _call_ollama_vlm(
         extra_options: Additional Ollama options (top_k, presence_penalty, etc.)
             merged into the options dict. Use model_profiles.get_profile() to
             get optimal settings per model.
+        call_type: what the call is for, in the compute counters
+            (``"diff"`` for the frame differ).
     """
     import base64
 
@@ -845,6 +849,7 @@ def _call_ollama_vlm(
         think=think,
         keep_alive=keep_alive,
         timeout=timeout,
+        call_type=call_type,
     )
     return response.text, response.elapsed
 
@@ -1130,6 +1135,7 @@ class SceneAnnotator:
         # Each call's output is grammar-constrained to the schema at
         # temperature 0, so a repeat of the same call cannot do better.
         inference_time = 0.0
+        model_calls = 0
         annotation: dict | None = None
         raw_response = ""
         try:
@@ -1137,12 +1143,14 @@ class SceneAnnotator:
                 annotation = cached
             else:
                 if reason is None:
+                    model_calls += 1
                     raw_response, elapsed = self._generate(prompt_for(False), None)
                     inference_time += elapsed
                     annotation = _validate_annotation(raw_response)
                     if annotation is not None and annotation.get("needs_vision"):
                         reason = "model"
                 if reason is not None:
+                    model_calls += 1
                     try:
                         raw_response, elapsed = self._generate(prompt_for(True), screenshot_path)
                     except (ConnectionError, TimeoutError):
@@ -1160,6 +1168,7 @@ class SceneAnnotator:
         except (ConnectionError, TimeoutError) as exc:  # OllamaUnavailable, cold-load timeouts
             # Transport error or timeout: keep the JPEG, leave the row pending.
             self._stats["deferred"] += 1
+            COMPUTE.record_deferred()
             self._defer()
             return AnnotationResult(
                 event_id=event_id,
@@ -1174,6 +1183,7 @@ class SceneAnnotator:
                 status="failed",
                 error=f"vlm_error: {exc}",
             )
+        COMPUTE.record_annotation(inference_time, model_calls)
 
         # --- Cache the model's answer (before the per-frame additions) ---
         # Redacted: a vision call saw the pixels, not the redacted text.

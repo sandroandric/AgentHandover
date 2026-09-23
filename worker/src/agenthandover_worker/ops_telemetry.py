@@ -8,6 +8,8 @@ from __future__ import annotations
 import json
 import logging
 import threading
+import time
+from collections import deque
 from dataclasses import dataclass, asdict, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -96,6 +98,135 @@ class ModelUsage:
 
 # The worker's one usage ledger (a worker is one process).
 MODEL_USAGE = ModelUsage()
+
+
+# Upper edges (ms, inclusive) of the per-frame annotation wall-time
+# histogram; a last bucket counts everything slower.
+ANNOTATION_WALL_MS_EDGES = (500, 1000, 2000, 5000, 10000, 30000, 60000)
+
+
+def _histogram_bucket(wall_ms: float) -> str:
+    for edge in ANNOTATION_WALL_MS_EDGES:
+        if wall_ms <= edge:
+            return f"le_{edge}"
+    return f"gt_{ANNOTATION_WALL_MS_EDGES[-1]}"
+
+
+class ComputeLedger:
+    """Where the worker's model time went, since start-up and in the last hour.
+
+    * ``model_seconds_by_call_type``: Ollama's ``total_duration`` (load,
+      prompt and generation; the worker's wall time for a reply without
+      it) per call type, and ``model_calls_by_call_type`` the call counts.
+    * ``annotation_retries``: extra model calls for a frame beyond its
+      first (the vision call after a text-only answer asked for one).
+    * ``annotation_deferred``: frames whose annotation was put off because
+      Ollama was unreachable or timed out (the row stays pending and is
+      tried again later).
+    * ``annotation_wall_ms_histogram``: per frame the model answered
+      (cache hits, deferrals and failed calls excluded), the worker's wall
+      time over its model calls.
+
+    ``snapshot()`` is published as ``compute`` in ``worker-status.json``;
+    ``agenthandover status --compute`` prints its ``last_hour``.  *now*
+    (epoch seconds) is injectable for tests.
+    """
+
+    WINDOW_SECONDS = 3600.0
+
+    def __init__(self, now=time.time) -> None:
+        self._now = now
+        self._lock = threading.Lock()
+        self._totals = self._empty()
+        # (time, kind, fields) for the last hour's roll-up.
+        self._recent: deque[tuple[float, str, tuple]] = deque()
+
+    @staticmethod
+    def _empty() -> dict:
+        return {
+            "model_seconds_by_call_type": {},
+            "model_calls_by_call_type": {},
+            "annotation_retries": 0,
+            "annotation_deferred": 0,
+            "annotation_wall_ms_histogram": {},
+        }
+
+    @staticmethod
+    def _apply(counters: dict, kind: str, fields: tuple) -> None:
+        if kind == "call":
+            call_type, seconds = fields
+            by_type = counters["model_seconds_by_call_type"]
+            by_type[call_type] = by_type.get(call_type, 0.0) + seconds
+            calls = counters["model_calls_by_call_type"]
+            calls[call_type] = calls.get(call_type, 0) + 1
+        elif kind == "deferred":
+            counters["annotation_deferred"] += 1
+        else:  # "annotation"
+            wall_ms, model_calls = fields
+            counters["annotation_retries"] += max(model_calls - 1, 0)
+            hist = counters["annotation_wall_ms_histogram"]
+            bucket = _histogram_bucket(wall_ms)
+            hist[bucket] = hist.get(bucket, 0) + 1
+
+    def _add(self, kind: str, fields: tuple) -> None:
+        with self._lock:
+            now = self._now()
+            self._apply(self._totals, kind, fields)
+            self._recent.append((now, kind, fields))
+            self._prune(now)
+
+    def _prune(self, now: float) -> None:
+        while self._recent and self._recent[0][0] <= now - self.WINDOW_SECONDS:
+            self._recent.popleft()
+
+    def record_call(self, call_type: str, response: "Response") -> None:
+        """Count one Ollama reply against *call_type*."""
+        nanos = response.total_duration
+        seconds = nanos / 1e9 if nanos else response.elapsed
+        self._add("call", (call_type, seconds))
+
+    def record_annotation(self, wall_seconds: float, model_calls: int) -> None:
+        """Count one frame annotated with *model_calls* calls (not a cache hit)."""
+        if model_calls > 0:
+            self._add("annotation", (wall_seconds * 1000.0, model_calls))
+
+    def record_deferred(self) -> None:
+        self._add("deferred", ())
+
+    @staticmethod
+    def _rounded(counters: dict) -> dict:
+        out = dict(counters)
+        seconds = counters["model_seconds_by_call_type"]
+        out["model_seconds_by_call_type"] = {k: round(v, 3) for k, v in seconds.items()}
+        out["model_calls_by_call_type"] = dict(counters["model_calls_by_call_type"])
+        out["annotation_wall_ms_histogram"] = {
+            bucket: counters["annotation_wall_ms_histogram"][bucket]
+            for bucket in [f"le_{e}" for e in ANNOTATION_WALL_MS_EDGES]
+            + [f"gt_{ANNOTATION_WALL_MS_EDGES[-1]}"]
+            if bucket in counters["annotation_wall_ms_histogram"]
+        }
+        out["model_seconds"] = round(sum(seconds.values()), 3)
+        return out
+
+    def snapshot(self) -> dict:
+        """The counters since start-up, with the last hour's under ``last_hour``."""
+        with self._lock:
+            self._prune(self._now())
+            last_hour = self._empty()
+            for _, kind, fields in self._recent:
+                self._apply(last_hour, kind, fields)
+            out = self._rounded(self._totals)
+            out["last_hour"] = self._rounded(last_hour)
+            return out
+
+    def reset(self) -> None:
+        with self._lock:
+            self._totals = self._empty()
+            self._recent.clear()
+
+
+# The worker's one compute ledger.
+COMPUTE = ComputeLedger()
 
 
 class OpsTelemetry:

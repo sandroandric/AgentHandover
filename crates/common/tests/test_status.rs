@@ -24,6 +24,7 @@ fn sample_daemon_status() -> DaemonStatus {
         events_purged: None,
         artifacts_purged: None,
         bytes_freed: None,
+        compute: None,
     }
 }
 
@@ -234,6 +235,7 @@ fn daemon_status_with_extension_message_roundtrip() {
         events_purged: None,
         artifacts_purged: None,
         bytes_freed: None,
+        compute: None,
     };
 
     let json = serde_json::to_string_pretty(&status).expect("serialize");
@@ -522,4 +524,43 @@ max_tokens = 400
     assert_eq!(config.llm.model, "llama3.2:3b");
     assert_eq!(config.llm.timeout_seconds, 30);
     assert_eq!(config.llm.max_tokens, 400);
+}
+
+/// WP-C1: the capture counters sit under `compute` in daemon-status.json,
+/// the since-start counters flat and the last hour's under `last_hour`;
+/// a status file without them (an older daemon) still parses.
+#[test]
+fn daemon_status_compute_shape_and_roundtrip() {
+    use agenthandover_common::status::{CaptureCompute, CaptureCounts};
+
+    let mut last_hour = CaptureCounts {
+        frames_captured: 3,
+        frames_kept: 2,
+        capture_ms: 90,
+        ocr_ms: 400,
+        ..Default::default()
+    };
+    last_hour.frames_gated_by_reason.insert("unchanged".into(), 1);
+    let mut since_start = last_hour.clone();
+    since_start.add(&last_hour);
+    let mut status = sample_daemon_status();
+    status.compute = Some(CaptureCompute { since_start, last_hour });
+
+    let value = serde_json::to_value(&status).unwrap();
+    let compute = &value["compute"];
+    assert_eq!(compute["frames_captured"], 6);
+    assert_eq!(compute["frames_kept"], 4);
+    assert_eq!(compute["frames_gated_by_reason"]["unchanged"], 2);
+    assert_eq!(compute["capture_ms"], 180);
+    assert_eq!(compute["ocr_ms"], 800);
+    assert_eq!(compute["last_hour"]["frames_captured"], 3);
+    assert_eq!(compute["last_hour"]["frames_gated_by_reason"]["unchanged"], 1);
+
+    let back: DaemonStatus = serde_json::from_value(value).unwrap();
+    assert_eq!(back.compute, status.compute);
+
+    let mut old = serde_json::to_value(sample_daemon_status()).unwrap();
+    old.as_object_mut().unwrap().remove("compute");
+    let parsed: DaemonStatus = serde_json::from_value(old).unwrap();
+    assert!(parsed.compute.is_none());
 }

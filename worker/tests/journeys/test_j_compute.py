@@ -9,9 +9,14 @@ already broken, and the cassette holds only the calls up to that point.
 
 The daily cap (``[vlm] annotation_max_compute_minutes_per_day``, WP-C5) is
 checked with a 5-minute cap: passive annotation stops at it, the rows stay
-pending with their screenshots.  ``worker-status.json`` (the heartbeat that
-publishes the pause reason) is not driven before WP-S6; the journey reads
-the budget the loop charges instead.
+pending with their screenshots.
+
+The model-time bounds are read from what the worker publishes (WP-C1):
+``worker-status.json``'s ``compute.last_hour`` (model seconds per call
+type, the per-frame wall-time histogram), its ``annotation_budget`` and
+``annotation_paused_reason``, written by the driver's heartbeat each tick.
+That the published seconds are the cassette's own ``total_duration`` sum
+is pinned by ``test_compute_status_accounts_for_every_model_call``.
 """
 
 from __future__ import annotations
@@ -111,7 +116,8 @@ def test_compute_volatile_hour_spends_at_most_600_model_seconds(
     run = _run(events_db, worker, clock, temp_home, cassette)
     # The hour's work was done (not cut short at the 60-frame bound).
     assert run.statuses.get("completed", 0) <= MAX_ANNOTATED, (run.ticks, run.statuses)
-    assert run.tape.model_seconds() <= MAX_MODEL_SECONDS, run.tape.model_seconds()
+    last_hour = run.worker.status()["compute"]["last_hour"]
+    assert last_hour["model_seconds"] <= MAX_MODEL_SECONDS, last_hour
 
 
 def test_compute_writes_no_artifact_and_refreshes_fts_quickly(
@@ -126,6 +132,34 @@ def test_compute_writes_no_artifact_and_refreshes_fts_quickly(
     searcher.refresh_index()
     elapsed = time.perf_counter() - started
     assert elapsed < FTS_REFRESH_BUDGET_S, f"events_fts refresh took {elapsed * 1000:.0f} ms"
+
+
+def test_compute_status_accounts_for_every_model_call(
+    events_db, worker, clock, temp_home, cassette,
+) -> None:
+    """WP-C1: ``worker-status.json`` accounts for every model call the
+    cassette answered, per call type, with Ollama's own seconds, and puts
+    each frame the model answered in the wall-time histogram once."""
+    run = _run(events_db, worker, clock, temp_home, cassette)
+    status = run.worker.status()
+    compute = status["compute"]
+    last_hour = compute["last_hour"]
+    # The hour ran on a fake clock in a few real seconds: all of it is
+    # within the last hour.
+    assert last_hour["model_seconds_by_call_type"] == compute["model_seconds_by_call_type"]
+
+    served = [e for e in run.tape.served if e["path"] in ("/api/generate", "/api/embed")]
+    by_type = last_hour["model_calls_by_call_type"]
+    assert sum(by_type.values()) == len(served), (by_type, len(served))
+    assert by_type.get("embed", 0) == sum(e["path"] == "/api/embed" for e in served)
+    assert last_hour["model_seconds"] == pytest.approx(run.tape.model_seconds(), abs=0.01)
+    # Passive capture's cost is annotation (the SOP miner has not run yet:
+    # its 2-hour timer is not due within the stopped run).
+    seconds = last_hour["model_seconds_by_call_type"]
+    assert seconds["annotation"] == max(seconds.values()), seconds
+    frames = sum(last_hour["annotation_wall_ms_histogram"].values())
+    assert frames == by_type["annotation"] - last_hour["annotation_retries"]
+    assert status["v2_annotations_today"] == run.statuses.get("completed", 0)
 
 
 def test_compute_curation_queue_is_not_rewritten_every_tick(
@@ -151,9 +185,11 @@ def test_compute_daily_cap_stops_passive_annotation(
         events_db, worker, clock, temp_home, cassette,
         vlm={"annotation_max_compute_minutes_per_day": CAP_MINUTES}, stop=_exhausted,
     )
-    budget = run.worker.annotation_budget
-    assert _exhausted(run), (run.ticks, budget.status(), run.statuses)
-    assert budget.compute_seconds >= CAP_MINUTES * 60
+    status = run.worker.status()
+    assert _exhausted(run), (run.ticks, status.get("annotation_budget"), run.statuses)
+    assert status["annotation_paused_reason"] == "annotation_budget_exhausted"
+    assert status["annotation_budget"]["compute_minutes"] >= CAP_MINUTES
+    assert status["annotation_budget"]["max_compute_minutes"] == CAP_MINUTES
     completed = run.statuses.get("completed", 0)
 
     for _ in range(2):

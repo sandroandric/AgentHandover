@@ -327,6 +327,7 @@ class LLMReasoner:
             },
             think=use_think,
             timeout=self.config.timeout,
+            call_type="reasoning",
         )
         return clean_model_text(response.text), response.elapsed
 

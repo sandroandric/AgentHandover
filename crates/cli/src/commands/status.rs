@@ -6,6 +6,122 @@ use agenthandover_common::status;
 
 use crate::display::{format_number, format_relative_time, is_heartbeat_stale};
 
+/// `agenthandover status --compute`: what capture and the models cost in
+/// the last hour, from the `compute` sections of daemon-status.json and
+/// worker-status.json.
+pub fn run_compute() -> Result<()> {
+    let daemon = status::read_status_file::<serde_json::Value>("daemon-status.json").ok();
+    let worker = status::read_status_file::<serde_json::Value>("worker-status.json").ok();
+    println!("{}", "AgentHandover compute, last hour".bold());
+    println!("{}", "=".repeat(50));
+    print!("{}", format_compute(daemon.as_ref(), worker.as_ref()));
+    Ok(())
+}
+
+fn u64_at(value: &serde_json::Value, key: &str) -> u64 {
+    value.get(key).and_then(|v| v.as_u64()).unwrap_or(0)
+}
+
+fn f64_at(value: &serde_json::Value, key: &str) -> f64 {
+    value.get(key).and_then(|v| v.as_f64()).unwrap_or(0.0)
+}
+
+fn seconds(ms: u64) -> String {
+    format!("{:.1} s", ms as f64 / 1000.0)
+}
+
+/// `"a 3, b 1"` from a JSON object of counts, largest first.
+fn counts(map: Option<&serde_json::Value>) -> String {
+    let mut items: Vec<(String, u64)> = map
+        .and_then(|m| m.as_object())
+        .map(|m| m.iter().map(|(k, v)| (k.clone(), v.as_u64().unwrap_or(0))).collect())
+        .unwrap_or_default();
+    if items.is_empty() {
+        return "none".to_string();
+    }
+    items.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    items
+        .iter()
+        .map(|(k, n)| format!("{k} {n}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The last-hour report for `status --compute` (plain text, no colour).
+fn format_compute(daemon: Option<&serde_json::Value>, worker: Option<&serde_json::Value>) -> String {
+    let mut out = String::new();
+    out.push_str("\n  Capture (daemon)\n");
+    match daemon.map(|d| d.get("compute").and_then(|c| c.get("last_hour"))) {
+        None => out.push_str("    not running (no daemon-status.json)\n"),
+        Some(None) => out.push_str("    no compute counters (the daemon predates them)\n"),
+        Some(Some(hour)) => {
+            out.push_str(&format!(
+                "    Frames:     {} captured, {} kept\n",
+                u64_at(hour, "frames_captured"),
+                u64_at(hour, "frames_kept"),
+            ));
+            out.push_str(&format!(
+                "    Gated:      {}\n",
+                counts(hour.get("frames_gated_by_reason"))
+            ));
+            out.push_str(&format!("    Capture:    {}\n", seconds(u64_at(hour, "capture_ms"))));
+            out.push_str(&format!("    OCR:        {}\n", seconds(u64_at(hour, "ocr_ms"))));
+        }
+    }
+
+    out.push_str("\n  Models (worker)\n");
+    match worker.map(|w| (w, w.get("compute").and_then(|c| c.get("last_hour")))) {
+        None => out.push_str("    not running (no worker-status.json)\n"),
+        Some((_, None)) => out.push_str("    no compute counters (the worker predates them)\n"),
+        Some((worker, Some(hour))) => {
+            let by_type = hour.get("model_seconds_by_call_type").and_then(|v| v.as_object());
+            let calls = hour.get("model_calls_by_call_type");
+            let total_calls: u64 = calls
+                .and_then(|c| c.as_object())
+                .map(|c| c.values().filter_map(|v| v.as_u64()).sum())
+                .unwrap_or(0);
+            out.push_str(&format!(
+                "    Model time: {:.1} s over {} calls\n",
+                f64_at(hour, "model_seconds"),
+                total_calls,
+            ));
+            let mut types: Vec<(&String, f64)> = by_type
+                .map(|m| m.iter().map(|(k, v)| (k, v.as_f64().unwrap_or(0.0))).collect())
+                .unwrap_or_default();
+            types.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+            for (call_type, secs) in types {
+                let n = calls.map(|c| u64_at(c, call_type)).unwrap_or(0);
+                out.push_str(&format!(
+                    "      {call_type:<12} {secs:>8.1} s  ({n} call{})\n",
+                    if n == 1 { "" } else { "s" }
+                ));
+            }
+            out.push_str(&format!(
+                "    Annotation: {} retries, {} deferred\n",
+                u64_at(hour, "annotation_retries"),
+                u64_at(hour, "annotation_deferred"),
+            ));
+            out.push_str(&format!(
+                "    Frame wall: {}\n",
+                counts(hour.get("annotation_wall_ms_histogram"))
+            ));
+            if let Some(budget) = worker.get("annotation_budget") {
+                out.push_str(&format!(
+                    "    Budget:     {} / {} frames, {:.1} / {:.0} min today\n",
+                    u64_at(budget, "frames"),
+                    u64_at(budget, "max_frames"),
+                    f64_at(budget, "compute_minutes"),
+                    f64_at(budget, "max_compute_minutes"),
+                ));
+            }
+            if let Some(reason) = worker.get("annotation_paused_reason").and_then(|v| v.as_str()) {
+                out.push_str(&format!("    Paused:     {reason}\n"));
+            }
+        }
+    }
+    out
+}
+
 pub fn run() -> Result<()> {
     println!("{}", "AgentHandover Status".bold());
     println!("{}", "=".repeat(50));
@@ -246,6 +362,60 @@ fn print_service_status(name: &str, status_file: &str, pid_name: &str) {
                 println!("    PID {} is alive but no status file found", pid);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_compute;
+    use serde_json::json;
+
+    #[test]
+    fn compute_report_reads_the_last_hour_of_both_files() {
+        let daemon = json!({"compute": {
+            "frames_captured": 900, "frames_kept": 300,
+            "frames_gated_by_reason": {"unchanged": 500},
+            "capture_ms": 1, "ocr_ms": 1,
+            "last_hour": {
+                "frames_captured": 120, "frames_kept": 40,
+                "frames_gated_by_reason": {"unchanged": 60, "same_text": 10, "rate_limited": 10},
+                "capture_ms": 3200, "ocr_ms": 12400
+            }
+        }});
+        let worker = json!({
+            "annotation_budget": {"frames": 12, "max_frames": 1500,
+                                  "compute_minutes": 4.07, "max_compute_minutes": 60.0},
+            "annotation_paused_reason": "annotation_budget_exhausted",
+            "compute": {"model_seconds": 9999.0, "last_hour": {
+                "model_seconds": 412.3,
+                "model_seconds_by_call_type": {"sop": 112.2, "annotation": 300.1},
+                "model_calls_by_call_type": {"sop": 1, "annotation": 38},
+                "annotation_retries": 3, "annotation_deferred": 0,
+                "annotation_wall_ms_histogram": {"le_1000": 20, "le_500": 10}
+            }}
+        });
+        let text = format_compute(Some(&daemon), Some(&worker));
+        assert!(text.contains("Frames:     120 captured, 40 kept"), "{text}");
+        assert!(text.contains("Gated:      unchanged 60, rate_limited 10, same_text 10"), "{text}");
+        assert!(text.contains("Capture:    3.2 s"), "{text}");
+        assert!(text.contains("OCR:        12.4 s"), "{text}");
+        assert!(text.contains("Model time: 412.3 s over 39 calls"), "{text}");
+        let annotation = text.find("annotation      300.1 s  (38 calls)").expect(&text);
+        let sop = text.find("sop             112.2 s  (1 call)").expect(&text);
+        assert!(annotation < sop, "largest first: {text}");
+        assert!(text.contains("Annotation: 3 retries, 0 deferred"), "{text}");
+        assert!(text.contains("Frame wall: le_1000 20, le_500 10"), "{text}");
+        assert!(text.contains("Budget:     12 / 1500 frames, 4.1 / 60 min today"), "{text}");
+        assert!(text.contains("Paused:     annotation_budget_exhausted"), "{text}");
+        // Since-start totals are not the last hour.
+        assert!(!text.contains("9999"), "{text}");
+    }
+
+    #[test]
+    fn compute_report_names_what_is_missing() {
+        let text = format_compute(None, Some(&json!({"pid": 1})));
+        assert!(text.contains("not running (no daemon-status.json)"), "{text}");
+        assert!(text.contains("no compute counters (the worker predates them)"), "{text}");
     }
 }
 

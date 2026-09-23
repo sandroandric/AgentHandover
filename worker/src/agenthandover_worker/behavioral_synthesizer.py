@@ -224,6 +224,7 @@ def _call_ollama_text(
 
     response = OllamaClient(host).generate(
         model, prompt, system=system, options=options, think=think, timeout=timeout,
+        call_type="synthesis",
     )
     return response.text, response.elapsed
 

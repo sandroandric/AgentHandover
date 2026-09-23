@@ -20,15 +20,19 @@ the loop body's processors in the loop's order:
 5. ``_process_passive_discovery`` every 2 hours of *clock* time (the timer
    starts when the worker is built, as main() seeds it at loop entry)
    while no focus session is pending;
-6. ``_write_sops_index``.
+6. ``_write_sops_index``;
+7. the status heartbeat, ``_write_worker_status`` with the running totals,
+   the annotation budget and pause reason and the compute counters
+   (``status()`` reads it back).  Building a ``JourneyWorker`` resets the
+   process-wide usage counters, as a worker start does.
 
 Not driven here, because they only exist inline in ``main()``: the VLM
 fallback job runner (needs ``VLMWorker``), the idle-gate shortcut for
 passive discovery and passive annotation (both read real system idle
 time and power state; the driver runs as if on AC), the expiry of the
 passive annotation backlog (compares with SQLite's real ``now``), the
-daily batch, the staleness / lifecycle / curation pass and the status
-heartbeat.  Journeys that need those wait for WP-S6.
+daily batch and the staleness / lifecycle / curation pass.  Journeys that
+need those wait for WP-S6.
 
 ``main()`` logs an exception inside an iteration and carries on with the
 next one (shrinking or quarantining the event batch); ``run_tick()`` lets it
@@ -39,10 +43,12 @@ logged and skipped by ``trigger_spool.drain`` itself, in both.
 from __future__ import annotations
 
 import dataclasses
+import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from agenthandover_worker import main as wm
+from agenthandover_worker import ops_telemetry
 from agenthandover_worker import trigger_spool
 from agenthandover_worker.annotation_cache import AnnotationCache
 from agenthandover_worker.config import load_config
@@ -120,6 +126,14 @@ class JourneyWorker:
         self._last_passive_discovery = clock.now()
         # main()'s memory of the episode store at the last SOP mining run.
         self.mining_watermark: dict = {}
+        # A worker is one process: its usage counters start at zero.
+        ops_telemetry.MODEL_USAGE.reset()
+        ops_telemetry.COMPUTE.reset()
+        self._started_at = clock.now().strftime("%Y-%m-%dT%H:%M:%SZ")
+        self._events_processed = 0
+        self._sops_generated = 0
+        self._annotations = 0
+        self._diffs = 0
 
         cfg = load_config()
         self.cfg = cfg
@@ -493,6 +507,7 @@ class JourneyWorker:
                 wm._write_sops_index(db, self.knowledge_base)
 
         wm._write_sops_index(db, self.knowledge_base)
+        self._write_status(unprocessed, summary, focus_sops, passive_sops, ann_stats, diff_stats)
         return {
             "triggers_consumed": triggers_consumed,
             "focus_sops": focus_sops,
@@ -501,6 +516,39 @@ class JourneyWorker:
             "diffs": diff_stats,
             "passive_sops": passive_sops,
         }
+
+    def _write_status(
+        self, unprocessed, summary, focus_sops, passive_sops, ann_stats, diff_stats,
+    ) -> None:
+        """main()'s end-of-iteration heartbeat: ``worker-status.json`` with
+        the running totals, the passive annotation budget and pause reason
+        (on AC, so only the budget pauses it) and the compute counters."""
+        self._events_processed += len(unprocessed)
+        self._sops_generated += (
+            focus_sops + (passive_sops or 0) + (summary["sops_exported"] if summary else 0)
+        )
+        self._annotations += (ann_stats or {}).get("annotated", 0)
+        self._diffs += (diff_stats or {}).get("diffs", 0)
+        exhausted = bool((ann_stats or {}).get("budget_exhausted"))
+        wm._write_worker_status(
+            started_at=self._started_at,
+            events_processed_today=self._events_processed,
+            sops_generated=self._sops_generated,
+            last_pipeline_duration_ms=None,
+            consecutive_errors=0,
+            vlm_available=self.scene_annotator is not None,
+            sop_inducer_available=self.sop_inducer is not None,
+            vlm_mode="local",
+            v2_annotation_enabled=self.scene_annotator is not None,
+            v2_annotations_today=self._annotations,
+            v2_diffs_today=self._diffs,
+            annotation_paused_reason="annotation_budget_exhausted" if exhausted else None,
+            annotation_budget=self.annotation_budget.status(),
+        )
+
+    def status(self) -> dict:
+        """The last ``worker-status.json`` :meth:`run_tick` wrote."""
+        return json.loads((self.state_dir / "worker-status.json").read_text())
 
     def _passive_discovery_due(self) -> bool:
         # main() seeds its timer when the loop starts: due every 2 hours.

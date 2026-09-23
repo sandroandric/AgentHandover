@@ -34,7 +34,7 @@ from agenthandover_worker.focus_processor import FocusProcessor
 from agenthandover_worker.frame_differ import DiffConfig, FrameDiffer
 from agenthandover_worker.negative_demo import NegativeDemoPruner
 from agenthandover_worker.ollama import OllamaError
-from agenthandover_worker.ops_telemetry import MODEL_USAGE
+from agenthandover_worker.ops_telemetry import COMPUTE, MODEL_USAGE
 from agenthandover_worker.export_adapter import SOPExportAdapter
 from agenthandover_worker.openclaw_writer import OpenClawWriter
 from agenthandover_worker.annotation_cache import AnnotationCache
@@ -794,8 +794,10 @@ def _write_worker_status(
         status["annotation_paused_reason"] = annotation_paused_reason
         if annotation_budget is not None:
             status["annotation_budget"] = annotation_budget
-    # Tokens and Ollama timings per model since the worker started.
+    # Tokens and Ollama timings per model since the worker started, and
+    # model seconds per call type (since start and in the last hour).
     status["model_calls"] = MODEL_USAGE.snapshot()
+    status["compute"] = COMPUTE.snapshot()
     sdir = _status_dir()
     sdir.mkdir(parents=True, exist_ok=True)
     target = sdir / "worker-status.json"

@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 /// Info about an active focus recording session.
@@ -40,6 +41,52 @@ pub struct DaemonStatus {
     pub artifacts_purged: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bytes_freed: Option<u64>,
+    /// What capture cost since the daemon started and in the last hour
+    /// (`agenthandover status --compute`). Absent from older daemons.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compute: Option<CaptureCompute>,
+}
+
+/// Capture-side counters: frames taken from the app's capture socket,
+/// frames kept, frames not taken or dropped per reason, and the
+/// milliseconds spent capturing and in OCR.
+///
+/// Gate reasons: `privacy_zone` (a transition in a blocked or
+/// metadata-only window), `rate_limited` (a transition over the minute's
+/// frame budget), `capture_failed` (the capture socket gave no usable frame),
+/// `privacy_changed` (a private window came up during the capture),
+/// `unchanged` (same screen as the last kept frame) and `same_text` (a
+/// heartbeat frame whose text did not change).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CaptureCounts {
+    pub frames_captured: u64,
+    pub frames_kept: u64,
+    #[serde(default)]
+    pub frames_gated_by_reason: BTreeMap<String, u64>,
+    pub capture_ms: u64,
+    pub ocr_ms: u64,
+}
+
+impl CaptureCounts {
+    /// Add `other`'s counters to these.
+    pub fn add(&mut self, other: &CaptureCounts) {
+        self.frames_captured += other.frames_captured;
+        self.frames_kept += other.frames_kept;
+        for (reason, n) in &other.frames_gated_by_reason {
+            *self.frames_gated_by_reason.entry(reason.clone()).or_default() += n;
+        }
+        self.capture_ms += other.capture_ms;
+        self.ocr_ms += other.ocr_ms;
+    }
+}
+
+/// [`CaptureCounts`] since the daemon started (flattened) and for the last
+/// hour, as written into `daemon-status.json` under `compute`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CaptureCompute {
+    #[serde(flatten)]
+    pub since_start: CaptureCounts,
+    pub last_hour: CaptureCounts,
 }
 
 /// Status written by the worker each poll cycle to worker-status.json
