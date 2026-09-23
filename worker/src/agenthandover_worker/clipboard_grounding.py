@@ -176,6 +176,54 @@ def _window(step: dict, timeline: list[dict]) -> tuple[list[dict], list[dict]]:
     return in_window, before_end
 
 
+def ground_frame_texts(frames: list[dict], timeline: list[dict]) -> list[dict]:
+    """*frames* (the SOP prompt's frames, a sample of *timeline*) with the
+    copy/paste wording of their annotation's activity and their diff
+    rewritten where the clipboard recorded nothing around the frame (its
+    own events and the next frame's; for a paste or "the copied text", any
+    copy up to then).  The live run's frames said "copying text from the
+    Example Domain page into TextEdit" with no copy recorded.  Returns
+    copies; a timeline without a clipboard record is returned as is."""
+    if session_clipboard_kinds(timeline) is None:
+        return frames
+    position = {f.get("event_id"): i for i, f in enumerate(timeline)}
+    grounded: list[dict] = []
+    for frame in frames:
+        i = position.get(frame.get("event_id"))
+        if i is None:
+            grounded.append(frame)
+            continue
+        nearby = [e for f in timeline[i:i + 2] for e in f["clipboard_events"]]
+        kinds = {e.get("kind") for e in nearby}
+        copied_before = any(
+            e.get("kind") == COPY for f in timeline[:i + 2] for e in f["clipboard_events"]
+        )
+        supported = {COPY: COPY in kinds, COPIED: copied_before,
+                     PASTE: PASTE in kinds or copied_before}
+
+        def fix(text: object) -> object:
+            if not isinstance(text, str):
+                return text
+            unsupported = {COPY if c == COPIED else c for c in claims([text]) if not supported[c]}
+            return rewrite(text, unsupported) if unsupported else text
+
+        annotation = frame.get("annotation")
+        if isinstance(annotation, dict) and isinstance(annotation.get("task_context"), dict):
+            context = annotation["task_context"]
+            annotation = {**annotation, "task_context": {
+                **context, "what_doing": fix(context.get("what_doing")),
+            }}
+        diff = frame.get("diff")
+        if isinstance(diff, dict):
+            diff = dict(diff)
+            if isinstance(diff.get("actions"), list):
+                diff["actions"] = [fix(a) for a in diff["actions"]]
+            if "step_description" in diff:
+                diff["step_description"] = fix(diff["step_description"])
+        grounded.append({**frame, "annotation": annotation, "diff": diff})
+    return grounded
+
+
 def ground_clipboard_claims(steps: list[dict], timeline: list[dict]) -> list[dict]:
     """Rewrite the copy/paste claims of *steps* that no clipboard event
     supports; returns one record per rewritten step.

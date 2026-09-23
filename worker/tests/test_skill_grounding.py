@@ -346,11 +346,15 @@ def _generate(timeline: list[dict]) -> tuple[dict, list[str]]:
 def test_the_generator_grounds_the_models_copy_and_paste() -> None:
     sop, prompts = _generate(_timeline([]))
     assert "CLIPBOARD: no copy, cut or paste was recorded" in prompts[0]
+    # The frame's own "copying" is not handed to the model as a fact.
+    assert "copying text" not in prompts[0]
+    assert "Activity: reading text from the Example Domain page into TextEdit" in prompts[0]
     assert [s["step"] for s in sop["steps"]] == [
         "Read the text regarding IANA reserved domains", "Type the text",
     ]
     sop, prompts = _generate(_timeline([("copy", 15)]))
     assert "CLIPBOARD:" not in prompts[0]
+    assert "Activity: copying text from the Example Domain page" in prompts[0]
     assert [s["step"] for s in sop["steps"]] == [
         "Copy the text regarding IANA reserved domains", "Paste the copied text",
     ]

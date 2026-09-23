@@ -21,7 +21,11 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from agenthandover_worker.clipboard_grounding import clipboard_note, ground_clipboard_claims
+from agenthandover_worker.clipboard_grounding import (
+    clipboard_note,
+    ground_clipboard_claims,
+    ground_frame_texts,
+)
 from agenthandover_worker.confidence import compute_v2_confidence
 from agenthandover_worker.dom import select_anchor
 from agenthandover_worker.event_helpers import describe_focused_field, display_name
@@ -1563,8 +1567,11 @@ class SOPGenerator:
             meaningful = _smart_sample_focus(meaningful, max_frames)
 
         # Build prompt
+        # The frames' own copy/paste wording, where the clipboard recorded
+        # nothing, is rewritten before the model reads it.
         prompt = _build_focus_prompt(
-            title, meaningful, clipboard_note=clipboard_note(timeline),
+            title, ground_frame_texts(meaningful, timeline),
+            clipboard_note=clipboard_note(timeline),
         )
 
         # Call VLM with model-specific profile

@@ -25,9 +25,10 @@ _CLAIM = re.compile(r"\b(copy|copies|copied|copying|paste|pastes|pasted|pasting)
 
 # The requests the no-clipboard run makes that the focus_dailynews cassette
 # does not hold: the SOP prompt carries the "no copy, cut or paste was
-# recorded" note (WP-Q1); the annotations and diffs replay as they are.
+# recorded" note and the frames' copy wording rewritten (WP-Q1); the
+# annotations and diffs replay as they are.
 NO_CLIPBOARD_MISSING_KEYS: tuple[str, ...] = (
-    "480e9411054222d764723ea0b6e5e7d37a1501c6711d4af5d0e138c99ffc65fc",  # the SOP call
+    "5c9d3d77a4f54ff7b8a52e0e48a54e0b1acc5889921e04e2f817b2d9413efc00",  # the SOP call
 )
 _ENTRIES = load_entries(CASSETTE_DIR / "focus_dailynews.jsonl")
 needs_no_clipboard_recording = pytest.mark.skipif(
