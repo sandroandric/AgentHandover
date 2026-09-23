@@ -19,8 +19,7 @@ pub struct Event {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_ids_spanned: Option<Vec<u32>>,
     /// The focused UI element as Accessibility reported it when the event
-    /// was taken (the observer's dwell, scroll-read and focus-recording
-    /// snapshots).  Stored in the `focused_element_json` column.
+    /// was taken (every frame the observer keeps).  Stored in the `focused_element_json` column.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub focused_element: Option<FocusedElement>,
 }
