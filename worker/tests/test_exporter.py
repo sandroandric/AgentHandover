@@ -209,6 +209,33 @@ class TestIndexReadsDisk:
         assert "broken" not in content
 
 
+    def test_a_batch_entry_without_a_file_is_not_listed(self, tmp_path: Path):
+        """A draft the hand-off gate held back has no file: not listed."""
+        sops_dir = tmp_path / "base" / "sops"
+        self._write_proc(sops_dir, "workflow_a", "Workflow A")
+
+        IndexGenerator().update_index(
+            sops_dir, [_sample_template("held_back", "Held Back")],
+        )
+
+        content = (tmp_path / "base" / "index.md").read_text(encoding="utf-8")
+        assert "**Total SOPs:** 1" in content
+        assert "held_back" not in content
+
+    def test_a_batch_entry_with_only_its_markdown_is_listed(self, tmp_path: Path):
+        """A writer without the JSON sidecar leaves ``sop.<slug>.md``."""
+        sops_dir = tmp_path / "base" / "sops"
+        AtomicWriter.write(sops_dir / "sop.md_only.md", "# MD only\n")
+
+        IndexGenerator().update_index(
+            sops_dir, [_sample_template("md_only", "MD Only")],
+        )
+
+        content = (tmp_path / "base" / "index.md").read_text(encoding="utf-8")
+        assert "**Total SOPs:** 1" in content
+        assert "`md_only`" in content
+
+
 class TestDirectoryCreation:
     """Missing dirs created automatically."""
 

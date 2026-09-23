@@ -73,6 +73,14 @@ class TestGenericWriter:
         assert "**Total SOPs:** 2" in index
         assert "`a-first`" in index and "`b-second`" in index
 
+    def test_the_catalogue_lists_the_sop_without_the_json_sidecar(self, tmp_path):
+        """Without ``json_export`` the SOP just written is still listed."""
+        writer = GenericWriter(output_dir=tmp_path, json_export=False)
+        writer.write_sop({"slug": "a-first", "title": "First SOP", "steps": []})
+        index = (tmp_path / "index.md").read_text(encoding="utf-8")
+        assert "**Total SOPs:** 1" in index
+        assert "`a-first`" in index
+
     def test_get_sops_dir(self, tmp_path):
         writer = GenericWriter(output_dir=tmp_path)
         assert writer.get_sops_dir() == tmp_path / "sops"

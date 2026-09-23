@@ -164,14 +164,16 @@ class IndexGenerator:
         in *sops_dir* (``archive/`` excluded), so a batch that touches one
         SOP never drops the others.  *sop_entries* (templates from the
         current batch) replace the disk entry of the same slug, so a fresh
-        batch wins; a batch entry with no file on disk (a draft the
-        hand-off gate held back) is not listed.  The index file is placed
-        in the parent of ``sops_dir`` (alongside the ``sops/`` directory).
+        batch wins.  A batch entry is listed only when its SOP is on disk:
+        its ``sop.<slug>.v3.json`` or, for a writer without the JSON
+        sidecar, its ``sop.<slug>.md``; a draft the hand-off gate held back
+        has neither.  The index file is placed in the parent of
+        ``sops_dir`` (alongside the ``sops/`` directory).
         """
         entries = {e.get("slug", "unknown"): e for e in load_disk_entries(sops_dir)}
         for entry in sop_entries:
             slug = entry.get("slug", "unknown")
-            if slug in entries:
+            if slug in entries or (sops_dir / f"sop.{slug}.md").is_file():
                 entries[slug] = entry
         content = self.generate_index(sops_dir, list(entries.values()))
         AtomicWriter.write(sops_dir.parent / "index.md", content)
