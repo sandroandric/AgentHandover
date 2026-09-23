@@ -42,9 +42,13 @@ QUERY = "find out whether a web domain name can still be registered"
 
 def _approved_skill(kb_root: Path) -> dict:
     proc = sop_to_procedure(generated_sop_template("check_domain_availability"))
+    # Approved for agents: what the approval leaves (trust "suggest") and a
+    # goal, so the hand-off gate (ledger.handoff_gate) lets it through.
     proc.update({
         "id": SLUG, "slug": SLUG, "title": "Check Domain Availability",
+        "goal": "Find out whether a domain is free to register and what it costs.",
         "lifecycle_state": "agent_ready",
+        "constraints": {"trust_level": "suggest", "guardrails": []},
     })
     kb = KnowledgeBase(root=kb_root)
     kb.ensure_structure()
@@ -144,7 +148,8 @@ def test_an_agent_pairs_and_finds_the_skill_by_meaning(
     assert search["results"][0]["slug"] == SLUG
     assert search["results"][0]["title"] == "Check Domain Availability"
 
-    assert answer["ready"][0]["slug"] == SLUG
+    assert [s["slug"] for s in answer["ready"]["ready"]] == [SLUG]
+    assert answer["ready"]["held_back"] == []
     # get_skill returns the same packet body Claude Code reads from disk.
     packet_body = answer["skill"]["packet"].split("\n---\n", 1)[1]
     disk_body = skill_file.read_text(encoding="utf-8").split("\n---\n", 1)[1]

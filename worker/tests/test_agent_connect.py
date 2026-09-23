@@ -44,8 +44,10 @@ def fake_kb(tmp_path: Path) -> Path:
         "id": "reddit-marketing",
         "title": "Reddit Community Marketing",
         "description": "Daily engagement workflow",
+        "goal": "Keep the brand present in three subreddits every day",
         "lifecycle_state": "agent_ready",
-        "constraints": {"guardrails": ["Max 5/day"]},
+        # What "Approve for agents" leaves: trust above observe.
+        "constraints": {"guardrails": ["Max 5/day"], "trust_level": "suggest"},
         "voice_profile": {"formality": "casual"},
     })
     (proc_dir / "reddit-marketing.json").write_text(
@@ -439,7 +441,7 @@ class TestConnectHermes:
 
         content = skill_file.read_text(encoding="utf-8")
         # Frontmatter must include the name field for Hermes
-        assert content.startswith("---\nname: reddit-marketing\ndescription: Daily engagement workflow.\n")
+        assert content.startswith("---\nname: reddit-marketing\ndescription: Keep the brand present in three subreddits every day.\n")
         assert "Max 5/day" in content
         assert "## Execution protocol" in content
         # Generator-shaped steps keep their target and verify line

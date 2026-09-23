@@ -575,6 +575,11 @@ def validate_procedure(data: dict) -> list[str]:
         if list_field in data and not isinstance(data[list_field], list):
             errors.append(f"Field '{list_field}' must be a list")
 
+    # Learning ledger
+    if "knowledge" in data:
+        from agenthandover_worker.ledger import validate_knowledge
+        errors.extend(validate_knowledge(data["knowledge"]))
+
     # Confidence summary
     valid_labels = ("high", "medium", "low")
     if "confidence_summary" in data:

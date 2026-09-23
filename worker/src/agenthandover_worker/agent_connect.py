@@ -66,7 +66,26 @@ def _load_procedures() -> list[dict]:
 
 
 def _ready_procedures() -> list[dict]:
-    return [p for p in _load_procedures() if p.get("lifecycle_state") == "agent_ready"]
+    """The procedures every connector hands to agents: those that pass
+    ``ledger.handoff_gate`` (approved, no required slot unknown, trust
+    above observe, fresh)."""
+    from agenthandover_worker.ledger import handoff_gate
+
+    return [p for p in _load_procedures() if handoff_gate(p).ok]
+
+
+def _held_back() -> list[tuple[dict, list[str]]]:
+    """Approved (agent_ready) procedures the gate holds back, with why."""
+    from agenthandover_worker.ledger import handoff_gate
+
+    held = []
+    for proc in _load_procedures():
+        if proc.get("lifecycle_state") != "agent_ready":
+            continue
+        gate = handoff_gate(proc)
+        if not gate.ok:
+            held.append((proc, gate.reasons))
+    return held
 
 
 def _is_generated(path: Path) -> bool:
@@ -203,7 +222,8 @@ def pair_claude_code(claude: str | None = None) -> bool:
 
 
 def prune_claude_skills(skills_dir: Path) -> list[str]:
-    """Remove exported Skills whose procedure is not agent_ready.
+    """Remove exported Skills whose procedure fails ``ledger.handoff_gate``
+    (not agent_ready, a required slot unknown, trust observe, or stale).
 
     Only ``<skills_dir>/<slug>/SKILL.md`` directories that AgentHandover
     generated (the footer names it) and whose slug is a known procedure
@@ -212,9 +232,11 @@ def prune_claude_skills(skills_dir: Path) -> list[str]:
     """
     from agenthandover_worker.claude_skill_writer import forget_export
 
+    from agenthandover_worker.ledger import handoff_gate
+
     removed: list[str] = []
     for proc in _load_procedures():
-        if proc.get("lifecycle_state") == "agent_ready":
+        if handoff_gate(proc).ok:
             continue
         ident = proc.get("id") or proc.get("slug")
         if not ident:
@@ -231,11 +253,13 @@ def connect_claude_code(
     commands_dir: Path | None = None,
     skills_dir: Path | None = None,
 ) -> None:
-    """Make Claude Code see exactly the agent_ready procedures, as Skills.
+    """Make Claude Code see exactly the procedures that pass
+    ``ledger.handoff_gate``, as Skills.
 
-    1. Writes each agent_ready procedure to ``<skills_dir>/<slug>/SKILL.md``
+    1. Writes each such procedure to ``<skills_dir>/<slug>/SKILL.md``
        (``ClaudeSkillWriter``, the ``claude-skill`` packet).
-    2. Removes exported Skills of procedures that are not agent_ready.
+    2. Removes exported Skills of procedures that fail the gate, and
+       prints why each approved procedure was held back.
     3. Writes ``<commands_dir>/agenthandover-list.md``, a pointer to those
        Skills, and removes the ``ah-<slug>.md`` commands older versions
        generated (a user's own ``ah-*.md`` files are kept).
@@ -299,6 +323,8 @@ def connect_claude_code(
     print(f"  Skills installed: {len(ready)}")
     for path in skill_paths:
         print(f"    /{path.parent.name}  ({path})")
+    for proc, reasons in _held_back():
+        print(f"  Held back: {proc.get('id') or proc.get('slug')}: {'; '.join(reasons)}")
     print(f"  Index: {index_path}")
 
 

@@ -181,10 +181,16 @@ Steps refer to inputs as `{{name}}`.
 - Compilation (~0 min): Opening the 'Daily news - 15 Sep' note and pasting titles/URLs with typed summaries.
 - Distribution (~0 min): Copying the note content and pasting it into the #daily-news Slack channel.
 
+## Not yet known
+
+- Trigger (what starts the task: a time, an event or a message): not learned from the recordings. Ask the user; do not assume.
+- Verification (how the user checks the result): not learned from the recordings. Ask the user; do not assume.
+
 ## Evidence
 
 - Observed 1 demonstration(s); confidence 0.93
 - Learned from: focus
+- 2026-09-15 focus session `1a85097c-b382-4864-93f3-3b1ba42dd34f`
 
 ## Execution protocol
 

@@ -2005,7 +2005,7 @@ def _process_focus_sessions_v2(
         # This recording is one instance of the procedure: the ledger's
         # evidence for what was learned from it.
         append_observation(procedure_dict, ObservationEvidence(
-            date=datetime.now(timezone.utc).strftime("%Y-%m-%d"), type="focus",
+            date=str(focus_events[0].get("timestamp") or "")[:10], type="focus",
             duration_minutes=0, session_id=session_id, event_count=len(focus_events),
         ), once_per_session=True)
         if behavioral_synthesizer is not None:

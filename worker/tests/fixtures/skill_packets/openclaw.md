@@ -81,12 +81,17 @@ Steps refer to inputs as `{{name}}`.
 ## Guardrails
 
 - Never add a domain to the cart or pay for anything
-- Trust level: observe
+- Trust level: suggest
 
 ## Voice
 
 When producing text for this workflow, match the user's writing style:
 - Tone: casual
+
+## Not yet known
+
+- Trigger (what starts the task: a time, an event or a message): not learned from the recordings. Ask the user; do not assume.
+- Verification (how the user checks the result): not learned from the recordings. Ask the user; do not assume.
 
 ## Evidence
 

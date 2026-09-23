@@ -68,7 +68,7 @@ from datetime import datetime, timezone
 SLOTS: dict[str, str] = {
     "goal": "what the user is producing",
     "done_criteria": "how to tell the task is finished",
-    "trigger": "what starts the task (a time, an event, a message)",
+    "trigger": "what starts the task: a time, an event or a message",
     "inputs": "the values that change from run to run",
     "steps": "the actions, in order",
     "decisions": "how the user chooses between options",
@@ -198,6 +198,10 @@ def _observed(proc: dict, slot: str) -> dict:
             return _unknown()
         return known("steps", instances + _step_frames(proc))
     if slot == "goal":
+        # The synthesiser writes "Unclear — ..." when it could not tell.
+        goal = proc.get("goal")
+        if isinstance(goal, str) and goal.strip().lower().startswith("unclear"):
+            return _unknown()
         return hypothesis(_first_filled(proc, ("goal",)))
     if slot == "done_criteria":
         return hypothesis(_first_filled(proc, (
@@ -214,7 +218,9 @@ def _observed(proc: dict, slot: str) -> dict:
     if slot == "decisions":
         return hypothesis(_first_filled(proc, ("selection_criteria", "branches")))
     if slot == "exceptions":
-        return hypothesis(_first_filled(proc, ("exceptions_seen",)))
+        return hypothesis(_first_filled(proc, (
+            "exceptions_seen", "execution_overview.common_errors",
+        )))
     if slot == "guardrails":
         return hypothesis(_first_filled(proc, ("constraints.guardrails",)))
     if slot == "verification":

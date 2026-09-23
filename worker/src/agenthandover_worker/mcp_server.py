@@ -141,25 +141,40 @@ def build_mcp_server():
 
     @mcp.tool()
     def list_ready_skills() -> str:
-        """List all Skills ready for agent execution.
+        """List the Skills an agent may run, and the approved ones held back.
 
-        Returns only procedures that have passed all readiness gates
-        (lifecycle=agent_ready, trust=execute, freshness check).
-        If a procedure is in this list, an agent can execute it.
+        Returns ``{"ready": [...], "held_back": [...]}``.  A Skill is in
+        ``ready`` only when all four checks of ``ledger.handoff_gate`` pass:
+        a human approved it (lifecycle ``agent_ready``); none of its required
+        ledger slots (goal, steps, done criteria) is unknown; its trust level
+        is above ``observe``; its freshness is at least the floor.  An
+        approved Skill failing any check is listed in ``held_back`` with the
+        failing ``reasons``.  Slots still unknown are listed per Skill in
+        ``not_yet_known``: ask the user about those, never assume them.
         """
-        kb = _kb()
-        procedures = kb.list_procedures()
-        ready = []
-        for proc in procedures:
-            if proc.get("lifecycle_state") == "agent_ready":
-                ready.append({
+        from agenthandover_worker.ledger import handoff_gate, unknown_slots
+
+        ready, held_back = [], []
+        for proc in _kb().list_procedures():
+            if proc.get("lifecycle_state") != "agent_ready":
+                continue
+            gate = handoff_gate(proc)
+            if not gate.ok:
+                held_back.append({
                     "slug": proc.get("id", ""),
                     "title": proc.get("title", ""),
-                    "description": proc.get("description", ""),
-                    "apps": proc.get("apps_involved", []),
-                    "confidence": proc.get("confidence_avg", 0),
+                    "reasons": gate.reasons,
                 })
-        return json.dumps(ready, indent=2)
+                continue
+            ready.append({
+                "slug": proc.get("id", ""),
+                "title": proc.get("title", ""),
+                "description": proc.get("description", ""),
+                "apps": proc.get("apps_involved", []),
+                "confidence": proc.get("confidence_avg", 0),
+                "not_yet_known": unknown_slots(proc),
+            })
+        return json.dumps({"ready": ready, "held_back": held_back}, indent=2)
 
     @mcp.tool()
     def list_all_skills() -> str:

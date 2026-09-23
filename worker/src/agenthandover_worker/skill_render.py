@@ -26,6 +26,7 @@ import yaml
 
 from agenthandover_worker import __version__
 from agenthandover_worker.event_helpers import display_name
+from agenthandover_worker.ledger import SLOTS, unknown_slots
 from agenthandover_worker.procedure_schema import procedure_steps, step_key
 
 Target = Literal[
@@ -548,6 +549,14 @@ def body_sections(proc: dict) -> list[str]:
                 line += f": {phase['description']}"
             timing.append(line)
     sections.append(_section("Timing", timing))
+
+    # What the ledger does not know yet: said, so the agent asks instead
+    # of assuming.
+    sections.append(_section("Not yet known", [
+        f"- {slot.replace('_', ' ').capitalize()} ({SLOTS[slot]}): not learned "
+        "from the recordings. Ask the user; do not assume."
+        for slot in unknown_slots(proc)
+    ]))
 
     # Evidence links
     evidence = proc.get("evidence") or {}

@@ -14,6 +14,7 @@ import os
 import shutil
 import sys
 from dataclasses import dataclass
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -81,14 +82,32 @@ async def _agent_runs_skill(home: Path, slug: str, *, deviate: str) -> AgentSess
     return AgentSession(tools, ready, skill, started, step_result, completed)
 
 
+# Approved long ago and never given trust: the hand-off gate holds it back.
+STALE_SLUG = "weekly-expense-report"
+
+
+def _stale_observe_procedure(now) -> dict:
+    return {
+        "schema_version": "3.2.0", "id": STALE_SLUG, "slug": STALE_SLUG,
+        "title": "Weekly expense report",
+        "goal": "File the week's receipts as one expense report.",
+        "outcome": "The report is submitted.",
+        "steps": [{"step_id": "step_1", "action": "Open the expenses page"}],
+        "lifecycle_state": "agent_ready",
+        "constraints": {"trust_level": "observe", "guardrails": []},
+        "staleness": {"last_observed": (now - timedelta(days=150)).isoformat()},
+    }
+
+
 def _journey(events_db, worker, clock, temp_home, cassette):
     run = start_focus_run(
         events_db=events_db, worker=worker, clock=clock,
         temp_home=temp_home, cassette=cassette,
     )
     slug = tick_until_skill(run, clock)["id"]
-    approve_for_agents(run, clock, slug)
     kb = run.worker.knowledge_base
+    kb.save_procedure(_stale_observe_procedure(clock.now()))
+    approve_for_agents(run, clock, slug)
     before = kb.get_procedure(slug)
     session = asyncio.run(
         _agent_runs_skill(temp_home.path, slug, deviate="Opened the digest from Drafts instead"),
@@ -102,7 +121,15 @@ def test_mcp_agent_gets_the_packet_and_reports_one_run(
     kb, slug, before, after, session = _journey(events_db, worker, clock, temp_home, cassette)
 
     assert session.tools == TOOLS
-    assert [s["slug"] for s in session.ready] == [slug]
+    # Only the approved focus Skill is ready; the stale, observe-trust one
+    # is neither listed nor installed for Claude Code.
+    assert [s["slug"] for s in session.ready["ready"]] == [slug]
+    assert not (temp_home.path / ".claude" / "skills" / STALE_SLUG).exists()
+    [held] = session.ready["held_back"]
+    assert held["slug"] == STALE_SLUG, held
+    assert any("trust level is 'observe'" in r for r in held["reasons"]), held
+    assert any(r.startswith("freshness") for r in held["reasons"]), held
+    assert (temp_home.path / ".claude" / "skills" / slug / "SKILL.md").is_file()
     # get_skill hands the agent the same packet every target renders.
     assert session.skill["packet"] == render_packet(before, target="mcp")
     packet_ids = [s.step_id for s in parse_packet(session.skill["packet"]).steps()]
