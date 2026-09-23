@@ -1,6 +1,7 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
+mod browser_extension;
 mod commands;
 mod display;
 mod machine;
@@ -92,8 +93,12 @@ enum Commands {
     Doctor {
         /// Print only the Ollama and memory checks, as JSON (what the
         /// app's onboarding shows)
-        #[arg(long)]
+        #[arg(long, conflicts_with = "extension_json")]
         ollama_json: bool,
+        /// Print only whether the browser extension is built and loaded in
+        /// a browser, as JSON (what the app's setup shows)
+        #[arg(long)]
+        extension_json: bool,
     },
     /// Uninstall AgentHandover
     Uninstall {
@@ -264,8 +269,9 @@ fn main() -> Result<()> {
         Commands::Setup { check, extension, vlm, tier, .. } => {
             commands::setup::run(check, extension, vlm, tier.as_deref())
         }
-        Commands::Doctor { ollama_json: false } => commands::doctor::run(),
-        Commands::Doctor { ollama_json: true } => commands::doctor::print_ollama_json(),
+        Commands::Doctor { ollama_json: true, .. } => commands::doctor::print_ollama_json(),
+        Commands::Doctor { extension_json: true, .. } => commands::doctor::print_extension_json(),
+        Commands::Doctor { .. } => commands::doctor::run(),
         Commands::Uninstall { purge_data } => commands::uninstall::run(purge_data),
         Commands::Focus { action } => match action {
             FocusAction::Start { title } => commands::focus::start(&title),
