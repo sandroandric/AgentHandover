@@ -42,7 +42,7 @@ def test_install_journey() -> None:
 
 @pytest.mark.xfail(strict=True, reason=(
     "WP-I1/WP-I2: agenthandover-mcp has no --help: mcp_server.main "
-    "(mcp_server.py:351-364) ignores every argument but --sse and starts the "
+    "(mcp_server.py:394-406) ignores every argument but --sse and starts the "
     "stdio server, so '--help' prints nothing and exits 0 only because stdin "
     "is at EOF (from a terminal it waits for an MCP client)"
 ))

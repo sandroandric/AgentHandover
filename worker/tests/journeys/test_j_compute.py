@@ -70,8 +70,8 @@ def _run(events_db, worker, clock, temp_home, cassette) -> ComputeRun:
 
 @pytest.mark.xfail(strict=True, reason=(
     "WP-C4/WP-C5: nothing gates the model per frame beyond the stale-skip "
-    "(_StaleTracker, scene_annotator.py:549-577, which resets on every title "
-    "change): _process_annotations (main.py:227) sends every changed frame "
+    "(_StaleTracker, scene_annotator.py:604-643, which resets on every title "
+    "change): _process_annotations (main.py:221) sends every changed frame "
     "to the VLM, with no annotation cache or keyframe gate, so a volatile "
     "hour annotates hundreds of frames"
 ))
@@ -110,7 +110,7 @@ def test_compute_writes_no_artifact_and_refreshes_fts_quickly(
 
 @pytest.mark.xfail(strict=True, reason=(
     "WP-C5: the loop rewrites curation-queue.json on every tick: "
-    "_write_curation_queue(procedure_curator, force=True) at main.py:4796 "
+    "_write_curation_queue(procedure_curator, force=True) at main.py:4808 "
     "runs unconditionally after the trigger drain (the driver mirrors it), "
     "not only when a trigger changed the queue"
 ))

@@ -79,7 +79,7 @@ def test_privacy_passive_frames_are_processed(
     "PrivacyZoneChecker._extract_app_info (privacy_zones.py:334) reads "
     "window 'app'/'app_name'/'app_bundle_id', but the daemon writes 'app_id' "
     "('pid:944:1Password'), so the 1Password frame is annotated; and the "
-    "privacy_blocked branch of _process_annotations (main.py:268) keeps "
+    "privacy_blocked branch of _process_annotations (main.py:262) keeps "
     "the JPEG on disk"
 ))
 def test_privacy_password_manager_frame_is_never_annotated_and_its_jpeg_is_deleted(
@@ -96,7 +96,7 @@ def test_privacy_password_manager_frame_is_never_annotated_and_its_jpeg_is_delet
 
 @pytest.mark.xfail(strict=True, reason=(
     "WP-V1/#8: the worker has no redaction before the model: "
-    "scene_annotator.build_annotation_prompt (scene_annotator.py:475) puts the "
+    "scene_annotator.build_annotation_prompt (scene_annotator.py:524) puts the "
     "OCR of the Gmail draft, password included, into the prompt verbatim, and "
     "the annotation it returns is stored as is (no worker redaction.py yet)"
 ))
@@ -118,7 +118,7 @@ def test_privacy_password_on_screen_never_reaches_the_model_or_the_store(
     "WP-V1/#8 (worker half): the daemon strips the extension's URL, but the "
     "reset token is on screen; the annotation's location is stored as the "
     "model read it from the address-bar OCR, query included "
-    "(SceneAnnotator.annotate_event, scene_annotator.py:768, keeps "
+    "(SceneAnnotator.annotate_event, scene_annotator.py:962, keeps "
     "_validate_annotation's output verbatim; no URL reduction in the worker)"
 ))
 def test_privacy_stored_urls_carry_no_query_string(
