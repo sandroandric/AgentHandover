@@ -370,6 +370,11 @@ impl ServiceFacts<'_> {
     }
 }
 
+/// A plist `brew services` wrote (`homebrew.mxcl.ollama`, `sh.brew.ollama`).
+fn is_brew_service(item: &LaunchItem) -> bool {
+    item.label.starts_with("homebrew.mxcl.") || item.label.starts_with("sh.brew.")
+}
+
 /// How to leave only `keep` installed and serving.
 fn keep_only(keep: &Install, facts: &ServiceFacts) -> String {
     let mut steps: Vec<String> = Vec::new();
@@ -385,9 +390,14 @@ fn keep_only(keep: &Install, facts: &ServiceFacts) -> String {
         });
     }
     for item in facts.launch_items {
+        // `brew services` owns its own plist: kept with Homebrew, removed
+        // by the `brew services stop` above otherwise.
+        let brew_installed = facts.installs.iter().any(|i| i.kind == HOMEBREW);
+        if is_brew_service(item) && brew_installed {
+            continue;
+        }
         let runs_keep = item.program.as_deref().is_some_and(|p| keep.owns(&canonical(p)));
-        let is_brew_service = item.label.starts_with("homebrew.mxcl.");
-        if !runs_keep && !(is_brew_service && keep.kind != HOMEBREW) {
+        if !runs_keep {
             steps.push(format!(
                 "launchctl bootout gui/$(id -u) {0} and delete {0}",
                 item.plist.display()
@@ -820,7 +830,26 @@ pub fn gather(host_url: &str, models: &ConfiguredModels) -> Report {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agenthandover_common::tiers::table;
+
+    /// A fixed tier table (the shipped one changes with the tier plan; the
+    /// memory arithmetic here must not).
+    fn tiers() -> TierTable {
+        serde_json::from_str(
+            r#"{"schema_version": 1, "basis": "", "minimum_ollama_version_for_gemma4": "0.34.0",
+                "embedding_model": "nomic-embed-text",
+                "model_sizes_gb": {"qwen3.5:4b": 3.4, "gemma4:12b-it-qat": 7.2,
+                                   "gemma4:31b-it-qat": 18.0, "nomic-embed-text": 0.27},
+                "tiers": [
+                  {"id": "standard", "label": "Standard", "subtitle": "", "min_ram_gb": 0,
+                   "annotation_model": "qwen3.5:4b", "sop_model": "qwen3.5:4b"},
+                  {"id": "recommended", "label": "Recommended", "subtitle": "", "min_ram_gb": 16,
+                   "annotation_model": "qwen3.5:4b", "sop_model": "gemma4:12b-it-qat"},
+                  {"id": "max_quality", "label": "Max Quality", "subtitle": "", "min_ram_gb": 48,
+                   "annotation_model": "qwen3.5:4b", "sop_model": "gemma4:31b-it-qat"}
+                ]}"#,
+        )
+        .unwrap()
+    }
 
     const MIN: &str = "0.34.0";
 
@@ -1141,7 +1170,7 @@ mod tests {
 
     #[test]
     fn need_is_the_larger_model_plus_embedding_and_margin() {
-        let t = table();
+        let t = &tiers();
         // Table sizes: 7.2 GB gemma, 0.27 GB embedding, 1 GB margin.
         assert_eq!(need_bytes(t, &[], "qwen3.5:4b", "gemma4:12b-it-qat"), 8_470_000_000);
         // A loaded model's /api/ps size (with context) wins over the table.
@@ -1157,7 +1186,7 @@ mod tests {
 
     #[test]
     fn a_tier_that_fits_passes() {
-        let t = table();
+        let t = &tiers();
         let (h, f) = diagnose_headroom(t, &mem(12 * GB, &[], Some(GB), Some(100 * GB)), "Recommended", "qwen3.5:4b", "gemma4:12b-it-qat");
         assert_eq!(f[0].level, Level::Pass);
         assert_eq!(f[0].title, "Memory for the Recommended tier: needs 8.5 GB, 12.0 GB available now");
@@ -1172,7 +1201,7 @@ mod tests {
 
     #[test]
     fn a_tier_that_does_not_fit_suggests_the_one_that_does() {
-        let t = table();
+        let t = &tiers();
         // 3 GB free + a loaded 1.6 GB model: 4.6 GB available.
         let loaded = [("qwen3.5:4b".to_string(), 1_600_000_000)];
         let (h, f) = diagnose_headroom(t, &mem(3 * GB, &loaded, None, None), "Recommended", "qwen3.5:4b", "gemma4:12b-it-qat");
@@ -1195,19 +1224,62 @@ mod tests {
 
     #[test]
     fn nothing_fits() {
-        let t = table();
+        let t = &tiers();
         let (_, f) = diagnose_headroom(t, &mem(GB / 2, &[], None, None), "Standard", "qwen3.5:4b", "qwen3.5:4b");
         assert!(text(&f[0]).contains("no tier fits in the memory free now"), "{}", text(&f[0]));
     }
 
     #[test]
     fn heavy_swap_and_a_full_disk_warn() {
-        let t = table();
+        let t = &tiers();
         let (_, f) = diagnose_headroom(t, &mem(12 * GB, &[], Some(44 * GB), Some(4 * GB)), "Standard", "qwen3.5:4b", "qwen3.5:4b");
         assert_eq!(f[1].level, Level::Warn);
         assert_eq!(f[1].title, "Swap in use: 44.0 GB (more than 8.0 GB)");
         assert_eq!(f[2].level, Level::Warn);
         assert_eq!(f[2].title, "Free disk: 4.0 GB (less than 10.0 GB)");
+    }
+
+    /// The app's onboarding decodes this exact JSON
+    /// (app/.../OllamaReportTests.swift reads the same fixture).
+    #[test]
+    fn the_report_matches_the_apps_fixture() {
+        let host = local();
+        let installs = [
+            Install { kind: APP, path: "/Applications/Ollama.app".into(), version: Some("0.30.6".into()) },
+            Install { kind: HOMEBREW, path: "/opt/homebrew/Cellar/ollama/0.34.2".into(), version: Some("0.34.2".into()) },
+        ];
+        let items = [LaunchItem {
+            label: "homebrew.mxcl.ollama".into(),
+            plist: "/Users/me/Library/LaunchAgents/homebrew.mxcl.ollama.plist".into(),
+            program: Some("/opt/homebrew/opt/ollama/bin/ollama".into()),
+        }];
+        let serving = Serving { pid: 812, executable: "/Applications/Ollama.app/Contents/Resources/ollama".into() };
+        let mut findings = diagnose_service(&facts(&host, Some("0.30.6"), &installs, &items, Some(&serving)));
+        let loaded = [("qwen3.5:4b".to_string(), 4_100_000_000)];
+        let (headroom, more) = diagnose_headroom(
+            &tiers(),
+            &mem(3 * GB, &loaded, Some(44 * GB), Some(40 * GB)),
+            "Recommended",
+            "qwen3.5:4b",
+            "gemma4:12b-it-qat",
+        );
+        findings.extend(more);
+        let report = Report {
+            host,
+            version: Some("0.30.6".into()),
+            minimum: MIN.into(),
+            installs: installs.to_vec(),
+            launch_items: items.to_vec(),
+            serving: Some(serving),
+            findings,
+            headroom: Some(headroom),
+        };
+        let json = serde_json::to_string_pretty(&report).unwrap() + "\n";
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/fixtures/ollama_report/app_serving_ahead_of_formula.json");
+        if std::env::var_os("AH_WRITE_FIXTURES").is_some() {
+            std::fs::write(path, &json).unwrap();
+        }
+        assert_eq!(json, std::fs::read_to_string(path).unwrap(), "rerun with AH_WRITE_FIXTURES=1 to update");
     }
 
     #[test]

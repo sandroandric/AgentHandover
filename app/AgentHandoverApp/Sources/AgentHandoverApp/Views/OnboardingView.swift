@@ -73,6 +73,10 @@ struct OnboardingView: View {
     @State private var ollamaInstalled = false
     @State private var ollamaRunning = false
     @State private var ollamaHasRequiredModels = false
+    /// `agenthandover doctor --ollama-json`: the serving Ollama, its
+    /// problems and each tier's memory need (nil when the CLI is absent).
+    @State private var ollamaReport: OllamaReport? = nil
+    @State private var readAppState = false
     @State private var remoteConfigSaved = false
     @State private var vlmStateRefreshing = false
     @State private var vlmStatusMessage = ""
@@ -1172,12 +1176,64 @@ struct OnboardingView: View {
             }
             .multilineTextAlignment(.center)
             .frame(maxWidth: 440)
+
+            if isScreenRecording {
+                appStateReadingCard
+            }
         }
         // Auto-recheck ONLY when returning from System Settings (not on step entry)
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             if awaitingSettingsReturn == permission && !granted {
                 awaitingSettingsReturn = nil
                 recheckPermission(permission, returnedFromSettings: true)
+            }
+        }
+    }
+
+    /// `[privacy] read_app_state`: an opt-in, explained before macOS asks.
+    private var appStateReadingCard: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Toggle("", isOn: Binding(
+                get: { readAppState },
+                set: { on in
+                    readAppState = on
+                    setAppStateReading(on)
+                }
+            ))
+            .toggleStyle(.switch)
+            .labelsHidden()
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Also read the open document (optional)")
+                    .font(.system(size: 13, weight: .semibold, design: .rounded))
+                    .foregroundColor(darkNavy)
+                Text("Reads the name of the open page, document or message in Safari, Mail, Notes, Finder and a few other Apple apps. macOS asks once per app whether AgentHandover may \u{201C}control\u{201D} it: that is the only way macOS offers to read it. AgentHandover only reads; it never acts in the app. You can turn an app off later in System Settings > Privacy & Security > Automation.")
+                    .font(.system(size: 11))
+                    .foregroundColor(darkNavy.opacity(0.5))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: 440, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 10)
+                .fill(readAppState ? goldenYellow.opacity(0.15) : lightGray)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(readAppState ? warmOrange.opacity(0.5) : darkNavy.opacity(0.1), lineWidth: 1)
+        )
+        .onAppear { readAppState = AppStateReading.isEnabled }
+    }
+
+    /// Save the choice, restart a running daemon so it applies now, and
+    /// when turned on let macOS ask for the supported apps open now.
+    private func setAppStateReading(_ on: Bool) {
+        AppStateReading.setEnabled(on)
+        if on { AppStateReading.askForOpenApps() }
+        DispatchQueue.global(qos: .userInitiated).async {
+            if ServiceController.isDaemonRunning() {
+                ServiceController.restartDaemon()
             }
         }
     }
@@ -1428,6 +1484,44 @@ struct OnboardingView: View {
 
     // MARK: - Local VLM Content
 
+    /// The serving Ollama and, when it is too old or competes with another
+    /// install, `doctor`'s explanation and fix, word for word.
+    @ViewBuilder
+    private var ollamaReportCard: some View {
+        if let report = ollamaReport, report.serviceLine != nil || !report.problems.isEmpty {
+            VStack(alignment: .leading, spacing: 8) {
+                if let line = report.serviceLine {
+                    Text(line)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(darkNavy.opacity(0.6))
+                }
+                ForEach(Array(report.problems.enumerated()), id: \.offset) { _, finding in
+                    VStack(alignment: .leading, spacing: 3) {
+                        HStack(spacing: 6) {
+                            Image(systemName: finding.level == .fail
+                                ? "xmark.octagon.fill" : "exclamationmark.triangle.fill")
+                                .foregroundColor(finding.level == .fail ? .red : warmOrange)
+                                .font(.system(size: 12))
+                            Text(finding.title)
+                                .font(.system(size: 12, weight: .bold, design: .rounded))
+                                .foregroundColor(darkNavy)
+                        }
+                        ForEach(Array(finding.lines.enumerated()), id: \.offset) { _, line in
+                            Text(line)
+                                .font(.system(size: 11))
+                                .foregroundColor(darkNavy.opacity(0.6))
+                                .textSelection(.enabled)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                }
+            }
+            .padding(12)
+            .frame(maxWidth: 440, alignment: .leading)
+            .background(RoundedRectangle(cornerRadius: 10).fill(lightGray))
+        }
+    }
+
     private var localVLMContent: some View {
         VStack(spacing: 12) {
             if ollamaInstalled {
@@ -1436,6 +1530,8 @@ struct OnboardingView: View {
                     grantedLabel: "Ollama Installed",
                     deniedLabel: ""
                 )
+
+                ollamaReportCard
 
                 if !ollamaRunning {
                     VStack(spacing: 10) {
@@ -1561,6 +1657,12 @@ struct OnboardingView: View {
                                         Text("\(tier.subtitle) \u{00B7} \(tierTable?.downloadLabel(for: tier) ?? "")")
                                             .font(.system(size: 11))
                                             .foregroundColor(darkNavy.opacity(0.5))
+                                        if let memory = ollamaReport?.memoryLabel(forTier: tier.id) {
+                                            Text(memory)
+                                                .font(.system(size: 11, weight: .medium))
+                                                .foregroundColor(ollamaReport?.fits(tier: tier.id) == false
+                                                    ? warmOrange : darkNavy.opacity(0.5))
+                                        }
                                     }
                                     Spacer()
                                 }
@@ -2855,8 +2957,10 @@ struct OnboardingView: View {
             } else {
                 statusMessage = "Download and install Ollama to run models locally."
             }
+            let report = findCLIBinary().flatMap { OllamaReport.load(cliPath: $0) }
 
             Task { @MainActor in
+                self.ollamaReport = report
                 self.ollamaInstalled = installed
                 self.ollamaRunning = running
                 self.ollamaHasRequiredModels = hasRequiredModels

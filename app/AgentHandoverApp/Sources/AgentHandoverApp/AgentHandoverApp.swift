@@ -104,6 +104,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         // Always start capture + observation servers so the daemon can
         // request screenshots at any point — during onboarding or after.
         startRuntimeBridges()
+        // [privacy] read_app_state: macOS asks per app, from here, the
+        // first time the user switches to one (see AppStateReading).
+        AppStateConsentAsker.shared.start()
 
         // The worker serves approvals, search and MCP reporting whether or
         // not capture is on, so it is loaded on every launch (a paused

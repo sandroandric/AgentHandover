@@ -154,8 +154,10 @@ struct ModelTierTable: Decodable {
     /// (right after the header, other `[vlm]` keys and every other section
     /// kept), or `block` appended when there is no `[vlm]` section: the
     /// same edit as `agenthandover setup` (`tiers::apply_vlm_block`).
+    /// `sectionHeader` edits another section the same way.
     static func applyVLMBlock(
-        _ block: String, to config: String, managedKeys: [String] = managedKeys
+        _ block: String, to config: String, managedKeys: [String] = managedKeys,
+        sectionHeader: String = "[vlm]"
     ) -> String {
         var lines = config.components(separatedBy: "\n").map { $0 + "\n" }
         // The piece after the last "\n" has no terminator (and is dropped when empty).
@@ -163,7 +165,7 @@ struct ModelTierTable: Decodable {
         if !last.isEmpty { lines.append(String(last)) }
 
         let trim = { (s: String) in s.trimmingCharacters(in: .whitespacesAndNewlines) }
-        guard let header = lines.firstIndex(where: { trim($0) == "[vlm]" }) else {
+        guard let header = lines.firstIndex(where: { trim($0) == sectionHeader }) else {
             var out = config
             if !out.isEmpty && !out.hasSuffix("\n") { out += "\n" }
             return out + "\n" + block
