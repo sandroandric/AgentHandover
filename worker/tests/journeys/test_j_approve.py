@@ -5,6 +5,10 @@ After J-focus's run leaves the draft, the journey writes the one trigger
 the app writes (``lifecycle-promote`` to ``agent_ready``) and runs one
 tick.  The main loop's idle poll backoff is not driven here (the driver
 ticks on demand); its ceiling is pinned in ``test_trigger_spool.py``.
+
+Claude Code gets the Skill as ``~/.claude/skills/<slug>/SKILL.md`` (WP-P2)
+and the ``/agenthandover-list`` command points at it; no ``ah-<slug>.md``
+command is written any more.
 """
 
 from __future__ import annotations
@@ -19,7 +23,7 @@ from journeys.focus_run import approve_for_agents, start_focus_run, tick_until_s
 
 
 @pytest.mark.parametrize("adapter", ["openclaw", "claude-skill"])
-def test_approve_for_agents_walks_to_agent_ready_and_writes_the_command(
+def test_approve_for_agents_walks_to_agent_ready_and_writes_the_skill(
     adapter, events_db, worker, clock, temp_home, cassette,
 ) -> None:
     run = start_focus_run(
@@ -29,10 +33,10 @@ def test_approve_for_agents_walks_to_agent_ready_and_writes_the_command(
     draft = tick_until_skill(run, clock)
     slug = draft["id"]
     commands = temp_home.path / ".claude" / "commands"
-    command = commands / f"ah-{slug}.md"
+    skill = temp_home.path / ".claude" / "skills" / slug / "SKILL.md"
 
     assert draft["lifecycle_state"] == "draft"
-    assert not command.exists()
+    assert not skill.exists()
 
     tick = approve_for_agents(run, clock, slug)
 
@@ -50,15 +54,38 @@ def test_approve_for_agents_walks_to_agent_ready_and_writes_the_command(
     )
     assert procedure_files == [f"{slug}.json"]
 
-    # Claude Code's /ah-<slug> is the packet; the index lists it with its description.
-    assert command.read_text(encoding="utf-8") == render_packet(proc, target="claude-command")
+    # Claude Code's /<slug> is the packet; the index lists it with its description.
+    assert skill.read_text(encoding="utf-8") == render_packet(proc, target="claude-skill")
     index = (commands / "agenthandover-list.md").read_text(encoding="utf-8")
-    assert f"- **{proc['title']}** (`/ah-{slug}`): {description(proc)}" in index
+    assert f"- **{proc['title']}** (`/{slug}`): {description(proc)}" in index
+    assert _files_under(temp_home.path / ".claude") >= {
+        f"skills/{slug}/SKILL.md", "commands/agenthandover-list.md",
+    }
+    if adapter == "openclaw":
+        assert _files_under(temp_home.path / ".claude") == {
+            f"skills/{slug}/SKILL.md", "commands/agenthandover-list.md",
+        }
 
-    if adapter == "claude-skill":
-        skill = temp_home.path / ".claude" / "skills" / slug / "SKILL.md"
-        assert skill.read_text(encoding="utf-8") == render_packet(proc, target="claude-skill")
-    assert _files_under(temp_home.path / ".claude") >= {f"commands/ah-{slug}.md"}
+
+@pytest.mark.xfail(strict=True, reason=(
+    "with --adapter claude-skill the primary writer is ClaudeSkillWriter, so "
+    "_focus_v2_export (main.py:2102) calls index_generator.update_index with "
+    "the Skills root (~/.claude/skills) and IndexGenerator.update_index "
+    "(exporter.py:174) writes its SOP catalogue to the parent: a stray "
+    "~/.claude/index.md in Claude Code's config directory"
+))
+def test_claude_skill_adapter_writes_only_the_skill_and_the_index_command(
+    events_db, worker, clock, temp_home, cassette,
+) -> None:
+    run = start_focus_run(
+        events_db=events_db, worker=worker, clock=clock,
+        temp_home=temp_home, cassette=cassette, adapter="claude-skill",
+    )
+    slug = tick_until_skill(run, clock)["id"]
+    approve_for_agents(run, clock, slug)
+    assert _files_under(temp_home.path / ".claude") == {
+        f"skills/{slug}/SKILL.md", "commands/agenthandover-list.md",
+    }
 
 
 def _files_under(root: Path) -> set[str]:

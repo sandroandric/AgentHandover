@@ -106,7 +106,7 @@ def test_mcp_agent_gets_the_packet_and_reports_one_run(
     # get_skill hands the agent the same packet every target renders.
     assert session.skill["packet"] == render_packet(before, target="mcp")
     packet_ids = [s.step_id for s in parse_packet(session.skill["packet"]).steps()]
-    assert session.step_result == {"recorded": True, "step_id": packet_ids[0]}
+    assert session.step_result == {"recorded": True, "step_id": packet_ids[0], "deviated": True}
     assert session.completed["final_status"] == "deviated"
 
     # The run log (the runs table the worker and the query API read) holds
