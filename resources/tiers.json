@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "basis": "Annotator qwen3.5:4b on every tier; Skills and synthesis on the largest model the RAM holds. Measured on a 16 GB Mac with Ollama 0.34.2: gemma4:12b-it-qat takes 40+ s per annotated frame (11 s image prefill + 30 s decode) against a 3 s budget. With ordinary apps open, qwen3.5:4b (3.4 GB) and gemma4:12b-it-qat (7.2 GB) do not fit together, so the worker loads one at a time: annotation first, then Skills.",
+  "basis": "Annotator qwen3.5:4b on every tier. Measured on a 16 GB Mac with Ollama 0.34.2: gemma4:12b-it-qat takes 40+ s per annotated frame (11 s image prefill + 30 s decode) against a 3 s budget, and does not fit next to qwen3.5:4b (3.4 GB) once ordinary apps are open. Writing Skills, qwen3.5:4b ran at 29.5 tok/s against Gemma 4 12B's 12.1 tok/s and wrote a Skill in 153 s against 230 s, of comparable quality, so 16 GB Macs run qwen3.5:4b for everything. From 24 GB a Gemma 4 QAT model writes Skills and synthesis, and the worker loads one model at a time: annotation first, then Skills.",
   "minimum_ollama_version_for_gemma4": "0.34.0",
   "embedding_model": "nomic-embed-text",
   "model_sizes_gb": {
@@ -22,16 +22,16 @@
     {
       "id": "recommended",
       "label": "Recommended",
-      "subtitle": "Qwen 3.5 4B watches, Gemma 4 12B QAT writes Skills",
+      "subtitle": "Qwen 3.5 4B for everything, measured best on 16 GB Macs",
       "min_ram_gb": 16,
       "annotation_model": "qwen3.5:4b",
-      "sop_model": "gemma4:12b-it-qat",
+      "sop_model": "qwen3.5:4b",
       "ab_sop_model": ""
     },
     {
       "id": "performance",
       "label": "Performance",
-      "subtitle": "Qwen 3.5 4B watches, Gemma 4 12B QAT writes Skills, with headroom",
+      "subtitle": "Qwen 3.5 4B watches, Gemma 4 12B QAT writes Skills",
       "min_ram_gb": 24,
       "annotation_model": "qwen3.5:4b",
       "sop_model": "gemma4:12b-it-qat",

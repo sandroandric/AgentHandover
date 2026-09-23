@@ -62,6 +62,9 @@ class ModelProfile:
     # prompt tokens at the 20-keyframe cap + num_predict; synthesis 4,225 +
     # 3,000; reasoner calls <= 1,002 + 4,000.  Gemma (num_predict 6,000):
     # 12,619 -> 16,384.  Qwen (num_predict 12,000): 18,619 -> 24,576.
+    # Qwen 3.5 4B is the SOP model on the Standard and Recommended (16 GB)
+    # tiers, so those tiers' generation phase runs at 24,576; Gemma 4 12B
+    # QAT (Performance) at 16,384 and 31B QAT (Max Quality) at 32,768.
     sop_system: str = ""
     sop_temperature: float = 0.3
     sop_num_predict: int = 6000
@@ -199,7 +202,8 @@ _PROFILES: dict[str, ModelProfile] = {
         diff_presence_penalty=1.0,
         diff_think=False,
     ),
-    # QAT 12B — the v0.4.0 default for the 16GB and 24GB tiers.  Settings
+    # QAT 12B — the SOP model of the 24GB tier (v0.4.0 also used it on 16GB;
+    # WP-F6 moved 16GB to qwen3.5:4b).  Settings
     # mirror the base ``gemma4`` profile, which is exactly what the
     # dailynews A/B validation ran on (the 12B QAT inherited the gemma4
     # family profile via fallback and produced the winning output).
@@ -508,15 +512,20 @@ def ollama_supports_gemma4(ollama_host: str = "http://localhost:11434") -> bool:
 EMBEDDING_MODEL = "nomic-embed-text"
 
 # The per-frame annotator is the small resident model on every tier
-# (text-first annotation, WP-C3b); the larger model only writes Skills and
-# behavioural syntheses, where quality matters and calls are rare.
+# (text-first annotation, WP-C3b); from 24 GB a larger model writes Skills
+# and behavioural syntheses, where quality matters and calls are rare.
+# 16 GB runs qwen3.5:4b for both (WP-F6, measured head-to-head on the test
+# Mac); 8 GB keeps it too, pending an 8 GB bench.
 TIER_BASIS = (
-    "Annotator qwen3.5:4b on every tier; Skills and synthesis on the largest "
-    "model the RAM holds. Measured on a 16 GB Mac with Ollama 0.34.2: "
-    "gemma4:12b-it-qat takes 40+ s per annotated frame (11 s image prefill "
-    "+ 30 s decode) against a 3 s budget. With ordinary apps open, "
-    "qwen3.5:4b (3.4 GB) and gemma4:12b-it-qat (7.2 GB) do not fit together, "
-    "so the worker loads one at a time: annotation first, then Skills."
+    "Annotator qwen3.5:4b on every tier. Measured on a 16 GB Mac with Ollama "
+    "0.34.2: gemma4:12b-it-qat takes 40+ s per annotated frame (11 s image "
+    "prefill + 30 s decode) against a 3 s budget, and does not fit next to "
+    "qwen3.5:4b (3.4 GB) once ordinary apps are open. Writing Skills, "
+    "qwen3.5:4b ran at 29.5 tok/s against Gemma 4 12B's 12.1 tok/s and "
+    "wrote a Skill in 153 s against 230 s, of comparable quality, so 16 GB "
+    "Macs run qwen3.5:4b for everything. From 24 GB a Gemma 4 QAT model "
+    "writes Skills and synthesis, and the worker loads one model at a time: "
+    "annotation first, then Skills."
 )
 
 # Download size in GB of the models a tier installs by default (``ollama
@@ -563,15 +572,15 @@ TIERS: tuple[Tier, ...] = (
     Tier(
         id="recommended",
         label="Recommended",
-        subtitle="Qwen 3.5 4B watches, Gemma 4 12B QAT writes Skills",
+        subtitle="Qwen 3.5 4B for everything, measured best on 16 GB Macs",
         min_ram_gb=16,
         annotation_model="qwen3.5:4b",
-        sop_model="gemma4:12b-it-qat",
+        sop_model="qwen3.5:4b",
     ),
     Tier(
         id="performance",
         label="Performance",
-        subtitle="Qwen 3.5 4B watches, Gemma 4 12B QAT writes Skills, with headroom",
+        subtitle="Qwen 3.5 4B watches, Gemma 4 12B QAT writes Skills",
         min_ram_gb=24,
         annotation_model="qwen3.5:4b",
         sop_model="gemma4:12b-it-qat",

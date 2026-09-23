@@ -478,16 +478,17 @@ def model_compute_seconds() -> float:
 class AnnotationBudget:
     """What passive model use has spent in the local day and the last hour.
 
-    Two caps per local day (``[vlm] annotation_max_frames_per_day``:
-    frames sent to the model, cache hits free; and
+    Two caps per local day (``[vlm] annotation_max_frames_per_day`` and
     ``annotation_max_compute_minutes_per_day``) and two per rolling hour
-    (``annotation_max_frames_per_hour``: frames annotated, cache hits
-    included, since each one feeds the diff, classification and search
-    steps; and ``annotation_max_compute_minutes_per_hour``).  Compute is
-    Ollama's own ``prompt_eval_duration + eval_duration`` of every model
-    call made under :func:`charged_to`: annotation, activity
-    classification, frame diffs, passive discovery.  Focus recordings are
-    not charged.
+    (``annotation_max_frames_per_hour`` and
+    ``annotation_max_compute_minutes_per_hour``).  Both frame caps count
+    frames sent to the model; a cache hit is free (WP-F6: it makes no
+    model call, and the diff and classification calls that follow it are
+    charged by the compute caps).  Hits in the hour are still counted for
+    the status.  Compute is Ollama's own ``prompt_eval_duration +
+    eval_duration`` of every model call made under :func:`charged_to`:
+    annotation, activity classification, frame diffs, passive discovery.
+    Focus recordings are not charged.
 
     :meth:`roll` sets the time: the day's counters start over on a new
     date, the hour's charges older than an hour drop out.
@@ -502,7 +503,8 @@ class AnnotationBudget:
     compute_seconds: float = 0.0
     # Epoch seconds of the last roll; charges are stamped with it.
     now: float = 0.0
-    # [time, frames annotated, compute seconds] per charge in the last hour.
+    # [time, model-annotated frames, compute seconds, cache hits] per
+    # charge in the last hour.
     recent: list = field(default_factory=list)
 
     @classmethod
@@ -524,14 +526,22 @@ class AnnotationBudget:
         cutoff = self.now - HOUR_SECONDS
         self.recent = [entry for entry in self.recent if entry[0] > cutoff]
 
-    def hour(self) -> tuple[int, float]:
-        """(frames annotated, compute seconds) in the hour before :attr:`now`."""
+    def _live(self) -> list:
         cutoff = self.now - HOUR_SECONDS
-        live = [entry for entry in self.recent if entry[0] > cutoff]
+        return [entry for entry in self.recent if entry[0] > cutoff]
+
+    def hour(self) -> tuple[int, float]:
+        """(frames sent to the model, compute seconds) in the hour before
+        :attr:`now`: what the hourly caps compare."""
+        live = self._live()
         return (
             int(sum(entry[1] for entry in live)),
             float(sum(entry[2] for entry in live)),
         )
+
+    def hour_cache_hits(self) -> int:
+        """Frames the annotation cache answered in the hour (not capped)."""
+        return int(sum(entry[3] for entry in self._live()))
 
     def pause_reason(self) -> str | None:
         """Why passive model use must wait, or None while both caps allow it."""
@@ -549,25 +559,28 @@ class AnnotationBudget:
         return self.pause_reason() is not None
 
     def charge_frame(self, *, model_call: bool) -> None:
-        """Count one annotated frame: in the hour always, in the day only
-        when the model was called for it (not a cache hit)."""
+        """Count one annotated frame against the day's and the hour's frame
+        caps when the model was called for it; a cache hit is only
+        recorded as a hit."""
         if model_call:
             self.frames += 1
-        self.recent.append([self.now, 1, 0.0])
+            self.recent.append([self.now, 1, 0.0, 0])
+        else:
+            self.recent.append([self.now, 0, 0.0, 1])
 
     def charge_compute(self, seconds: float) -> None:
         """Count Ollama compute (see :func:`charged_to`)."""
         seconds = max(seconds, 0.0)
         if seconds:
             self.compute_seconds += seconds
-            self.recent.append([self.now, 0, seconds])
+            self.recent.append([self.now, 0, seconds, 0])
 
     def to_json(self) -> str:
         return json.dumps({
             "date": self.date,
             "frames": self.frames,
             "compute_seconds": round(self.compute_seconds, 3),
-            "recent": [[t, f, round(s, 3)] for t, f, s in self.recent],
+            "recent": [[t, f, round(s, 3), h] for t, f, s, h in self.recent],
         })
 
     def load(self, raw: str | None) -> None:
@@ -577,10 +590,14 @@ class AnnotationBudget:
             self.date = str(saved.get("date", ""))
             self.frames = int(saved.get("frames", 0))
             self.compute_seconds = float(saved.get("compute_seconds", 0.0))
+            # Entries saved before WP-F6 have no hit count; a frame there
+            # may have been a hit, but counting it as a model call only
+            # keeps the old (stricter) cap for at most an hour.
             self.recent = [
-                [float(t), int(f), float(s)] for t, f, s in saved.get("recent", [])
+                [float(e[0]), int(e[1]), float(e[2]), int(e[3]) if len(e) > 3 else 0]
+                for e in saved.get("recent", [])
             ]
-        except (ValueError, TypeError, AttributeError):
+        except (ValueError, TypeError, AttributeError, IndexError):
             self.date, self.frames, self.compute_seconds, self.recent = "", 0, 0.0, []
 
     def status(self) -> dict:
@@ -593,6 +610,7 @@ class AnnotationBudget:
             "compute_minutes": round(self.compute_seconds / 60.0, 2),
             "max_compute_minutes": round(self.max_compute_seconds / 60.0, 2),
             "hour_frames": hour_frames,
+            "hour_cache_hits": self.hour_cache_hits(),
             "max_frames_per_hour": self.max_frames_per_hour,
             "hour_compute_minutes": round(hour_seconds / 60.0, 2),
             "max_compute_minutes_per_hour": round(

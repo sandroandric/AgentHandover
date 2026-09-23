@@ -41,24 +41,24 @@ def test_write_tiers_writes_the_committed_bytes(tmp_path):
 def test_vlm_block_command_prints_the_block():
     out = subprocess.run(
         [sys.executable, "-m", "agenthandover_worker.model_profiles",
-         "vlm-block", "recommended"],
+         "vlm-block", "performance"],
         check=True, capture_output=True, text=True,
     ).stdout
     assert out == (
-        '[vlm]\nmode = "local"\ntier = "recommended"\n'
+        '[vlm]\nmode = "local"\ntier = "performance"\n'
         'annotation_model = "qwen3.5:4b"\nsop_model = "gemma4:12b-it-qat"\n'
     )
-    assert out == mp.vlm_block(mp.get_tier("recommended"))
+    assert out == mp.vlm_block(mp.get_tier("performance"))
 
 
 def test_shared_vlm_block_fixture_carries_the_python_block():
-    """tests/fixtures/vlm_block/recommended.toml is what the Rust setup
+    """tests/fixtures/vlm_block/performance.toml is what the Rust setup
     (``tiers::apply_vlm_block``) and the Swift onboarding
     (``ModelTiers.applyVLMBlock``) must produce; its managed lines are
     this module's ``vlm_block``."""
-    text = (REPO_ROOT / "tests" / "fixtures" / "vlm_block" / "recommended.toml").read_text()
+    text = (REPO_ROOT / "tests" / "fixtures" / "vlm_block" / "performance.toml").read_text()
     start = text.index("[vlm]\n")
-    block = mp.vlm_block(mp.get_tier("recommended"))
+    block = mp.vlm_block(mp.get_tier("performance"))
     assert text[start:start + len(block)] == block
 
 
@@ -81,12 +81,14 @@ def test_recommend_tier_by_ram(ram, tier):
 
 
 def test_the_measured_split():
-    """The annotator is qwen3.5:4b on every tier; Skills and synthesis run on
-    gemma4:12b-it-qat at 16/24 GB and gemma4:31b-it-qat at 48 GB."""
+    """The annotator is qwen3.5:4b on every tier; Skills and synthesis run
+    on qwen3.5:4b up to 16 GB (WP-F6: faster than gemma4:12b-it-qat there,
+    of comparable quality, and it fits next to ordinary apps),
+    gemma4:12b-it-qat at 24 GB and gemma4:31b-it-qat at 48 GB."""
     assert {t.annotation_model for t in mp.TIERS} == {"qwen3.5:4b"}
     assert {t.id: t.sop_model for t in mp.TIERS} == {
         "standard": "qwen3.5:4b",
-        "recommended": "gemma4:12b-it-qat",
+        "recommended": "qwen3.5:4b",
         "performance": "gemma4:12b-it-qat",
         "max_quality": "gemma4:31b-it-qat",
     }
@@ -103,6 +105,19 @@ def test_every_tier_model_has_a_registered_profile_and_a_size():
         for model in tier.models:
             assert model in mp.MODEL_SIZES_GB, model
     assert mp.get_tier("standard").models == ["qwen3.5:4b", "nomic-embed-text"]
+
+
+def test_each_tiers_sop_model_holds_the_largest_measured_generation_call():
+    """WP-C9's per-model context: the largest generation-phase call measured
+    on focus_dailynews (the SOP call, 6,619 prompt tokens at the 20-keyframe
+    cap) plus the model's num_predict fits its ``sop_num_ctx``.  On the
+    16 GB tier that model is qwen3.5:4b (WP-F6) at 24,576."""
+    largest_prompt = 6_619
+    for tier in mp.TIERS:
+        profile = mp.get_profile(tier.sop_model)
+        assert largest_prompt + profile.sop_num_predict <= profile.sop_num_ctx, tier.id
+    recommended = mp.get_profile(mp.get_tier("recommended").sop_model)
+    assert (recommended.model, recommended.sop_num_ctx) == ("qwen3.5:4b", 24_576)
 
 
 def test_minimum_ollama_version():

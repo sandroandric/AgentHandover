@@ -4,14 +4,19 @@ of model time.
 ``passive_volatile_hour`` is 1,200 frames captured at the daemon's ceiling
 while the user switches context every 20-60 s.  The worker ticks over the
 hour (15 s of clock per tick) on the recorded cassette.  Once more frames
-have been annotated than the bound allows, the run stops: the bound is
-already broken, and the cassette holds only the calls up to that point.
+have been sent to the model than the bound allows, the run stops: the
+bound is already broken, and the cassette holds only the calls up to that
+point.
 
 The hourly gate (``[vlm] annotation_max_frames_per_hour`` = 60 and
 ``annotation_max_compute_minutes_per_hour`` = 10, WP-F2) holds the hour to
-60 annotated frames and 600 model seconds; the cache key folds the
+60 frames sent to the model and 600 model seconds; the cache key folds the
 volatile text ("updated 12s ago", "Ln 312, Col 1", counters) so a screen
-seen before is answered without the model.  The daily cap
+seen before is answered without the model.  Since WP-F6 a cache hit is
+free under the frame cap (it makes no model call; the diff and
+classification calls after it are charged to the compute cap), so the
+bound is on model calls, not on completed rows: the hour now annotates
+every frame the cache answers.  The daily cap
 (``[vlm] annotation_max_compute_minutes_per_day``, WP-C5) is checked with a
 1-minute cap and the hourly gate opened wide: passive annotation stops at
 it, the rows stay pending with their screenshots.
@@ -72,6 +77,11 @@ def _statuses(db_path) -> dict:
         conn.close()
 
 
+def _model_annotated(run: ComputeRun) -> int:
+    """Frames the annotator sent to the model (cache hits excluded)."""
+    return run.worker.scene_annotator.stats["annotated"]
+
+
 def _run(events_db, worker, clock, temp_home, cassette, *, vlm=None, stop=None) -> ComputeRun:
     """Tick over the hour until nothing is pending and, without ``stop``,
     until the 60-frame bound is broken; with ``stop``, until ``stop(run)``."""
@@ -91,7 +101,7 @@ def _run(events_db, worker, clock, temp_home, cassette, *, vlm=None, stop=None) 
         run.statuses = _statuses(fixture.db_path)
         if not run.statuses.get("pending"):
             break
-        if stop is None and run.statuses.get("completed", 0) > MAX_ANNOTATED:
+        if stop is None and _model_annotated(run) > MAX_ANNOTATED:
             break
         if stop is not None and stop(run):
             break
@@ -99,26 +109,59 @@ def _run(events_db, worker, clock, temp_home, cassette, *, vlm=None, stop=None) 
     return run
 
 
+# Requests the hour makes since WP-F6 (cache hits no longer close the
+# hourly frame cap, so the run reaches frames the WP-F2 recording never
+# did) that ``passive_volatile_hour.jsonl`` does not hold.  These are the
+# misses a replay shows; the first is the annotation of the first frame
+# past the old 60-row stop, which fails (HTTP 500, the row deferred)
+# every tick after it, so recording it reveals the calls behind it.
+# Re-record incrementally with AH_RECORD=1 on the test Mac.
+F6_MISSING_KEYS = (
+    "44038ed6cbebbdbc5b135e9cd62321be2612cfa570b3e187104468a54823a698",
+    "a27b4a24b1328f9518b348ea8b93cd1db0beb9b57199f0c6c549c4c5718e6ac8",
+    "bb64064041e26a48809677a1efd130dcc4e922ccfe527cb4efcbb3514e3cd0ca",
+    "c8fa94403d4e4143084dfc938ebd1dabb5dfa42e2e6391c52aee23b4a8b5c00c",
+    "12d85b60339a2d9b27bdf96d029858d198c380c8291087232515809d9a0dcd74",
+    "9b14fb80a511035dd08abbd71ce4c66c422323d37f139070dffe6f6c6d66e8a4",
+    "cd6e6e2e588997f9b6d7f3e1fe0fc526865084898a253ec846b3286b9cadaab2",
+    "02861cd371489660707fb668a691987705083817cae02c5d2cd43e7491740da0",
+)
+_HOUR_ENTRIES = load_entries(CASSETTE_DIR / "passive_volatile_hour.jsonl")
+needs_f6_recording = pytest.mark.skipif(
+    any(key not in _HOUR_ENTRIES for key in F6_MISSING_KEYS),
+    reason=(
+        "cassettes/passive_volatile_hour.jsonl lacks the requests the hour makes "
+        "once cache hits are free (WP-F6): "
+        + ", ".join(k for k in F6_MISSING_KEYS if k not in _HOUR_ENTRIES)
+        + " (and the calls they unblock); re-record with AH_RECORD=1 on the test Mac"
+    ),
+)
+
+
+@needs_f6_recording
 def test_compute_volatile_hour_annotates_at_most_60_frames(
     events_db, worker, clock, temp_home, cassette,
 ) -> None:
-    """The hourly gate closes at 60 annotated frames: the rest of the hour
-    stays pending with its screenshots, and the budget says why."""
+    """The hour sends at most 60 frames to the model; cache hits are free
+    and published as hits.  Whatever is still pending keeps its
+    screenshot, and when the gate closed, the budget says why."""
     run = _run(events_db, worker, clock, temp_home, cassette)
-    assert run.ticks == HOUR_TICKS, (run.ticks, run.statuses)
-    assert run.statuses.get("completed", 0) <= MAX_ANNOTATED, (run.ticks, run.statuses)
-    budget = run.worker.annotation_budget
-    assert budget.pause_reason() == "annotation_hourly_budget_exhausted", budget.status()
+    assert run.ticks == HOUR_TICKS or not run.statuses.get("pending"), (
+        run.ticks, run.statuses,
+    )
+    stats = run.worker.scene_annotator.stats
+    assert stats["annotated"] <= MAX_ANNOTATED, (stats, run.statuses)
     status = run.worker.status()
-    assert status["annotation_paused_reason"] == "annotation_hourly_budget_exhausted"
-    assert status["annotation_budget"]["hour_frames"] <= MAX_ANNOTATED, status
-    assert run.results[-1]["annotations"]["budget_exhausted"]
-    assert run.statuses.get("pending", 0) > 0
+    published = status["annotation_budget"]
+    assert published["hour_frames"] <= MAX_ANNOTATED, status
+    # The run is one hour of fake clock: every hit is still in the hour.
+    assert published["hour_cache_hits"] == stats["cache_hits"], (published, stats)
+    # Repeat screens are answered by the cache, not the model.
+    assert stats["cache_hits"] > stats["annotated"], stats
+    if run.results[-1]["annotations"]["budget_exhausted"]:
+        assert status["annotation_paused_reason"] == "annotation_hourly_budget_exhausted"
     for shot in _pending_screenshots(run.fixture.db_path):
         assert (run.fixture.screenshots_dir / shot.rsplit("/", 1)[-1]).exists(), shot
-    # Repeat screens are answered by the cache, not the model.
-    stats = run.worker.scene_annotator.stats
-    assert stats["cache_hits"] > stats["annotated"], stats
 
 
 # The activity classifier's call the volatile hour repeats 28 times, as
@@ -131,7 +174,7 @@ _COLD_LOAD_SECONDS = 10
 
 
 def _recorded_load_seconds(key: str) -> float:
-    entry = load_entries(CASSETTE_DIR / "passive_volatile_hour.jsonl").get(key)
+    entry = _HOUR_ENTRIES.get(key)
     return (entry["response"].get("load_duration") or 0) / 1e9 if entry else 0.0
 
 
@@ -144,6 +187,7 @@ def _recorded_load_seconds(key: str) -> float:
         "on the test Mac with qwen3.5:4b resident"
     ),
 )
+@needs_f6_recording
 def test_compute_volatile_hour_spends_at_most_600_model_seconds(
     events_db, worker, clock, temp_home, cassette,
 ) -> None:
@@ -154,6 +198,7 @@ def test_compute_volatile_hour_spends_at_most_600_model_seconds(
     assert last_hour["model_seconds"] <= MAX_MODEL_SECONDS, last_hour
 
 
+@needs_f6_recording
 def test_compute_writes_no_artifact_and_refreshes_fts_quickly(
     events_db, worker, clock, temp_home, cassette,
 ) -> None:
@@ -168,6 +213,7 @@ def test_compute_writes_no_artifact_and_refreshes_fts_quickly(
     assert elapsed < FTS_REFRESH_BUDGET_S, f"events_fts refresh took {elapsed * 1000:.0f} ms"
 
 
+@needs_f6_recording
 def test_compute_status_accounts_for_every_model_call(
     events_db, worker, clock, temp_home, cassette,
 ) -> None:
@@ -200,6 +246,7 @@ def test_compute_status_accounts_for_every_model_call(
     assert status["v2_annotations_today"] == run.statuses.get("completed", 0)
 
 
+@needs_f6_recording
 def test_compute_curation_queue_is_not_rewritten_every_tick(
     events_db, worker, clock, temp_home, cassette,
 ) -> None:

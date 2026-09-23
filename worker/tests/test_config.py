@@ -314,10 +314,12 @@ def test_idle_jobs_bad_window_keeps_the_default(tmp_path, caplog):
 
 
 def test_a_named_tier_supplies_the_models_the_file_leaves_out(tmp_path):
-    cfg = load_config(_write(tmp_path, '[vlm]\ntier = "recommended"\n'))
+    cfg = load_config(_write(tmp_path, '[vlm]\ntier = "performance"\n'))
     assert (cfg.vlm.tier, cfg.vlm.annotation_model, cfg.vlm.sop_model) == (
-        "recommended", "qwen3.5:4b", "gemma4:12b-it-qat",
+        "performance", "qwen3.5:4b", "gemma4:12b-it-qat",
     )
+    cfg = load_config(_write(tmp_path, '[vlm]\ntier = "recommended"\n'))
+    assert (cfg.vlm.annotation_model, cfg.vlm.sop_model) == ("qwen3.5:4b", "qwen3.5:4b")
 
 
 def test_explicit_models_win_over_the_tier(tmp_path):
@@ -345,7 +347,7 @@ def test_sop_ab_flag_picks_the_tiers_ab_model(tmp_path):
 
 def test_reasoning_model_overrides_the_reasoner_only(tmp_path):
     cfg = load_config(_write(tmp_path, (
-        '[vlm]\ntier = "recommended"\nreasoning_model = "r:1"\n'
+        '[vlm]\ntier = "performance"\nreasoning_model = "r:1"\n'
     )))
     assert cfg.vlm.reasoner_model == "r:1"
     assert cfg.vlm.sop_model == "gemma4:12b-it-qat"
