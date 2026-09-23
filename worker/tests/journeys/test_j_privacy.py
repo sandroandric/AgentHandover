@@ -72,14 +72,6 @@ def test_privacy_passive_frames_are_processed(
             assert "?" not in url
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "WP-V2: the privacy zone never matches a daemon row: "
-    "PrivacyZoneChecker._extract_app_info (privacy_zones.py:334) reads "
-    "window 'app'/'app_name'/'app_bundle_id', but the daemon writes 'app_id' "
-    "('pid:944:1Password'), so the 1Password frame is annotated; and the "
-    "privacy_blocked branch of _process_annotations (main.py:262) keeps "
-    "the JPEG on disk"
-))
 def test_privacy_password_manager_frame_is_never_annotated_and_its_jpeg_is_deleted(
     events_db, worker, clock, temp_home, cassette,
 ) -> None:
@@ -93,10 +85,13 @@ def test_privacy_password_manager_frame_is_never_annotated_and_its_jpeg_is_delet
 
 
 @pytest.mark.xfail(strict=True, reason=(
-    "WP-V1/#8: the worker has no redaction before the model: "
-    "scene_annotator.build_annotation_prompt (scene_annotator.py:524) puts the "
-    "OCR of the Gmail draft, password included, into the prompt verbatim, and "
-    "the annotation it returns is stored as is (no worker redaction.py yet)"
+    "WP-V1/#8: the password on screen reaches the model and the store: "
+    "SceneAnnotator.annotate_event redacts only the annotation it stores "
+    "(scene_annotator.py:1176), not the OCR it puts in the prompt "
+    "(_select_ocr_text and guard_screen_text, scene_annotator.py:1058-1059); "
+    "and redaction.py's password rule needs 'password:' or 'password=' "
+    "(redaction.py:39), so 'The staging GitHub password is <pw>' in the Gmail "
+    "draft survives redaction in the stored key_text.typed_text and _screen_text"
 ))
 def test_privacy_password_on_screen_never_reaches_the_model_or_the_store(
     events_db, worker, clock, temp_home, cassette,
@@ -114,10 +109,10 @@ def test_privacy_password_on_screen_never_reaches_the_model_or_the_store(
 
 @pytest.mark.xfail(strict=True, reason=(
     "WP-V1/#8 (worker half): the daemon strips the extension's URL, but the "
-    "reset token is on screen; the annotation's location is stored as the "
-    "model read it from the address-bar OCR, query included "
-    "(SceneAnnotator.annotate_event, scene_annotator.py:962, keeps "
-    "_validate_annotation's output verbatim; no URL reduction in the worker)"
+    "reset token is on screen; the stored annotation keeps it in location, "
+    "key_text.urls and _screen_text (the address-bar OCR): redact_value "
+    "(scene_annotator.py:1176, redaction.py) has no URL query reduction and "
+    "the 20-hex token is below its 80-char high-entropy rule"
 ))
 def test_privacy_stored_urls_carry_no_query_string(
     events_db, worker, clock, temp_home, cassette,
