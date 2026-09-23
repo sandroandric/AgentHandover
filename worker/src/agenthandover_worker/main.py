@@ -3560,8 +3560,11 @@ def _process_lifecycle_promote_trigger(
 
     ``slug`` (app) or ``procedure_slug`` (CLI) names the procedure.  The
     target is reached by walking the promotion chain one valid transition
-    at a time.  Promoting to ``agent_ready`` first approves a pending draft
-    through *approve*; a draft that fails approval (lint) is not promoted.
+    at a time.  Promoting to ``agent_ready`` first lints a pending draft; a
+    draft that fails lint is not promoted.  Once the procedure is
+    ``agent_ready`` its review record is approved and exported through
+    *approve* (every export passes the hand-off gate, which a draft never
+    does, so the export has to follow the promotion).
     Claude Code commands are refreshed whenever the procedure enters or
     leaves ``agent_ready``; on entering it, the procedure is also written
     as a Claude Code Skill when *claude_skill_writer* is configured (the
@@ -3585,9 +3588,13 @@ def _process_lifecycle_promote_trigger(
 
     logger.info("Processing lifecycle promote trigger: %s → %s", slug, to_state)
 
+    record = None
     if target is ProcedureLifecycle.AGENT_READY and db is not None and approve is not None:
         record = db.get_generated_sop_by_slug(slug)
-        if record is not None and record.get("status") == "draft" and not approve(slug):
+        template = record.get("sop_json") if record is not None else None
+        if record is not None and record.get("status") == "draft" and not (
+            isinstance(template, dict) and template and _lint_and_log(template, "approval")
+        ):
             logger.warning("Not promoting %s: its draft could not be approved", slug)
             return
 
@@ -3605,6 +3612,8 @@ def _process_lifecycle_promote_trigger(
     after = lifecycle_manager.get_state(slug)
     if before == after or ProcedureLifecycle.AGENT_READY not in (before, after):
         return
+    if after is ProcedureLifecycle.AGENT_READY and record is not None:
+        approve(slug)  # type: ignore[misc]  # set with record above
     if after is ProcedureLifecycle.AGENT_READY and claude_skill_writer is not None:
         proc = knowledge_base.get_procedure(slug) if knowledge_base is not None else None
         if proc is not None:

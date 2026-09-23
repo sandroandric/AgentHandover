@@ -689,7 +689,7 @@ class TestDBPassiveDiscoveryMethods:
 class TestProcessPassiveDiscovery:
     @patch("agenthandover_worker.task_segmenter._compute_embeddings", side_effect=_mock_embeddings)
     def test_full_pipeline_generates_sop(self, mock_embed):
-        """End-to-end: events → segment → generate → export."""
+        """End-to-end: events → segment → generate (export waits for approval)."""
         conn, db_path = _make_test_db()
         try:
             from agenthandover_worker.db import WorkerDB
@@ -773,9 +773,13 @@ class TestProcessPassiveDiscovery:
                 index_generator=mock_index,
             )
 
-            assert sops >= 1
+            # The SOP is generated and kept for review; nothing is written to
+            # an agent's directory before it is approved for agents.
+            assert sops == 0
             mock_sop_gen.generate_from_passive.assert_called_once()
-            mock_writer.write_sop.assert_called()
+            mock_writer.write_sop.assert_not_called()
+            mock_writer.write_procedure.assert_not_called()
+            assert len(db.get_generated_sops()) == 1
             # Prior-evidence enrichment ran: the new template carries the
             # duration and domains accumulated by the earlier observation.
             generated = mock_sop_gen.generate_from_passive.return_value.sop
