@@ -231,6 +231,16 @@ if ! as_user "${VENV}/bin/python" -m agenthandover_worker.model_profiles \
         write-tiers "${DATA_DIR}/tiers.json"; then
     warn "could not write ${DATA_DIR}/tiers.json; onboarding cannot list the model tiers"
 fi
+# An upgrade: a [vlm] block still on its tier's earlier default models
+# (model_profiles.PREVIOUS_TIER_DEFAULTS) moves to the tier's current ones,
+# after a timestamped backup; a block the user customised is kept. The
+# worker repeats this at startup, for upgrades by other means.
+if [ "${CONFIG_CREATED}" -eq 0 ]; then
+    if ! as_user "${VENV}/bin/python" -m agenthandover_worker.model_profiles \
+            migrate-vlm "${DATA_DIR}/config.toml"; then
+        warn "could not check the [vlm] models in ${DATA_DIR}/config.toml against the tier table; run: agenthandover doctor"
+    fi
+fi
 if [ "${CONFIG_CREATED}" -eq 1 ]; then
     if VLM_BLOCK=$(as_user "${VENV}/bin/python" -m agenthandover_worker.model_profiles vlm-block standard); then
         printf '\n%s\n' "${VLM_BLOCK}" >> "${DATA_DIR}/config.toml"

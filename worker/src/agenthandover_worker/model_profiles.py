@@ -18,8 +18,13 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
+import shutil
 import sys
+import tempfile
+import tomllib
 from dataclasses import asdict, dataclass
+from datetime import datetime
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -596,6 +601,27 @@ TIERS: tuple[Tier, ...] = (
     ),
 )
 
+# Each tier's earlier default ``(annotation_model, sop_model)`` pairs: the
+# models a shipped writer (the installer's ``vlm-block``, onboarding's
+# ``ModelTiers.vlmBlock``, ``agenthandover setup --tier``) could have put
+# in a config's managed ``[vlm]`` block under that ``tier`` id, and that
+# the tier no longer runs.  Explicit models win over the tier, so such a
+# config keeps them after an upgrade until :func:`migrate_vlm_block`
+# moves it to the tier's current pair.  Add a pair here whenever a tier's
+# default changes; never remove one.
+#
+# Sources (``git log -p -- worker/src/agenthandover_worker/model_profiles.py
+# resources/tiers.json`` from WP-C6, which introduced ``TIERS`` and the
+# ``tier`` key; no earlier release wrote a ``tier`` key):
+#   recommended  qwen3.5:4b + gemma4:12b-it-qat   the default from d770865
+#                (WP-C6; written by the installer 2ce4c15, setup 85e9cbb and
+#                onboarding 012b97f, merged in 2461285) until dfaa35d (WP-F6)
+#                moved the 16 GB tier to qwen3.5:4b for both.
+# standard, performance and max_quality have kept their WP-C6 pair.
+PREVIOUS_TIER_DEFAULTS: dict[str, tuple[tuple[str, str], ...]] = {
+    "recommended": (("qwen3.5:4b", "gemma4:12b-it-qat"),),
+}
+
 
 # The tier every Mac can run: the library default of every model setting.
 STANDARD_TIER = TIERS[0]
@@ -628,7 +654,16 @@ def tiers_document() -> dict:
         "minimum_ollama_version_for_gemma4": MINIMUM_OLLAMA_VERSION_FOR_GEMMA4,
         "embedding_model": EMBEDDING_MODEL,
         "model_sizes_gb": MODEL_SIZES_GB,
-        "tiers": [asdict(t) for t in TIERS],
+        "tiers": [
+            {
+                **asdict(t),
+                "previous_defaults": [
+                    {"annotation_model": ann, "sop_model": sop}
+                    for ann, sop in PREVIOUS_TIER_DEFAULTS.get(t.id, ())
+                ],
+            }
+            for t in TIERS
+        ],
     }
 
 
@@ -653,8 +688,187 @@ def vlm_block(tier: Tier) -> str:
     )
 
 
+# The keys of ``[vlm]`` a tier choice writes, in order (:func:`vlm_block`).
+MANAGED_VLM_KEYS = ("mode", "tier", "annotation_model", "sop_model")
+
+
+def _config_lines(config: str) -> list[str]:
+    """*config* split after every ``\\n``, as Rust's ``split_inclusive``:
+    the last piece has no terminator and is dropped when empty."""
+    parts = config.split("\n")
+    lines = [p + "\n" for p in parts[:-1]]
+    if parts[-1]:
+        lines.append(parts[-1])
+    return lines
+
+
+def _managed_key(stripped_line: str) -> str | None:
+    """The managed key a stripped ``[vlm]`` line sets, or None."""
+    key, sep, _ = stripped_line.partition("=")
+    key = key.strip()
+    return key if sep and key in MANAGED_VLM_KEYS else None
+
+
+def apply_vlm_block(config: str, tier: Tier) -> str:
+    """*config* with *tier* chosen: the managed keys of ``[vlm]`` replaced
+    by :func:`vlm_block` (right after the header, other ``[vlm]`` keys and
+    every other section kept byte for byte), or the block appended when
+    there is no ``[vlm]`` section.
+
+    The same edit as ``agenthandover setup`` (``tiers::apply_vlm_block``)
+    and onboarding (``ModelTiers.applyVLMBlock``); the shared fixture
+    ``tests/fixtures/vlm_block`` pins the three byte for byte.
+    """
+    block = vlm_block(tier)
+    lines = _config_lines(config)
+    header = next((i for i, line in enumerate(lines) if line.strip() == "[vlm]"), None)
+    if header is None:
+        out = config
+        if out and not out.endswith("\n"):
+            out += "\n"
+        return out + "\n" + block
+    out = "".join(lines[:header]) + block
+    in_section = True
+    for line in lines[header + 1:]:
+        stripped = line.strip()
+        if stripped.startswith("["):
+            in_section = False
+        if not (in_section and _managed_key(stripped)):
+            out += line
+    return out
+
+
+def migrate_vlm_block(config_text: str) -> tuple[str, bool, str]:
+    """Move a config still on a tier's earlier default models to the
+    tier's current ones.  Returns ``(new_text, changed, reason)``.
+
+    Changes the managed ``[vlm]`` keys (with :func:`apply_vlm_block`, so the
+    result is what ``agenthandover setup --tier`` writes) only when the
+    block is one a writer left and the user has not customised:
+
+    * ``mode`` is ``"local"`` or absent;
+    * ``tier`` is a known tier id;
+    * ``annotation_model`` and ``sop_model`` are one of that tier's
+      :data:`PREVIOUS_TIER_DEFAULTS` pairs (not its current pair);
+    * each managed key appears at most once, exactly as the writers put it
+      (``key = "value"``, no comment or other quoting), and ``tomllib``
+      reads the same values.
+
+    Otherwise *config_text* comes back unchanged with the reason why.
+    Other ``[vlm]`` keys and every other section are kept byte for byte.
+    """
+    def keep(reason: str) -> tuple[str, bool, str]:
+        return config_text, False, reason
+
+    lines = _config_lines(config_text)
+    header = next((i for i, line in enumerate(lines) if line.strip() == "[vlm]"), None)
+    if header is None:
+        return keep("no [vlm] section")
+
+    values: dict[str, str] = {}
+    for line in lines[header + 1:]:
+        stripped = line.strip()
+        if stripped.startswith("["):
+            break
+        key = _managed_key(stripped)
+        if key is None:
+            continue
+        if key in values:
+            return keep(f"[vlm] sets {key} more than once")
+        match = re.fullmatch(rf'{key} = "([^"\\]*)"', stripped)
+        if match is None:
+            return keep(f"[vlm] {key} was edited by hand ({stripped})")
+        values[key] = match.group(1)
+
+    try:
+        parsed = tomllib.loads(config_text)
+    except tomllib.TOMLDecodeError as exc:
+        return keep(f"config.toml is not valid TOML ({exc})")
+    vlm = parsed.get("vlm")
+    if not isinstance(vlm, dict) or any(
+        vlm.get(key) != values.get(key) for key in MANAGED_VLM_KEYS
+    ):
+        return keep("[vlm] reads differently as TOML than line by line")
+
+    mode = values.get("mode", "local")
+    if mode != "local":
+        return keep(f'[vlm] mode is "{mode}"')
+    tier_id = values.get("tier")
+    if tier_id is None:
+        return keep("[vlm] names no tier")
+    tier = get_tier(tier_id)
+    if tier is None:
+        return keep(f'unknown tier "{tier_id}"')
+    pair = (values.get("annotation_model"), values.get("sop_model"))
+    if None in pair:
+        return keep("[vlm] does not pin both models (the tier supplies the rest)")
+    current = (tier.annotation_model, tier.sop_model)
+    if pair == current:
+        return keep(f'already the current models of tier "{tier.id}"')
+    if pair not in PREVIOUS_TIER_DEFAULTS.get(tier.id, ()):
+        return keep(
+            f'{pair[0]} + {pair[1]} is not an earlier default of tier "{tier.id}" '
+            "(set by hand)"
+        )
+
+    changes = ", ".join(
+        f"{key} {old} -> {new}"
+        for key, old, new in zip(("annotation_model", "sop_model"), pair, current)
+        if old != new
+    )
+    return (
+        apply_vlm_block(config_text, tier),
+        True,
+        f'tier "{tier.id}": {changes} ({pair[0]} + {pair[1]} was the tier\'s '
+        f"earlier default; it now runs {current[0]} + {current[1]})",
+    )
+
+
+def migrate_vlm_file(path: Path, now: datetime | None = None) -> tuple[bool, str, Path | None]:
+    """Apply :func:`migrate_vlm_block` to the config file at *path*.
+
+    Only when it changes something: first a timestamped copy of the old
+    file (``config.toml.<YYYYmmdd-HHMMSS>.bak`` beside it), then the new
+    text written atomically (temporary file in the same directory, then
+    ``os.replace``) with the old file's permissions.  A symlinked config
+    is written through to its target.  Returns ``(changed, reason,
+    backup_path)``.
+    """
+    target = Path(path).resolve()
+    original = target.read_bytes()
+    new_text, changed, reason = migrate_vlm_block(original.decode("utf-8"))
+    if not changed:
+        return False, reason, None
+
+    stamp = (now or datetime.now()).strftime("%Y%m%d-%H%M%S")
+    backup = target.with_name(f"{target.name}.{stamp}.bak")
+    n = 1
+    while True:
+        try:
+            with open(backup, "xb") as fh:
+                fh.write(original)
+            break
+        except FileExistsError:
+            n += 1
+            backup = target.with_name(f"{target.name}.{stamp}-{n}.bak")
+    shutil.copymode(target, backup)
+
+    fd, tmp_name = tempfile.mkstemp(dir=target.parent, prefix=f".{target.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(new_text.encode("utf-8"))
+            fh.flush()
+            os.fsync(fh.fileno())
+        shutil.copymode(target, tmp_name)
+        os.replace(tmp_name, target)
+    except BaseException:
+        Path(tmp_name).unlink(missing_ok=True)
+        raise
+    return True, reason, backup
+
+
 def _main(argv: list[str]) -> int:
-    """``write-tiers PATH`` | ``vlm-block TIER_ID``."""
+    """``write-tiers PATH`` | ``vlm-block TIER_ID`` | ``migrate-vlm PATH``."""
     if len(argv) == 2 and argv[0] == "write-tiers":
         target = Path(argv[1])
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -669,9 +883,24 @@ def _main(argv: list[str]) -> int:
             return 2
         sys.stdout.write(vlm_block(tier))
         return 0
+    if len(argv) == 2 and argv[0] == "migrate-vlm":
+        target = Path(argv[1])
+        if not target.exists():
+            print(f"No {target}; no [vlm] models to migrate")
+            return 0
+        try:
+            changed, reason, backup = migrate_vlm_file(target)
+        except (OSError, UnicodeDecodeError) as exc:
+            print(f"could not migrate the [vlm] models in {target}: {exc}", file=sys.stderr)
+            return 1
+        if changed:
+            print(f"Migrated [vlm] in {target}: {reason}; backup: {backup}")
+        else:
+            print(f"Kept [vlm] in {target} as it is: {reason}")
+        return 0
     print(
         "usage: python -m agenthandover_worker.model_profiles "
-        "write-tiers PATH | vlm-block TIER_ID",
+        "write-tiers PATH | vlm-block TIER_ID | migrate-vlm PATH",
         file=sys.stderr,
     )
     return 2

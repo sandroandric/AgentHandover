@@ -1,0 +1,20 @@
+# A config onboarding left on the 16 GB tier before WP-F6 (its sop_model was
+# gemma4:12b-it-qat), plus a hand-set [vlm] key and the sections around it:
+# the worker's tier migration and `agenthandover setup --tier recommended`
+# must turn it into recommended-migrated.toml byte for byte.
+
+[export]
+adapter = "all"
+json_export = false
+
+[vlm]
+mode = "local"
+tier = "recommended"
+annotation_model = "qwen3.5:4b"
+sop_model = "gemma4:12b-it-qat"
+annotation_timeout_seconds = 240
+
+[embedding]
+model = "nomic-embed-text"
+# Image embeddings need the optional embeddings-apple extra.
+image_embeddings = false

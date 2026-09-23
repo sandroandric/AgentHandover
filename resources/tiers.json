@@ -17,7 +17,8 @@
       "min_ram_gb": 0,
       "annotation_model": "qwen3.5:4b",
       "sop_model": "qwen3.5:4b",
-      "ab_sop_model": ""
+      "ab_sop_model": "",
+      "previous_defaults": []
     },
     {
       "id": "recommended",
@@ -26,7 +27,13 @@
       "min_ram_gb": 16,
       "annotation_model": "qwen3.5:4b",
       "sop_model": "qwen3.5:4b",
-      "ab_sop_model": ""
+      "ab_sop_model": "",
+      "previous_defaults": [
+        {
+          "annotation_model": "qwen3.5:4b",
+          "sop_model": "gemma4:12b-it-qat"
+        }
+      ]
     },
     {
       "id": "performance",
@@ -35,7 +42,8 @@
       "min_ram_gb": 24,
       "annotation_model": "qwen3.5:4b",
       "sop_model": "gemma4:12b-it-qat",
-      "ab_sop_model": ""
+      "ab_sop_model": "",
+      "previous_defaults": []
     },
     {
       "id": "max_quality",
@@ -44,7 +52,8 @@
       "min_ram_gb": 48,
       "annotation_model": "qwen3.5:4b",
       "sop_model": "gemma4:31b-it-qat",
-      "ab_sop_model": "gemma4:26b-a4b-it-qat"
+      "ab_sop_model": "gemma4:26b-a4b-it-qat",
+      "previous_defaults": []
     }
   ]
 }

@@ -26,7 +26,7 @@ from agenthandover_worker import trigger_spool
 from agenthandover_worker import workflow_mining
 from agenthandover_worker.clipboard_linker import ClipboardLinker
 from agenthandover_worker.event_helpers import focused_field, parse_json_field
-from agenthandover_worker.config import EXPORT_ADAPTERS, load_config
+from agenthandover_worker.config import EXPORT_ADAPTERS, config_path, load_config
 from agenthandover_worker.confidence import ConfidenceScorer, is_native_app_context
 from agenthandover_worker.db import WorkerDB
 from agenthandover_worker.episode_builder import EpisodeBuilder
@@ -35,6 +35,7 @@ from agenthandover_worker.exporter import IndexGenerator
 from agenthandover_worker.focus_processor import FocusProcessor
 from agenthandover_worker.frame_differ import DiffConfig, FrameDiffer
 from agenthandover_worker.negative_demo import NegativeDemoPruner
+from agenthandover_worker.model_profiles import migrate_vlm_file
 from agenthandover_worker.model_scheduler import ModelScheduler
 from agenthandover_worker.ollama import OllamaClient, OllamaError
 from agenthandover_worker.ops_telemetry import COMPUTE, MODEL_USAGE
@@ -721,6 +722,27 @@ def _poll_log_level(
 def _status_dir() -> Path:
     """Return the standard data directory for status/PID files."""
     return data_dir()
+
+
+def _migrate_vlm_config(path: Path | None = None) -> bool:
+    """Move config.toml's ``[vlm]`` block off a tier's earlier default
+    models (``model_profiles.migrate_vlm_file``: backup first, atomic
+    write, only when it changes).  One INFO line when it changes
+    something; a failure is a warning and never stops the worker.
+    Returns whether the file changed."""
+    target = config_path() if path is None else path
+    if not target.is_file():
+        return False
+    try:
+        changed, reason, backup = migrate_vlm_file(target)
+    except (OSError, UnicodeDecodeError) as exc:
+        logger.warning(
+            "Could not check the [vlm] models in %s against the tier table: %s", target, exc,
+        )
+        return False
+    if changed:
+        logger.info("Migrated [vlm] in %s: %s; backup: %s", target, reason, backup)
+    return changed
 
 
 def _atomic_write_result(path: Path, data: dict) -> None:
@@ -4202,7 +4224,10 @@ def main(argv: list[str] | None = None) -> None:
     knowledge_base = KnowledgeBase(root=args.knowledge_dir)
     knowledge_base.ensure_structure()
 
-    # One read of config.toml for the whole worker run.
+    # A config still on a tier's earlier default models moves to the
+    # tier's current ones (the installer does this too; this covers
+    # upgrades by other means), then one read of config.toml for the run.
+    _migrate_vlm_config()
     cfg = load_config()
     vlm_cfg = cfg.vlm
     if args.adapter is None:

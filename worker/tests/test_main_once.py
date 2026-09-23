@@ -148,3 +148,38 @@ def test_vector_kb_and_matcher_reach_their_consumers(
     assert seen["TaskSegmenter"]["vector_kb"] is vector_kb
     assert seen["ProcedureMatcher"]["vector_kb"] is vector_kb
     assert isinstance(seen["DailyBatchProcessor"]["matcher"], ProcedureMatcher)
+
+
+def test_startup_migrates_a_config_on_an_earlier_tier_default(
+    once_home: Path, tmp_db_path: Path, tmp_path: Path,
+) -> None:
+    """main() moves a [vlm] block still on the 16 GB tier's pre-WP-F6
+    models to its current ones before it reads the config, once, with a
+    backup beside it."""
+    config = worker_main._status_dir() / "config.toml"
+    if worker_main._platform.system() != "Darwin":
+        config = once_home / ".config" / "agenthandover" / "config.toml"
+    host_line = config.read_text(encoding="utf-8").splitlines()[1]
+    old = (
+        '[vlm]\nmode = "local"\ntier = "recommended"\n'
+        'annotation_model = "qwen3.5:4b"\nsop_model = "gemma4:12b-it-qat"\n'
+        f"{host_line}\n\n[knowledge]\nquery_api_enabled = false\n"
+    )
+    config.write_text(old, encoding="utf-8")
+
+    for _ in range(2):
+        worker_main.main([
+            "--once",
+            "--db-path", str(tmp_db_path),
+            "--sops-dir", str(tmp_path / "sops"),
+            "--knowledge-dir", str(tmp_path / "knowledge"),
+            "--adapter", "generic",
+            "--log-level", "ERROR",
+        ])
+
+    assert config.read_text(encoding="utf-8") == old.replace(
+        'sop_model = "gemma4:12b-it-qat"', 'sop_model = "qwen3.5:4b"',
+    )
+    backups = list(config.parent.glob("config.toml.*.bak"))
+    assert len(backups) == 1
+    assert backups[0].read_text(encoding="utf-8") == old
