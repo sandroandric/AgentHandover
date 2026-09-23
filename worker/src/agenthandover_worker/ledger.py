@@ -202,7 +202,7 @@ def _observed(proc: dict, slot: str) -> dict:
         goal = proc.get("goal")
         if isinstance(goal, str) and goal.strip().lower().startswith("unclear"):
             return _unknown()
-        return hypothesis(_first_filled(proc, ("goal",)))
+        return hypothesis(_first_filled(proc, ("goal", "task_description")))
     if slot == "done_criteria":
         return hypothesis(_first_filled(proc, (
             "outcome", "expected_outcomes", "execution_overview.success_criteria",

@@ -1044,37 +1044,38 @@ class TestExportParity:
         assert data["schema_version"] in ("3.0.0", "3.1.0", "3.2.0")
         assert data["id"] == slug
 
-    def test_export_via_adapter_uses_v3_when_available(self, kb, tmp_path, sample_procedure):
-        """_export_via_adapter() calls write_procedure() when v3 exists in KB."""
+    def test_export_via_adapter_writes_an_approved_procedure(self, kb, tmp_path, sample_procedure):
+        """_export_via_adapter() renders the v3 procedure once it passes the
+        hand-off gate (approved for agents, trust above observe, fresh)."""
         from agenthandover_worker.evidence_tracker import EvidenceTracker
         from agenthandover_worker.procedure_writer import ProcedureWriter
         from agenthandover_worker.generic_writer import GenericWriter
         from agenthandover_worker.main import _export_via_adapter
         from agenthandover_worker.export_adapter import procedure_to_sop_template
 
-        et = EvidenceTracker(knowledge_base=kb)
-        pw = ProcedureWriter(kb=kb, evidence=et)
-
-        # Save the procedure to KB
-        kb.save_procedure(sample_procedure)
-
-        # Create an SOP template that matches the procedure slug
+        pw = ProcedureWriter(kb=kb, evidence=EvidenceTracker(knowledge_base=kb))
         sop_template = procedure_to_sop_template(sample_procedure)
-
         adapter = GenericWriter(output_dir=tmp_path)
+
+        # A draft is never written where agents read.
+        kb.save_procedure(sample_procedure)
+        assert _export_via_adapter(adapter, [sop_template], pw) == []
+
+        sample_procedure["lifecycle_state"] = "agent_ready"
+        sample_procedure["constraints"]["trust_level"] = "suggest"
+        kb.save_procedure(sample_procedure)
         paths = _export_via_adapter(adapter, [sop_template], pw)
 
         assert len(paths) == 1
         assert paths[0].exists()
 
-    def test_export_via_adapter_falls_back_to_sop(self, tmp_path, sample_sop_template):
-        """_export_via_adapter() falls back to write_sop() when no v3 in KB."""
+    def test_export_via_adapter_skips_a_template_without_a_procedure(
+        self, tmp_path, sample_sop_template,
+    ):
+        """No v3 procedure in the knowledge base: nothing approved, nothing written."""
         from agenthandover_worker.generic_writer import GenericWriter
         from agenthandover_worker.main import _export_via_adapter
 
-        adapter = GenericWriter(output_dir=tmp_path)
-        # No procedure_writer → falls back to write_sop
-        paths = _export_via_adapter(adapter, [sample_sop_template], None)
-
-        assert len(paths) == 1
-        assert paths[0].exists()
+        adapter = GenericWriter(output_dir=tmp_path / "out")
+        assert _export_via_adapter(adapter, [sample_sop_template], None) == []
+        assert not (tmp_path / "out").exists()

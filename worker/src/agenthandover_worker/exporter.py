@@ -163,13 +163,16 @@ class IndexGenerator:
         The catalogue is built from the ``sop.<slug>.v3.json`` procedures
         in *sops_dir* (``archive/`` excluded), so a batch that touches one
         SOP never drops the others.  *sop_entries* (templates from the
-        current batch) are merged over the disk entries by slug, so a
-        fresh batch wins.  The index file is placed in the parent of
-        ``sops_dir`` (alongside the ``sops/`` directory).
+        current batch) replace the disk entry of the same slug, so a fresh
+        batch wins; a batch entry with no file on disk (a draft the
+        hand-off gate held back) is not listed.  The index file is placed
+        in the parent of ``sops_dir`` (alongside the ``sops/`` directory).
         """
         entries = {e.get("slug", "unknown"): e for e in load_disk_entries(sops_dir)}
         for entry in sop_entries:
-            entries[entry.get("slug", "unknown")] = entry
+            slug = entry.get("slug", "unknown")
+            if slug in entries:
+                entries[slug] = entry
         content = self.generate_index(sops_dir, list(entries.values()))
         AtomicWriter.write(sops_dir.parent / "index.md", content)
 

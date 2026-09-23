@@ -145,35 +145,33 @@ def _export_via_adapter(
     sop_templates: list[dict],
     procedure_writer: "ProcedureWriter | None",
 ) -> list[Path]:
-    """Export SOPs via *adapter*, preferring v3 procedure rendering.
+    """Export, via *adapter*, the templates whose v3 procedure passes the
+    hand-off gate (``ledger.handoff_gate``: approved for agents, no
+    required slot unknown, trust above observe, fresh).
 
-    For each template, if a v3 procedure exists in the knowledge base
-    (i.e. ``procedure_writer`` already saved it), the adapter's
-    ``write_procedure()`` is used for richer output.  Falls back to
-    ``write_sop()`` when no v3 procedure is available or when the v3
-    path raises.
-
-    Returns the list of written file paths.
+    A draft, or a template with no procedure in the knowledge base, is
+    never written where agents read; it is written once a human approves
+    it (the promote trigger and the lifecycle pass's
+    ``BundleCompiler.compile_all``).  Returns the written file paths.
     """
+    from agenthandover_worker.ledger import handoff_gate
+
     kb = procedure_writer._kb if procedure_writer is not None else None
     paths: list[Path] = []
     for template in sop_templates:
         slug = template.get("slug", "unknown")
         proc = kb.get_procedure(slug) if kb is not None else None
+        if proc is None or not handoff_gate(proc).ok:
+            logger.debug("Not exporting %s via %s: not approved for agents",
+                         slug, type(adapter).__name__)
+            continue
         try:
-            if proc is not None:
-                paths.append(adapter.write_procedure(proc))
-            else:
-                paths.append(adapter.write_sop(template))
+            paths.append(adapter.write_procedure(proc))
         except Exception:
-            # Fall back to SOP template rendering
-            try:
-                paths.append(adapter.write_sop(template))
-            except Exception:
-                logger.warning(
-                    "Export failed for %s via %s",
-                    slug, type(adapter).__name__, exc_info=True,
-                )
+            logger.warning(
+                "Export failed for %s via %s",
+                slug, type(adapter).__name__, exc_info=True,
+            )
     return paths
 
 

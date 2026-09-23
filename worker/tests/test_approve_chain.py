@@ -289,10 +289,21 @@ class TestMinedTemplatesRespectReview:
         assert (env.state / "sop-registry-v1-mined.json").is_file()
         assert not (env.state / "sop-templates-cache.json").exists()
 
-    def test_auto_approve_exports(self, env: Env) -> None:
+    def test_auto_approve_hands_off_nothing_until_approved_for_agents(self, env: Env) -> None:
+        """``[sop] auto_approve`` skips the review queue, but nothing reaches
+        an agent's directory before a human approves it for agents (the
+        hand-off gate); that approval then writes it."""
         summary = self._tick(env, auto_approve=True)
-        assert summary["sops_exported"] == 1
+        assert summary["sops_exported"] == 0
+        assert not list(env.export_dir.rglob("sop.*"))
+        assert env.skills() == []
         assert not (env.state / "sop-registry.json").exists()
+        slug = env.kb.list_procedures()[0]["id"]
+        assert env.kb.get_procedure(slug)["lifecycle_state"] == "draft"
+
+        env.send("lifecycle-promote", {"slug": slug, "to_state": "agent_ready"})
+
+        assert env.skills() == [slug]
 
     def test_a_template_that_fails_lint_is_dropped(self, env: Env) -> None:
         bad = generated_sop_template("check_domain_availability")
