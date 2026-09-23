@@ -114,7 +114,7 @@ pub struct VlmConfig {
 
     // --- v2 scene annotation pipeline fields ---
 
-    /// Model for per-frame annotation (default: "qwen3.5:2b").
+    /// Model for per-frame annotation (default: "qwen3.5:4b").
     #[serde(default = "default_annotation_model")]
     pub annotation_model: String,
     /// Model for SOP generation (default: "qwen3.5:4b").
@@ -137,7 +137,7 @@ fn default_screenshot_scale() -> f64 { 0.5 }
 fn default_dhash_threshold() -> u32 { 10 }
 
 fn default_vlm_mode() -> String { "local".to_string() }
-fn default_annotation_model() -> String { "qwen3.5:2b".to_string() }
+fn default_annotation_model() -> String { "qwen3.5:4b".to_string() }
 fn default_sop_model() -> String { "qwen3.5:4b".to_string() }
 fn default_annotation_enabled() -> bool { true }
 fn default_stale_skip_count() -> u32 { 3 }

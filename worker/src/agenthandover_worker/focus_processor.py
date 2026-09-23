@@ -18,7 +18,7 @@ from pathlib import Path
 
 from agenthandover_worker.dom import url_host
 from agenthandover_worker.event_helpers import display_name, parse_json_field, parse_timestamp
-from agenthandover_worker.scene_annotator import SceneAnnotator
+from agenthandover_worker.scene_annotator import SceneAnnotator, as_compact, page_for_event
 from agenthandover_worker.frame_differ import FrameDiffer
 from agenthandover_worker.sop_generator import SOPGenerator, GeneratedSOP
 
@@ -166,21 +166,16 @@ class FocusProcessor:
         """Build one observation dict from a timeline frame for the
         behavioral synthesizer.
 
-        Pulls EVERY structured field Gemma fills in, so the synthesizer
-        can see verbatim text (emails, URLs, typed content, names, the
-        Send button being focused) rather than just 'user is doing X'.
-
-        Historical bug (caught 2026-04-10): only 4 fields were extracted,
-        dropping ``names``, ``ui_state.active_element``, ``visible_content
-        .values`` (where compose body content lives), and the explicit
-        ``compose`` block — all of which carry the recipient/subject/body
-        text the synthesizer needs to write a concrete goal.
+        Carries every field of the compact annotation plus the frame's
+        screen text, so the synthesizer can quote verbatim text (emails,
+        URLs, typed content, the focused control, the picked list entry,
+        subject lines and message bodies on screen) rather than just
+        'user is doing X'.
         """
-        ann = frame.get("annotation", {}) or {}
-        tc = ann.get("task_context", {}) or {}
-        kt = ann.get("key_text", {}) or {}
-        vc = ann.get("visible_content", {}) or {}
-        ui = ann.get("ui_state", {}) or {}
+        ann = as_compact(frame.get("annotation"))
+        tc = ann.get("task_context") or {}
+        kt = ann.get("key_text") or {}
+        ui = ann.get("ui_state") or {}
 
         obs: dict = {
             "action": tc.get("what_doing", ""),
@@ -190,47 +185,40 @@ class FocusProcessor:
         }
 
         # Verbatim grounding — helps the synthesizer write concrete goals
-        email_addrs = kt.get("email_addresses") or []
-        if email_addrs:
-            obs["email_addresses"] = email_addrs
+        emails = kt.get("emails") or []
+        if emails:
+            obs["email_addresses"] = emails
         urls = kt.get("urls") or []
         if urls:
             obs["urls"] = urls
-        names = kt.get("names") or []
-        if names:
-            obs["names"] = names[:10]
         typed = kt.get("typed_text") or ""
         if typed:
             obs["typed_text"] = typed[:400]
-        selected = kt.get("selected_text") or ""
-        if selected:
-            obs["selected_text"] = selected[:400]
 
         # UI state — "active_element=Send button" tells the synthesizer
         # the user is about to send something, even when typed_text is
-        # empty (Gemma often leaves typed_text blank if the cursor isn't
-        # visibly blinking in the screenshot).
+        # empty.
         active_element = ui.get("active_element") or ""
         if active_element:
             obs["active_element"] = active_element[:200]
+        modal = ui.get("modal") or ""
+        if modal:
+            obs["modal"] = modal[:200]
 
-        # All visible text — Gemma flattens compose-window content into
-        # visible_content.values mixed with background UI text.  We pass
-        # it through with a higher cap so the synthesizer can quote
-        # actual subject lines, body text, recipient chips, etc.
-        values = vc.get("values") or []
-        if values:
-            obs["visible_values"] = values[:25]
-        headings = vc.get("headings") or []
-        if headings:
-            obs["headings"] = headings[:8]
+        items = [
+            f"{item.get('label')}{' (chosen)' if item.get('chosen') else ''}"
+            for item in ann.get("visible_items") or []
+            if isinstance(item, dict) and item.get("label")
+        ]
+        if items:
+            obs["visible_items"] = items
 
-        # Compose-specific structured fields (filled in when the
-        # annotation prompt explicitly asks for them — sharper prompt
-        # added 2026-04-10).
-        compose = ann.get("compose")
-        if isinstance(compose, dict) and compose:
-            obs["compose"] = compose
+        # The screen's own text (the salient OCR lines the annotation
+        # prompt carried), where subject lines, message bodies and
+        # recipient chips live.
+        screen_text = ann.get("_screen_text") or ""
+        if screen_text:
+            obs["screen_text"] = screen_text[:600]
 
         return obs
 
@@ -505,6 +493,7 @@ class FocusProcessor:
                 recent_annotations=recent,
                 artifact_dir=str(screenshots_dir),
                 skip_stale_check=True,
+                page=page_for_event(db, event),
             )
 
             if result.status == "completed" and result.annotation:

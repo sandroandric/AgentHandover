@@ -58,7 +58,7 @@ class VlmConfig:
     model: str = ""
     api_key_env: str = ""
     annotation_enabled: bool = True
-    annotation_model: str = "qwen3.5:2b"
+    annotation_model: str = "qwen3.5:4b"
     sop_model: str = "qwen3.5:4b"
     stale_skip_count: int = 3
     sliding_window_max_age_sec: int = 600

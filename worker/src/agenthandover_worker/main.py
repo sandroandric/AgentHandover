@@ -36,7 +36,12 @@ from agenthandover_worker.ollama import OllamaError
 from agenthandover_worker.ops_telemetry import MODEL_USAGE
 from agenthandover_worker.export_adapter import SOPExportAdapter
 from agenthandover_worker.openclaw_writer import OpenClawWriter
-from agenthandover_worker.scene_annotator import AnnotationConfig, SceneAnnotator
+from agenthandover_worker.scene_annotator import (
+    AnnotationConfig,
+    SceneAnnotator,
+    as_compact,
+    page_for_event,
+)
 from agenthandover_worker.sop_generator import SOPGenerator, SOPGeneratorConfig, _generate_slug
 from agenthandover_worker.sop_linter import lint_sop
 from agenthandover_worker.task_segmenter import TaskSegmenter, SegmenterConfig
@@ -287,6 +292,7 @@ def _process_annotations(
             event,
             recent_annotations=recent,
             artifact_dir=str(screenshots_dir),
+            page=page_for_event(db, event),
         )
 
         # Save result to DB
@@ -1801,7 +1807,7 @@ def _process_focus_sessions_v2(
             try:
                 # Prefer the rich per-frame observations stashed by the
                 # focus_processor (email_addresses, typed_text, urls,
-                # visible_values from the OCR-enriched annotations) so the
+                # visible_items and the frames' screen text) so the
                 # synthesizer can quote verbatim text in goal/strategy.
                 # Fall back to abstract SOP steps only if rich data is
                 # unavailable.
@@ -2448,14 +2454,22 @@ def _process_passive_discovery(
                         ann = frame.get("annotation", {})
                         if not isinstance(ann, dict):
                             continue
+                        ann = as_compact(ann)
+                        # The target: the list entry the user picked, else
+                        # the control they were on.
+                        chosen = next(
+                            (str(item.get("label") or "")
+                             for item in ann.get("visible_items") or []
+                             if isinstance(item, dict) and item.get("chosen")),
+                            "",
+                        )
                         steps.append({
                             "action": ann.get("task_context", {}).get("what_doing", ""),
                             "app": ann.get("app", ""),
                             "location": ann.get("location", ""),
-                            "target": ann.get("visible_content", {}).get("headings", [""])[0]
-                                if isinstance(ann.get("visible_content"), dict)
-                                and ann.get("visible_content", {}).get("headings")
-                                else "",
+                            "target": chosen or str(
+                                (ann.get("ui_state") or {}).get("active_element") or ""
+                            ),
                             "input": "",
                         })
                     if steps:
@@ -5273,10 +5287,10 @@ def main(argv: list[str] | None = None) -> None:
                                         # the actual events from the DB and
                                         # build rich per-frame dicts with
                                         # verbatim text (email_addresses,
-                                        # urls, typed_text, visible_values,
+                                        # urls, typed_text, screen_text,
                                         # active_element) via
                                         # FocusProcessor._build_pre_analysis_obs.
-                                        # This surfaces the same ground-truth
+                                        # This surfaces the same verbatim
                                         # grounding to the synthesizer prompt's
                                         # TIMELINE EVIDENCE section that focus
                                         # recordings already get.

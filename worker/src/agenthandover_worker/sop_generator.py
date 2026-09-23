@@ -26,6 +26,7 @@ from agenthandover_worker.dom import select_anchor
 from agenthandover_worker.event_helpers import display_name
 from agenthandover_worker.json_extract import extract_json
 from agenthandover_worker.ollama import OllamaClient
+from agenthandover_worker.scene_annotator import as_compact
 
 logger = logging.getLogger(__name__)
 
@@ -345,9 +346,11 @@ Respond with ONLY the JSON object."""
 # Timeline formatting
 # ---------------------------------------------------------------------------
 
-# Verbatim fields (typed text, URLs, compose fields, copied text) are cut to
+# Verbatim fields (typed text, URLs, copied text) are cut to
 # this many characters each in the SOP prompt.
 _VERBATIM_MAX_CHARS = 200
+# The frame's screen text (salient OCR lines) per timeline entry.
+_SCREEN_TEXT_MAX_CHARS = 300
 
 
 def _one_line(text: object, limit: int = _VERBATIM_MAX_CHARS) -> str:
@@ -364,6 +367,7 @@ def _format_timeline_entry(
     clipboard_context: dict | None = None,
 ) -> str:
     """Format a single timeline entry for the SOP generation prompt."""
+    annotation = as_compact(annotation)
     lines = []
 
     # Time + app
@@ -378,28 +382,27 @@ def _format_timeline_entry(
     if what_doing:
         lines.append(f"  Activity: {what_doing}")
 
-    # Visible content
-    vc = annotation.get("visible_content", {})
-    if isinstance(vc, dict):
-        headings = vc.get("headings", [])
-        if headings:
-            lines.append(f"  Headings: {', '.join(str(h) for h in headings[:5])}")
-        labels = vc.get("labels", [])
-        if labels:
-            lines.append(f"  Labels: {', '.join(str(l) for l in labels[:8])}")
-        values = vc.get("values", [])
-        if values:
-            lines.append(f"  Values: {', '.join(str(v) for v in values[:8])}")
-
     # UI state
     ui = annotation.get("ui_state", {})
     if isinstance(ui, dict):
         active = ui.get("active_element", "")
         if active:
             lines.append(f"  Active: {active}")
+        modal = _one_line(ui.get("modal"))
+        if modal:
+            lines.append(f"  Dialog: {modal}")
+
+    # The entries of a list the user picked from, the pick marked.
+    items = [
+        f"{_one_line(item.get('label'), 80)}{' [chosen]' if item.get('chosen') else ''}"
+        for item in annotation.get("visible_items") or []
+        if isinstance(item, dict) and _one_line(item.get("label"))
+    ]
+    if items:
+        lines.append(f"  Items: {'; '.join(items[:6])}")
 
     # Verbatim text the steps must quote: what was typed, the links on
-    # screen, and an open compose window's fields.
+    # screen, and the screen's own text (subject lines, recipients, ...).
     kt = annotation.get("key_text")
     if isinstance(kt, dict):
         typed = _one_line(kt.get("typed_text"))
@@ -408,12 +411,9 @@ def _format_timeline_entry(
         urls = [_one_line(u) for u in kt.get("urls") or [] if _one_line(u)]
         if urls:
             lines.append(f"  URLs: {_one_line(', '.join(urls))}")
-    compose = annotation.get("compose")
-    if isinstance(compose, dict) and compose.get("is_compose_window_open") is not False:
-        for label, key in (("To", "recipient"), ("Subject", "subject"), ("Body first line", "body_first_line")):
-            value = _one_line(compose.get(key))
-            if value:
-                lines.append(f'  Compose {label}: "{value}"')
+    screen = _one_line(annotation.get("_screen_text"), _SCREEN_TEXT_MAX_CHARS)
+    if screen:
+        lines.append(f'  Screen text: "{screen}"')
 
     # Frame diff (what changed since last frame)
     if diff and isinstance(diff, dict):

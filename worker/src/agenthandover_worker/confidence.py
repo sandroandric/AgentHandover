@@ -353,7 +353,7 @@ _FOCUS_BONUS = 0.10
 _ANNOTATION_QUALITY_FIELDS = (
     "app",
     "location",
-    "visible_content",
+    "key_text",
     "ui_state",
     "task_context",
 )

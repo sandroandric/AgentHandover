@@ -261,7 +261,7 @@ pub fn run() -> Result<()> {
             );
         } else {
             let annotation_model = read_config_string_field(&config_str, "vlm", "annotation_model")
-                .unwrap_or_else(|| "qwen3.5:2b".to_string());
+                .unwrap_or_else(|| "qwen3.5:4b".to_string());
             let sop_model = read_config_string_field(&config_str, "vlm", "sop_model")
                 .unwrap_or_else(|| "qwen3.5:4b".to_string());
             let embedding_model = read_config_string_field(&config_str, "embedding", "model")

@@ -21,6 +21,7 @@ import time
 from dataclasses import dataclass
 
 from agenthandover_worker.json_extract import extract_json
+from agenthandover_worker.scene_annotator import as_compact
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +33,7 @@ SESSION_GAP_THRESHOLD = 600  # 10 minutes
 class DiffConfig:
     """Configuration for the frame differ."""
 
-    model: str = "qwen3.5:2b"
+    model: str = "qwen3.5:4b"
     ollama_host: str = "http://localhost:11434"
     num_predict: int = 400
     session_gap_seconds: int = SESSION_GAP_THRESHOLD
@@ -94,14 +95,16 @@ def _make_diff_failed_marker(error: str) -> dict:
 # ---------------------------------------------------------------------------
 
 def _parse_annotation(event: dict) -> dict | None:
-    """Extract the parsed annotation from an event row."""
+    """Extract the parsed annotation from an event row, in the compact
+    schema (:func:`scene_annotator.as_compact`)."""
     raw = event.get("scene_annotation_json")
     if not raw:
         return None
     try:
-        return json.loads(raw)
+        parsed = json.loads(raw)
     except (json.JSONDecodeError, TypeError):
         return None
+    return as_compact(parsed) if isinstance(parsed, dict) else None
 
 
 def _parse_timestamp(ts_str: str) -> float:
@@ -157,18 +160,20 @@ def _detect_edge_case(
     prev_app = prev_annotation.get("app", "")
     curr_app = curr_annotation.get("app", "")
 
-    # No-change check: same app + location + same visible values
+    # No-change check: same app + location + same screen text and typing
     prev_loc = prev_annotation.get("location", "")
     curr_loc = curr_annotation.get("location", "")
     prev_what = prev_annotation.get("task_context", {}).get("what_doing", "")
     curr_what = curr_annotation.get("task_context", {}).get("what_doing", "")
-    prev_values = prev_annotation.get("visible_content", {}).get("values", [])
-    curr_values = curr_annotation.get("visible_content", {}).get("values", [])
+
+    def _content(annotation: dict) -> tuple:
+        kt = annotation.get("key_text") or {}
+        return (annotation.get("_screen_text", ""), kt.get("typed_text", ""))
 
     if (
         prev_app == curr_app
         and prev_loc == curr_loc
-        and prev_values == curr_values
+        and _content(prev_annotation) == _content(curr_annotation)
         and prev_what == curr_what
     ):
         gap = 0.0
@@ -213,6 +218,10 @@ Respond with this JSON structure:
 Respond with ONLY the JSON object."""
 
 
+# The screen text per frame in the diff prompt (two frames per call).
+_DIFF_SCREEN_TEXT_MAX_CHARS = 600
+
+
 def _format_annotation_for_diff(annotation: dict) -> str:
     """Format an annotation dict into a compact text representation for the diff prompt."""
     lines = []
@@ -221,19 +230,28 @@ def _format_annotation_for_diff(annotation: dict) -> str:
     lines.append(f"App: {app}")
     lines.append(f"Location: {location}")
 
-    vc = annotation.get("visible_content", {})
-    if vc.get("headings"):
-        lines.append(f"Headings: {', '.join(str(h) for h in vc['headings'])}")
-    if vc.get("labels"):
-        lines.append(f"Labels: {', '.join(str(l) for l in vc['labels'])}")
-    if vc.get("values"):
-        lines.append(f"Values: {', '.join(str(v) for v in vc['values'])}")
+    screen = " | ".join(
+        line.strip() for line in str(annotation.get("_screen_text") or "").splitlines()
+        if line.strip()
+    )
+    if screen:
+        lines.append(f"Screen text: {screen[:_DIFF_SCREEN_TEXT_MAX_CHARS]}")
+    kt = annotation.get("key_text") or {}
+    if kt.get("typed_text"):
+        lines.append(f"Typed: {kt['typed_text']}")
+    items = [
+        f"{item.get('label')}{' (chosen)' if item.get('chosen') else ''}"
+        for item in annotation.get("visible_items") or []
+        if isinstance(item, dict) and item.get("label")
+    ]
+    if items:
+        lines.append(f"Items: {'; '.join(items)}")
 
     ui = annotation.get("ui_state", {})
     if ui.get("active_element"):
         lines.append(f"Active element: {ui['active_element']}")
-    if ui.get("modals_or_popups") and ui["modals_or_popups"] != "none":
-        lines.append(f"Modal/popup: {ui['modals_or_popups']}")
+    if ui.get("modal"):
+        lines.append(f"Modal/popup: {ui['modal']}")
 
     tc = annotation.get("task_context", {})
     if tc.get("what_doing"):
