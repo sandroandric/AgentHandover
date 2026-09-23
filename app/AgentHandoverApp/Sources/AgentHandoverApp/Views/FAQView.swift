@@ -156,7 +156,7 @@ struct FAQView: View {
                     FAQItem(
                         id: "how-connect",
                         question: "How do I connect an AI agent?",
-                        answer: "Click the agent name in the menu bar and hit \"Connect\". For Claude Code this runs `claude mcp add --scope user`; for the others it adds AgentHandover's MCP server to the agent's MCP config file.\n\nSupported agents: Claude Code, Cursor, Windsurf, Codex, and any MCP-compatible tool.\n\nYou can also connect manually:\n  agenthandover connect claude-code\n  agenthandover connect mcp"
+                        answer: "Click the agent name in the menu bar and hit \"Connect\". For Claude Code this runs `claude mcp add --scope user`, for Codex `codex mcp add`; for the others it adds AgentHandover's MCP server to the agent's MCP config file.\n\nSupported agents: Claude Code, Cursor, Windsurf, Codex, and any MCP-compatible tool.\n\nYou can also connect manually:\n  agenthandover connect claude-code\n  agenthandover connect mcp"
                     ),
                     FAQItem(
                         id: "how-use-skill",

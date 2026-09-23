@@ -210,7 +210,7 @@ final class ServiceController {
         let d = startDaemon()
         let w = startWorker()
         // Re-install native messaging host manifest on resume. It was removed
-        // by stopAll() on pause to prevent Chrome from spawning transient
+        // by stopCapture() on pause to prevent Chrome from spawning transient
         // ah-observer bridge instances while observation was supposed to be
         // off. Without this, toggling "Observe Me" back on would leave the
         // extension permanently disconnected until the app relaunched.
@@ -218,9 +218,10 @@ final class ServiceController {
         return d && w
     }
 
-    static func stopAll() {
+    /// Pause (and app quit): stop capture only. The worker stays loaded:
+    /// approvals, search and MCP reporting all go through it, paused or not.
+    static func stopCapture() {
         stopDaemon()
-        stopWorker()
         // Remove the native messaging host manifest so Chrome can't spawn
         // transient ah-observer bridge instances while observation is paused.
         // Previously the extension would keep writing extension-heartbeat.json

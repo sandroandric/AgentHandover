@@ -314,16 +314,16 @@ brew install --cask agenthandover
 
 The cask downloads the signed, notarized `.pkg` from GitHub releases and runs Apple's installer — you get bit-identical behavior to the direct-download path, so all TCC (Accessibility + Screen Recording), launchd, and Ollama onboarding flows work the same. Uninstall cleanly with `brew uninstall --cask agenthandover` (use `--zap` to also remove `~/Library/Application Support/agenthandover`).
 
-### Source build (Rust, Node.js 18+, Python 3.11+, Swift / Xcode CLT)
+### Source build (Rust, Node.js 18+, Python 3.11+, Swift / Xcode CLT, [just](https://github.com/casey/just))
 
 ```bash
 git clone https://github.com/sandroandric/AgentHandover.git && cd AgentHandover
-bash scripts/build-pkg.sh     # builds daemon + CLI + worker + extension + app,
-                              # then packages a signed .pkg at target/
+just package-pkg              # builds daemon + CLI + extension + app, then runs
+                              # scripts/build-pkg.sh to package target/AgentHandover-<version>.pkg
 sudo installer -pkg target/AgentHandover-*.pkg -target /
 ```
 
-`scripts/build-pkg.sh` is the single source of truth for builds — it's what the GitHub releases pipeline runs. The `justfile` has individual `just build-daemon`, `just build-cli`, etc. recipes if you need to rebuild a single component during development.
+`scripts/build-pkg.sh` only packages: it takes the daemon and CLI prebuilt from `target/universal-release/` (`just build-daemon build-cli`), builds the app, builds the extension when `extension/dist` is missing, and copies the worker source. It signs the binaries and the package only when a Developer ID Application / Installer identity is in your keychain; otherwise the package is unsigned. The `justfile` has individual `just build-daemon`, `just build-cli`, etc. recipes if you need to rebuild a single component during development.
 
 </details>
 

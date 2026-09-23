@@ -9,14 +9,19 @@
 #              so the probe must skip it and pick a 3.11+ one
 #   upgrade    second install over it, with a stub "app" process running
 #              that preinstall must stop; then a broken venv is rebuilt
+#   tcc        upgrades over a stand-in app: an unchanged code signature
+#              keeps the grants; a changed one resets Accessibility and
+#              Screen Recording as the install user
 #   oldpython  only a Python older than 3.11 available: install must fail
 #              with an actionable message
-#   build-pkg  scripts/build-pkg.sh must refuse to package without the app
-#              binary or with a missing/old Sparkle.framework
+#   build-pkg  scripts/build-pkg.sh must refuse to package without the
+#              prebuilt Rust binaries, the app binary or with a
+#              missing/old Sparkle.framework
 #
 # Nothing here touches the live login session: AH_NO_SERVICES=1 skips
-# launchctl/tccutil/defaults/open, and the "app" preinstall quits is a stub
-# with its own name. Run unprivileged (ownership checks that need root are
+# launchctl/tccutil/defaults/open, the "app" preinstall quits is a stub
+# with its own name, and tccutil is a stand-in first on the PATH (the
+# stand-in app it would reset has its own bundle id besides). Run unprivileged (ownership checks that need root are
 # reported as skipped) or with sudo on a test Mac to also check that the lib
 # dir is root-owned. Needs network access (or a warm pip cache) for the
 # worker's dependencies.
@@ -110,6 +115,14 @@ echo "Mode:     $([ "${IS_ROOT}" -eq 1 ] && echo "root, installing for ${INSTALL
 # Helpers
 # ---------------------------------------------------------------------------
 
+# Stand-ins put first on the scripts' PATH. tccutil records who ran it and
+# with what arguments; the real one would reset this machine's grants.
+STUB_BIN="${WORK}/stubbin"
+TCCUTIL_LOG="${WORK}/tccutil.log"
+mkdir -p "${STUB_BIN}"
+printf '#!/bin/sh\necho "$(id -un) $*" >> "%s"\n' "${TCCUTIL_LOG}" > "${STUB_BIN}/tccutil"
+chmod +x "${STUB_BIN}/tccutil"
+
 # Lay out what the .pkg payload puts on disk (see scripts/build-pkg.sh).
 make_prefix() {
     local p="${WORK}/$1"
@@ -130,7 +143,8 @@ make_prefix() {
 # run_script <prefix> <preinstall|postinstall> <python candidates> <log>
 run_script() {
     local p="$1" script="$2" candidates="$3" log="$4"
-    env AH_LIB_DIR="${p}/lib" AH_BIN_DIR="${p}/bin" \
+    env PATH="${STUB_BIN}:${PATH}" \
+        AH_LIB_DIR="${p}/lib" AH_BIN_DIR="${p}/bin" \
         AH_LAUNCH_AGENTS="${p}/LaunchAgents" AH_USER_HOME="${p}/home" \
         AH_APP_PATH="${p}/Applications/AgentHandover.app" \
         AH_NO_SERVICES=1 AH_APP_BUNDLE_ID="" AH_APP_PROCESS="${STUB_NAME}" \
@@ -180,8 +194,10 @@ check_installed_prefix() {
         test "$(plist_value "${plist}" StandardErrorPath)" = "${dd}/logs/worker.stderr.log"
     check "worker plist: stdout log under the user's data dir" \
         test "$(plist_value "${plist}" StandardOutPath)" = "${dd}/logs/worker.stdout.log"
-    check "worker plist: no placeholder or /tmp path left" \
-        bash -c "! grep -qE '__AH_LOG_DIR__|/tmp/' \"\$1\"" _ "${plist}"
+    # The template's old /tmp/com.agenthandover.worker.*.log paths. (Not any
+    # /tmp/: this harness's own prefixes live under /tmp.)
+    check "worker plist: no placeholder or /tmp log path left" \
+        bash -c "! grep -qE '__AH_LOG_DIR__|/tmp/com\\.agenthandover' \"\$1\"" _ "${plist}"
 
     local nm="${p}/home/Library/Application Support/Google/Chrome/NativeMessagingHosts/com.agenthandover.host.json"
     check "native messaging manifest points at this prefix's daemon" \
@@ -338,6 +354,62 @@ check "postinstall rebuilt the venv" contains "${WORK}/rebuild-post.log" "Existi
 check "rebuilt venv imports the worker" "${P}/lib/venv/bin/python" -c "import agenthandover_worker, mcp"
 
 # ---------------------------------------------------------------------------
+# tcc: an upgrade that changes the app's code signature
+# ---------------------------------------------------------------------------
+echo ""
+echo "== upgrade that changes the app's designated requirement =="
+# A stand-in app bundle, signed ad hoc: its designated requirement is its
+# cdhash, so rebuilding the binary with different code changes it (as an
+# unsigned or re-signed release does). Its own bundle id keeps even a real
+# tccutil away from the real app's grants.
+TEST_APP_ID="com.agenthandover.installtest"
+make_app() { # make_app <prefix> <exit code compiled into the binary>
+    local app="$1/Applications/AgentHandover.app"
+    rm -rf "${app}"
+    mkdir -p "${app}/Contents/MacOS"
+    printf 'int main(void) { return %d; }\n' "$2" | cc -x c -o "${app}/Contents/MacOS/AgentHandover" -
+    cat > "${app}/Contents/Info.plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleIdentifier</key><string>${TEST_APP_ID}</string>
+<key>CFBundleExecutable</key><string>AgentHandover</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+</dict></plist>
+EOF
+    codesign --force --sign - "${app}" >/dev/null 2>&1
+    if [ "${IS_ROOT}" -eq 1 ]; then chown -R "${INSTALL_USER}" "$1/Applications"; fi
+}
+upgrade_with_app() { # upgrade_with_app <exit code of the new app> <log prefix>
+    rm -f "${TCCUTIL_LOG}"
+    run_script "${P}" preinstall "" "${WORK}/$2-pre.log"
+    make_app "${P}" "$1"   # the payload lands between the two scripts
+    run_script "${P}" postinstall "${GOOD_PY}" "${WORK}/$2-post.log"
+}
+make_app "${P}" 1
+check "stand-in app has a designated requirement" \
+    bash -c "codesign -dr - \"\$1\" 2>/dev/null | grep -q designated" _ "${P}/Applications/AgentHandover.app"
+
+upgrade_with_app 1 same-dr
+check "same signature: postinstall exits 0" test $? -eq 0
+check "same signature: no grant is reset" test ! -e "${TCCUTIL_LOG}"
+check "same signature: the saved requirement is cleaned up" test ! -e "${P}/lib/.app-designated-requirement"
+
+upgrade_with_app 2 new-dr
+rc=$?
+check "new signature: postinstall exits 0" test "${rc}" -eq 0
+[ "${rc}" -eq 0 ] || sed 's/^/    | /' "${WORK}/new-dr-post.log"
+check "new signature: postinstall says why it resets" \
+    contains "${WORK}/new-dr-post.log" "The app's code signature changed"
+check "new signature: Accessibility reset as ${INSTALL_USER}" \
+    contains "${TCCUTIL_LOG}" "${INSTALL_USER} reset Accessibility ${TEST_APP_ID}"
+check "new signature: Screen Recording reset as ${INSTALL_USER}" \
+    contains "${TCCUTIL_LOG}" "${INSTALL_USER} reset ScreenCapture ${TEST_APP_ID}"
+check "new signature: exactly those two resets" test "$(wc -l < "${TCCUTIL_LOG}")" -eq 2
+check "new signature: the saved requirement is cleaned up" test ! -e "${P}/lib/.app-designated-requirement"
+rm -rf "${P}/Applications"
+
+# ---------------------------------------------------------------------------
 # oldpython
 # ---------------------------------------------------------------------------
 echo ""
@@ -387,6 +459,14 @@ cat > .build/release/Sparkle.framework/Versions/B/Resources/Info.plist <<EOF
 <plist version="1.0"><dict><key>CFBundleShortVersionString</key><string>SPARKLE_VERSION</string></dict></plist>
 EOF'
 FAKE_APP='mkdir -p .build/release && cp /bin/echo .build/release/AgentHandoverApp'
+
+T="$(make_build_tree norust 'exit 0')"
+rm -f "${T}/target/universal-release/agenthandover-daemon"
+run_build "${T}" "${WORK}/build-norust.log"
+check "no prebuilt daemon: build-pkg exits non-zero" test $? -ne 0
+check "no prebuilt daemon: names the missing binary" \
+    contains "${WORK}/build-norust.log" "FATAL: ${T}/target/universal-release/agenthandover-daemon is missing."
+check "no prebuilt daemon: says how to build it" contains "${WORK}/build-norust.log" "just package-pkg"
 
 T="$(make_build_tree nobinary 'exit 0')"
 run_build "${T}" "${WORK}/build-nobinary.log"
