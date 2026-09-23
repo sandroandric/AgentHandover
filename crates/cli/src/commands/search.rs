@@ -352,9 +352,11 @@ mod tests {
 
     #[test]
     fn nothing_listening_means_fall_back() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        drop(listener);
+        // Port 1: privileged, so no test can bind it, and nothing listens on
+        // it. (Binding port 0 and dropping the listener raced with the tests
+        // running beside this one: the OS could hand the freed port to
+        // another test's server before the connect.)
+        let port = 1;
 
         let reply = post_query_api(port, "/search", None, &serde_json::json!({"query": "x"})).unwrap();
         assert!(reply.is_none());

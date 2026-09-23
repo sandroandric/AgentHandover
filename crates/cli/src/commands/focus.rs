@@ -87,6 +87,9 @@ fn start_in(state_dir: &std::path::Path, title: &str, daemon_running: bool) -> R
     };
 
     write_focus_signal(state_dir, &signal)?;
+    // An earlier "nothing was recorded" outcome (the worker's
+    // focus-result.json) no longer applies once a new session records.
+    let _ = std::fs::remove_file(state_dir.join("focus-result.json"));
 
     println!("{} Focus recording started", "●".red());
     println!("  Title:      {}", title.bold());
@@ -355,7 +358,9 @@ mod tests {
     #[test]
     fn start_with_a_running_daemon_writes_a_recording_signal() {
         let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("focus-result.json"), "{}").unwrap();
         start_in(dir.path(), "Send weekly report", true).unwrap();
+        assert!(!dir.path().join("focus-result.json").exists(), "an old outcome is cleared");
         let signal = read_focus_signal(dir.path()).unwrap();
         assert!(signal.is_recording());
         assert_eq!(signal.title, "Send weekly report");

@@ -561,9 +561,12 @@ struct MenuBarView: View {
                     RoundedRectangle(cornerRadius: cardRadius)
                         .stroke(Color.purple.opacity(0.15), lineWidth: 1)
                 )
-            } else if let nothingRecordedMessage = appState.focusState.nothingRecordedMessage {
+            } else {
+              VStack(spacing: 8) {
+                if let nothingRecordedMessage = appState.focusState.nothingRecordedMessage {
                 // The worker closed the stopped session without events
-                // (focus-result.json): say so instead of "Analyzing".
+                // (focus-result.json): say so instead of "Analyzing",
+                // above the Record button (recording again needs no dismiss).
                 HStack(alignment: .top, spacing: 10) {
                     Image(systemName: "exclamationmark.circle")
                         .font(.system(size: 14))
@@ -589,7 +592,7 @@ struct MenuBarView: View {
                     RoundedRectangle(cornerRadius: cardRadius)
                         .stroke(warmOrange.opacity(0.3), lineWidth: 1)
                 )
-            } else {
+                }
                 // Record button with idle pulse
                 Button(action: { showTitlePrompt = true }) {
                     HStack(spacing: 8) {
@@ -628,6 +631,7 @@ struct MenuBarView: View {
                         idlePulse = true
                     }
                 }
+              }
             }
         }
     }

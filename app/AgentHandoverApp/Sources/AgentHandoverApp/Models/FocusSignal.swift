@@ -121,6 +121,9 @@ enum FocusSignal {
             status: "recording"
         )
         try write(signal, in: dir)
+        // A new recording makes an earlier "nothing was recorded" outcome
+        // moot; left behind, it could reappear once this session ends.
+        try? FileManager.default.removeItem(at: dir.appendingPathComponent(FocusResult.fileName))
         return signal
     }
 

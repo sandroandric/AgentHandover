@@ -138,6 +138,16 @@ final class FocusSignalTests: XCTestCase {
         )
     }
 
+    /// A new recording clears an earlier "nothing was recorded" outcome,
+    /// which could otherwise reappear once the new session ends.
+    func testStartClearsAnOldNothingRecordedOutcome() throws {
+        let result = dir.appendingPathComponent(FocusResult.fileName)
+        try Data(#"{"session_id":"old","title":"t","status":"nothing_recorded","message":"m","stopped_at":null,"closed_at":"2026-09-23T10:00:00Z"}"#.utf8).write(to: result)
+        XCTAssertNotNil(FocusResult.read(in: dir))
+        _ = try FocusSignal.start(title: "Next", in: dir)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: result.path))
+    }
+
     func testUnknownStatusIsIdle() {
         let signal = FocusSessionSignalFile(
             session_id: "s", title: "t", started_at: "2026-09-23T10:00:00Z", status: "weird"
