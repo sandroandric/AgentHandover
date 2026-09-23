@@ -144,7 +144,7 @@ def test_text_first_annotation_on_the_focus_recording(
         before = len(tape.served)
         result = annotator.annotate_event(
             event, recent_annotations=recent, artifact_dir=str(fixture.screenshots_dir),
-            skip_stale_check=True, page=page_for_event(w.db, event),
+            page=page_for_event(w.db, event),
         )
         calls = [
             e for e in tape.served[before:]

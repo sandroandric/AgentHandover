@@ -790,6 +790,7 @@ def deduplicate_templates(
     evidence_normalizer=None,
     llm_reasoner: "LLMReasoner | None" = None,
     registry_file: str = _REGISTRY_FILE,
+    changed_only: bool = False,
 ) -> list[dict]:
     """Deduplicate a batch of new SOPs against the cumulative registry.
 
@@ -808,6 +809,11 @@ def deduplicate_templates(
             When provided, ``merge_sops`` uses semantic alignment
             instead of the simple "keep more steps" strategy.
         registry_file: Registry filename inside *state_dir*.
+        changed_only: Return only new templates and merged ones whose
+            ``compute_fingerprint`` differs from the registry's stored
+            fingerprint, so re-mining an unchanged library exports nothing.
+            (Recorded and passive Skills keep the default: a re-recording
+            is always handed on.)
 
     Returns the final list of SOP templates to export (merged + new).
     """
@@ -824,8 +830,10 @@ def deduplicate_templates(
                 evidence_normalizer=evidence_normalizer,
                 llm_reasoner=llm_reasoner,
             )
+            stored_fp = registry[match_idx].get("_fingerprint")
             registry[match_idx] = merged
-            output.append(merged)
+            if not changed_only or merged.get("_fingerprint") != stored_fp:
+                output.append(merged)
         else:
             # New SOP — add to registry
             new_sop["_fingerprint"] = compute_fingerprint(new_sop)

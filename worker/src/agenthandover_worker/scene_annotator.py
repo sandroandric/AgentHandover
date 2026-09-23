@@ -19,7 +19,8 @@ Key features:
 - Everything stored is passed through :mod:`redaction` (secrets, emails,
   phone numbers).
 - 3-frame sliding window context (time-bounded to 10 minutes)
-- Stale-frame skipping: 3+ consecutive same-app non-workflow → skip
+- Annotation cache: a frame whose app, title and screen text match an
+  annotated frame reuses its annotation without a model call
 - Screenshot lifecycle: delete JPEG after the frame is processed (success
   or failure); when Ollama is unreachable the frame is deferred instead
   (JPEG kept, row left pending, 60 s backoff)
@@ -34,6 +35,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from agenthandover_worker.annotation_cache import AnnotationCache, cache_key
 from agenthandover_worker.dom import accessible_name, flatten_dom, implicit_role, url_host
 from agenthandover_worker.event_helpers import display_name, is_bundle_id, parse_json_field
 from agenthandover_worker.json_extract import extract_json
@@ -137,7 +139,6 @@ class AnnotationConfig:
 
     model: str = "qwen3.5:4b"
     ollama_host: str = "http://localhost:11434"
-    stale_skip_count: int = 3
     sliding_window_size: int = 3
     sliding_window_max_age_sec: int = 600
     delete_screenshot_after_processing: bool = True
@@ -160,6 +161,8 @@ class AnnotationResult:
     error: str | None = None
     inference_time_seconds: float = 0.0
     visual_text_proxy: str | None = None
+    # True when the annotation came from the annotation cache (no model call).
+    cached: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -768,53 +771,6 @@ def as_compact(annotation: dict | None) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Stale-frame detection
-# ---------------------------------------------------------------------------
-
-@dataclass
-class _StaleTracker:
-    """Track consecutive non-workflow frames for stale-skip logic."""
-
-    consecutive_non_workflow: int = 0
-    last_app: str = ""
-    last_location: str = ""
-
-    def update(self, annotation: dict) -> bool:
-        """Update tracker and return True if this frame should be skipped.
-
-        A frame is stale (skip-worthy) after *threshold* consecutive
-        annotations where:
-        - app + location are unchanged
-        - is_workflow is False
-        """
-        app = annotation.get("app", "")
-        location = annotation.get("location", "")
-        is_workflow = annotation.get("task_context", {}).get("is_workflow", False)
-
-        if is_workflow or app != self.last_app or location != self.last_location:
-            self.consecutive_non_workflow = 0
-            self.last_app = app
-            self.last_location = location
-            if not is_workflow and app == self.last_app:
-                self.consecutive_non_workflow = 1
-            return False
-
-        # Same app + location, non-workflow
-        self.consecutive_non_workflow += 1
-        return False  # Don't skip this one yet — caller checks threshold
-
-    def should_skip(self, threshold: int) -> bool:
-        """Return True if we've exceeded the stale threshold."""
-        return self.consecutive_non_workflow >= threshold
-
-    def reset(self) -> None:
-        """Reset tracker (e.g. on significant screen change or app switch)."""
-        self.consecutive_non_workflow = 0
-        self.last_app = ""
-        self.last_location = ""
-
-
-# ---------------------------------------------------------------------------
 # Ollama VLM client
 # ---------------------------------------------------------------------------
 
@@ -911,14 +867,15 @@ class SceneAnnotator:
         config: AnnotationConfig | None = None,
         image_embedder=None,
         vector_kb=None,
+        cache: "AnnotationCache | None" = None,
     ) -> None:
         self.config = config or AnnotationConfig()
         self._image_embedder = image_embedder
         self._vector_kb = vector_kb
-        self._stale = _StaleTracker()
+        self._cache = cache
         self._stats = {
             "annotated": 0,
-            "skipped_stale": 0,
+            "cache_hits": 0,
             "failed": 0,
             "missing_screenshot": 0,
             "deferred": 0,
@@ -1026,7 +983,6 @@ class SceneAnnotator:
         *,
         recent_annotations: list[dict] | None = None,
         artifact_dir: str | Path | None = None,
-        skip_stale_check: bool = False,
         page: dict | None = None,
     ) -> AnnotationResult:
         """Annotate a single event's frame, text first.
@@ -1034,8 +990,6 @@ class SceneAnnotator:
         *event* is a row dict from the events table.
         *recent_annotations* is the sliding-window context (up to 3 recent).
         *artifact_dir* is where screenshot files are stored.
-        *skip_stale_check* disables stale-frame skipping (used for focus
-        sessions where every frame matters).
         *page* is the browser page on screen (:func:`page_for_event`):
         its URL goes into the WINDOW header and its elements into the
         prompt.
@@ -1052,44 +1006,10 @@ class SceneAnnotator:
         False until the backoff has passed.
         """
         event_id = event.get("id", "unknown")
-        # The row's window and metadata, parsed once for the stale check
-        # and the WINDOW header.
+        # The row's window and metadata, parsed once for the WINDOW header
+        # and the cache key.
         window = parse_json_field(event, "window_json")
         metadata = parse_json_field(event, "metadata_json")
-
-        # --- Stale-frame check ---
-        # If we've been skipping due to stale frames, check if this one
-        # should also be skipped.
-        if not skip_stale_check and self._stale.should_skip(self.config.stale_skip_count):
-            # Check if the screen actually changed (app/title differ from
-            # recent).  The tracker holds the annotation's app, which the
-            # WINDOW header makes the display name of ``app_id``.
-            current_app = display_name(window.get("app_id"))
-            current_title = str(window.get("title") or "")
-
-            if (
-                current_app == self._stale.last_app
-                and current_title == self._stale.last_location
-            ):
-                # Still stale — skip this frame. The skip is final (the
-                # event is saved as "skipped"), so its JPEG has no further
-                # use and is deleted now rather than at the TTL sweep.
-                self._stats["skipped_stale"] += 1
-                self._delete_screenshot(self._find_screenshot(event, artifact_dir))
-                logger.debug(
-                    "Stale-skip event %s (app=%s, %d consecutive)",
-                    event_id,
-                    current_app,
-                    self._stale.consecutive_non_workflow,
-                )
-                return AnnotationResult(
-                    event_id=event_id,
-                    status="skipped",
-                    error="stale_frame",
-                )
-            else:
-                # Screen changed — reset stale tracker and proceed
-                self._stale.reset()
 
         # --- Locate screenshot ---
         screenshot_path = self._find_screenshot(event, artifact_dir)
@@ -1142,6 +1062,19 @@ class SceneAnnotator:
             len(ocr_text) + len(page_text),
         )
 
+        # --- Annotation cache: the same screen was annotated before ---
+        # The key covers what the model is shown: window app and title,
+        # OCR and page text.
+        key = None
+        cached = None
+        if self._cache is not None:
+            key = cache_key(
+                display_name(window.get("app_id")),
+                str(window.get("title") or ""),
+                "\n".join(t for t in (ocr_text, page_text) if t),
+            )
+            cached = self._cache.lookup(key) if key is not None else None
+
         # --- Call the model: text first, vision when needed ---
         # Each call's output is grammar-constrained to the schema at
         # temperature 0, so a repeat of the same call cannot do better.
@@ -1149,27 +1082,30 @@ class SceneAnnotator:
         annotation: dict | None = None
         raw_response = ""
         try:
-            if reason is None:
-                raw_response, elapsed = self._generate(prompt_for(False), None)
-                inference_time += elapsed
-                annotation = _validate_annotation(raw_response)
-                if annotation is not None and annotation.get("needs_vision"):
-                    reason = "model"
-            if reason is not None:
-                try:
-                    raw_response, elapsed = self._generate(prompt_for(True), screenshot_path)
-                except (ConnectionError, TimeoutError):
-                    raise
-                except Exception as exc:
-                    if annotation is None:
-                        raise
-                    # The text-only answer stands when the vision call fails.
-                    logger.debug("Vision call failed for %s: %s", event_id, exc)
-                else:
+            if cached is not None:
+                annotation = cached
+            else:
+                if reason is None:
+                    raw_response, elapsed = self._generate(prompt_for(False), None)
                     inference_time += elapsed
-                    annotation = _validate_annotation(raw_response) or annotation
-                if annotation is not None:
-                    annotation["_vision"] = reason
+                    annotation = _validate_annotation(raw_response)
+                    if annotation is not None and annotation.get("needs_vision"):
+                        reason = "model"
+                if reason is not None:
+                    try:
+                        raw_response, elapsed = self._generate(prompt_for(True), screenshot_path)
+                    except (ConnectionError, TimeoutError):
+                        raise
+                    except Exception as exc:
+                        if annotation is None:
+                            raise
+                        # The text-only answer stands when the vision call fails.
+                        logger.debug("Vision call failed for %s: %s", event_id, exc)
+                    else:
+                        inference_time += elapsed
+                        annotation = _validate_annotation(raw_response) or annotation
+                    if annotation is not None:
+                        annotation["_vision"] = reason
         except (ConnectionError, TimeoutError) as exc:  # OllamaUnavailable, cold-load timeouts
             # Transport error or timeout: keep the JPEG, leave the row pending.
             self._stats["deferred"] += 1
@@ -1187,6 +1123,10 @@ class SceneAnnotator:
                 status="failed",
                 error=f"vlm_error: {exc}",
             )
+
+        # --- Cache the model's answer (before the per-frame additions) ---
+        if annotation is not None and cached is None and key is not None:
+            self._cache.store(key, annotation)
 
         # --- Bookkeeping, then redaction of everything stored ---
         if annotation is None:
@@ -1241,15 +1181,13 @@ class SceneAnnotator:
         # pipelines can embed it even after the screenshot is gone.
         visual_proxy = self._build_visual_text_proxy(event, annotation)
 
-        # --- Update stale tracker ---
-        self._stale.update(annotation)
-
-        self._stats["annotated"] += 1
+        self._stats["cache_hits" if cached is not None else "annotated"] += 1
         result = AnnotationResult(
             event_id=event_id,
             status="completed",
             annotation=annotation,
             inference_time_seconds=inference_time,
+            cached=cached is not None,
         )
         if visual_proxy:
             result.visual_text_proxy = visual_proxy
@@ -1330,6 +1268,10 @@ class SceneAnnotator:
             logger.debug("Deleted screenshot after processing: %s", screenshot_path)
         except OSError:
             logger.debug("Failed to delete screenshot %s", screenshot_path, exc_info=True)
+
+    def discard_screenshot(self, event: dict, artifact_dir: str | Path | None) -> None:
+        """Delete the JPEG of a frame that will never be annotated."""
+        self._delete_screenshot(self._find_screenshot(event, artifact_dir))
 
     # ------------------------------------------------------------------
     # Screenshot location

@@ -149,6 +149,7 @@ class TestProcessAnnotations:
         stats = _process_annotations(v2_db, annotator, tmp_path / "screenshots")
         assert stats == {
             "annotated": 0, "skipped": 0, "failed": 0, "blocked": 0, "deferred": 0,
+            "budget_exhausted": False,
         }
 
     def test_annotates_pending_event(
@@ -254,28 +255,6 @@ class TestProcessAnnotations:
 
         event = v2_db.get_event_by_id(eid)
         assert event["annotation_status"] == "missing_screenshot"
-
-    def test_handles_skipped_stale(
-        self, v2_db: WorkerDB, v2_write_conn: sqlite3.Connection, tmp_path: Path,
-    ):
-        """Stale-skipped events are saved with status='skipped'."""
-        eid = _insert_event(v2_write_conn)
-
-        annotator = SceneAnnotator(AnnotationConfig())
-
-        with patch.object(
-            annotator, "annotate_event",
-            return_value=AnnotationResult(
-                event_id=eid,
-                status="skipped",
-                error="stale_frame",
-            ),
-        ):
-            stats = _process_annotations(
-                v2_db, annotator, tmp_path / "screenshots"
-            )
-
-        assert stats["skipped"] == 1
 
     def test_passes_sliding_window_context(
         self, v2_db: WorkerDB, v2_write_conn: sqlite3.Connection, tmp_path: Path,

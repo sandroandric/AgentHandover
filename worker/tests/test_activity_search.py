@@ -1233,3 +1233,62 @@ class TestQueryApiThread:
         finally:
             srv.stop()
             searcher.close()
+
+# ---------------------------------------------------------------------------
+# 22. events_fts_ids shadow table and pruning
+# ---------------------------------------------------------------------------
+
+
+class TestIndexShadowTable:
+    """The shadow table replaces the FTS scan and lets the index be pruned."""
+
+    def test_refresh_query_plan_does_not_scan_the_fts_table(
+        self, tmp_db_path: Path, write_conn: sqlite3.Connection,
+    ) -> None:
+        _insert_annotated_event(write_conn)
+        with ActivitySearcher(tmp_db_path) as s:
+            s._ensure_fts_index()
+            plan = " ".join(
+                str(row[3]) for row in s._conn.execute(
+                    "EXPLAIN QUERY PLAN SELECT e.id FROM events e "
+                    "WHERE e.annotation_status = 'completed' "
+                    "AND NOT EXISTS (SELECT 1 FROM events_fts_ids i "
+                    "WHERE i.event_id = e.id)"
+                )
+            )
+            # Each event is one primary-key lookup; nothing is scanned.
+            assert "sqlite_autoindex_events_fts_ids_1 (event_id=?)" in plan
+            assert "SCAN" not in plan
+            ids = s._conn.execute("SELECT COUNT(*) FROM events_fts_ids").fetchone()[0]
+            assert ids == 1
+
+    def test_prune_follows_the_daemons_deletes(
+        self, tmp_db_path: Path, write_conn: sqlite3.Connection,
+    ) -> None:
+        old = _insert_annotated_event(write_conn, what_doing="Renewed the old domain")
+        _insert_annotated_event(write_conn, what_doing="Renewed the new domain")
+        with ActivitySearcher(tmp_db_path) as s:
+            assert len(s.search("renewed")) == 2
+            write_conn.execute("DELETE FROM events WHERE id = ?", (old,))
+            write_conn.commit()
+            assert s.prune_index() == 1
+            assert [r.event_id for r in s.search("renewed")] != [old]
+            assert len(s.search("renewed")) == 1
+            assert s.prune_index() == 0
+            assert s.refresh_index() == 0
+
+    def test_an_index_from_before_the_shadow_table_is_adopted(
+        self, tmp_db_path: Path, write_conn: sqlite3.Connection,
+    ) -> None:
+        eid = _insert_annotated_event(write_conn)
+        write_conn.execute(
+            "CREATE VIRTUAL TABLE events_fts USING fts5(event_id, what_doing, app, location)"
+        )
+        write_conn.execute(
+            "INSERT INTO events_fts VALUES (?, 'Browsing the web', 'Chrome', '')", (eid,),
+        )
+        write_conn.commit()
+        with ActivitySearcher(tmp_db_path) as s:
+            assert s.refresh_index() == 0
+            count = s._conn.execute("SELECT COUNT(*) FROM events_fts").fetchone()[0]
+            assert count == 1

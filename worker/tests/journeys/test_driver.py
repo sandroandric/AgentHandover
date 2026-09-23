@@ -65,12 +65,13 @@ def test_passive_discovery_follows_the_clock(events_db, worker, clock) -> None:
     fixture = events_db("focus_dailynews", rebase_to=clock.now())
     journey = worker(fixture)
 
-    assert journey.run_tick()["passive_sops"] is not None  # due at start-up, like main()
+    # The timer starts with the worker, as main() seeds it at loop entry.
     assert journey.run_tick()["passive_sops"] is None
     clock.advance(hours=1, minutes=59)
     assert journey.run_tick()["passive_sops"] is None
     clock.advance(minutes=1)
     assert journey.run_tick()["passive_sops"] is not None
+    assert journey.run_tick()["passive_sops"] is None
 
 
 def test_tick_drains_the_trigger_spool_through_mains_handlers(

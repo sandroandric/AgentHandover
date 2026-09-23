@@ -53,7 +53,9 @@ def test_missing_file_gives_every_default(tmp_path):
     assert cfg.vlm.annotation_enabled is True
     assert cfg.vlm.annotation_model == "qwen3.5:4b"
     assert cfg.vlm.sop_model == "qwen3.5:4b"
-    assert cfg.vlm.stale_skip_count == 3
+    assert cfg.vlm.annotation_max_frames_per_day == 1500
+    assert cfg.vlm.annotation_max_compute_minutes_per_day == 60.0
+    assert (cfg.embedding.retention_days, cfg.embedding.max_rows) == (90, 50_000)
     assert cfg.vlm.sliding_window_max_age_sec == 600
     assert cfg.vlm.ollama_host == "http://localhost:11434"
     assert cfg.vlm.annotation_timeout_seconds == 180.0
@@ -96,7 +98,7 @@ def test_raw_and_privacy_zones_are_passed_through(tmp_path):
 def test_vlm_values(tmp_path):
     cfg = load_config(_write(tmp_path, (
         '[vlm]\nannotation_enabled = false\nannotation_model = "qwen3:4b"\n'
-        'sop_model = "gemma4:e4b"\nstale_skip_count = 5\n'
+        'sop_model = "gemma4:e4b"\nannotation_max_frames_per_day = 5\n'
         'sliding_window_max_age_sec = 900\nollama_host = "http://127.0.0.1:1"\n'
         'mode = "remote"\nprovider = "openai"\nmodel = "gpt"\n'
         'api_key_env = "KEY"\n'
@@ -105,7 +107,7 @@ def test_vlm_values(tmp_path):
     assert vlm.annotation_enabled is False
     assert vlm.annotation_model == "qwen3:4b"
     assert vlm.sop_model == "gemma4:e4b"
-    assert vlm.stale_skip_count == 5
+    assert vlm.annotation_max_frames_per_day == 5
     assert vlm.sliding_window_max_age_sec == 900
     assert vlm.ollama_host == "http://127.0.0.1:1"
     assert (vlm.mode, vlm.provider, vlm.model, vlm.api_key_env) == (
@@ -123,12 +125,12 @@ def test_booleans_written_as_strings_or_numbers(tmp_path, raw, expected):
 
 def test_invalid_values_keep_the_default(tmp_path, caplog):
     cfg = load_config(_write(tmp_path, (
-        '[vlm]\nannotation_timeout_seconds = "soon"\nstale_skip_count = "many"\n'
+        '[vlm]\nannotation_timeout_seconds = "soon"\nannotation_max_frames_per_day = 0\n'
         'ollama_host = 11434\nannotation_enabled = "maybe"\n'
         "[focus]\nmax_session_hours = -1\n"
     )))
     assert cfg.vlm.annotation_timeout_seconds == 180.0
-    assert cfg.vlm.stale_skip_count == 3
+    assert cfg.vlm.annotation_max_frames_per_day == 1500
     assert cfg.vlm.ollama_host == "http://localhost:11434"
     assert cfg.vlm.annotation_enabled is True
     assert cfg.focus.max_session_hours == 4.0

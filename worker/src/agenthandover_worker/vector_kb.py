@@ -1,10 +1,13 @@
 """Vector Knowledge Base — embedding, storage, and semantic search.
 
-Embeds text via Ollama (nomic-embed-text by default), stores vectors as
-BLOB in SQLite, and provides brute-force cosine similarity search.
+Embeds text via Ollama (nomic-embed-text by default), stores unit vectors
+as BLOB in SQLite, and provides brute-force cosine similarity search.
 
 Design choices:
   * BLOB storage (struct.pack float32) — half the size of JSON, zero parse cost
+  * Unit vectors plus an 8-bit copy — search is a coarse byte dot product
+    over every row (``math.sumprod``) and an exact re-score of the best
+  * Retention and a row cap — ``purge_stale`` runs daily, ``max_rows`` holds
   * Own SQLite connection — same isolation pattern as ActivitySearcher
   * Idempotent upsert — SHA-256 text_hash skips re-embedding unchanged content
   * Budget cap — max_embeds_per_cycle prevents Ollama overload on backlog catch-up
@@ -13,6 +16,7 @@ Design choices:
 from __future__ import annotations
 
 import hashlib
+import heapq
 import logging
 import math
 import sqlite3
@@ -39,6 +43,12 @@ class VectorKBConfig:
     batch_size: int = 32
     timeout_seconds: float = 60.0
     max_embeds_per_cycle: int = 200
+    # ``[embedding] retention_days``: rows not updated for this long are
+    # purged by the daily maintenance.
+    retention_days: int = 90
+    # ``[embedding] max_rows``: hard cap; the least recently updated rows
+    # beyond it are evicted after each upsert.
+    max_rows: int = 50_000
 
 
 # ---------------------------------------------------------------------------
@@ -59,14 +69,58 @@ class VectorSearchResult:
 # BLOB helpers
 # ---------------------------------------------------------------------------
 
+# One ``struct.Struct`` per dimension, built once instead of per row.
+_STRUCTS: dict[int, struct.Struct] = {}
+
+# The search candidates re-scored exactly: at least this many, and at
+# least this many times ``top_k``.
+_RERANK_MIN = 40
+_RERANK_FACTOR = 4
+
+
+def _struct(dim: int) -> struct.Struct:
+    packer = _STRUCTS.get(dim)
+    if packer is None:
+        packer = _STRUCTS[dim] = struct.Struct(f"{dim}f")
+    return packer
+
+
 def _encode_embedding(vec: list[float]) -> bytes:
     """Pack a float vector into raw float32 bytes."""
-    return struct.pack(f"{len(vec)}f", *vec)
+    return _struct(len(vec)).pack(*vec)
 
 
-def _decode_embedding(blob: bytes, dim: int) -> list[float]:
+def _decode_embedding(blob: bytes, dim: int) -> tuple[float, ...]:
     """Unpack raw float32 bytes into a float vector."""
-    return list(struct.unpack(f"{dim}f", blob))
+    return _struct(dim).unpack(blob)
+
+
+def _normalize(vec) -> list[float]:
+    """*vec* scaled to unit length (a zero vector stays zero)."""
+    norm = math.sqrt(math.fsum(x * x for x in vec))
+    if norm == 0.0:
+        return [0.0] * len(vec)
+    return [x / norm for x in vec]
+
+
+def _quantize(unit: list[float]) -> tuple[bytes, float]:
+    """An 8-bit copy of a unit vector for the coarse search pass.
+
+    Each component becomes ``round(x * scale) + 128`` in one byte, with
+    ``scale = 127 / max|x|``, so a dot product of two such byte strings
+    runs on ``math.sumprod``'s small-integer fast path.  Returns the bytes
+    and the scale.
+    """
+    peak = max((abs(x) for x in unit), default=0.0)
+    scale = 127.0 / peak if peak > 0.0 else 1.0
+    return bytes(round(x * scale) + 128 for x in unit), scale
+
+
+def _dot(a, b) -> float:
+    return math.fsum(x * y for x, y in zip(a, b))
+
+
+_sumprod = getattr(math, "sumprod", _dot)  # math.sumprod is Python 3.12+
 
 
 def _text_hash(text: str) -> str:
@@ -80,12 +134,31 @@ def _vector_id(source_type: str, source_id: str) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
+@dataclass(frozen=True)
+class _Row:
+    """One vector in the in-memory search index."""
+
+    source_type: str
+    source_id: str
+    model: str
+    dim: int
+    qvec: bytes
+    scale: float
+    offset_sum: int  # sum of the signed components, sum(qvec) - 128 * dim
+
+
 # ---------------------------------------------------------------------------
 # Core class
 # ---------------------------------------------------------------------------
 
 class VectorKB:
     """Embedding storage and semantic search over SQLite.
+
+    Vectors are stored L2-normalised, so a similarity is a dot product.
+    Each row also carries an 8-bit copy (``qvec``); search scores every
+    row against it from an in-memory index kept in step with the table
+    (rows changed since the last search are read by ``updated_at``), then
+    re-scores the best candidates exactly from the float32 vectors.
 
     Manages its own SQLite connection (read-write).  Call :meth:`close`
     or use as a context manager when done.
@@ -103,6 +176,9 @@ class VectorKB:
         self._conn.execute("PRAGMA journal_mode = WAL;")
         self._ensure_table()
         self._cycle_embed_count = 0
+        # Search index: vector id -> _Row, and the newest updated_at read.
+        self._index: dict[str, _Row] | None = None
+        self._index_mark = ""
 
     # ------------------------------------------------------------------
     # Schema
@@ -121,13 +197,39 @@ class VectorKB:
             "  created_at  TEXT NOT NULL DEFAULT "
             "    (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),"
             "  updated_at  TEXT NOT NULL DEFAULT "
-            "    (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))"
+            "    (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),"
+            "  qvec        BLOB,"
+            "  qscale      REAL"
             ")"
         )
+        columns = {
+            row[1] for row in self._conn.execute("PRAGMA table_info(vector_store)")
+        }
+        for name, decl in (("qvec", "BLOB"), ("qscale", "REAL")):
+            if name not in columns:
+                self._conn.execute(f"ALTER TABLE vector_store ADD COLUMN {name} {decl}")
         self._conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_vs_source "
             "ON vector_store(source_type, source_id)"
         )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_vs_updated ON vector_store(updated_at)"
+        )
+        # Rows written before vectors were stored normalised with their
+        # 8-bit copy: convert them once.
+        stale = self._conn.execute(
+            "SELECT id, embedding, dim FROM vector_store WHERE qvec IS NULL"
+        ).fetchall()
+        for vid, blob, dim in stale:
+            unit = _normalize(_decode_embedding(blob, dim))
+            qvec, scale = _quantize(unit)
+            self._conn.execute(
+                "UPDATE vector_store SET embedding = ?, qvec = ?, qscale = ? "
+                "WHERE id = ?",
+                (_encode_embedding(unit), qvec, scale, vid),
+            )
+        if stale:
+            logger.info("Normalised %d stored vector(s)", len(stale))
         self._conn.commit()
 
     # ------------------------------------------------------------------
@@ -191,6 +293,31 @@ class VectorKB:
             row and row[0] == thash and row[1] == self.config.embedding_model
         )
 
+    def _store(
+        self, source_type: str, source_id: str, text_hash: str,
+        embedding: list[float],
+    ) -> None:
+        """Write one normalised vector (no commit)."""
+        unit = _normalize(embedding)
+        qvec, scale = _quantize(unit)
+        self._conn.execute(
+            "INSERT INTO vector_store "
+            "(id, source_type, source_id, embedding, model, dim, text_hash, "
+            " qvec, qscale) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(id) DO UPDATE SET "
+            " embedding = excluded.embedding,"
+            " model = excluded.model,"
+            " dim = excluded.dim,"
+            " text_hash = excluded.text_hash,"
+            " qvec = excluded.qvec,"
+            " qscale = excluded.qscale,"
+            " updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
+            (_vector_id(source_type, source_id), source_type, source_id,
+             _encode_embedding(unit), self.config.embedding_model, len(unit),
+             text_hash, qvec, scale),
+        )
+
     def upsert(
         self,
         source_type: str,
@@ -225,21 +352,9 @@ class VectorKB:
                 logger.debug("Ollama unavailable for embedding", exc_info=True)
                 return False
 
-        blob = _encode_embedding(embedding)
-        self._conn.execute(
-            "INSERT INTO vector_store "
-            "(id, source_type, source_id, embedding, model, dim, text_hash) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?) "
-            "ON CONFLICT(id) DO UPDATE SET "
-            " embedding = excluded.embedding,"
-            " model = excluded.model,"
-            " dim = excluded.dim,"
-            " text_hash = excluded.text_hash,"
-            " updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
-            (vid, source_type, source_id, blob,
-             self.config.embedding_model, len(embedding), thash),
-        )
+        self._store(source_type, source_id, thash, embedding)
         self._conn.commit()
+        self.enforce_row_cap()
         return True
 
     def upsert_batch(
@@ -257,65 +372,48 @@ class VectorKB:
         if not items:
             return 0
 
-        count = 0
+        to_store: list[tuple[str, str, str, list[float]]] = []
 
         if embeddings and len(embeddings) == len(items):
-            # Caller provided embeddings — upsert directly
+            # Caller provided embeddings
             for (stype, sid, text), emb in zip(items, embeddings):
-                if emb and self.upsert(stype, sid, text, embedding=emb):
-                    count += 1
-            return count
+                thash = _text_hash(text)
+                if emb and not self._is_current(_vector_id(stype, sid), thash):
+                    to_store.append((stype, sid, thash, emb))
+        else:
+            # Filter unchanged items by text_hash
+            to_embed: list[tuple[str, str, str, str]] = []  # (stype, sid, hash, text)
+            for stype, sid, text in items:
+                thash = _text_hash(text)
+                if not self._is_current(_vector_id(stype, sid), thash):
+                    to_embed.append((stype, sid, thash, text))
+            if not to_embed:
+                return 0
 
-        # Filter unchanged items by text_hash
-        to_embed: list[tuple[int, str, str, str]] = []  # (idx, stype, sid, text)
-        for i, (stype, sid, text) in enumerate(items):
-            if self._is_current(_vector_id(stype, sid), _text_hash(text)):
-                continue  # unchanged
-            to_embed.append((i, stype, sid, text))
+            budget_left = self.config.max_embeds_per_cycle - self._cycle_embed_count
+            if budget_left <= 0:
+                logger.debug("Embed budget exhausted, skipping batch of %d", len(to_embed))
+                return 0
+            to_embed = to_embed[:budget_left]
 
-        if not to_embed:
-            return 0
+            try:
+                computed = self.compute_embeddings([t[3] for t in to_embed])
+            except (ConnectionError, OllamaError):
+                logger.debug("Ollama unavailable for batch embedding", exc_info=True)
+                return 0
+            self._cycle_embed_count += len(computed)
+            to_store = [
+                (stype, sid, thash, emb)
+                for (stype, sid, thash, _text), emb in zip(to_embed, computed)
+                if emb
+            ]
 
-        # Budget check
-        budget_left = self.config.max_embeds_per_cycle - self._cycle_embed_count
-        if budget_left <= 0:
-            logger.debug("Embed budget exhausted, skipping batch of %d", len(to_embed))
-            return 0
-        to_embed = to_embed[:budget_left]
-
-        # Compute embeddings
-        texts = [t[3] for t in to_embed]
-        try:
-            computed = self.compute_embeddings(texts)
-        except (ConnectionError, OllamaError):
-            logger.debug("Ollama unavailable for batch embedding", exc_info=True)
-            return 0
-
-        self._cycle_embed_count += len(computed)
-
-        for (_, stype, sid, text), emb in zip(to_embed, computed):
-            if not emb:
-                continue
-            vid = _vector_id(stype, sid)
-            thash = _text_hash(text)
-            blob = _encode_embedding(emb)
-            self._conn.execute(
-                "INSERT INTO vector_store "
-                "(id, source_type, source_id, embedding, model, dim, text_hash) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?) "
-                "ON CONFLICT(id) DO UPDATE SET "
-                " embedding = excluded.embedding,"
-                " model = excluded.model,"
-                " dim = excluded.dim,"
-                " text_hash = excluded.text_hash,"
-                " updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
-                (vid, stype, sid, blob,
-                 self.config.embedding_model, len(emb), thash),
-            )
-            count += 1
-
+        for stype, sid, thash, emb in to_store:
+            self._store(stype, sid, thash, emb)
         self._conn.commit()
-        return count
+        if to_store:
+            self.enforce_row_cap()
+        return len(to_store)
 
     # ------------------------------------------------------------------
     # Search
@@ -346,6 +444,33 @@ class VectorKB:
             min_score=min_score,
         )
 
+    def _sync_index(self, *, reload: bool = True) -> dict[str, _Row]:
+        """Bring the in-memory index up to date with the table.
+
+        Rows written since the last sync are read through the
+        ``updated_at`` index; a row count that then disagrees with the
+        table (rows deleted, possibly by another process) reloads it all,
+        once (a writer racing the reload is caught by the next search).
+        """
+        if self._index is None:
+            self._index, self._index_mark = {}, ""
+        rows = self._conn.execute(
+            "SELECT id, source_type, source_id, model, dim, qvec, qscale, "
+            "updated_at FROM vector_store WHERE updated_at >= ?",
+            (self._index_mark,),
+        ).fetchall()
+        for vid, stype, sid, model, dim, qvec, scale, updated in rows:
+            self._index[vid] = _Row(
+                stype, sid, model, dim, qvec, scale, sum(qvec) - 128 * dim,
+            )
+            if updated > self._index_mark:
+                self._index_mark = updated
+        (total,) = self._conn.execute("SELECT COUNT(*) FROM vector_store").fetchone()
+        if total != len(self._index) and reload:
+            self._index = None
+            return self._sync_index(reload=False)
+        return self._index
+
     def search_by_vector(
         self,
         query_vector: list[float],
@@ -354,37 +479,52 @@ class VectorKB:
         source_types: list[str] | None = None,
         min_score: float = 0.0,
     ) -> list[VectorSearchResult]:
-        """Find closest vectors to a pre-computed vector."""
-        if not query_vector:
+        """Find closest vectors to a pre-computed vector.
+
+        A coarse pass ranks every row by its 8-bit copy; the best
+        ``max(40, 4 * top_k)`` are re-scored from their float32 vectors,
+        and those exact scores are what is returned.
+        """
+        if not query_vector or top_k <= 0:
             return []
+        dim = len(query_vector)
+        unit = _normalize(query_vector)
+        qvec, qscale = _quantize(unit)
+        q_offset = sum(qvec) - 128 * dim
+        base = 128 * q_offset + 16384 * dim
+        wanted = set(source_types) if source_types else None
 
-        # Load all vectors (filtered by source_types if given)
-        if source_types:
-            placeholders = ",".join("?" for _ in source_types)
-            cur = self._conn.execute(
-                f"SELECT source_type, source_id, embedding, dim, model "
-                f"FROM vector_store WHERE source_type IN ({placeholders})",
-                source_types,
-            )
-        else:
-            cur = self._conn.execute(
-                "SELECT source_type, source_id, embedding, dim, model "
-                "FROM vector_store",
-            )
+        coarse: list[tuple[float, str]] = []
+        for vid, row in self._sync_index().items():
+            if row.dim != dim or (wanted is not None and row.source_type not in wanted):
+                continue
+            # sum((q+128)(r+128)) minus the offset terms = sum(q * r)
+            approx = (
+                _sumprod(qvec, row.qvec) - base - 128 * row.offset_sum
+            ) / (qscale * row.scale)
+            coarse.append((approx, vid))
+        if not coarse:
+            return []
+        candidates = heapq.nlargest(
+            max(_RERANK_MIN, _RERANK_FACTOR * top_k), coarse,
+        )
 
+        packer = _struct(dim)
         results: list[VectorSearchResult] = []
-        for row in cur:
-            stype, sid, blob, dim, model = row
-            if dim != len(query_vector):
-                continue  # dimension mismatch — skip
-            vec = _decode_embedding(blob, dim)
-            score = self.cosine_similarity(query_vector, vec)
+        for _approx, vid in candidates:
+            found = self._conn.execute(
+                "SELECT embedding FROM vector_store WHERE id = ?", (vid,),
+            ).fetchone()
+            if found is None:
+                continue
+            score = _sumprod(unit, packer.unpack(found[0]))
             if score >= min_score:
+                row = self._index[vid]
                 results.append(VectorSearchResult(
-                    source_type=stype,
-                    source_id=sid,
+                    source_type=row.source_type,
+                    source_id=row.source_id,
                     score=round(score, 4),
-                    model=model,
+                    model=row.model,
                 ))
 
         results.sort(key=lambda r: r.score, reverse=True)
@@ -399,6 +539,8 @@ class VectorKB:
         vid = _vector_id(source_type, source_id)
         cur = self._conn.execute("DELETE FROM vector_store WHERE id = ?", (vid,))
         self._conn.commit()
+        if self._index is not None:
+            self._index.pop(vid, None)
         return cur.rowcount > 0
 
     def count(self, source_type: str | None = None) -> int:
@@ -412,18 +554,39 @@ class VectorKB:
             cur = self._conn.execute("SELECT COUNT(*) FROM vector_store")
         return cur.fetchone()[0]
 
-    def purge_stale(self, max_age_days: int = 90) -> int:
-        """Remove entries older than *max_age_days*."""
+    def purge_stale(self, max_age_days: int | None = None) -> int:
+        """Remove entries not updated for *max_age_days*
+        (default ``config.retention_days``)."""
+        days = self.config.retention_days if max_age_days is None else max_age_days
         cur = self._conn.execute(
             "DELETE FROM vector_store "
-            "WHERE datetime(updated_at) < datetime('now', ?)",
-            (f"-{max_age_days} days",),
+            "WHERE updated_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?)",
+            (f"-{days} days",),
         )
         self._conn.commit()
         deleted = cur.rowcount
         if deleted:
-            logger.info("Purged %d stale vectors (>%dd old)", deleted, max_age_days)
+            self._index = None
+            logger.info("Purged %d stale vectors (>%dd old)", deleted, days)
         return deleted
+
+    def enforce_row_cap(self, max_rows: int | None = None) -> int:
+        """Evict the least recently updated rows beyond *max_rows*
+        (default ``config.max_rows``).  Returns the number evicted."""
+        cap = self.config.max_rows if max_rows is None else max_rows
+        if self.count() <= cap:
+            return 0
+        cur = self._conn.execute(
+            "DELETE FROM vector_store WHERE id NOT IN ("
+            "  SELECT id FROM vector_store ORDER BY updated_at DESC LIMIT ?"
+            ")",
+            (cap,),
+        )
+        self._conn.commit()
+        self._index = None
+        if cur.rowcount:
+            logger.info("Evicted %d vector(s) over the %d-row cap", cur.rowcount, cap)
+        return cur.rowcount
 
     def reset_cycle_budget(self) -> None:
         """Reset the per-cycle embedding budget counter."""

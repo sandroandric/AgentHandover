@@ -74,6 +74,14 @@ def test_once_runs_one_iteration_and_cleans_up(
     assert status_file.is_file()
     status = json.loads(status_file.read_text(encoding="utf-8"))
     assert status["consecutive_errors"] == 0
+    assert "annotation_paused_reason" in status
+    assert status["annotation_budget"]["max_frames"] == 1500
+    # The once-per-day jobs ran and recorded today's local date.
+    from datetime import date
+
+    from agenthandover_worker.db import WorkerDB
+    with WorkerDB(tmp_db_path) as db:
+        assert db.get_state(worker_main.DAILY_JOBS_STATE_KEY) == date.today().isoformat()
     assert not (status_dir / "worker.pid").exists()
     assert {
         signum: signal.getsignal(signum) for signum in handlers_before

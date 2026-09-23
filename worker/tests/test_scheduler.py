@@ -511,3 +511,122 @@ class TestBoundaryConditions:
         result = gate.check(conditions)
 
         assert any("temp_high" in b for b in result.blockers)
+
+
+# ------------------------------------------------------------------
+# Probing: unknown temperature, window first, cached subprocesses
+# ------------------------------------------------------------------
+
+
+class _Clock:
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+class TestProbing:
+    def test_unknown_temperature_skips_the_check(self) -> None:
+        result = IdleJobGate().check(_make_conditions(cpu_temp_c=None))
+        assert result.can_run is True
+        assert result.conditions.to_dict()["cpu_temp_c"] is None
+
+    def test_no_speed_limit_line_reads_as_unknown(self, monkeypatch) -> None:
+        import subprocess
+        from agenthandover_worker import scheduler
+
+        monkeypatch.setattr(scheduler.platform, "system", lambda: "Darwin")
+        monkeypatch.setattr(
+            scheduler.subprocess, "run",
+            lambda *a, **k: subprocess.CompletedProcess(
+                a[0], 0, stdout="Note: No thermal warning level has been recorded\n",
+            ),
+        )
+        assert IdleJobGate._get_cpu_temp() is None
+
+    def test_outside_the_window_probes_nothing(self, monkeypatch) -> None:
+        from datetime import datetime as real_datetime
+        from agenthandover_worker import scheduler
+
+        def forbidden(*args, **kwargs):
+            raise AssertionError("no subprocess outside the time window")
+
+        class _Noon(real_datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return real_datetime(2026, 9, 23, 12, 0)
+
+        monkeypatch.setattr(scheduler.subprocess, "run", forbidden)
+        monkeypatch.setattr(scheduler, "datetime", _Noon)
+        result = IdleJobGate().check()  # default window 01:00-05:00
+        assert result.can_run is False
+        assert result.conditions is None
+        assert result.blockers[0].startswith("outside_time_window")
+
+    def test_probes_are_cached_for_a_minute(self, monkeypatch) -> None:
+        calls: list[str] = []
+        clock = _Clock()
+        gate = IdleJobGate(SchedulerConfig(
+            run_window_start=time(0, 0), run_window_end=time(23, 59, 59, 999999),
+        ), clock=clock)
+        monkeypatch.setattr(gate, "_get_power_state", lambda: calls.append("p") or (True, 90))
+        monkeypatch.setattr(gate, "_get_cpu_usage", lambda: calls.append("c") or 5.0)
+        monkeypatch.setattr(gate, "_get_cpu_temp", lambda: calls.append("t") or None)
+
+        gate.check()
+        gate.check()
+        assert calls == ["p", "c", "t"]
+        clock.now += 61
+        gate.check()
+        assert calls == ["p", "c", "t"] * 2
+
+
+class TestPassiveAnnotationPolicy:
+    def _gate(self, monkeypatch, *, on_ac, locked=False, idle=None):
+        gate = IdleJobGate(clock=_Clock())
+        monkeypatch.setattr(gate, "_get_power_state", lambda: (on_ac, 80))
+        monkeypatch.setattr(gate, "_get_screen_locked", lambda: locked)
+        monkeypatch.setattr(gate, "_get_idle_seconds", lambda: idle)
+        return gate
+
+    def test_on_ac_runs(self, monkeypatch) -> None:
+        assert self._gate(monkeypatch, on_ac=True).passive_annotation_allowed() == (
+            True, "on_ac_power",
+        )
+
+    def test_battery_and_active_user_waits(self, monkeypatch) -> None:
+        gate = self._gate(monkeypatch, on_ac=False, idle=30.0)
+        assert gate.passive_annotation_allowed() == (False, "on_battery_user_active")
+
+    def test_battery_and_two_idle_minutes_runs(self, monkeypatch) -> None:
+        gate = self._gate(monkeypatch, on_ac=False, idle=120.0)
+        assert gate.passive_annotation_allowed() == (True, "user_idle")
+
+    def test_battery_and_locked_screen_runs(self, monkeypatch) -> None:
+        gate = self._gate(monkeypatch, on_ac=False, locked=True, idle=0.0)
+        assert gate.passive_annotation_allowed() == (True, "screen_locked")
+
+    def test_unknown_idle_time_waits(self, monkeypatch) -> None:
+        gate = self._gate(monkeypatch, on_ac=False, idle=None)
+        assert gate.passive_annotation_allowed()[0] is False
+
+
+class TestParsers:
+    def test_hid_idle_time(self) -> None:
+        from agenthandover_worker.scheduler import parse_hid_idle_seconds
+
+        out = '  |   "HIDIdleTime" = 155621708000\n'
+        assert parse_hid_idle_seconds(out) == 155.621708
+        assert parse_hid_idle_seconds("nothing") is None
+
+    def test_screen_locked(self) -> None:
+        import plistlib
+        from agenthandover_worker.scheduler import parse_screen_locked
+
+        def root(users):
+            return plistlib.dumps({"IOConsoleUsers": users})
+
+        assert parse_screen_locked(root([{"CGSSessionScreenIsLocked": True}])) is True
+        assert parse_screen_locked(root([{"kCGSSessionOnConsoleKey": True}])) is False
+        assert parse_screen_locked(b"not a plist") is False

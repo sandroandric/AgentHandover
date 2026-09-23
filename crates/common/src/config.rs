@@ -131,9 +131,6 @@ pub struct VlmConfig {
     /// Enable continuous scene annotation pipeline.
     #[serde(default = "default_annotation_enabled")]
     pub annotation_enabled: bool,
-    /// Skip annotation after N consecutive non-workflow same-app frames.
-    #[serde(default = "default_stale_skip_count")]
-    pub stale_skip_count: u32,
     /// Max age (seconds) for sliding window context frames (default: 600 = 10 min).
     #[serde(default = "default_sliding_window_max_age_sec")]
     pub sliding_window_max_age_sec: u64,
@@ -149,7 +146,6 @@ fn default_vlm_mode() -> String { "local".to_string() }
 fn default_annotation_model() -> String { "qwen3.5:4b".to_string() }
 fn default_sop_model() -> String { "qwen3.5:4b".to_string() }
 fn default_annotation_enabled() -> bool { true }
-fn default_stale_skip_count() -> u32 { 3 }
 fn default_sliding_window_max_age_sec() -> u64 { 600 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -310,7 +306,6 @@ impl Default for VlmConfig {
             annotation_model: default_annotation_model(),
             sop_model: default_sop_model(),
             annotation_enabled: default_annotation_enabled(),
-            stale_skip_count: default_stale_skip_count(),
             sliding_window_max_age_sec: default_sliding_window_max_age_sec(),
         }
     }

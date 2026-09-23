@@ -36,6 +36,7 @@ from agenthandover_worker.ollama import OllamaError
 from agenthandover_worker.ops_telemetry import MODEL_USAGE
 from agenthandover_worker.export_adapter import SOPExportAdapter
 from agenthandover_worker.openclaw_writer import OpenClawWriter
+from agenthandover_worker.annotation_cache import AnnotationCache
 from agenthandover_worker.scene_annotator import (
     AnnotationConfig,
     SceneAnnotator,
@@ -45,7 +46,7 @@ from agenthandover_worker.scene_annotator import (
 from agenthandover_worker.sop_generator import SOPGenerator, SOPGeneratorConfig, _generate_slug
 from agenthandover_worker.sop_linter import lint_sop
 from agenthandover_worker.task_segmenter import TaskSegmenter, SegmenterConfig
-from agenthandover_worker.scheduler import IdleJobGate, SchedulerConfig
+from agenthandover_worker.scheduler import AnnotationBudget, IdleJobGate, SchedulerConfig
 from agenthandover_worker.translator import SemanticTranslator
 from agenthandover_worker.vlm_queue import VLMFallbackQueue, VLMJob
 from agenthandover_worker.loop_guard import (
@@ -231,11 +232,18 @@ def _process_annotations(
     batch_size: int = 5,
     privacy_checker: "PrivacyZoneChecker | None" = None,
     activity_classifier: "ActivityClassifier | None" = None,
+    budget: "AnnotationBudget | None" = None,
 ) -> dict:
     """Process a batch of unannotated screenshots through the scene annotator.
 
     Returns stats dict with counts of annotated/skipped/failed/blocked/
-    deferred events.
+    deferred events, and ``budget_exhausted``.
+
+    With a *budget*, each frame sent to the model is charged its Ollama
+    compute (prompt + generation time of the annotation model); once the
+    day's frames or compute are spent the batch stops, leaving the rows
+    pending with their screenshots for the next local day.  Cache hits
+    cost nothing.
 
     Focus-session events (tagged with ``focus_session_id`` in metadata)
     are excluded in the query and left to the focus_processor. The scene
@@ -250,12 +258,21 @@ def _process_annotations(
     returns ``deferred``) the batch stops: the rows stay pending and their
     screenshots are kept for the next attempt after the backoff.
     """
-    stats = {"annotated": 0, "skipped": 0, "failed": 0, "blocked": 0, "deferred": 0}
+    stats = {
+        "annotated": 0, "skipped": 0, "failed": 0, "blocked": 0, "deferred": 0,
+        "budget_exhausted": False,
+    }
+    if budget is not None and budget.exhausted():
+        stats["budget_exhausted"] = True
+        return stats
     unannotated = db.get_unannotated_events(limit=batch_size, exclude_focus=True)
     if not unannotated or not annotator.ready():
         return stats
 
     for event in unannotated:
+        if budget is not None and budget.exhausted():
+            stats["budget_exhausted"] = True
+            break
         event_id = event.get("id", "unknown")
         timestamp = event.get("timestamp", "")
 
@@ -288,12 +305,21 @@ def _process_annotations(
         )
 
         # Run annotation
+        compute_before = _model_compute_seconds(annotator.config.model)
         result = annotator.annotate_event(
             event,
             recent_annotations=recent,
             artifact_dir=str(screenshots_dir),
             page=page_for_event(db, event),
         )
+        if (
+            budget is not None
+            and not result.cached
+            and result.status in ("completed", "failed")
+        ):
+            budget.charge(
+                _model_compute_seconds(annotator.config.model) - compute_before
+            )
 
         # Save result to DB
         if result.status == "completed" and result.annotation:
@@ -359,6 +385,43 @@ def _process_annotations(
             )
 
     return stats
+
+
+# worker_state keys: the local date the once-per-day jobs last ran, and
+# passive annotation's budget counters for the current local day.
+DAILY_JOBS_STATE_KEY = "daily_jobs_date"
+ANNOTATION_BUDGET_STATE_KEY = "annotation_budget"
+
+# Passive frames still pending after this long are given up on.
+ANNOTATION_BACKLOG_MAX_AGE_HOURS = 24.0
+
+
+def _run_daily_maintenance(
+    *,
+    vector_kb: "VectorKB | None" = None,
+    activity_searcher: "ActivitySearcher | None" = None,
+    annotation_cache: "AnnotationCache | None" = None,
+) -> None:
+    """Prune what grows with time: vectors past their retention (the row
+    cap is enforced on every upsert), search-index entries of events the
+    daemon deleted, and unused annotation-cache rows."""
+    for name, job in (
+        ("vector purge", vector_kb and vector_kb.purge_stale),
+        ("search index prune", activity_searcher and activity_searcher.prune_index),
+        ("annotation cache prune", annotation_cache and annotation_cache.prune),
+    ):
+        if not job:
+            continue
+        try:
+            job()
+        except Exception:
+            logger.debug("Daily %s failed", name, exc_info=True)
+
+
+def _model_compute_seconds(model: str) -> float:
+    """Ollama's prompt + generation seconds for *model* since start-up."""
+    usage = MODEL_USAGE.snapshot().get(model, {})
+    return usage.get("prompt_eval_seconds", 0.0) + usage.get("eval_seconds", 0.0)
 
 
 def _process_diffs(
@@ -621,8 +684,15 @@ def _write_worker_status(
     v2_annotations_today: int = 0,
     v2_diffs_today: int = 0,
     v2_annotation_enabled: bool = False,
+    annotation_paused_reason: str | None = None,
+    annotation_budget: dict | None = None,
 ) -> None:
-    """Atomically write worker-status.json (tmp + fsync + rename)."""
+    """Atomically write worker-status.json (tmp + fsync + rename).
+
+    ``annotation_paused_reason`` says why passive annotation is not running
+    (``annotation_budget_exhausted``, ``on_battery_user_active``), or is
+    None while it runs.
+    """
     status = {
         "pid": os.getpid(),
         "version": _WORKER_VERSION,
@@ -646,6 +716,9 @@ def _write_worker_status(
         status["v2_annotation_enabled"] = True
         status["v2_annotations_today"] = v2_annotations_today
         status["v2_diffs_today"] = v2_diffs_today
+        status["annotation_paused_reason"] = annotation_paused_reason
+        if annotation_budget is not None:
+            status["annotation_budget"] = annotation_budget
     # Tokens and Ollama timings per model since the worker started.
     status["model_calls"] = MODEL_USAGE.snapshot()
     sdir = _status_dir()
@@ -869,6 +942,10 @@ def _write_sops_index(
         existing_slugs = {s.get("slug", "") for s in all_sops}
         try:
             kb_procs = knowledge_base.list_procedures()
+        except Exception:
+            kb_procs = []
+        kb_by_slug = {proc.get("id", ""): proc for proc in kb_procs}
+        try:
             for proc in kb_procs:
                 slug = proc.get("id", "")
                 source = proc.get("source", "")
@@ -922,13 +999,10 @@ def _write_sops_index(
 
             # Look up lifecycle_state from KB procedure
             slug = s.get("slug", "")
-            lifecycle_state = "observed"
-            try:
-                kb_proc = knowledge_base.get_procedure(slug) if slug else None
-                if kb_proc is not None:
-                    lifecycle_state = kb_proc.get("lifecycle_state", "observed")
-            except Exception:
-                pass
+            kb_proc = kb_by_slug.get(slug) if slug else None
+            lifecycle_state = (
+                kb_proc.get("lifecycle_state", "observed") if kb_proc else "observed"
+            )
 
             sop_entries.append({
                 "sop_id": s.get("sop_id", ""),
@@ -995,49 +1069,45 @@ def _write_sops_index(
             pass
 
 
-_last_curation_queue_write: float = 0.0
-
-
-def _write_curation_queue(
-    procedure_curator: "ProcedureCurator | None" = None,
-    *,
-    force: bool = False,
-) -> None:
+def _write_curation_queue(procedure_curator: "ProcedureCurator | None" = None) -> bool:
     """Write curation-queue.json for the SwiftUI app to read.
 
     Contains merge candidates and other curation items that the app
-    cannot derive from procedure JSON alone.
-    Throttled to at most once every 60 seconds unless *force* is True.
+    cannot derive from procedure JSON alone.  Called after a trigger was
+    consumed and by the daily curation pass; the file is rewritten only
+    when its merge candidates differ from what it holds.  Returns True
+    when it wrote the file.
     """
-    global _last_curation_queue_write
-    now = time.time()
-    if not force and (now - _last_curation_queue_write) < 60.0:
-        return
     if procedure_curator is None:
-        return
+        return False
 
     try:
-        from dataclasses import asdict
-
         merges = procedure_curator.detect_merge_candidates()
-        merge_list = []
-        for m in merges:
-            merge_list.append({
+        merge_list = [
+            {
                 "slug_a": m.slug_a,
                 "slug_b": m.slug_b,
                 "similarity": round(m.similarity, 4),
                 "explanation": m.explanation,
                 "shared_apps": m.shared_apps,
-            })
+            }
+            for m in merges
+        ]
+
+        sdir = _status_dir()
+        target = sdir / "curation-queue.json"
+        try:
+            with open(target) as f:
+                if json.load(f).get("merge_candidates") == merge_list:
+                    return False
+        except (OSError, ValueError, AttributeError):
+            pass
 
         queue_data = {
             "updated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "merge_candidates": merge_list,
         }
-
-        sdir = _status_dir()
         sdir.mkdir(parents=True, exist_ok=True)
-        target = sdir / "curation-queue.json"
         fd, tmp_path = tempfile.mkstemp(
             dir=str(sdir), prefix=".curation-queue.", suffix=".tmp"
         )
@@ -1046,13 +1116,14 @@ def _write_curation_queue(
             f.flush()
             os.fsync(f.fileno())
         os.rename(tmp_path, str(target))
-        _last_curation_queue_write = now
+        return True
     except Exception:
         logger.debug("Failed to write curation-queue.json", exc_info=True)
         try:
             os.unlink(tmp_path)  # type: ignore[possibly-undefined]
         except Exception:
             pass
+        return False
 
 
 def run_pipeline(
@@ -1074,6 +1145,7 @@ def run_pipeline(
     procedure_writer: "ProcedureWriter | None" = None,
     kb_export_adapter: "KnowledgeBaseExportAdapter | None" = None,
     sop_auto_approve: bool = True,
+    mining_watermark: dict | None = None,
 ) -> dict:
     """Run the full D->E->F pipeline on a batch of events.
 
@@ -1081,6 +1153,12 @@ def run_pipeline(
     With ``sop_auto_approve`` off they are only queued for review in the
     DB; nothing reaches the knowledge base or any export directory until
     a human approves them.
+
+    *mining_watermark* is the caller's memory of the episode store
+    (``WorkerDB.episode_steps_watermark``) at the last mining run: when
+    the store has not changed since, step F (induction, enhancement,
+    dedup, export) is skipped.  Only templates whose fingerprint changed
+    are exported and counted.
 
     Returns a summary dict with counts and results for monitoring.
     """
@@ -1259,6 +1337,12 @@ def run_pipeline(
     # Step F: Induce SOPs from ALL historical episodes (not just current batch)
     # Load stored episodes + current batch for cross-cycle pattern mining.
     sop_templates: list[dict] = []
+    if sop_inducer is not None and db is not None and mining_watermark is not None:
+        watermark = db.episode_steps_watermark(max_age_days=14)
+        if mining_watermark.get("episodes") == watermark:
+            logger.debug("Episode store unchanged; SOP mining skipped")
+            return summary
+        mining_watermark["episodes"] = watermark
     if sop_inducer is not None:
         all_episodes_for_mining: list[list[dict]] = []
         if db is not None:
@@ -1308,6 +1392,7 @@ def run_pipeline(
         )
         sop_templates = deduplicate_templates(
             sop_templates, _status_dir(), registry_file=V1_MINED_REGISTRY_FILE,
+            changed_only=True,
         )
 
     if sop_templates and not sop_auto_approve:
@@ -2019,6 +2104,7 @@ def _process_focus_sessions_v2(
                             "Failed to save pending SOP to DB", exc_info=True,
                         )
                     _clear_focus_signal(signal_path)
+                    focus_processor.annotate_remaining(db)
                     return 0  # Don't export yet — wait for answers
             except Exception:
                 logger.warning(
@@ -2092,8 +2178,9 @@ def _process_focus_sessions_v2(
             title, lint_error or result.error,
         )
 
-    # Clear signal file
+    # Clear signal file, then annotate the keyframes the SOP did not need.
     _clear_focus_signal(signal_path)
+    focus_processor.annotate_remaining(db)
     return exported
 
 
@@ -2902,6 +2989,7 @@ def _process_retry_triggers(
                         "Retry failed again for focus session '%s': %s",
                         title, result.error,
                     )
+                focus_processor.annotate_remaining(db)
             else:
                 logger.warning(
                     "Retry: no events found for focus session %s", source_id,
@@ -4148,6 +4236,8 @@ def main(argv: list[str] | None = None) -> None:
         from agenthandover_worker.vector_kb import VectorKB, VectorKBConfig
         vkb_config = VectorKBConfig(
             ollama_host=vlm_cfg.ollama_host,
+            retention_days=cfg.embedding.retention_days,
+            max_rows=cfg.embedding.max_rows,
         )
         vector_kb = VectorKB(args.db_path, vkb_config)
         # Health check: verify embedding model is available
@@ -4527,11 +4617,12 @@ def main(argv: list[str] | None = None) -> None:
     task_segmenter: TaskSegmenter | None = None
     sop_generator: SOPGenerator | None = None
 
+    annotation_cache: AnnotationCache | None = None
     if v2_annotation_enabled:
+        annotation_cache = AnnotationCache(args.db_path)
         ann_config = AnnotationConfig(
             model=vlm_cfg.annotation_model,
             ollama_host=vlm_cfg.ollama_host,
-            stale_skip_count=vlm_cfg.stale_skip_count,
             sliding_window_max_age_sec=vlm_cfg.sliding_window_max_age_sec,
             timeout_seconds=vlm_cfg.annotation_timeout_seconds,
         )
@@ -4556,6 +4647,7 @@ def main(argv: list[str] | None = None) -> None:
             config=ann_config,
             image_embedder=_image_embedder,
             vector_kb=vector_kb,
+            cache=annotation_cache,
         )
         # Load the annotation model now (with keep_alive) so the first
         # real frame meets a warm model.  A failure only logs and starts
@@ -4595,10 +4687,9 @@ def main(argv: list[str] | None = None) -> None:
 
         logger.info(
             "v2 scene annotation pipeline enabled "
-            "(annotation=%s, sop=%s, stale_skip=%d, window=%ds)",
+            "(annotation=%s, sop=%s, window=%ds)",
             vlm_cfg.annotation_model,
             vlm_cfg.sop_model,
-            vlm_cfg.stale_skip_count,
             vlm_cfg.sliding_window_max_age_sec,
         )
     else:
@@ -4683,17 +4774,19 @@ def main(argv: list[str] | None = None) -> None:
     # (unprocessed, pending VLM) counts of the last poll logged at INFO.
     last_logged_poll_counts: tuple[int, int] | None = None
 
-    # Episode store cleanup — run once per day
-    _last_episode_cleanup = 0.0
-
-    # Daily batch processing — run once per day
-    _last_daily_batch: str = ""  # YYYY-MM-DD of last batch
-    _last_staleness_check = 0.0
-
-    # Passive discovery timer — run every 2 hours (7200s)
+    # Passive discovery timer — every 2 hours (7200s), seeded when the
+    # main loop starts.
     _PASSIVE_DISCOVERY_INTERVAL = 7200
-    _last_passive_discovery = 0.0
     total_passive_sops: int = 0
+
+    # Passive annotation's daily budget and why it is paused (if it is).
+    annotation_budget = AnnotationBudget(
+        max_frames=vlm_cfg.annotation_max_frames_per_day,
+        max_compute_seconds=vlm_cfg.annotation_max_compute_minutes_per_day * 60.0,
+    )
+    annotation_paused_reason: str | None = None
+    # SOP mining input seen by the last run_pipeline (see its docstring).
+    mining_watermark: dict = {}
 
     # Write initial status file after DB connect
     _vlm_stats = vlm_queue.get_stats()
@@ -4741,6 +4834,12 @@ def main(argv: list[str] | None = None) -> None:
         current_interval = args.poll_interval
         consecutive_errors = 0
         event_guard = EventRetryGuard(max_batch=100)
+
+        # Timers start now; once-per-day jobs are keyed on the local date
+        # they last ran, persisted so a restart does not rerun them.
+        _last_passive_discovery = time.monotonic()
+        daily_jobs_date = db.get_state(DAILY_JOBS_STATE_KEY) or ""
+        annotation_budget.load(db.get_state(ANNOTATION_BUDGET_STATE_KEY))
 
         # App and CLI requests arrive through the trigger spool; each kind
         # maps to one handler.
@@ -4841,8 +4940,11 @@ def main(argv: list[str] | None = None) -> None:
                     _status_dir(), trigger_handlers,
                 )
 
-                # Refresh curation queue after any curation action so UI reflects changes
-                _write_curation_queue(procedure_curator, force=True)
+                # A consumed trigger (merge, dismiss, promote, ...) may have
+                # changed the curation queue; nothing else between daily
+                # curation passes does.
+                if triggers_consumed:
+                    _write_curation_queue(procedure_curator)
 
                 # Close a recording that was never stopped, so its rows get
                 # processed instead of staying pending forever.
@@ -4965,6 +5067,7 @@ def main(argv: list[str] | None = None) -> None:
                         procedure_writer=procedure_writer,
                         kb_export_adapter=kb_export_adapter,
                         sop_auto_approve=sop_auto_approve,
+                        mining_watermark=mining_watermark,
                     )
                     pipeline_elapsed_ms = int((time.monotonic() - pipeline_start) * 1000)
                     last_pipeline_duration_ms = pipeline_elapsed_ms
@@ -5028,11 +5131,45 @@ def main(argv: list[str] | None = None) -> None:
                         )
 
                 if scene_annotator is not None and v2_schema_ok:
-                    ann_stats = _process_annotations(
-                        db, scene_annotator, screenshots_dir,
-                        privacy_checker=privacy_checker,
-                        activity_classifier=activity_classifier,
-                    )
+                    # Passive frames older than a day are given up on.
+                    for expired in db.expire_annotation_backlog(
+                        max_age_hours=ANNOTATION_BACKLOG_MAX_AGE_HOURS,
+                    ):
+                        scene_annotator.discard_screenshot(expired, screenshots_dir)
+                    # Passive annotation runs on AC, with the screen locked,
+                    # or after two idle minutes, within the daily budget.
+                    # Focus recordings were processed above regardless.
+                    annotation_budget.roll(datetime.now().date().isoformat())
+                    allowed, why = idle_gate.passive_annotation_allowed()
+                    ann_stats = {
+                        "annotated": 0, "skipped": 0, "failed": 0,
+                        "blocked": 0, "deferred": 0, "budget_exhausted": False,
+                    }
+                    if allowed:
+                        frames_before = annotation_budget.frames
+                        ann_stats = _process_annotations(
+                            db, scene_annotator, screenshots_dir,
+                            privacy_checker=privacy_checker,
+                            activity_classifier=activity_classifier,
+                            budget=annotation_budget,
+                        )
+                        if annotation_budget.frames != frames_before:
+                            db.set_state(
+                                ANNOTATION_BUDGET_STATE_KEY,
+                                annotation_budget.to_json(),
+                            )
+                    if not allowed:
+                        reason = why
+                    elif ann_stats["budget_exhausted"]:
+                        reason = "annotation_budget_exhausted"
+                    else:
+                        reason = None
+                    if reason != annotation_paused_reason:
+                        logger.info(
+                            "Passive annotation %s",
+                            f"paused: {reason}" if reason else "resumed",
+                        )
+                    annotation_paused_reason = reason
                     total_v2_annotations += ann_stats["annotated"]
 
                     if ann_stats["annotated"] > 0 or ann_stats["blocked"] > 0:
@@ -5168,29 +5305,33 @@ def main(argv: list[str] | None = None) -> None:
                     v2_annotation_enabled=v2_annotation_enabled,
                     v2_annotations_today=total_v2_annotations,
                     v2_diffs_today=total_v2_diffs,
+                    annotation_paused_reason=annotation_paused_reason,
+                    annotation_budget=annotation_budget.status(),
                 )
 
                 # Refresh sops-index.json (throttled to every 5s)
                 _write_sops_index(db, knowledge_base)
 
-                # Episode store cleanup — once per day (86400s)
-                _now_mono = time.monotonic()
-                if _now_mono - _last_episode_cleanup > 86400:
+                # --- Once-per-day jobs: the first tick of each local day,
+                # keyed on the date persisted when they last ran. ---
+                today_local = datetime.now().date().isoformat()
+                run_daily = today_local != daily_jobs_date
+
+                # Episode store cleanup
+                if run_daily:
                     try:
                         db.cleanup_old_episodes(max_age_days=14)
                     except Exception:
                         logger.debug("Episode store cleanup failed", exc_info=True)
-                    _last_episode_cleanup = _now_mono
 
                 # --- Phase 2+: Daily batch + staleness (once per day) ---
-                # Process *yesterday* — today is still in progress and would
-                # produce an incomplete summary.  The guard uses today_str so
-                # the batch runs at most once per calendar day.
-                today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+                # Process *yesterday* (UTC, the events' timestamp date) —
+                # today is still in progress and would produce an
+                # incomplete summary.
                 yesterday_str = (
                     datetime.now(timezone.utc) - timedelta(days=1)
                 ).strftime("%Y-%m-%d")
-                if today_str != _last_daily_batch:
+                if run_daily:
                     try:
                         # Daily batch: aggregate yesterday's (complete) events
                         day_events = db.get_annotated_events_for_date(yesterday_str)
@@ -5495,10 +5636,8 @@ def main(argv: list[str] | None = None) -> None:
                     except Exception:
                         logger.debug("OCR text preservation failed", exc_info=True)
 
-                    _last_daily_batch = today_str
-
-                # Staleness check — once per day (86400s)
-                if _now_mono - _last_staleness_check > 86400:
+                # Staleness check
+                if run_daily:
                     try:
                         reports = staleness_detector.check_all()
                         stale_count = sum(
@@ -5562,9 +5701,15 @@ def main(argv: list[str] | None = None) -> None:
                         logger.debug("Curation batch failed", exc_info=True)
 
                     # Write curation-queue.json for SwiftUI app
-                    _write_curation_queue(procedure_curator, force=True)
+                    _write_curation_queue(procedure_curator)
 
-                    _last_staleness_check = _now_mono
+                    _run_daily_maintenance(
+                        vector_kb=vector_kb,
+                        activity_searcher=activity_searcher,
+                        annotation_cache=annotation_cache,
+                    )
+                    db.set_state(DAILY_JOBS_STATE_KEY, today_local)
+                    daily_jobs_date = today_local
 
                 # Any iteration that gets here without raising is healthy,
                 # whether or not it had events to process.
