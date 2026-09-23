@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from unittest.mock import patch
 
 from agenthandover_worker.clipboard_grounding import (
     attach_clipboard_events,
@@ -17,6 +18,12 @@ from agenthandover_worker.clipboard_grounding import (
     ground_clipboard_claims,
 )
 from agenthandover_worker.focus_processor import FocusProcessor
+from agenthandover_worker.frame_differ import (
+    FrameDiffer,
+    content_lines,
+    ground_text_changes,
+    is_chrome_line,
+)
 from agenthandover_worker.focus_questioner import (
     ANSWER_ACCEPTED_GUESS,
     ANSWER_TYPED,
@@ -396,3 +403,116 @@ def test_the_session_query_returns_the_browsers_pastes(tmp_path: Path) -> None:
     with WorkerDB(db_path) as db:
         ids = [e["id"] for e in db.get_focus_session_events("s1")]
     assert ids == ["f0", "c1", "p1", "f1"]  # p2 is after the session
+
+
+# ---------------------------------------------------------------------------
+# Window chrome: the font toolbar is not an edit
+# ---------------------------------------------------------------------------
+
+# A TextEdit window at (100, 100), 800 x 600 points, on a 1512 x 982 display.
+_DISPLAY = [{"display_id": "1", "bounds_global_px": [0, 0, 1512, 982],
+             "scale_factor": 2.0, "orientation": 0}]
+_DOC_LINES = ["IANA-managed Reserved Domains", "example.com is reserved per RFC 2606"]
+
+
+def _textedit_frame(event_id: str, second: int, font_popup: str, extra: str = "") -> dict:
+    """A TextEdit frame: the menu bar above the window, the format bar's
+    font popup (OCR'd as *font_popup*) inside its toolbar band, the
+    document below."""
+    def box(y_points: float, text: str, x: float = 120, w: float = 300) -> dict:
+        return {"text": text, "confidence": 1.0,
+                "bbox_normalized": [x / 1512, y_points / 982, w / 1512, 14 / 982]}
+
+    doc = _DOC_LINES + ([extra] if extra else [])
+    elements = [
+        box(4, "TextEdit File Edit Format View Window Help", x=30, w=500),
+        box(135, font_popup, x=160, w=120),
+        *(box(250 + 30 * i, line) for i, line in enumerate(doc)),
+    ]
+    annotation = {
+        "app": "TextEdit", "location": "Untitled.rtf",
+        "task_context": {"what_doing": "Typing in TextEdit"},
+        "_screen_text": "\n".join(e["text"] for e in elements),
+    }
+    return {
+        "id": event_id, "timestamp": _ts(second), "annotation_status": "completed",
+        "scene_annotation_json": json.dumps(annotation),
+        "window_json": json.dumps({"window_id": "7", "app_id": "pid:900:TextEdit",
+                                   "title": "Untitled.rtf",
+                                   "bounds_global_px": [100, 100, 800, 600]}),
+        "display_topology_json": json.dumps(_DISPLAY), "primary_display_id": "1",
+        "metadata_json": json.dumps({"ocr": {"elements": elements}}),
+    }
+
+
+def test_toolbar_menu_and_font_text_is_chrome() -> None:
+    frame = _textedit_frame("t1", 0, "Halvetica Ragular")
+    annotation = json.loads(frame["scene_annotation_json"])
+    content, chrome = content_lines(frame, annotation)
+    assert content == _DOC_LINES
+    assert chrome == ["TextEdit File Edit Format View Window Help", "Halvetica Ragular"]
+    # Without geometry the words alone still mark the font popup and menu bar.
+    assert content_lines(None, annotation)[0] == _DOC_LINES
+    assert is_chrome_line("Helvetica Regular 12") and is_chrome_line("Halvetica Ragular")
+    assert not is_chrome_line("IANA") and not is_chrome_line("Edit the file")
+    assert not is_chrome_line("Notes", "Notes") and not is_chrome_line("12")
+    # A short label in the toolbar band is chrome only with the geometry.
+    frame = _textedit_frame("t2", 0, "IANA Reserved")
+    annotation = json.loads(frame["scene_annotation_json"])
+    assert "IANA Reserved" in content_lines(frame, annotation)[1]
+    assert "IANA Reserved" in content_lines(frame, annotation, geometry=False)[0]
+
+
+def test_an_ocr_flicker_in_the_font_popup_is_no_change() -> None:
+    """Frames that differ only in how OCR read the toolbar are not sent to
+    the model: nothing the user did changed."""
+    prev = _textedit_frame("t1", 0, "Helvetica Regular")
+    curr = _textedit_frame("t2", 10, "Halvetica Ragular")
+    with patch("agenthandover_worker.scene_annotator._call_ollama_vlm") as call:
+        result = FrameDiffer().diff_pair(prev, curr)
+    assert result.diff["diff_type"] == "no_change"
+    call.assert_not_called()
+
+
+def test_a_font_popup_edit_is_not_kept() -> None:
+    """The live run's diff: "The user corrected the text ... changing
+    'Halvetica Ragular' to 'IANA'" (TextEdit's font popup, misread)."""
+    prev = _textedit_frame("t1", 0, "Helvetica Regular")
+    curr = _textedit_frame("t2", 10, "Halvetica Ragular", extra="Reserved for documentation")
+    prompts: list[str] = []
+    answer = {
+        "diff_type": "action",
+        "actions": [
+            "The user corrected the text, changing 'Halvetica Ragular' to 'IANA'",
+            "The user typed 'Reserved for documentation' below the heading",
+        ],
+        "inputs": [{"field": "Font", "value": "Halvetica Ragular"},
+                   {"field": "Document", "value": "Reserved for documentation"}],
+        "navigation": "none",
+        "step_description": "Changed 'Halvetica Ragular' to 'IANA'",
+    }
+
+    def model(**kwargs):
+        prompts.append(kwargs["prompt"])
+        return json.dumps(answer), 1.0
+
+    with patch("agenthandover_worker.scene_annotator._call_ollama_vlm", side_effect=model):
+        diff = FrameDiffer().diff_pair(prev, curr).diff
+    # The font popup and menu bar never reached the model.
+    assert "alvetica" not in prompts[0] and "Helvetica" not in prompts[0]
+    assert "File Edit Format" not in prompts[0]
+    assert "Reserved for documentation" in prompts[0]
+    # The toolbar "edit" is dropped, the real one kept.
+    assert diff["actions"] == ["The user typed 'Reserved for documentation' below the heading"]
+    assert diff["inputs"] == [{"field": "Document", "value": "Reserved for documentation"}]
+    assert diff["step_description"] == diff["actions"][0]
+    assert any("Halvetica Ragular" in d for d in diff["ungrounded"])
+
+
+def test_grounding_keeps_edits_the_document_shows() -> None:
+    diff = {"actions": ["Typed 'hello world' into the note"], "inputs": [],
+            "step_description": "Typed a greeting"}
+    assert ground_text_changes(diff, "Hello  world\nother") is diff
+    # Quoted text without an edit verb is a reference, not a claimed edit.
+    diff = {"actions": ["Opened the 'Settings' pane"], "inputs": []}
+    assert ground_text_changes(diff, "") is diff

@@ -386,13 +386,10 @@ def _build_context_section(recent_annotations: list[dict]) -> str:
     )
 
 
-def _cursor_normalized(event: dict) -> tuple[float, float] | None:
-    """The cursor position in 0..1 screenshot coordinates (top-left origin),
-    or None when the event lacks the cursor or the primary display bounds.
-    Screenshots are of the primary display; OCR boxes use the same frame."""
-    x, y = event.get("cursor_x"), event.get("cursor_y")
-    if not isinstance(x, (int, float)) or not isinstance(y, (int, float)):
-        return None
+def primary_display_bounds(event: dict) -> tuple[float, float, float, float] | None:
+    """The primary display's ``[x, y, w, h]`` in global coordinates, the
+    frame the screenshot (and so every OCR box) covers; None when the event
+    lacks the display topology."""
     raw = event.get("display_topology_json")
     try:
         displays = json.loads(raw) if isinstance(raw, str) else raw
@@ -409,12 +406,26 @@ def _cursor_normalized(event: dict) -> tuple[float, float] | None:
         bounds = d.get("bounds_global_px")
         if not (isinstance(bounds, list) and len(bounds) == 4):
             continue
-        bx, by, bw, bh = bounds
-        if not bw or not bh:
+        if not all(isinstance(v, (int, float)) for v in bounds) or not bounds[2] or not bounds[3]:
             continue
-        nx, ny = (x - bx) / bw, (y - by) / bh
-        if 0.0 <= nx <= 1.0 and 0.0 <= ny <= 1.0:
-            return nx, ny
+        return tuple(bounds)  # type: ignore[return-value]
+    return None
+
+
+def _cursor_normalized(event: dict) -> tuple[float, float] | None:
+    """The cursor position in 0..1 screenshot coordinates (top-left origin),
+    or None when the event lacks the cursor or the primary display bounds.
+    Screenshots are of the primary display; OCR boxes use the same frame."""
+    x, y = event.get("cursor_x"), event.get("cursor_y")
+    if not isinstance(x, (int, float)) or not isinstance(y, (int, float)):
+        return None
+    display = primary_display_bounds(event)
+    if display is None:
+        return None
+    bx, by, bw, bh = display
+    nx, ny = (x - bx) / bw, (y - by) / bh
+    if 0.0 <= nx <= 1.0 and 0.0 <= ny <= 1.0:
+        return nx, ny
     return None
 
 

@@ -17,13 +17,16 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass
+from difflib import SequenceMatcher
 
 from agenthandover_worker.annotation_cache import normalise_screen_text
+from agenthandover_worker.event_helpers import display_name, parse_json_field
 from agenthandover_worker.json_extract import extract_json
 from agenthandover_worker.redaction import redact
-from agenthandover_worker.scene_annotator import as_compact
+from agenthandover_worker.scene_annotator import as_compact, primary_display_bounds
 from agenthandover_worker.model_profiles import STANDARD_TIER
 
 logger = logging.getLogger(__name__)
@@ -92,6 +95,135 @@ def _make_diff_failed_marker(error: str) -> dict:
         "diff_type": "diff_failed",
         "error": error,
     }
+
+
+# ---------------------------------------------------------------------------
+# Window chrome: text that is not the document
+# ---------------------------------------------------------------------------
+
+# The title bar and toolbar of a window (a TextEdit window's title bar and
+# format bar end about 58 points down): a short label entirely inside this
+# band is a control, not content.
+TOOLBAR_BAND_POINTS = 60
+# A toolbar label has at most this many words; a longer line in the band
+# is content (a web page's own header, a document's first line).
+_TOOLBAR_LABEL_MAX_WORDS = 4
+
+# Words that make up menus, font and format controls: a line made only of
+# them (a font popup's "Helvetica Regular", a menu bar's "File Edit
+# Format") is chrome wherever it is.  OCR misreads them ("Halvetica
+# Ragular"), so words of four letters or more match at 75% similarity.
+_CHROME_WORDS = frozenset("""
+    helvetica neue arial times new roman courier menlo monaco georgia verdana
+    futura avenir next gill sans palatino optima baskerville didot geneva
+    lucida grande sf pro text display mono san francisco calibri cambria
+    tahoma trebuchet charter hoefler rockwell
+    regular bold italic oblique light medium semibold condensed black heavy
+    thin ultralight book
+    styles style spacing lists list paragraph body title heading subheading
+    caption default align
+    file edit view insert format tools window help history bookmarks develop
+    go arrange share table
+    b i u
+""".split())
+_WORD_RE = re.compile(r"[a-z]+|\d+(?:\.\d+)?", re.IGNORECASE)
+_CHROME_MATCH = 0.75
+
+
+def _is_chrome_word(word: str) -> bool:
+    if word in _CHROME_WORDS:
+        return True
+    if len(word) < 4:
+        return False
+    return any(
+        len(known) >= 4 and SequenceMatcher(None, word, known).ratio() >= _CHROME_MATCH
+        for known in _CHROME_WORDS
+    )
+
+
+def is_chrome_line(line: str, app: str = "") -> bool:
+    """True when every word of *line* is a menu, font or format control
+    word.  The frontmost *app*'s name counts too (its menu bar starts with
+    it), and so do numbers (a point size), but only beside a control word:
+    "Notes" alone is a window or sidebar title, "12" alone may be content."""
+    words = [w.lower() for w in _WORD_RE.findall(line)]
+    app_words = {w.lower() for w in _WORD_RE.findall(app)}
+    controls = [w for w in words if not w[0].isdigit() and w not in app_words]
+    return bool(controls) and all(_is_chrome_word(w) for w in controls)
+
+
+def _ocr_boxes(event: dict) -> dict[str, list]:
+    """OCR line text -> its ``bbox_normalized`` (first occurrence)."""
+    ocr = parse_json_field(event, "metadata_json").get("ocr")
+    boxes: dict[str, list] = {}
+    for el in (ocr.get("elements") if isinstance(ocr, dict) else None) or []:
+        if not isinstance(el, dict):
+            continue
+        text, bbox = str(el.get("text") or "").strip(), el.get("bbox_normalized")
+        if text and isinstance(bbox, list) and len(bbox) == 4 and all(
+            isinstance(v, (int, float)) for v in bbox
+        ):
+            boxes.setdefault(text, bbox)
+    return boxes
+
+
+def _window_frame(event: dict) -> tuple[float, float, float, float, float] | None:
+    """The frontmost window in the screenshot's 0..1 coordinates
+    ``(x, y, w, h, toolbar band height)``, or None without the geometry."""
+    bounds = parse_json_field(event, "window_json").get("bounds_global_px")
+    display = primary_display_bounds(event)
+    if display is None or not (
+        isinstance(bounds, list) and len(bounds) == 4
+        and all(isinstance(v, (int, float)) for v in bounds) and bounds[2] and bounds[3]
+    ):
+        return None
+    dx, dy, dw, dh = display
+    x, y, w, h = bounds
+    return (x - dx) / dw, (y - dy) / dh, w / dw, h / dh, TOOLBAR_BAND_POINTS / dh
+
+
+def content_lines(
+    event: dict | None, annotation: dict, *, geometry: bool = True,
+) -> tuple[list[str], list[str]]:
+    """The annotation's screen text split into the document's lines and
+    the window chrome's (``(content, chrome)``).
+
+    A line made only of menu, font and format words is chrome
+    (:func:`is_chrome_line`).  With *geometry* and the frame's geometry
+    (the OCR boxes and the window's bounds on the primary display), so is
+    a line outside the frontmost window (the menu bar, another window, the
+    Dock) and a short label entirely inside the window's title and toolbar
+    band (tabs, the address bar, font popups).
+
+    The diff prompt drops only the chrome words (``geometry=False``): the
+    address bar and tab titles are how the model sees a typed URL or a
+    switched tab.  The claimed edits are checked against the document's
+    text with the geometry (:func:`ground_text_changes`)."""
+    lines = [
+        line.strip() for line in str(annotation.get("_screen_text") or "").splitlines()
+        if line.strip()
+    ]
+    app = str(annotation.get("app") or "")
+    if event is not None:
+        app = app or display_name(parse_json_field(event, "window_json").get("app_id"))
+    boxes = _ocr_boxes(event) if event is not None and geometry else {}
+    window = _window_frame(event) if event is not None and boxes else None
+    content: list[str] = []
+    chrome: list[str] = []
+    for line in lines:
+        bbox = boxes.get(line)
+        outside = in_band = False
+        if window is not None and bbox is not None:
+            wx, wy, ww, wh, band = window
+            bx, by, bw, bh = bbox
+            cx, cy = bx + bw / 2, by + bh / 2
+            outside = not (wx <= cx <= wx + ww and wy <= cy <= wy + wh)
+            in_band = (
+                by + bh <= wy + band
+                and len(line.split()) <= _TOOLBAR_LABEL_MAX_WORDS
+            )
+        (chrome if outside or in_band or is_chrome_line(line, app) else content).append(line)
+    return content, chrome
 
 
 # ---------------------------------------------------------------------------
@@ -173,15 +305,19 @@ def _detect_edge_case(
     # Screen text compared with its volatile parts (clocks, "5s ago",
     # counters) folded, as the annotation cache compares it: a screen the
     # cache calls unchanged is not sent to the model to learn the same.
-    def _content(annotation: dict) -> tuple:
+    # Only the document's text counts: a toolbar that flickers between
+    # OCR readings is not a change (:func:`content_lines`).
+    def _content(event: dict, annotation: dict) -> tuple:
         kt = annotation.get("key_text") or {}
-        screen = normalise_screen_text(str(annotation.get("_screen_text") or ""))
+        screen = normalise_screen_text(
+            "\n".join(content_lines(event, annotation, geometry=False)[0])
+        )
         return (screen, kt.get("typed_text", ""))
 
     if (
         prev_app == curr_app
         and prev_loc == curr_loc
-        and _content(prev_annotation) == _content(curr_annotation)
+        and _content(prev_event, prev_annotation) == _content(curr_event, curr_annotation)
         and prev_what == curr_what
     ):
         gap = 0.0
@@ -230,20 +366,21 @@ Respond with ONLY the JSON object."""
 _DIFF_SCREEN_TEXT_MAX_CHARS = 600
 
 
-def _format_annotation_for_diff(annotation: dict) -> str:
+def _format_annotation_for_diff(annotation: dict, content: list[str] | None = None) -> str:
     """Format an annotation dict into a compact text representation for the
     diff prompt, redacted (rows stored before the current redaction rules
-    carry what they carried)."""
+    carry what they carried).  *content* is the frame's document text
+    (:func:`content_lines`), the screen text when not given: the window's
+    chrome is never offered as something the user edited."""
     lines = []
     app = annotation.get("app", "?")
     location = annotation.get("location", "?")
     lines.append(f"App: {app}")
     lines.append(f"Location: {location}")
 
-    screen = " | ".join(
-        line.strip() for line in str(annotation.get("_screen_text") or "").splitlines()
-        if line.strip()
-    )
+    if content is None:
+        content = content_lines(None, annotation, geometry=False)[0]
+    screen = " | ".join(content)
     if screen:
         lines.append(f"Screen text: {screen[:_DIFF_SCREEN_TEXT_MAX_CHARS]}")
     kt = annotation.get("key_text") or {}
@@ -289,6 +426,83 @@ def _validate_diff(raw: str) -> dict | None:
         return None
 
     return data
+
+
+# A text change the diff claims ("changed 'X' to 'Y'", "typed 'Z'") must be
+# in the document: quoted text of an edit that is on neither frame's content
+# (the live run's "changing 'Halvetica Ragular' to 'IANA'", read off
+# TextEdit's font popup) drops that action.
+_EDIT_VERB_RE = re.compile(
+    r"\b((re)?typ(e|es|ed|ing)|enter(s|ed|ing)?|chang(e|es|ed|ing)|correct(s|ed|ing)?|"
+    r"replac(e|es|ed|ing)|edit(s|ed|ing)?|writ(e|es|ing)|wrote|written|"
+    r"delet(e|es|ed|ing)|renam(e|es|ed|ing)|updat(e|es|ed|ing)|fix(es|ed|ing)?|"
+    r"modif(y|ies|ied|ying)|insert(s|ed|ing)?|add(s|ed|ing)?|remov(e|es|ed|ing))\b",
+    re.IGNORECASE,
+)
+_QUOTED_RE = re.compile(r"[\"\u201c\u2018']([^\"\u201d\u2019']{2,})[\"\u201d\u2019']")
+
+
+def _squash(text: str) -> str:
+    """Lowercase, one space between words; `` | `` (how the prompt joins a
+    frame's lines, and the model copies it) counts as a space."""
+    return " ".join(str(text).lower().replace(" | ", " ").split())
+
+
+def ground_text_changes(diff: dict, corpus: str, chrome: str = "", app: str = "") -> dict:
+    """*diff* without the text changes that are not the user's.
+
+    *corpus* is what the user can have edited (both frames' document text,
+    typed text and locations), *chrome* the windows' controls
+    (:func:`content_lines`).  An edit action ("changed 'X' to 'Y'",
+    "typed 'Z'") whose quoted text is not in *corpus* is dropped, and the
+    summary with it when it quotes such text; an input whose value is a
+    control's text (in *chrome* and not in *corpus*, or made of control
+    words) is dropped.  What was dropped is kept under ``ungrounded``."""
+    haystack = _squash(corpus)
+    controls = _squash(chrome)
+
+    def grounded(text: str) -> bool:
+        return all(
+            _squash(q) in haystack for q in _QUOTED_RE.findall(text)
+        ) if _EDIT_VERB_RE.search(text) else True
+
+    def control_text(value: str) -> bool:
+        squashed = _squash(value)
+        return bool(squashed) and (
+            (squashed in controls and squashed not in haystack)
+            or is_chrome_line(value, app)
+        )
+
+    dropped: list[str] = []
+    actions = []
+    for action in diff.get("actions") or []:
+        (actions if grounded(str(action)) else dropped).append(action)
+    inputs = []
+    for item in diff.get("inputs") or []:
+        value = str(item.get("value") or "") if isinstance(item, dict) else ""
+        if control_text(value):
+            dropped.append(f"input {item.get('field', '?')}: {value}")
+        else:
+            inputs.append(item)
+    if not dropped:
+        return diff
+    out = {**diff, "actions": actions, "inputs": inputs, "ungrounded": dropped}
+    summary = str(diff.get("step_description") or "")
+    if summary and not grounded(summary):
+        out["step_description"] = actions[0] if actions else ""
+        dropped.append(summary)
+    logger.info("Frame diff: dropped %d edit claim(s) not in the documents: %s",
+                len(dropped), "; ".join(dropped))
+    return out
+
+
+def _corpus(annotation: dict, content: list[str]) -> str:
+    kt = annotation.get("key_text") or {}
+    return "\n".join([
+        *content, str(kt.get("typed_text") or ""), str(annotation.get("location") or ""),
+        *(str(i.get("label") or "") for i in annotation.get("visible_items") or []
+          if isinstance(i, dict)),
+    ])
 
 
 # ---------------------------------------------------------------------------
@@ -361,8 +575,14 @@ class FrameDiffer:
             return DiffResult(event_id=curr_id, diff=None)
 
         # --- LLM diff ---
-        frame_a = _format_annotation_for_diff(prev_ann)
-        frame_b = _format_annotation_for_diff(curr_ann)
+        # Without the font, format and menu controls' words: they are not
+        # the user's (``content_lines``).
+        frame_a = _format_annotation_for_diff(
+            prev_ann, content_lines(prev_event, prev_ann, geometry=False)[0],
+        )
+        frame_b = _format_annotation_for_diff(
+            curr_ann, content_lines(curr_event, curr_ann, geometry=False)[0],
+        )
 
         prompt = DIFF_PROMPT_TEMPLATE.format(frame_a=frame_a, frame_b=frame_b)
 
@@ -413,6 +633,16 @@ class FrameDiffer:
                 inference_time_seconds=inference_time,
             )
 
+        # A claimed edit must be in the documents (the windows' text
+        # without their chrome, located by the frames' geometry).
+        content_a, chrome_a = content_lines(prev_event, prev_ann)
+        content_b, chrome_b = content_lines(curr_event, curr_ann)
+        diff = ground_text_changes(
+            diff,
+            _corpus(prev_ann, content_a) + "\n" + _corpus(curr_ann, content_b),
+            chrome="\n".join(chrome_a + chrome_b),
+            app=str(curr_ann.get("app") or ""),
+        )
         self._stats["diffs_computed"] += 1
         return DiffResult(
             event_id=curr_id,
