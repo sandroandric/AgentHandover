@@ -42,7 +42,26 @@ final class ModelTiersTests: XCTestCase {
             XCTAssertEqual(tier.annotationModel, rawTier["annotation_model"] as? String)
             XCTAssertEqual(tier.sopModel, rawTier["sop_model"] as? String)
             XCTAssertEqual(tier.abSOPModel, rawTier["ab_sop_model"] as? String)
+            let rawPairs = try XCTUnwrap(rawTier["previous_defaults"] as? [[String: String]])
+            XCTAssertEqual(tier.previousDefaults.map { [$0.annotationModel, $0.sopModel] },
+                           rawPairs.map { [$0["annotation_model"] ?? "", $0["sop_model"] ?? ""] })
         }
+        // WP-F6 moved the 16 GB tier off gemma4:12b-it-qat.
+        XCTAssertEqual(table.tier(id: "recommended")?.previousDefaults,
+                       [ModelPair(annotationModel: "qwen3.5:4b", sopModel: "gemma4:12b-it-qat")])
+    }
+
+    /// A tiers.json from an install before `previous_defaults` still decodes.
+    func testDecodesATableWithoutPreviousDefaults() throws {
+        let json = """
+            {"schema_version": 1, "minimum_ollama_version_for_gemma4": "0.34.0",
+             "embedding_model": "nomic-embed-text", "model_sizes_gb": {},
+             "tiers": [{"id": "standard", "label": "Standard", "subtitle": "s",
+                        "min_ram_gb": 0, "annotation_model": "qwen3.5:4b",
+                        "sop_model": "qwen3.5:4b", "ab_sop_model": ""}]}
+            """
+        let table = try ModelTierTable.decode(Data(json.utf8))
+        XCTAssertEqual(table.tiers[0].previousDefaults, [])
     }
 
     func testRecommendsByRAM() throws {
@@ -80,6 +99,17 @@ final class ModelTiersTests: XCTestCase {
         let once = ModelTierTable.applyVLMBlock(block, to: try fixture("input.toml"))
         XCTAssertEqual(once, try fixture("performance.toml"))
         XCTAssertEqual(ModelTierTable.applyVLMBlock(block, to: once), once)
+    }
+
+    /// The worker's tier migration makes onboarding's edit: a config on the
+    /// 16 GB tier's pre-WP-F6 models becomes recommended-migrated.toml.
+    func testVLMBlockMatchesTheMigrationFixture() throws {
+        let table = try ModelTierTable.load(from: Self.tiersURL)
+        let tier = try XCTUnwrap(table.tier(id: "recommended"))
+        let block = ModelTierTable.vlmBlock(
+            tierID: tier.id, annotationModel: tier.annotationModel, sopModel: tier.sopModel)
+        XCTAssertEqual(ModelTierTable.applyVLMBlock(block, to: try fixture("recommended-previous.toml")),
+                       try fixture("recommended-migrated.toml"))
     }
 
     func testVLMBlockIsAppendedWithoutAVLMSection() {

@@ -10,6 +10,10 @@ struct ModelTier: Decodable, Hashable, Identifiable {
     let sopModel: String
     /// The SOP model's A/B arm (`[vlm] sop_ab = true`); empty when none.
     let abSOPModel: String
+    /// The tier's earlier default models (`PREVIOUS_TIER_DEFAULTS` in the
+    /// worker, which migrates a config still pinning them); empty in a
+    /// tiers.json written before they were recorded.
+    let previousDefaults: [ModelPair]
 
     enum CodingKeys: String, CodingKey, CaseIterable {
         case id, label, subtitle
@@ -17,6 +21,30 @@ struct ModelTier: Decodable, Hashable, Identifiable {
         case annotationModel = "annotation_model"
         case sopModel = "sop_model"
         case abSOPModel = "ab_sop_model"
+        case previousDefaults = "previous_defaults"
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        label = try c.decode(String.self, forKey: .label)
+        subtitle = try c.decode(String.self, forKey: .subtitle)
+        minRAMGB = try c.decode(Int.self, forKey: .minRAMGB)
+        annotationModel = try c.decode(String.self, forKey: .annotationModel)
+        sopModel = try c.decode(String.self, forKey: .sopModel)
+        abSOPModel = try c.decode(String.self, forKey: .abSOPModel)
+        previousDefaults = try c.decodeIfPresent([ModelPair].self, forKey: .previousDefaults) ?? []
+    }
+}
+
+/// An `(annotation_model, sop_model)` pair of a tier.
+struct ModelPair: Decodable, Hashable {
+    let annotationModel: String
+    let sopModel: String
+
+    enum CodingKeys: String, CodingKey {
+        case annotationModel = "annotation_model"
+        case sopModel = "sop_model"
     }
 }
 
