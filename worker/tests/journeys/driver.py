@@ -44,6 +44,7 @@ from pathlib import Path
 
 from agenthandover_worker import main as wm
 from agenthandover_worker import trigger_spool
+from agenthandover_worker.annotation_cache import AnnotationCache
 from agenthandover_worker.config import load_config
 from agenthandover_worker.loop_guard import EventRetryGuard
 from agenthandover_worker.ollama import OllamaError
@@ -252,7 +253,9 @@ class JourneyWorker:
         self.focus_processor = None
         self.task_segmenter = None
         self.sop_generator = None
+        self.annotation_cache = None
         if vlm_cfg.annotation_enabled:
+            self.annotation_cache = AnnotationCache(self.db_path)
             self.scene_annotator = wm.SceneAnnotator(
                 config=wm.AnnotationConfig(
                     model=vlm_cfg.annotation_model,
@@ -262,6 +265,7 @@ class JourneyWorker:
                 ),
                 image_embedder=None,
                 vector_kb=self.vector_kb,
+                cache=self.annotation_cache,
             )
             self.scene_annotator.preload()
             self.frame_differ = wm.FrameDiffer(
@@ -367,6 +371,8 @@ class JourneyWorker:
         if self.vector_kb is not None:
             self.vector_kb.close()
         self.activity_searcher.close()
+        if self.annotation_cache is not None:
+            self.annotation_cache.close()
 
     def __enter__(self) -> "JourneyWorker":
         return self

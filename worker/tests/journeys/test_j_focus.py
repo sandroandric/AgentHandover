@@ -11,8 +11,6 @@ from __future__ import annotations
 import re
 import statistics
 
-import pytest
-
 from agenthandover_worker.frame_differ import DIFF_SYSTEM_PROMPT
 from agenthandover_worker.model_profiles import get_profile
 from agenthandover_worker.scene_annotator import annotation_system_prompt
@@ -120,16 +118,6 @@ def test_focus_packet_has_no_assumed_text(
     assert not re.search(r"\bAssum(e|ed|ing)\b", packet.body), packet.body
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "the pasted text is left to the model: the SOP prompt shows the copy "
-    "(sop_generator.py:475-500, '>>> Copied text'), but _vlm_sop_to_template "
-    "(sop_generator.py:884) never attaches the clipboard preview to the paste "
-    "step, and on the standard tier the Slack paste step reads 'Paste the "
-    "copied note content' with no input; select_keyframes "
-    "(focus_processor.py:76-128) also lets only 2 of the session's 4 copies "
-    "into the 20 SOP keyframes (copy adjacency +10 ranks below a dwell "
-    "boundary's +100)"
-))
 def test_focus_paste_step_carries_the_clipboard_text(
     events_db, worker, clock, temp_home, cassette,
 ) -> None:
