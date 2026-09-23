@@ -372,6 +372,7 @@ class FrameDiffer:
                     k: v for k, v in profile.diff_options().items()
                     if k not in ("num_predict",)
                 },
+                call_type="diff",
             )
         except ConnectionError as exc:
             self._stats["failed"] += 1

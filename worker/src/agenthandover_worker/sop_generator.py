@@ -1372,6 +1372,7 @@ def _call_ollama(
         format="json" if format_json and not think else None,
         think=think,
         timeout=timeout,
+        call_type="sop",
     )
     return response.text, response.elapsed
 

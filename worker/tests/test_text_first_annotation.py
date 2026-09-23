@@ -19,6 +19,7 @@ import pytest
 from agenthandover_worker import scene_annotator as sa
 from agenthandover_worker.db import WorkerDB
 from agenthandover_worker.focus_processor import FocusProcessor
+from agenthandover_worker.ops_telemetry import ComputeLedger
 from agenthandover_worker.scene_annotator import (
     AnnotationConfig,
     SceneAnnotator,
@@ -176,6 +177,33 @@ class TestTextFirst:
             result = annotator.annotate_event(event)
         assert result.status == "deferred"
         assert Path(json.loads(event["metadata_json"])["screenshot_path"]).exists()
+
+    def test_compute_counts_the_vision_follow_up_as_a_retry(self, tmp_path):
+        """WP-C1: the text-only call and the vision call are both
+        annotation seconds; the second call is the frame's retry, and the
+        frame lands in the wall-time histogram once."""
+        rec = _Recorder(
+            dict(_answer(needs_vision=True), total_duration=1_000_000_000),
+            dict(_answer(), total_duration=2_000_000_000),
+        )
+        with patch.object(sa, "COMPUTE", ComputeLedger()) as ledger:
+            with patch("urllib.request.urlopen", rec):
+                SceneAnnotator(AnnotationConfig()).annotate_event(_event(tmp_path))
+        snap = ledger.snapshot()
+        assert snap["annotation_retries"] == 1
+        assert sum(snap["annotation_wall_ms_histogram"].values()) == 1
+        assert snap["annotation_deferred"] == 0
+
+    def test_compute_counts_a_deferral_and_no_histogram_entry(self, tmp_path):
+        import urllib.error
+
+        rec = _Recorder(urllib.error.URLError(ConnectionRefusedError(61, "refused")))
+        with patch.object(sa, "COMPUTE", ComputeLedger()) as ledger:
+            with patch("urllib.request.urlopen", rec):
+                SceneAnnotator(AnnotationConfig()).annotate_event(_event(tmp_path))
+        snap = ledger.snapshot()
+        assert snap["annotation_deferred"] == 1
+        assert snap["annotation_wall_ms_histogram"] == {}
 
     def test_prefix_is_shared_by_text_and_vision_calls(self):
         """The static instructions are the system prompt of every call, and

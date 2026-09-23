@@ -386,6 +386,26 @@ class TestFrameDiffer:
         assert result.inference_time_seconds == pytest.approx(3.6)
         assert differ.stats["diffs_computed"] == 1
 
+    def test_llm_diff_is_counted_as_a_diff_call(self):
+        """The differ's model time is its own call type in the compute
+        counters, not annotation's (WP-C1)."""
+        differ = FrameDiffer()
+        prev = _make_event("e1", "2026-03-03T09:14:50.000Z", ANN_CHROME_GITHUB)
+        curr = _make_event("e2", "2026-03-03T09:15:05.000Z", ANN_CHROME_GITHUB_FILLED)
+        seen: list[dict] = []
+
+        def _mock_llm(*args, **kwargs):
+            seen.append(kwargs)
+            return json.dumps(VALID_DIFF_RESPONSE), 1.0
+
+        with patch(
+            "agenthandover_worker.scene_annotator._call_ollama_vlm",
+            side_effect=_mock_llm,
+        ):
+            differ.diff_pair(prev, curr)
+
+        assert [kw["call_type"] for kw in seen] == ["diff"]
+
     def test_llm_diff_failure(self):
         """LLM returns garbage → diff_failed marker."""
         differ = FrameDiffer()

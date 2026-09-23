@@ -19,8 +19,10 @@ Failures are classified so callers can tell "try again later" from
   or a reply that is not a JSON object.
 
 Every successful generate or embed call is counted in
-``ops_telemetry.MODEL_USAGE`` (tokens and Ollama's own durations), which
-the worker publishes in ``worker-status.json``.
+``ops_telemetry.MODEL_USAGE`` (tokens and Ollama's own durations, per
+model) and in ``ops_telemetry.COMPUTE`` (model seconds per ``call_type``:
+annotation, diff, sop, synthesis, reasoning, embed, preload or other),
+both of which the worker publishes in ``worker-status.json``.
 """
 
 from __future__ import annotations
@@ -122,6 +124,7 @@ class OllamaClient:
         think: bool | str | None = None,
         keep_alive: str | None = None,
         timeout: float | None = None,
+        call_type: str = "other",
     ) -> Response:
         """POST ``/api/generate`` (non-streaming) and return the reply.
 
@@ -136,6 +139,7 @@ class OllamaClient:
             keep_alive: how long Ollama keeps the model loaded after the
                 call; None omits it (Ollama's default is 5m).
             timeout: seconds to wait for the reply; None waits forever.
+            call_type: what the call is for, in the compute counters.
         """
         payload: dict[str, Any] = {"model": model, "prompt": prompt, "stream": False}
         if think is not None:
@@ -167,6 +171,7 @@ class OllamaClient:
                 model, (options or {}).get("num_predict"),
             )
         ops_telemetry.MODEL_USAGE.record(model, "generate", response)
+        ops_telemetry.COMPUTE.record_call(call_type, response)
         return response
 
     def preload(
@@ -185,7 +190,7 @@ class OllamaClient:
         """
         return self.generate(
             model, "", options=options, think=False,
-            keep_alive=keep_alive, timeout=timeout,
+            keep_alive=keep_alive, timeout=timeout, call_type="preload",
         )
 
     def embed(
@@ -223,10 +228,9 @@ class OllamaClient:
                 )
                 embeddings.extend([] for _ in range(len(batch) - len(embeddings)))
             vectors.extend(embeddings)
-            ops_telemetry.MODEL_USAGE.record(
-                model, "embed",
-                Response.from_reply(reply, time.monotonic() - began),
-            )
+            response = Response.from_reply(reply, time.monotonic() - began)
+            ops_telemetry.MODEL_USAGE.record(model, "embed", response)
+            ops_telemetry.COMPUTE.record_call("embed", response)
         return vectors
 
     def tags(self, timeout: float | None = 3.0) -> list[str]:

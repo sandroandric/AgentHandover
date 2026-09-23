@@ -30,7 +30,7 @@ from agenthandover_worker.ollama import (
     OllamaUnavailable,
     Response,
 )
-from agenthandover_worker.ops_telemetry import MODEL_USAGE
+from agenthandover_worker.ops_telemetry import COMPUTE, MODEL_USAGE
 from agenthandover_worker.vector_kb import VectorKB, VectorKBConfig
 
 HOST = "http://localhost:11434"
@@ -380,3 +380,64 @@ def test_eval_count_reaches_worker_status(tmp_path):
     assert calls["eval_count"] == REPLY["eval_count"] == 56
     assert calls["prompt_eval_count"] == 1234
     assert calls["generate_calls"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Model seconds per call type (WP-C1) -> worker-status.json "compute"
+# ---------------------------------------------------------------------------
+
+_CALL_TYPE_OF_SITE = {
+    "annotation (image, schema, keep_alive, profile options)": "annotation",
+    "annotation (base64 image, defaults)": "annotation",
+    "preload": "preload",
+    "sop (json format, thinking off)": "sop",
+    "sop (thinking on drops the grammar)": "sop",
+    "synthesis": "synthesis",
+    "reasoning": "reasoning",
+    "segmenter embeddings": "embed",
+}
+
+
+def test_every_call_site_is_counted_under_its_call_type(tmp_path):
+    for name, call, _ in _call_sites(tmp_path):
+        COMPUTE.reset()
+        reply = (
+            {"embeddings": [[1.0], [2.0]], "total_duration": 250_000_000}
+            if "embeddings" in name else REPLY
+        )
+        with patch("urllib.request.urlopen", _Urlopen(reply)):
+            call()
+        snap = COMPUTE.snapshot()
+        expected = _CALL_TYPE_OF_SITE[name]
+        assert snap["model_calls_by_call_type"] == {expected: 1}, name
+        assert snap["model_seconds_by_call_type"] == {
+            expected: reply["total_duration"] / 1e9
+        }, name
+    COMPUTE.reset()
+
+
+def test_compute_reaches_worker_status(tmp_path):
+    from agenthandover_worker.main import _write_worker_status
+
+    COMPUTE.reset()
+    with patch("urllib.request.urlopen", _Urlopen(REPLY)):
+        scene_annotator._call_ollama_vlm(model="m", prompt="p")
+        sop_generator._call_ollama(model="m", prompt="p", think=False)
+    with patch("agenthandover_worker.main._status_dir", return_value=tmp_path):
+        _write_worker_status(
+            started_at="2026-09-22T10:00:00Z",
+            events_processed_today=0,
+            sops_generated=0,
+            last_pipeline_duration_ms=None,
+            consecutive_errors=0,
+            vlm_available=True,
+            sop_inducer_available=False,
+        )
+    COMPUTE.reset()
+    compute = json.loads((tmp_path / "worker-status.json").read_text())["compute"]
+    assert compute["model_seconds_by_call_type"] == {"annotation": 3.0, "sop": 3.0}
+    assert compute["model_calls_by_call_type"] == {"annotation": 1, "sop": 1}
+    assert compute["model_seconds"] == 6.0
+    assert compute["last_hour"]["model_seconds_by_call_type"] == {
+        "annotation": 3.0, "sop": 3.0,
+    }
