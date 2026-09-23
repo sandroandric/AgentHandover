@@ -39,7 +39,7 @@ pub fn check_pid_file(name: &str) -> Option<u32> {
 }
 
 /// Check if a process with the given PID is running.
-fn is_process_running(pid: u32) -> bool {
+pub fn is_process_running(pid: u32) -> bool {
     // kill(pid, 0) checks if process exists without sending a signal
     unsafe { libc::kill(pid as i32, 0) == 0 }
 }
