@@ -34,12 +34,14 @@ STOP_WORDS = {
 # Linking thresholds, one per similarity metric: Jaccard over normalised
 # intent tokens, and cosine of ``clustering:``-prefixed nomic-embed-text
 # vectors.  A score from one metric is never compared with the other's
-# threshold.  The cosine value is the segmenter's operating point for the
-# same model and prefix (measured in tests/journeys/test_segmenter_threshold.py
-# on frame texts); tests/journeys/test_linker_threshold.py pins it on
-# intent texts once its cassette is recorded.
+# threshold.  The cosine value is measured on intent texts in
+# tests/journeys/test_linker_threshold.py (recorded nomic-embed-text
+# vectors): same-task pairs score 0.76-0.96, and the closest different-task
+# pair (a Stripe payout reconciliation vs. failed payments in the Stripe
+# dashboard) 0.88, so the segmenter's 0.83 would link different tasks.
+# 0.89 links no two tasks; the pairs in between go to the LLM band.
 _JACCARD_THRESHOLD = 0.4
-_COSINE_THRESHOLD = 0.83
+_COSINE_THRESHOLD = 0.89
 _THRESHOLDS = {"jaccard": _JACCARD_THRESHOLD, "cosine": _COSINE_THRESHOLD}
 # Just below its metric's threshold, an LLM YES links two intents.  Only
 # below: at or above the threshold the intents link without a model call,

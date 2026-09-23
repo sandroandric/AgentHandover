@@ -13,7 +13,9 @@ an app or a verb with one of them.  The pin is the one that matters for
 mining: no pair from two different tasks reaches the threshold (a false
 link merges two tasks' history).  Same-task pairs that fall below it are
 left to the LLM band just under the threshold, or stay unlinked (a missed
-link costs one day of history).
+link costs one day of history).  Recorded: same-task cosines 0.76-0.96,
+the closest different-task pair (Stripe payout vs. failed Stripe payments)
+0.88, hence 0.89.
 
 Record: ``AH_RECORD=1 AH_RECORD_UPSTREAM=http://<ollama> pytest <this file>``.
 """
@@ -32,14 +34,9 @@ from agenthandover_worker.session_linker import (
     SessionLinker,
 )
 from agenthandover_worker.vector_kb import VectorKB, VectorKBConfig
-from journeys.cassette import CASSETTE_DIR, open_cassette
+from journeys.cassette import open_cassette
 
 JOURNEY = "linker_threshold"
-
-pytestmark = pytest.mark.skipif(
-    not (CASSETTE_DIR / f"{JOURNEY}.jsonl").exists(),
-    reason="linker_threshold cassette not recorded (record with AH_RECORD=1)",
-)
 
 # (task, intent as a daily summary words it)
 INTENTS = [
@@ -101,3 +98,10 @@ def test_the_jaccard_threshold_would_link_different_tasks(tmp_path: Path) -> Non
     0.4, real cosines link pairs from different tasks."""
     cross = [s for ta, tb, s in _scores(tmp_path) if ta != tb and s >= 0.4]
     assert cross, "every cross-task cosine is under 0.4; re-check the calibration"
+
+
+def test_the_segmenter_threshold_would_link_different_tasks(tmp_path: Path) -> None:
+    """Why the linker does not reuse the segmenter's 0.83: on intent texts
+    it links the Stripe payout routine with a failed-payments lookup."""
+    cross = {(ta, tb) for ta, tb, s in _scores(tmp_path) if ta != tb and s >= 0.83}
+    assert ("stripe", "stripe_failed") in cross
