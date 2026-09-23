@@ -307,6 +307,7 @@ async fn main() -> Result<()> {
     let health_start_time = start_time;
     let health_event_counter = Arc::clone(&event_counter);
     let health_nm_ts = Arc::clone(&last_nm_message_epoch_ms);
+    let health_capture_stats = Arc::clone(&config.capture_stats);
     let health_handle = tokio::spawn(async move {
         let artifact_dir = health_db_path.parent()
             .map(|p| p.join("artifacts"))
@@ -380,6 +381,12 @@ async fn main() -> Result<()> {
                         events_purged: last_maintenance.as_ref().map(|r| r.events_purged),
                         artifacts_purged: last_maintenance.as_ref().map(|r| r.artifacts_purged),
                         bytes_freed: last_maintenance.as_ref().map(|r| r.bytes_freed),
+                        compute: Some(
+                            health_capture_stats
+                                .lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                                .snapshot(std::time::Instant::now()),
+                        ),
                     };
                     if let Err(e) = agenthandover_common::status::write_status_file(
                         "daemon-status.json",

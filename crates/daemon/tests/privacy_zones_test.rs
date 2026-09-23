@@ -20,7 +20,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
 use tokio::sync::{mpsc, watch};
@@ -254,7 +254,12 @@ async fn blocked_app_never_reaches_the_shutter() {
             window_reply("pid:11:1Password", "Vault — Bank logins — edit"),
         ],
     );
+    let stats = Arc::clone(&h.config.capture_stats);
     let events = run_loop(h.config, &h.root, Duration::from_millis(500)).await;
+    let compute = stats.lock().unwrap().snapshot(Instant::now());
+    assert_eq!(compute.since_start.frames_captured, 0);
+    assert_eq!(compute.since_start.frames_gated_by_reason.get("privacy_zone"), Some(&1));
+    assert_eq!(compute.last_hour, compute.since_start);
 
     assert_eq!(h.captures.load(Ordering::SeqCst), 0, "no capture request for 1Password");
     assert_eq!(frames(&events), 0);
@@ -278,8 +283,13 @@ async fn unblocked_app_switch_requests_a_frame() {
             window_reply("pid:12:Preview", "invoice.pdf"),
         ],
     );
+    let stats = Arc::clone(&h.config.capture_stats);
     let events = run_loop(h.config, &h.root, Duration::from_millis(500)).await;
     assert!(h.captures.load(Ordering::SeqCst) >= 1, "the app switch requested a frame");
+    // The fake socket closes without a frame: counted as a failed capture.
+    let compute = stats.lock().unwrap().snapshot(Instant::now());
+    assert_eq!(compute.since_start.frames_captured, 0);
+    assert!(compute.since_start.frames_gated_by_reason.get("capture_failed").is_some_and(|n| *n >= 1));
     assert_eq!(app_switches(&events).len(), 1);
     assert_eq!(app_switches(&events)[0].2, "invoice.pdf");
 }
@@ -400,9 +410,15 @@ async fn an_allowed_window_keeps_its_frame() {
             window_reply("pid:12:Preview", "invoice.pdf"),
         ],
     );
+    let stats = Arc::clone(&h.config.capture_stats);
     let events = run_loop(h.config, &h.root, Duration::from_millis(800)).await;
     assert_eq!(frames(&events), 1, "{events:?}");
     assert_eq!(jpegs_in(&shots), 1);
+    // WP-C1: daemon-status.json's capture counters see the same frame.
+    let compute = stats.lock().unwrap().snapshot(Instant::now());
+    assert_eq!(compute.since_start.frames_captured, 1);
+    assert_eq!(compute.since_start.frames_kept, 1);
+    assert!(compute.since_start.frames_gated_by_reason.is_empty());
 }
 
 /// The user switches to 1Password while the frame is being taken: the
@@ -421,8 +437,13 @@ async fn a_switch_to_a_blocked_window_during_the_capture_drops_the_frame() {
             window_reply("pid:11:1Password", "Vault"),
         ],
     );
+    let stats = Arc::clone(&h.config.capture_stats);
     let events = run_loop(h.config, &h.root, Duration::from_millis(800)).await;
     assert!(h.captures.load(Ordering::SeqCst) >= 1, "the capture was taken");
+    let compute = stats.lock().unwrap().snapshot(Instant::now());
+    assert_eq!(compute.since_start.frames_captured, 1);
+    assert_eq!(compute.since_start.frames_kept, 0);
+    assert_eq!(compute.since_start.frames_gated_by_reason.get("privacy_changed"), Some(&1));
     assert_eq!(frames(&events), 0, "no frame row: {events:?}");
     assert_eq!(jpegs_in(&shots), 0, "no file");
 }

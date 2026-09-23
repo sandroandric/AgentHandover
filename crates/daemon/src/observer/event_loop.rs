@@ -17,6 +17,7 @@ use tracing::{info, debug, warn, error};
 use uuid::Uuid;
 
 use super::capture_policy::{ocr_words, CapturePolicy, CaptureTrigger, FrameDecision};
+use super::capture_stats::{with_stats, CaptureStats, SharedCaptureStats};
 use super::privacy_zones::{PrivacyZones, Zone};
 use crate::observation::{
     focused_element_at_async, snapshot_at_async, ObservationSnapshot, SleepRecord, WarnLimiter,
@@ -71,6 +72,9 @@ pub struct ObserverConfig {
     /// through AppleScript (each first query triggers a macOS consent
     /// prompt, so this is opt-in).
     pub read_app_state: bool,
+    /// Frames taken, kept and gated, capture and OCR milliseconds; the
+    /// health watcher publishes them in `daemon-status.json`.
+    pub capture_stats: SharedCaptureStats,
 }
 
 impl Default for ObserverConfig {
@@ -92,6 +96,7 @@ impl Default for ObserverConfig {
             state_dir: agenthandover_common::status::data_dir(),
             capture_input_values: false,
             read_app_state: false,
+            capture_stats: CaptureStats::shared(),
         }
     }
 }
@@ -393,6 +398,9 @@ pub async fn run_observer_loop(
                 // A blocked or metadata-only window never reaches the shutter.
                 if zone != Zone::Full {
                     debug!(zone = zone.as_str(), "Privacy zone: no frame");
+                    if !transitions.is_empty() {
+                        with_stats(&config.capture_stats, |s| s.gated(Instant::now(), "privacy_zone"));
+                    }
                     continue;
                 }
                 if !config.capture_screenshots || artifact_store.is_none() {
@@ -402,6 +410,11 @@ pub async fn run_observer_loop(
                 let Some(trigger) =
                     policy.shutter_trigger(&transitions, focus_recording, Instant::now())
                 else {
+                    // With a transition in hand, only the minute's frame
+                    // budget stops the shutter.
+                    if !transitions.is_empty() {
+                        with_stats(&config.capture_stats, |s| s.gated(Instant::now(), "rate_limited"));
+                    }
                     continue;
                 };
                 let gate = PrivacyGate {
@@ -571,27 +584,42 @@ async fn capture_kept_frame(
     config: &ObserverConfig,
     gate: &PrivacyGate<'_>,
 ) -> Option<KeptFrame> {
-    let (width, height, bgra, jpeg) =
-        grab_frame(&config.capture_socket, config.screenshot_scale, config.screenshot_quality).await?;
+    let stats = &config.capture_stats;
+    let gated = |reason: &str| with_stats(stats, |s| s.gated(Instant::now(), reason));
+
+    let started = Instant::now();
+    let grabbed =
+        grab_frame(&config.capture_socket, config.screenshot_scale, config.screenshot_quality).await;
+    let Some((width, height, bgra, jpeg)) = grabbed else {
+        with_stats(stats, |s| s.capture_failed(Instant::now(), started.elapsed()));
+        return None;
+    };
+    with_stats(stats, |s| s.captured(Instant::now(), started.elapsed()));
     if !gate.still_allows(config).await {
         debug!("The window changed to a private one during the capture, dropping the frame");
+        gated("privacy_changed");
         return None;
     }
-    let signature = dhash::compute_signature(&bgra, width, height)?;
+    let Some(signature) = dhash::compute_signature(&bgra, width, height) else {
+        gated("capture_failed");
+        return None;
+    };
 
     let mut pixels = bgra;
     match policy.frame_decision(trigger, focus_recording, &signature) {
         FrameDecision::Unchanged => {
             debug!(trigger = trigger.as_str(), "Screen unchanged since the last kept frame, dropping");
+            gated("unchanged");
             return None;
         }
         FrameDecision::CheckText => {
-            let (back, fast) = ocr_frame(pixels, width, height, OcrPass::Fast).await;
+            let (back, fast) = timed_ocr(stats, pixels, width, height, OcrPass::Fast).await;
             pixels = back;
             // Without OCR there is no text to compare: the pixels changed, keep it.
             if let Some((text, _)) = fast {
                 if !policy.text_changed(&ocr_words(&text)) {
                     debug!("Heartbeat frame shows the same text as the last kept frame, dropping");
+                    gated("same_text");
                     return None;
                 }
             }
@@ -599,14 +627,29 @@ async fn capture_kept_frame(
         FrameDecision::Keep => {}
     }
 
-    let (_, accurate) = ocr_frame(pixels, width, height, OcrPass::Accurate).await;
+    let (_, accurate) = timed_ocr(stats, pixels, width, height, OcrPass::Accurate).await;
     let screenshot_path = write_vlm_jpeg(&jpeg, &config.screenshots_dir);
     let (words, ocr) = match accurate {
         Some((text, json)) => (Some(ocr_words(&text)), Some(json)),
         None => (None, None),
     };
     policy.record_kept(signature, words, focus_recording);
+    with_stats(stats, |s| s.kept(Instant::now()));
     Some(KeptFrame { screenshot_path, ocr })
+}
+
+/// [`ocr_frame`], its time counted in `stats`.
+async fn timed_ocr(
+    stats: &SharedCaptureStats,
+    pixels: Vec<u8>,
+    width: usize,
+    height: usize,
+    pass: OcrPass,
+) -> (Vec<u8>, Option<(String, serde_json::Value)>) {
+    let started = Instant::now();
+    let out = ocr_frame(pixels, width, height, pass).await;
+    with_stats(stats, |s| s.ocr(Instant::now(), started.elapsed()));
+    out
 }
 
 /// Capture one frame from the app's capture socket: `(width, height, BGRA
