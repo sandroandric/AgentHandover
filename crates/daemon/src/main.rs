@@ -153,10 +153,9 @@ async fn main() -> Result<()> {
 
     // Convert AppConfig -> ObserverConfig
     let config = ObserverConfig {
-        t_dwell_seconds: app_config.observer.t_dwell_seconds,
-        t_scroll_read_seconds: app_config.observer.t_scroll_read_seconds,
         capture_screenshots: app_config.observer.capture_screenshots,
         screenshot_max_per_minute: app_config.observer.screenshot_max_per_minute,
+        focus_screenshot_max_per_minute: app_config.observer.focus_screenshot_max_per_minute,
         poll_interval: std::time::Duration::from_millis(500),
         db_path: {
             // Use the same standard path the worker expects so both
@@ -271,6 +270,7 @@ async fn main() -> Result<()> {
             while let Some(event) = nm_event_rx.recv().await {
                 // Track last NM message timestamp for extension-connected detection
                 nm_ts.store(chrono::Utc::now().timestamp_millis(), Ordering::Relaxed);
+                note_browser_transition(&event);
                 match forwarder_tx.try_send(ObserverMessage::Event { event }) {
                     Ok(()) => {}
                     Err(mpsc::error::TrySendError::Full(_)) => {
@@ -443,11 +443,16 @@ async fn main() -> Result<()> {
         }
     });
 
+    // Set by the clipboard forwarder, consumed by the observer: a clipboard
+    // change is a capture transition.
+    let clipboard_changed = Arc::new(AtomicBool::new(false));
+
     // Spawn clipboard monitor (macOS only)
     #[cfg(target_os = "macos")]
     let clipboard_handle = {
         use agenthandover_daemon::platform::clipboard_monitor;
         let clip_tx = tx.clone();
+        let clip_changed = Arc::clone(&clipboard_changed);
         let clip_shutdown_rx = shutdown_tx.subscribe();
         // Clipboard text is stored only when the user opted in.
         let clip_preview_max_chars = app_config
@@ -465,6 +470,7 @@ async fn main() -> Result<()> {
                     match msg {
                         clipboard_monitor::ClipboardMessage::Change(change) => {
                             hash_tracker.record(change.content_hash.clone());
+                            clip_changed.store(true, Ordering::Release);
                             let event = agenthandover_common::event::Event {
                                 id: uuid::Uuid::new_v4(),
                                 timestamp: change.timestamp,
@@ -527,7 +533,15 @@ async fn main() -> Result<()> {
     };
 
     // Run observer loop (blocks until shutdown)
-    let observer_result = run_observer_loop(config, tx, shutdown_rx, artifact_store, capture_paused).await;
+    let observer_result = run_observer_loop(
+        config,
+        tx,
+        shutdown_rx,
+        artifact_store,
+        capture_paused,
+        clipboard_changed,
+    )
+    .await;
 
     // Abort background tasks
     native_handle.abort();
@@ -649,6 +663,9 @@ async fn run_native_messaging_bridge() -> Result<()> {
             if let Some(tab_id) = event.metadata.get("tabId").and_then(|v| v.as_i64()) {
                 forwarder_tab_id.store(tab_id, Ordering::Relaxed);
             }
+
+            // Tell the observer to capture the page the user just acted on.
+            note_browser_transition(&event);
 
             // Write extension heartbeat every 5 seconds (throttled)
             if last_heartbeat_write.elapsed() >= std::time::Duration::from_secs(5) {
@@ -780,6 +797,21 @@ async fn run_native_messaging_bridge() -> Result<()> {
 
     info!("NM bridge exiting");
     Ok(())
+}
+
+/// Hand a browser click, navigation or form submit to the observer through
+/// the transition file (the bridge is Chrome's process, not the observer's).
+fn note_browser_transition(event: &agenthandover_common::event::Event) {
+    use agenthandover_common::browser_transition::{write_browser_transition, BrowserTransition};
+
+    let Some(kind) = native_messaging::browser_transition_kind(&event.kind) else {
+        return;
+    };
+    let transition = BrowserTransition { kind, at: chrono::Utc::now() };
+    let dir = agenthandover_common::status::data_dir();
+    if let Err(e) = write_browser_transition(&dir, &transition) {
+        warn!("Failed to write browser transition: {}", e);
+    }
 }
 
 /// Load AppConfig from the standard config file location, falling back to

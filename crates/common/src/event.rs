@@ -44,6 +44,19 @@ pub enum EventKind {
         from_app: String,
         to_app: String,
     },
+    /// The active browser tab committed a navigation (full load or
+    /// history push). `url` is origin + path only.
+    NavigationChange {
+        url: String,
+        title: String,
+    },
+    /// A form was submitted in the active tab. `form_anchor` identifies the
+    /// form and its submitter (role, name, label, test id, action path);
+    /// it never carries field values.
+    FormSubmit {
+        url: String,
+        form_anchor: serde_json::Value,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

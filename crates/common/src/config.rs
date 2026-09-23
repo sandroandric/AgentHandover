@@ -36,7 +36,12 @@ pub struct ObserverConfig {
     pub t_dwell_seconds: u64,
     pub t_scroll_read_seconds: u64,
     pub capture_screenshots: bool,
+    /// Ceiling on frames kept per minute outside focus recordings.
     pub screenshot_max_per_minute: u32,
+    /// Ceiling on frames kept per minute during a focus recording, counted
+    /// separately so passive capture can never leave a recording blind.
+    #[serde(default = "default_focus_screenshot_max_per_minute")]
+    pub focus_screenshot_max_per_minute: u32,
     /// Screenshot format: "jpeg" (default, half-res) or "png" (full-res).
     #[serde(default = "default_screenshot_format")]
     pub screenshot_format: String,
@@ -46,7 +51,10 @@ pub struct ObserverConfig {
     /// Screenshot scale factor (default: 0.5 = half resolution).
     #[serde(default = "default_screenshot_scale")]
     pub screenshot_scale: f64,
-    /// dHash perceptual hash threshold (hamming distance). Lower = stricter dedup.
+    /// Frame change threshold: a frame is new when at least this many of
+    /// the 192 blocks of its block-mean signature moved by more than the
+    /// dead zone since the last kept frame (see `capture::dhash`). Higher =
+    /// fewer frames kept.
     #[serde(default = "default_dhash_threshold")]
     pub dhash_threshold: u32,
 }
@@ -131,7 +139,8 @@ pub struct VlmConfig {
 fn default_screenshot_format() -> String { "jpeg".to_string() }
 fn default_screenshot_quality() -> u8 { 70 }
 fn default_screenshot_scale() -> f64 { 0.5 }
-fn default_dhash_threshold() -> u32 { 10 }
+fn default_dhash_threshold() -> u32 { 1 }
+fn default_focus_screenshot_max_per_minute() -> u32 { 40 }
 
 fn default_vlm_mode() -> String { "local".to_string() }
 fn default_annotation_model() -> String { "qwen3.5:2b".to_string() }
@@ -226,6 +235,7 @@ impl Default for ObserverConfig {
             t_scroll_read_seconds: 8,
             capture_screenshots: true,
             screenshot_max_per_minute: 20,
+            focus_screenshot_max_per_minute: default_focus_screenshot_max_per_minute(),
             screenshot_format: default_screenshot_format(),
             screenshot_quality: default_screenshot_quality(),
             screenshot_scale: default_screenshot_scale(),

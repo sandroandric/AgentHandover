@@ -7,11 +7,12 @@
 t_dwell_seconds = 3
 t_scroll_read_seconds = 8
 capture_screenshots = true
-screenshot_max_per_minute = 20
+screenshot_max_per_minute = 20  # ceiling on frames kept per minute (passive)
+focus_screenshot_max_per_minute = 40  # separate ceiling during a focus recording
 screenshot_format = "jpeg"       # "jpeg" (half-res, recommended) or "png" (full-res)
 screenshot_quality = 70          # JPEG quality 1-100 (only used for jpeg format)
 screenshot_scale = 0.5           # fraction of native (Retina) pixels; 0.5 recommended for VLM
-dhash_threshold = 10             # perceptual hash dedup threshold (lower = stricter)
+dhash_threshold = 1              # changed screen blocks needed to keep a frame (higher = fewer frames)
 
 [privacy]
 enable_inline_secret_redaction = true
