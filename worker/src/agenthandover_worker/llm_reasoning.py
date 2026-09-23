@@ -65,6 +65,14 @@ def sanitize_user_data(text: str, max_length: int = _MAX_USER_DATA_LENGTH) -> st
 # ---------------------------------------------------------------------------
 
 
+class TruncatedAnswer(Exception):
+    """Ollama stopped the answer at ``num_predict``: it is incomplete."""
+
+    def __init__(self, message: str, elapsed: float = 0.0) -> None:
+        super().__init__(message)
+        self.elapsed = elapsed
+
+
 @dataclass
 class ReasoningConfig:
     """Configuration for the LLM reasoner."""
@@ -73,7 +81,12 @@ class ReasoningConfig:
     ollama_host: str = "http://localhost:11434"
     num_predict: int = 4000
     timeout: float = 1800.0
-    think: bool = True
+    # Off: every reasoning call wants a short structured answer, and with
+    # thinking on the Focus Q&A call spent its whole num_predict (4000) on
+    # 15,000 characters of thinking and returned a cut-off JSON answer
+    # (focus_dailynews cassette, qwen3.5:4b).  A caller may still pass
+    # ``think=True``; a truncated answer is then retried without it.
+    think: bool = False
     # Ollama context size; None means the model profile's ``sop_num_ctx``,
     # the context every generation-phase call on that model uses (Ollama
     # reloads a model whose num_ctx changes).  The annotation-phase
@@ -141,7 +154,7 @@ class LLMReasoner:
 
         Args:
             think: Override for thinking mode.  Defaults to ``config.think``
-                (True).  JSON responses benefit from thinking.
+                (False).
         """
         result = self._execute(prompt, system, caller, think=think)
         if not result.success:
@@ -290,9 +303,25 @@ class LLMReasoner:
             logger.debug("LLM reasoning skipped (%s): over budget", caller)
             return base
 
-        # Call Ollama
+        # Call Ollama.  An answer cut off at num_predict is never parsed
+        # as if complete: a call that thought is retried once without
+        # thinking (the thinking is what ate the budget); otherwise it fails.
         try:
-            raw_text, elapsed = self._call_ollama(prompt, system, think=think)
+            try:
+                raw_text, elapsed = self._call_ollama(prompt, system, think=think)
+            except TruncatedAnswer as exc:
+                use_think = think if think is not None else self.config.think
+                if not use_think:
+                    raise
+                logger.warning(
+                    "LLM reasoning (%s): %s; retrying without thinking", caller, exc,
+                )
+                raw_text, elapsed = self._call_ollama(prompt, system, think=False)
+                elapsed += exc.elapsed
+        except TruncatedAnswer as exc:
+            base.error = f"Truncated answer: {exc}"
+            logger.warning("LLM reasoning failed (%s): %s", caller, exc)
+            return base
         except ConnectionError as exc:
             base.error = f"Ollama connection failed: {exc}"
             logger.warning("LLM reasoning failed (%s): %s", caller, exc)
@@ -330,7 +359,8 @@ class LLMReasoner:
         """Call Ollama /api/generate. This is the mock boundary for tests.
 
         Returns the answer without ``<think>`` blocks and the call's
-        wall-clock seconds.
+        wall-clock seconds; raises :class:`TruncatedAnswer` when Ollama
+        stopped at ``num_predict`` (``done_reason == "length"``).
         """
         use_think = think if think is not None else self.config.think
         response = OllamaClient(self.config.ollama_host).generate(
@@ -345,6 +375,13 @@ class LLMReasoner:
             think=use_think,
             timeout=self.config.timeout,
         )
+        if response.done_reason == "length":
+            raise TruncatedAnswer(
+                f"{self.config.model} stopped at num_predict="
+                f"{num_predict or self.config.num_predict} "
+                f"({'with' if use_think else 'without'} thinking)",
+                response.elapsed,
+            )
         return clean_model_text(response.text), response.elapsed
 
     # ------------------------------------------------------------------

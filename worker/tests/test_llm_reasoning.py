@@ -260,3 +260,60 @@ class TestEdgeCases:
             result = _make_reasoner().reason_json("prompt")
         assert not result.success
         assert "unexpected" in result.error
+
+
+# ---------------------------------------------------------------------------
+# Truncated answers (done_reason "length") and thinking (WP-C9)
+# ---------------------------------------------------------------------------
+
+
+class TestTruncatedAnswer:
+    """An answer Ollama cut off at num_predict is never parsed as complete."""
+
+    CUT_OFF = '{"questions": [{"question": "Which Slack workspace'
+    COMPLETE = '{"questions": []}'
+
+    @staticmethod
+    def _fake_generate(replies, calls):
+        from agenthandover_worker.ollama import Response
+
+        def generate(self, model, prompt, **kwargs):
+            calls.append(kwargs)
+            text, done_reason = replies.pop(0)
+            return Response(text=text, done_reason=done_reason, elapsed=2.0)
+        return generate
+
+    def _run(self, replies, **reason_kwargs):
+        from agenthandover_worker.ollama import OllamaClient
+
+        calls: list[dict] = []
+        with patch.object(OllamaClient, "generate", self._fake_generate(replies, calls)):
+            result = _make_reasoner().reason_json("p", **reason_kwargs)
+        return result, calls
+
+    def test_reasoning_calls_do_not_think_by_default(self):
+        result, calls = self._run([(self.COMPLETE, "stop")])
+        assert result.success and result.value == {"questions": []}
+        assert [c["think"] for c in calls] == [False]
+
+    def test_a_truncated_answer_without_thinking_fails(self):
+        result, calls = self._run([(self.CUT_OFF, "length")])
+        assert not result.success
+        assert result.value is None
+        assert "Truncated answer" in result.error
+        assert len(calls) == 1
+
+    def test_a_truncated_answer_with_thinking_is_retried_once_without(self):
+        result, calls = self._run(
+            [(self.CUT_OFF, "length"), (self.COMPLETE, "stop")], think=True,
+        )
+        assert [c["think"] for c in calls] == [True, False]
+        assert result.success and result.value == {"questions": []}
+        assert result.elapsed_seconds == 4.0
+
+    def test_a_retry_that_is_truncated_again_fails(self):
+        result, calls = self._run(
+            [(self.CUT_OFF, "length"), (self.CUT_OFF, "length")], think=True,
+        )
+        assert len(calls) == 2
+        assert not result.success and "Truncated answer" in result.error
