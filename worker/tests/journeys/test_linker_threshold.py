@@ -23,6 +23,8 @@ from __future__ import annotations
 from itertools import combinations
 from pathlib import Path
 
+import pytest
+
 from agenthandover_worker.knowledge_base import KnowledgeBase
 from agenthandover_worker.session_linker import (
     _COSINE_THRESHOLD,
@@ -30,9 +32,14 @@ from agenthandover_worker.session_linker import (
     SessionLinker,
 )
 from agenthandover_worker.vector_kb import VectorKB, VectorKBConfig
-from journeys.cassette import open_cassette
+from journeys.cassette import CASSETTE_DIR, open_cassette
 
 JOURNEY = "linker_threshold"
+
+pytestmark = pytest.mark.skipif(
+    not (CASSETTE_DIR / f"{JOURNEY}.jsonl").exists(),
+    reason="linker_threshold cassette not recorded (record with AH_RECORD=1)",
+)
 
 # (task, intent as a daily summary words it)
 INTENTS = [

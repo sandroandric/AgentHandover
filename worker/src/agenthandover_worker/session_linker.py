@@ -33,9 +33,11 @@ STOP_WORDS = {
 
 # Linking thresholds, one per similarity metric: Jaccard over normalised
 # intent tokens, and cosine of ``clustering:``-prefixed nomic-embed-text
-# vectors (calibrated on real vectors in
-# tests/journeys/test_linker_threshold.py).  A score from one metric is
-# never compared with the other's threshold.
+# vectors.  A score from one metric is never compared with the other's
+# threshold.  The cosine value is the segmenter's operating point for the
+# same model and prefix (measured in tests/journeys/test_segmenter_threshold.py
+# on frame texts); tests/journeys/test_linker_threshold.py pins it on
+# intent texts once its cassette is recorded.
 _JACCARD_THRESHOLD = 0.4
 _COSINE_THRESHOLD = 0.83
 _THRESHOLDS = {"jaccard": _JACCARD_THRESHOLD, "cosine": _COSINE_THRESHOLD}
