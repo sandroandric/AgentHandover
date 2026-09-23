@@ -18,12 +18,26 @@ from __future__ import annotations
 
 import json
 import logging
+import re
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
 from agenthandover_worker import paths
 
 logger = logging.getLogger(__name__)
+
+# An agent is waiting on search_skills, so the query embedding gets a short
+# timeout (a warm embed takes well under a second; a cold model load a few
+# seconds). Ollama serves one request at a time, so while the worker is
+# annotating an embed can queue far longer; after a failure, skip the
+# model for a while instead of making every search wait again.
+QUERY_EMBED_TIMEOUT_S = 8.0
+EMBED_RETRY_AFTER_S = 60.0
+
+_STOPWORDS = frozenset(
+    "a an and at by for from how i in into is it my of on or the to with".split()
+)
 
 
 def _get_kb_root() -> Path:
@@ -77,6 +91,7 @@ def build_mcp_server():
 
                     _state["vkb"] = (VectorKB(db_path, VectorKBConfig(
                         ollama_host=load_config().vlm.ollama_host,
+                        timeout_seconds=QUERY_EMBED_TIMEOUT_S,
                     )), "")
                 except Exception as exc:
                     logger.warning("VectorKB init failed", exc_info=True)
@@ -89,16 +104,31 @@ def build_mcp_server():
         return _state["vkb"]
 
     def _keyword_search(query: str, limit: int) -> list[dict]:
-        query_lower = query.lower()
+        """Score each Skill by the share of query words it contains: a
+        word in the title counts 1, one only in the description, tags or
+        steps counts 0.5."""
+        from agenthandover_worker.procedure_schema import procedure_steps
+
+        words = [
+            w for w in re.findall(r"\w+", query.lower())
+            if w not in _STOPWORDS and len(w) > 1
+        ] or [query.lower().strip()]
         matches = []
         for proc in _kb().list_procedures():
-            title = proc.get("title", "").lower()
-            desc = proc.get("description", "").lower()
-            if query_lower in title or query_lower in desc:
+            title = f"{proc.get('title', '')} {proc.get('short_title', '')}".lower()
+            body = " ".join([
+                proc.get("description", ""),
+                " ".join(proc.get("tags", [])),
+                *(s.get("action") or s.get("description", "") for s in procedure_steps(proc)),
+            ]).lower()
+            score = sum(
+                1.0 if w in title else 0.5 if w in body else 0.0 for w in words
+            ) / len(words)
+            if score > 0:
                 matches.append({
                     "slug": proc.get("id", ""),
                     "title": proc.get("title", ""),
-                    "score": 1.0 if query_lower in title else 0.7,
+                    "score": round(score, 2),
                 })
         matches.sort(key=lambda m: m["score"], reverse=True)
         return matches[:limit]
@@ -176,22 +206,29 @@ def build_mcp_server():
         procedures about deployment even if they're titled differently.
 
         Returns ``{"mode", "reason", "results"}``: ``mode`` is
-        ``"semantic"`` or ``"keyword_fallback"`` (a substring match on
-        titles and descriptions), and ``reason`` says why semantic search
-        was not used.
+        ``"semantic"`` or ``"keyword_fallback"`` (query words matched in
+        titles, descriptions, tags and steps), and ``reason`` says why
+        semantic search was not used.
         """
         from agenthandover_worker.ollama import OllamaError
 
         vkb, reason = _vector_kb()
         if vkb is not None:
+            down_until, down_reason = _state.get("embed_down", (0.0, ""))
             if vkb.count("procedure") == 0:
                 reason = "no Skill has been embedded yet"
+            elif time.monotonic() < down_until:
+                reason = down_reason
             else:
                 try:
                     vectors = vkb.compute_embeddings([query])
-                except (ConnectionError, OllamaError) as exc:
+                except (ConnectionError, TimeoutError, OllamaError) as exc:
                     reason = f"embedding model unavailable: {exc}"
                     logger.warning("search_skills: %s", reason)
+                    _state["embed_down"] = (
+                        time.monotonic() + EMBED_RETRY_AFTER_S,
+                        f"{reason} (retrying after {EMBED_RETRY_AFTER_S:.0f}s)",
+                    )
                 else:
                     if vectors and vectors[0]:
                         hits = vkb.search_by_vector(

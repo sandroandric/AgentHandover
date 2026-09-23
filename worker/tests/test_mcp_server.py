@@ -254,3 +254,68 @@ class TestSearchSkillsMode:
         assert "embedding model unavailable" in result["reason"]
         assert "embedding model unavailable" in caplog.text
         assert [r["slug"] for r in result["results"]] == ["reddit-marketing"]
+
+    def test_embedding_timeout_is_short_and_not_retried_every_call(self, server):
+        """Seen on a real Mac: Ollama was busy, and each of four searches in
+        one Claude Code turn waited 60 s for /api/embed before falling back."""
+        from agenthandover_worker import mcp_server
+        from agenthandover_worker.ollama import OllamaTimeout
+        from agenthandover_worker.vector_kb import VectorKB
+
+        search, db = server
+        self._embed_skill(db)
+        timeouts: list[float] = []
+
+        def busy(self, texts, **_):
+            timeouts.append(self.config.timeout_seconds)
+            raise OllamaTimeout("Ollama timed out after 8s (/api/embed)")
+
+        with patch.object(VectorKB, "compute_embeddings", busy):
+            first = search("reddit")
+            second = search("reddit")
+        assert timeouts == [mcp_server.QUERY_EMBED_TIMEOUT_S]
+        assert first["mode"] == second["mode"] == "keyword_fallback"
+        assert "retrying after" in second["reason"]
+
+        with patch.object(VectorKB, "compute_embeddings", _fake_embed), \
+             patch.object(mcp_server.time, "monotonic",
+                          return_value=mcp_server.time.monotonic() + mcp_server.EMBED_RETRY_AFTER_S + 1):
+            assert search("reddit")["mode"] == "semantic"
+
+
+class TestKeywordFallback:
+    """What an agent types is a sentence, not a title substring."""
+
+    @pytest.fixture
+    def search(self, tmp_path: Path):
+        from agenthandover_worker.knowledge_base import KnowledgeBase
+        from agenthandover_worker.mcp_server import build_mcp_server
+
+        kb = KnowledgeBase(root=tmp_path / "knowledge")
+        kb.ensure_structure()
+        kb.save_procedure({
+            "id": "x-replyu", "title": "x replyu", "short_title": "Reply to Health Thread",
+            "description": "", "tags": ["communication"],
+            "steps": [{"action": "Navigate to the X feed and locate the post"},
+                      {"action": "Click the 'Reply' button"}],
+        })
+        kb.save_procedure({
+            "id": "expense-report", "title": "Submit expense report",
+            "description": "Monthly receipts", "steps": [{"action": "Open Expensify"}],
+        })
+        with patch("agenthandover_worker.mcp_server._get_kb_root", return_value=tmp_path / "knowledge"), \
+             patch("agenthandover_worker.mcp_server._get_db_path", return_value=tmp_path / "none.db"):
+            srv = build_mcp_server()
+            yield lambda q: json.loads(srv._tool_manager.get_tool("search_skills").fn(q))["results"]
+
+    def test_sentence_query_finds_the_skill(self, search):
+        results = search("reply to a post on X")
+        assert [r["slug"] for r in results] == ["x-replyu"]
+        assert results[0]["score"] == 0.75  # "reply" in the title, "post" in a step
+
+    def test_title_words_rank_above_step_words(self, search):
+        assert [r["slug"] for r in search("expense report")] == ["expense-report"]
+        assert search("receipts")[0]["score"] == 0.5
+
+    def test_no_overlap_returns_nothing(self, search):
+        assert search("deploy kubernetes") == []
