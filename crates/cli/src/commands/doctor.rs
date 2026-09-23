@@ -401,10 +401,12 @@ fn app_state_findings(
     for (app, c) in consent {
         match c {
             AutomationConsent::Denied => lines.push(format!(
-                "{app}: turned off. Fix: System Settings > Privacy & Security > Automation >                  AgentHandover: turn on {app}."
+                "{app}: turned off. Fix: System Settings > Privacy & Security > Automation > \
+                 AgentHandover: turn on {app}."
             )),
             AutomationConsent::NotAsked => lines.push(format!(
-                "{app}: macOS has not asked yet; AgentHandover asks the next time you switch                  to {app} while it runs."
+                "{app}: macOS has not asked yet; AgentHandover asks the next time you switch \
+                 to {app} while it runs."
             )),
             AutomationConsent::Unknown => {
                 lines.push(format!("{app}: macOS gave no answer; it is not read."))
@@ -894,8 +896,15 @@ mod tests {
         let warn = app_state_findings(true, Some(&seen));
         assert_eq!(warn[0].level, machine::Level::Warn);
         assert_eq!(warn[0].title, "Reading open documents: 2 app(s) not granted");
-        assert!(warn[0].lines[0].starts_with("Mail: turned off. Fix: System Settings"));
-        assert!(warn[0].lines[1].starts_with("TextEdit: macOS has not asked yet"));
+        assert_eq!(
+            warn[0].lines,
+            [
+                "Mail: turned off. Fix: System Settings > Privacy & Security > Automation > \
+                 AgentHandover: turn on Mail.",
+                "TextEdit: macOS has not asked yet; AgentHandover asks the next time you switch \
+                 to TextEdit while it runs.",
+            ]
+        );
     }
 
     /// An old Ollama fails only when the models the worker would use (the
