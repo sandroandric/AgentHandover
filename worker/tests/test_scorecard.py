@@ -13,6 +13,7 @@ from pathlib import Path
 from eval.replay_runner import ReplayScenario, ReplayRunner
 from eval.scorer import Scorer, ScenarioScore
 from eval.scorecard import Scorecard
+from journeys.cassette import open_cassette
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures" / "replay"
 BASELINE_PATH = Path(__file__).parent / "eval" / "baseline_scorecard.json"
@@ -30,12 +31,14 @@ def _run_all_scenarios(tmp_path: Path) -> Scorecard:
     scorer = Scorer()
     scores: list[ScenarioScore] = []
 
-    for i, scenario in enumerate(scenarios):
-        runner = ReplayRunner(scenario)
-        scenario_dir = tmp_path / f"scenario_{i}_{scenario.scenario_id}"
-        scenario_dir.mkdir(parents=True, exist_ok=True)
-        score = scorer.score_scenario(scenario, runner, scenario_dir)
-        scores.append(score)
+    # Segmentation embeds with the real model, answered by the cassette.
+    with open_cassette("eval_replay") as tape:
+        for i, scenario in enumerate(scenarios):
+            runner = ReplayRunner(scenario, ollama_host=tape.host)
+            scenario_dir = tmp_path / f"scenario_{i}_{scenario.scenario_id}"
+            scenario_dir.mkdir(parents=True, exist_ok=True)
+            score = scorer.score_scenario(scenario, runner, scenario_dir)
+            scores.append(score)
 
     return Scorecard(scores)
 
