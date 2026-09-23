@@ -215,6 +215,12 @@ def _parse(ts: str) -> datetime:
     return datetime.fromisoformat(ts.replace("Z", "+00:00"))
 
 
+def observation_id(session: list[AnnotatedFrame]) -> str:
+    """A session's observation id, from its first frame: re-recording the
+    same session (a later run, a late annotation) updates its row."""
+    return "obs-" + hashlib.sha256(session[0].event_id.encode()).hexdigest()[:16]
+
+
 def build_observation(
     session: list[AnnotatedFrame], events: list[dict], task_label: str = "",
 ) -> dict:
@@ -237,7 +243,7 @@ def build_observation(
         labels = Counter(f.what_doing for f in session if f.what_doing)
         task_label = labels.most_common(1)[0][0] if labels else ""
     return {
-        "obs_id": "obs-" + hashlib.sha256(session[0].event_id.encode()).hexdigest()[:16],
+        "obs_id": observation_id(session),
         "workflow_key": workflow_key(steps),
         "started_utc": started.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z",
         "started_local_date": local.date().isoformat(),
@@ -266,18 +272,33 @@ def record_observations(
     finished once the user has been idle in it for :data:`IDLE_GAP_SECONDS`
     before *now*) and advance :data:`DISTILLED_STATE_KEY`.  *labels* maps
     event ids to their segment's task label.  Returns the number of
-    sessions recorded (an already recorded session is updated in place)."""
+    sessions recorded (an already recorded session is updated in place).
+
+    Passive discovery runs every few minutes over a sliding window, so the
+    window's start regularly falls inside a session recorded by an earlier
+    run; such a truncated session holds frames of another observation and
+    is skipped rather than recorded as a second one."""
     by_id = {e.get("id", ""): e for e in events}
     labels = labels or {}
     cutoff = now.timestamp() - IDLE_GAP_SECONDS
     distilled = now - timedelta(seconds=IDLE_GAP_SECONDS)
     recorded = 0
-    for session in split_sessions(events, sleep_boundaries):
+    sessions = split_sessions(events, sleep_boundaries)
+    owner: dict[str, str] = {}  # event id -> the observation holding it
+    if sessions:
+        for obs in db.get_workflow_observations(
+            since=_parse(sessions[0][0].timestamp) - timedelta(days=1),
+        ):
+            owner.update(dict.fromkeys(json.loads(obs["event_ids_json"]), obs["obs_id"]))
+    for session in sessions:
         if _timestamp_to_epoch(session[-1].timestamp) > cutoff:
             distilled = min(distilled, _parse(session[0].timestamp))
             continue  # still in progress
         if len(session) < MIN_SESSION_FRAMES:
             continue
+        obs_id = observation_id(session)
+        if any(owner.get(f.event_id, obs_id) != obs_id for f in session):
+            continue  # part of an observation already recorded
         seg_labels = Counter(labels[f.event_id] for f in session if labels.get(f.event_id))
         label = seg_labels.most_common(1)[0][0] if seg_labels else ""
         obs = build_observation(session, [by_id[f.event_id] for f in session], label)

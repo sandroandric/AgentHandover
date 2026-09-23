@@ -208,6 +208,25 @@ class TestObservationLog:
         # Distilled up to the idle cutoff (the live session starts later).
         assert db.get_state(wm.DISTILLED_STATE_KEY) == "2026-09-05T05:58:00.000Z"
 
+    def test_a_session_cut_by_the_window_start_is_not_recorded_again(
+        self, db: WorkerDB, write_conn,
+    ) -> None:
+        """Passive discovery runs every few minutes over a sliding 24-hour
+        window; when the window's start falls inside an already recorded
+        session, its tail is not a second observation."""
+        start = datetime(2026, 9, 1, 9, tzinfo=timezone.utc)
+        events = _session_events("s", start)
+        _insert(write_conn, events)
+        now = start + timedelta(hours=1)
+        assert wm.record_observations(db, db.get_annotated_events_in_window(hours=24, now=now), now=now) == 1
+        # A day later the window starts between the session's first frames.
+        later = start + timedelta(hours=24, minutes=2)
+        tail = db.get_annotated_events_in_window(hours=24, now=later)
+        assert 2 <= len(tail) < len(events)
+        assert wm.record_observations(db, tail, now=later) == 0
+        (obs,) = db.get_workflow_observations()
+        assert json.loads(obs["event_ids_json"]) == [e["id"] for e in events]
+
     def test_a_single_frame_session_is_not_an_observation(self, db: WorkerDB, write_conn) -> None:
         now = datetime(2026, 9, 1, 12, tzinfo=timezone.utc)
         _insert(write_conn, [_event("one", now - timedelta(hours=1), _ann("https://a.io/x"))])
