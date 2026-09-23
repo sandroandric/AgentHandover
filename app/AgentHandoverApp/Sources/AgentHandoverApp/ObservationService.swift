@@ -155,10 +155,11 @@ final class ObservationService {
     func focusedElement(captureValues: Bool) -> ObservationFocusedElement? {
         guard PermissionChecker.isAccessibilityGranted() else { return nil }
         let systemWide = AXUIElementCreateSystemWide()
+        // Set on the system-wide element, the timeout applies to every AX
+        // call this app makes, so a hung app costs at most 100 ms per read.
         AXUIElementSetMessagingTimeout(systemWide, 0.1)
         guard let focused = AXElementNode(element: systemWide)
             .element(kAXFocusedUIElementAttribute as String) else { return nil }
-        AXUIElementSetMessagingTimeout(focused.element, 0.1)
         return FocusedElementReader.read(focused: focused, captureValues: captureValues)
     }
 
