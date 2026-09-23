@@ -181,17 +181,13 @@ fi
 
 if [ -n "${CODESIGN_IDENTITY}" ]; then
     echo "Codesigning binaries with: ${CODESIGN_IDENTITY}"
-    # Sign individual binaries first
-    # Sign app binary and CLI with Developer ID
-    for binary in \
-        "${PKG_ROOT}/usr/local/bin/agenthandover" \
-        "${PKG_ROOT}/Applications/AgentHandover.app/Contents/MacOS/AgentHandover"; do
-        if [ -f "${binary}" ]; then
-            codesign --force --options runtime --timestamp \
-                --sign "${CODESIGN_IDENTITY}" "${binary}"
-            echo "  Signed: $(basename "${binary}")"
-        fi
-    done
+    # The app asks macOS for Automation consent and the daemon checks it
+    # ([privacy] read_app_state); the hardened runtime needs this for both.
+    APPLE_EVENTS="${REPO_ROOT}/resources/pkg/apple-events.entitlements"
+    # Sign the CLI with Developer ID
+    codesign --force --options runtime --timestamp \
+        --sign "${CODESIGN_IDENTITY}" "${PKG_ROOT}/usr/local/bin/agenthandover"
+    echo "  Signed: agenthandover"
 
     # Sign daemon with Developer ID but use a DIFFERENT identifier so
     # TCC doesn't associate it with the old "ah-observer" principal.
@@ -199,6 +195,7 @@ if [ -n "${CODESIGN_IDENTITY}" ]; then
     if [ -f "${DAEMON_EXEC}" ]; then
         codesign --force --options runtime --timestamp \
             --identifier "com.agenthandover.observer" \
+            --entitlements "${APPLE_EVENTS}" \
             --sign "${CODESIGN_IDENTITY}" "${DAEMON_EXEC}"
         echo "  Signed: ah-observer (as com.agenthandover.observer)"
     fi
@@ -209,6 +206,12 @@ if [ -n "${CODESIGN_IDENTITY}" ]; then
     # binary is signed. --deep signs all nested bundles too.
     if [ -d "${PKG_ROOT}/Applications/AgentHandover.app" ]; then
         codesign --force --deep --options runtime --timestamp \
+            --sign "${CODESIGN_IDENTITY}" \
+            "${PKG_ROOT}/Applications/AgentHandover.app"
+        # Then the app itself again, with its entitlements (--deep would
+        # hand them to Sparkle's nested code too).
+        codesign --force --options runtime --timestamp \
+            --entitlements "${APPLE_EVENTS}" \
             --sign "${CODESIGN_IDENTITY}" \
             "${PKG_ROOT}/Applications/AgentHandover.app"
         echo "  Signed bundle: AgentHandover.app (deep)"

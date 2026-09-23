@@ -6,6 +6,7 @@ use agenthandover_common::observation::{
     capture_socket_path, observation_socket_path, snapshot_at,
 };
 
+use agenthandover_common::status::AutomationConsent;
 use agenthandover_common::tiers;
 use crate::{machine, ollama, paths};
 
@@ -232,6 +233,17 @@ pub fn run() -> Result<()> {
     print_findings(&mut counts, &report.findings);
     let ollama_ok = report.version.is_some();
 
+    // Check 15b: `[privacy] read_app_state` (opt-in): the apps macOS has
+    // not let AgentHandover read, from the daemon's status.
+    let read_app_state = read_config_string_field(&config_str, "privacy", "read_app_state")
+        .is_some_and(|v| v == "true");
+    let consent = agenthandover_common::status::read_status_file::<
+        agenthandover_common::status::DaemonStatus,
+    >("daemon-status.json")
+    .ok()
+    .and_then(|s| s.app_state_consent);
+    print_findings(&mut counts, &app_state_findings(read_app_state, consent.as_ref()));
+
     // Check 16: Required models pulled
     //
     // The models depend on the RAM tier (tiers.json), so a hard-coded
@@ -354,6 +366,59 @@ fn configured_models(config_str: &str) -> machine::ConfiguredModels {
         read_config_string_field(config_str, "vlm", "sop_model").as_deref(),
     );
     machine::ConfiguredModels { tier_label: tier.label.clone(), annotation, sop }
+}
+
+/// What doctor says about `[privacy] read_app_state`: nothing when it is
+/// off; otherwise which apps macOS lets AgentHandover read (the daemon
+/// records the answer it gets, asked without a prompt, per app).
+fn app_state_findings(
+    enabled: bool,
+    consent: Option<&std::collections::BTreeMap<String, AutomationConsent>>,
+) -> Vec<machine::Finding> {
+    use machine::{Finding, Level};
+    if !enabled {
+        return vec![];
+    }
+    let Some(consent) = consent.filter(|c| !c.is_empty()) else {
+        return vec![Finding {
+            level: Level::Pass,
+            title: "Reading open documents (on; no supported app opened yet)".into(),
+            lines: vec![],
+        }];
+    };
+    let granted: Vec<&str> = consent
+        .iter()
+        .filter(|(_, c)| **c == AutomationConsent::Granted)
+        .map(|(a, _)| a.as_str())
+        .collect();
+    let mut lines = Vec::new();
+    for (app, c) in consent {
+        match c {
+            AutomationConsent::Denied => lines.push(format!(
+                "{app}: turned off. Fix: System Settings > Privacy & Security > Automation >                  AgentHandover: turn on {app}."
+            )),
+            AutomationConsent::NotAsked => lines.push(format!(
+                "{app}: macOS has not asked yet; AgentHandover asks the next time you switch                  to {app} while it runs."
+            )),
+            AutomationConsent::Unknown => {
+                lines.push(format!("{app}: macOS gave no answer; it is not read."))
+            }
+            AutomationConsent::Granted | AutomationConsent::NotRunning => {}
+        }
+    }
+    if lines.is_empty() {
+        let title = if granted.is_empty() {
+            "Reading open documents (on)".to_string()
+        } else {
+            format!("Reading open documents (on: {})", granted.join(", "))
+        };
+        return vec![Finding { level: Level::Pass, title, lines }];
+    }
+    vec![Finding {
+        level: Level::Warn,
+        title: format!("Reading open documents: {} app(s) not granted", lines.len()),
+        lines,
+    }]
 }
 
 fn print_findings(counts: &mut CheckCounts, findings: &[machine::Finding]) {
@@ -817,6 +882,30 @@ mod tests {
         let (level, detail) = heartbeat_verdict(Some(hung), now(), |_| true);
         assert_eq!(level, HeartbeatLevel::Warn);
         assert!(detail.contains("600s ago"), "{detail}");
+    }
+
+    #[test]
+    fn app_state_reads_report_the_apps_not_granted() {
+        use std::collections::BTreeMap;
+        use AutomationConsent::*;
+        assert!(app_state_findings(false, None).is_empty());
+        let none = app_state_findings(true, None);
+        assert_eq!(none[0].level, machine::Level::Pass);
+
+        let mut seen = BTreeMap::new();
+        seen.insert("Notes".to_string(), Granted);
+        seen.insert("Safari".to_string(), NotRunning);
+        let ok = app_state_findings(true, Some(&seen));
+        assert_eq!(ok[0].level, machine::Level::Pass);
+        assert_eq!(ok[0].title, "Reading open documents (on: Notes)");
+
+        seen.insert("Mail".to_string(), Denied);
+        seen.insert("TextEdit".to_string(), NotAsked);
+        let warn = app_state_findings(true, Some(&seen));
+        assert_eq!(warn[0].level, machine::Level::Warn);
+        assert_eq!(warn[0].title, "Reading open documents: 2 app(s) not granted");
+        assert!(warn[0].lines[0].starts_with("Mail: turned off. Fix: System Settings"));
+        assert!(warn[0].lines[1].starts_with("TextEdit: macOS has not asked yet"));
     }
 
     #[test]
