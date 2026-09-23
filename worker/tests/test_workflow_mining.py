@@ -408,6 +408,50 @@ class TestValueAndQueue:
         assert len(again.observations) == 4
 
 
+    def test_a_retry_regenerates_from_the_failed_observations(
+        self, db: WorkerDB, write_conn, tmp_path: Path,
+    ) -> None:
+        """The retry trigger finds the workflow's observations through the
+        failure's ``obs_ids``, feeds their frames to the generator, points
+        the draft at them and promotes them."""
+        from unittest.mock import MagicMock, patch
+
+        from agenthandover_worker.main import _process_retry_triggers
+        from agenthandover_worker.sop_generator import GeneratedSOP
+        from fixtures.vlm_answers import generated_sop_template
+
+        start = datetime(2026, 9, 1, 9, tzinfo=timezone.utc)
+        sessions = [_session_events(f"d{n}", start + timedelta(days=n)) for n in range(3)]
+        _insert(write_conn, [e for s in sessions for e in s])
+        now = start + timedelta(days=3)
+        wm.record_observations(db, db.get_annotated_events_in_window(hours=96, now=now), now=now)
+        obs_ids = [o["obs_id"] for o in db.get_workflow_observations()]
+        assert len(obs_ids) == 3
+        failure_id = db.record_failed_generation(
+            "passive", "key", "boom", title="Reconcile payout", context={"obs_ids": obs_ids},
+        )
+        generator = MagicMock()
+        generator.generate_from_passive.return_value = GeneratedSOP(
+            sop=generated_sop_template("check_domain_availability"), success=True,
+        )
+        writer = MagicMock()
+        writer.get_sops_dir.return_value = tmp_path / "sops"
+        with patch("agenthandover_worker.main._status_dir", return_value=tmp_path):
+            _process_retry_triggers(
+                {"failure_id": failure_id}, db, sop_generator=generator,
+                openclaw_writer=writer, index_generator=MagicMock(), sop_auto_approve=False,
+            )
+        (demos,), _ = generator.generate_from_passive.call_args
+        assert [len(d) for d in demos] == [len(s) for s in sessions]
+        (sop,) = db.get_generated_sops()
+        template = db.get_generated_sop(sop["sop_id"])["sop_json"]
+        assert [o["obs_id"] for o in template["observations"]] == obs_ids
+        assert template["episode_count"] == 3
+        promoted = {o["promoted_slug"] for o in db.get_workflow_observations()}
+        assert promoted == {sop["slug"]}
+        assert db.get_failed_generations() == []
+
+
 # ---------------------------------------------------------------------------
 # Local days (#165)
 # ---------------------------------------------------------------------------

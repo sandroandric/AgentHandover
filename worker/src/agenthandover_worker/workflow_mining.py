@@ -417,13 +417,18 @@ class Candidate:
             "episode_count": len(self.observations),
             "recurrence": self.recurrence,
             "value": self.value,
-            "observations": [
-                {"obs_id": o["obs_id"], "timestamp": o["started_utc"],
-                 "date": o["started_local_date"], "duration_s": o["duration_s"],
-                 "source": "passive"}
-                for o in self.observations
-            ],
+            "observations": observation_pointers(self.observations),
         }
+
+
+def observation_pointers(observations: list[dict]) -> list[dict]:
+    """A draft's evidence pointers into the observation log."""
+    return [
+        {"obs_id": o["obs_id"], "timestamp": o["started_utc"],
+         "date": o["started_local_date"], "duration_s": o["duration_s"],
+         "source": "passive"}
+        for o in observations
+    ]
 
 
 @dataclass

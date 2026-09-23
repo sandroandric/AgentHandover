@@ -3146,6 +3146,10 @@ def _process_retry_triggers(
                     )
                     if result.success and result.sop:
                         slug = result.sop.get("slug", "")
+                        result.sop.update(
+                            episode_count=len(pending_segs),
+                            observations=workflow_mining.observation_pointers(pending_segs),
+                        )
 
                         # Lint before save+export
                         if not _lint_and_log(result.sop, "retry_passive"):
