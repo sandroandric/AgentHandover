@@ -1033,3 +1033,59 @@ class TestIsNoiseFrame:
         assert _is_noise_frame(self._frame("work", "execution_relevant", False)) is False
         assert _is_noise_frame(self._frame("work", "ignore", True)) is True
         assert _is_noise_frame(self._frame("", "", False)) is True
+
+
+class TestPassiveWindowAndVectorReuse:
+    """WP-M4 pins: the passive window follows a given ``now`` (a replay's
+    virtual clock) and the 2-hourly pass never re-embeds a frame."""
+
+    def test_window_ends_at_now_and_starts_hours_before(self):
+        from datetime import datetime, timezone
+        from agenthandover_worker.db import WorkerDB
+
+        conn, db_path = _make_test_db()
+        try:
+            ann = json.dumps({"task_context": {"what_doing": "x", "is_workflow": True}})
+            for eid, ts in [
+                ("old", "2026-09-01T07:59:59.000000+00:00"),
+                ("in1", "2026-09-01T08:00:01.000000+00:00"),
+                ("in2", "2026-09-02T07:59:00.123456+00:00"),
+                ("future", "2026-09-02T08:00:01.000000+00:00"),
+            ]:
+                conn.execute(
+                    "INSERT INTO events (id, timestamp, annotation_status, scene_annotation_json) "
+                    "VALUES (?, ?, 'completed', ?)", (eid, ts, ann),
+                )
+            conn.commit()
+            with WorkerDB(db_path) as db:
+                now = datetime(2026, 9, 2, 8, 0, 0, tzinfo=timezone.utc)
+                events = db.get_annotated_events_in_window(hours=24, now=now)
+            assert [e["id"] for e in events] == ["in1", "in2"]
+        finally:
+            conn.close()
+            db_path.unlink(missing_ok=True)
+
+    def test_second_pass_reuses_stored_vectors(self, tmp_path):
+        from agenthandover_worker.vector_kb import VectorKB
+
+        calls: list[list[str]] = []
+
+        def embed(texts, **_kw):
+            calls.append(list(texts))
+            return _mock_embeddings(texts, **_kw)
+
+        first = [_make_event("e1", "2026-03-04T10:00:00Z", what_doing="Filing expense report")]
+        both = first + [
+            _make_event("e2", "2026-03-04T10:01:00Z", what_doing="Submitting expense form"),
+        ]
+        with VectorKB(tmp_path / "v.db") as vkb, patch(
+            "agenthandover_worker.task_segmenter._compute_embeddings", side_effect=embed,
+        ):
+            seg = TaskSegmenter(vector_kb=vkb)
+            seg.segment(first)
+            result = seg.segment(both)
+        assert len(calls) == 2
+        assert len(calls[1]) == 1 and "Submitting" in calls[1][0]  # e1 came from the store
+        frames = {f.event_id: f for s in result.segments for f in s.frames}
+        assert frames["e1"].embedding and frames["e2"].embedding
+        assert len(result.clusters) == 1

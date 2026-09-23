@@ -11,8 +11,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Chrome", "title": "Google Scholar"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.80, 0.20, 0.00, 0.00]
+      "metadata_json": {}
     },
     {
       "id": "evt-002",
@@ -24,8 +23,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Chrome", "title": "Google Scholar - transformer architecture"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.81, 0.19, 0.00, 0.00]
+      "metadata_json": {}
     },
     {
       "id": "evt-003",
@@ -37,8 +35,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Chrome", "title": "arXiv - Attention Mechanisms Survey"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.79, 0.21, 0.00, 0.00]
+      "metadata_json": {}
     },
     {
       "id": "evt-004",
@@ -50,8 +47,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Chrome", "title": "arXiv - Attention Mechanisms Survey (PDF)"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.80, 0.20, 0.00, 0.00]
+      "metadata_json": {}
     },
     {
       "id": "evt-005",
@@ -63,8 +59,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Chrome", "title": "arXiv - Efficient Transformers"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.82, 0.18, 0.00, 0.00]
+      "metadata_json": {}
     },
     {
       "id": "evt-006",
@@ -76,8 +71,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Chrome", "title": "Papers With Code - Multi-Head Attention"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.78, 0.22, 0.00, 0.00]
+      "metadata_json": {}
     },
     {
       "id": "evt-007",
@@ -89,8 +83,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Chrome", "title": "Papers With Code - Benchmarks"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.80, 0.20, 0.00, 0.00]
+      "metadata_json": {}
     },
     {
       "id": "evt-008",
@@ -102,8 +95,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Chrome", "title": "Google Scholar - flash attention"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.81, 0.19, 0.00, 0.00]
+      "metadata_json": {}
     },
     {
       "id": "evt-009",
@@ -115,8 +107,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Notion", "title": "Notion - Research Notes"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.75, 0.25, 0.00, 0.00]
+      "metadata_json": {}
     },
     {
       "id": "evt-010",
@@ -128,8 +119,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Notion", "title": "Notion - Attention Mechanisms Notes"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.76, 0.24, 0.00, 0.00]
+      "metadata_json": {}
     },
     {
       "id": "evt-011",
@@ -141,8 +131,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Notion", "title": "Notion - Attention Mechanisms Notes"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.74, 0.26, 0.00, 0.00]
+      "metadata_json": {}
     },
     {
       "id": "evt-012",
@@ -154,8 +143,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Notion", "title": "Notion - Attention Mechanisms Notes"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.75, 0.25, 0.00, 0.00]
+      "metadata_json": {}
     },
     {
       "id": "evt-013",
@@ -167,8 +155,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Notion", "title": "Notion - Implementation Plan"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.73, 0.27, 0.00, 0.00]
+      "metadata_json": {}
     },
     {
       "id": "evt-014",
@@ -180,8 +167,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Notion", "title": "Notion - Implementation Plan"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.76, 0.24, 0.00, 0.00]
+      "metadata_json": {}
     },
     {
       "id": "evt-015",
@@ -193,8 +179,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "VS Code", "title": "VS Code - attention.py"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.70, 0.30, 0.00, 0.00]
+      "metadata_json": {}
     },
     {
       "id": "evt-016",
@@ -206,8 +191,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "VS Code", "title": "VS Code - attention.py"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.72, 0.28, 0.00, 0.00]
+      "metadata_json": {}
     },
     {
       "id": "evt-017",
@@ -219,8 +203,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "VS Code", "title": "VS Code - attention.py"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.70, 0.30, 0.00, 0.00]
+      "metadata_json": {}
     },
     {
       "id": "evt-018",
@@ -232,8 +215,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "VS Code", "title": "VS Code - attention.py"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.71, 0.29, 0.00, 0.00]
+      "metadata_json": {}
     },
     {
       "id": "evt-019",
@@ -245,8 +227,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "VS Code", "title": "VS Code - test_attention.py"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.69, 0.31, 0.00, 0.00]
+      "metadata_json": {}
     },
     {
       "id": "evt-020",
@@ -258,8 +239,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "VS Code", "title": "VS Code - Terminal - pytest"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.70, 0.30, 0.00, 0.00]
+      "metadata_json": {}
     }
   ],
   "ground_truth": {

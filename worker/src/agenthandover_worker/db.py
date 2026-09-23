@@ -13,11 +13,18 @@ import json
 import logging
 import sqlite3
 import uuid
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from collections.abc import Callable
 from typing import Self
 
 logger = logging.getLogger(__name__)
+
+
+def _sqlite_utc(moment: datetime) -> str:
+    """*moment* in the text SQLite's ``strftime('%Y-%m-%dT%H:%M:%fZ')``
+    writes, so it compares with stored timestamps the way ``'now'`` does."""
+    return moment.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
 
 
 class WorkerDB:
@@ -950,16 +957,30 @@ class WorkerDB:
         *,
         hours: int = 4,
         min_timestamp: str | None = None,
+        now: datetime | None = None,
     ) -> list[dict]:
         """Return all completed annotations within a time window.
 
         When *min_timestamp* is provided, uses it as the window start.
-        Otherwise, returns events from the last *hours* hours.
+        When *now* (timezone-aware) is provided, the window is the *hours*
+        hours up to *now*, and rows stamped after *now* are left out, so a
+        replay on a virtual clock sees what the worker would have seen then.
+        Otherwise, returns events from the last *hours* hours of the wall
+        clock.
 
         Only returns events with completed annotations and non-null
         scene_annotation_json.  Used by the task segmenter.
         """
-        if min_timestamp:
+        if now is not None and not min_timestamp:
+            cur = self._conn.execute(
+                "SELECT * FROM events "
+                "WHERE annotation_status = 'completed' "
+                "  AND scene_annotation_json IS NOT NULL "
+                "  AND timestamp >= ? AND timestamp <= ? "
+                "ORDER BY timestamp ASC",
+                (_sqlite_utc(now - timedelta(hours=hours)), _sqlite_utc(now)),
+            )
+        elif min_timestamp:
             cur = self._conn.execute(
                 "SELECT * FROM events "
                 "WHERE annotation_status = 'completed' "

@@ -1,0 +1,705 @@
+{
+ "fixture": "passive_3weeks",
+ "timezone": "UTC",
+ "routines": [
+  {
+   "slug": "stripe-payout-reconciliation",
+   "name": "Reconcile yesterday's Stripe payout",
+   "cadence": "daily",
+   "local_weekday": null,
+   "instances": [
+    {
+     "instance_id": "stripe-payout-reconciliation-20260831",
+     "start": "2026-08-31T09:18:00+00:00",
+     "end": "2026-08-31T09:25:31+00:00",
+     "variant": [],
+     "event_ids": [
+      "03db11ba-baa8-4317-8802-c59f882d9db1",
+      "0b4d10dd-4236-41f7-b8d7-2a4ce7b055e5",
+      "30f901fb-9991-41b8-919c-b87ed9e93dbb",
+      "49972ab1-577f-4021-8ad2-da29a01a1e81",
+      "79a77bdc-7a6d-4037-a606-901e5c914fdb"
+     ],
+     "extra_event_ids": []
+    },
+    {
+     "instance_id": "stripe-payout-reconciliation-20260901",
+     "start": "2026-09-01T09:06:00+00:00",
+     "end": "2026-09-01T09:12:34+00:00",
+     "variant": [],
+     "event_ids": [
+      "b88c487e-61ec-4e93-b8fb-5969fc050e13",
+      "b9a19de7-dab1-4c9d-8eaa-cbfc194fdc87",
+      "fb98494e-89c9-4bd3-8564-553abeebd309",
+      "d1105c1e-2ad8-4702-8b56-22c6a12303d8",
+      "d953845a-b607-42d2-955e-38737aa30945"
+     ],
+     "extra_event_ids": []
+    },
+    {
+     "instance_id": "stripe-payout-reconciliation-20260902",
+     "start": "2026-09-02T09:04:00+00:00",
+     "end": "2026-09-02T09:10:00+00:00",
+     "variant": [],
+     "event_ids": [
+      "e7b7e09b-3bd3-4a71-a39a-5485e9b31dc9",
+      "1ed200c8-7fc4-4221-be96-0e6c8ccaf682",
+      "7654a683-4cc4-44b0-8213-f5fca268b2dd",
+      "b3cef018-4f4b-4d32-a1f1-6781413a3f30",
+      "a9bd180e-270f-4534-92b9-6321be4a6142"
+     ],
+     "extra_event_ids": []
+    },
+    {
+     "instance_id": "stripe-payout-reconciliation-20260903",
+     "start": "2026-09-03T08:56:00+00:00",
+     "end": "2026-09-03T09:03:01+00:00",
+     "variant": [],
+     "event_ids": [
+      "ad044652-afc7-4ae2-af2e-a66908bb6fe1",
+      "ba7fcb73-3cb7-4091-a335-bacb6d6dcafa",
+      "c72de01a-892f-4078-b141-b61c1ddd5906",
+      "c763e21b-0a3d-4870-a4ec-ea704d8e07b1",
+      "d80e13a6-cf7b-440b-b1f7-fae71cc16c4a"
+     ],
+     "extra_event_ids": []
+    },
+    {
+     "instance_id": "stripe-payout-reconciliation-20260904",
+     "start": "2026-09-04T09:23:00+00:00",
+     "end": "2026-09-04T09:29:30+00:00",
+     "variant": [],
+     "event_ids": [
+      "5b6bcfd0-82f7-4f21-b89b-2ea01f6a8dca",
+      "68d6a880-b1c5-4cda-ad0f-a654f707c342",
+      "499de39f-6edc-4de2-af90-fd29071efa49",
+      "9ee3a229-67f7-481c-a09f-cbc357367cef",
+      "27ca98e7-6e8c-4014-bcf2-fb8049e5dfd5"
+     ],
+     "extra_event_ids": []
+    },
+    {
+     "instance_id": "stripe-payout-reconciliation-20260907",
+     "start": "2026-09-07T09:20:00+00:00",
+     "end": "2026-09-07T09:27:31+00:00",
+     "variant": [
+      "extra_tab"
+     ],
+     "event_ids": [
+      "b90d1eb0-6f7e-4f49-aebf-fc6d1f31258d",
+      "11d20591-3722-4c47-acae-454883956394",
+      "b3056018-55ae-46d5-9f7f-d8577f6665cc",
+      "3e1666ed-2646-4aa6-8921-ed67f47da67c",
+      "4dda48c7-f3a5-4c91-ae91-cbe8626587fb"
+     ],
+     "extra_event_ids": [
+      "9f3a18fb-ac83-4169-9eb5-5c232a9a87d3"
+     ]
+    },
+    {
+     "instance_id": "stripe-payout-reconciliation-20260908",
+     "start": "2026-09-08T08:55:00+00:00",
+     "end": "2026-09-08T09:04:00+00:00",
+     "variant": [
+      "sheet_first"
+     ],
+     "event_ids": [
+      "cc0ff3c7-9b41-4fc6-9e03-91381402b110",
+      "56136ed2-91ee-4123-bb5b-85377afc4fee",
+      "f1616895-49ad-4283-b7ca-1d316928c1e7",
+      "fd4661af-17e4-4236-8bd3-9fd88d0dd2e9",
+      "72af2212-5735-43d6-875c-79dc78161b67",
+      "c9774814-01e9-48b7-9162-28c890e0d3b2"
+     ],
+     "extra_event_ids": []
+    },
+    {
+     "instance_id": "stripe-payout-reconciliation-20260909",
+     "start": "2026-09-09T08:57:00+00:00",
+     "end": "2026-09-09T09:02:27+00:00",
+     "variant": [],
+     "event_ids": [
+      "0869e383-ef03-4736-9718-e4f7084bd6c5",
+      "309ca5eb-ef48-4057-a00a-a82e3d3bc6f4",
+      "ce0f7d81-211c-4367-8713-a6ad1724f825",
+      "3b76f5b7-dd13-4170-b425-8c20c1af7b4e",
+      "0c5ca84e-36c9-403d-9cfc-987853865054"
+     ],
+     "extra_event_ids": []
+    },
+    {
+     "instance_id": "stripe-payout-reconciliation-20260910",
+     "start": "2026-09-10T21:05:00+00:00",
+     "end": "2026-09-10T21:14:55+00:00",
+     "variant": [
+      "sheet_first",
+      "extra_tab",
+      "evening"
+     ],
+     "event_ids": [
+      "490ac81b-a7b5-4967-8e63-ffa382f061c1",
+      "e2f7000f-9873-469c-9c20-8c9f99978b50",
+      "cbd1ea1c-5d1b-4c15-8b0c-ab9da50ca199",
+      "5c09dfde-8751-4386-9ffc-b44be8e61d73",
+      "8187ccc0-03c2-4f8d-8d2c-de35442bde2f",
+      "b269540a-580d-4b7b-8783-676e96c45f2b"
+     ],
+     "extra_event_ids": [
+      "ffbbfcb3-5fa7-4b6f-b0d0-3727bea2c881"
+     ]
+    },
+    {
+     "instance_id": "stripe-payout-reconciliation-20260911",
+     "start": "2026-09-11T09:12:00+00:00",
+     "end": "2026-09-11T09:19:26+00:00",
+     "variant": [],
+     "event_ids": [
+      "29efbb2e-5cf6-4c91-9b6c-0a961e812112",
+      "a4cf61a4-9349-4af2-a787-bd03bda5861a",
+      "55b3b7f6-ab0f-4315-a07d-6eda9298a133",
+      "78d71afa-48eb-498a-bc31-e17857dfebf9",
+      "017f97f9-facf-4f9c-8357-caa14ccdd76b"
+     ],
+     "extra_event_ids": []
+    },
+    {
+     "instance_id": "stripe-payout-reconciliation-20260914",
+     "start": "2026-09-14T09:19:00+00:00",
+     "end": "2026-09-14T09:25:33+00:00",
+     "variant": [],
+     "event_ids": [
+      "68041d0f-072b-448c-848f-35e01b9270c5",
+      "7cf83734-f03d-40e6-97bd-5fe7baf1cd04",
+      "5cfe52cb-f988-40a2-b981-af0a63e69bdb",
+      "062bf342-a544-433b-b9de-d9db5876a403",
+      "d975979e-2d17-4cc3-9358-356bf74c7b7d"
+     ],
+     "extra_event_ids": []
+    },
+    {
+     "instance_id": "stripe-payout-reconciliation-20260915",
+     "start": "2026-09-15T09:01:00+00:00",
+     "end": "2026-09-15T09:08:38+00:00",
+     "variant": [],
+     "event_ids": [
+      "72acc219-7767-41fd-996d-0a7a3f71b1bf",
+      "3e1d23e8-7ab8-42f6-862c-a2241af115e3",
+      "df10b785-412c-4592-bd36-ea1ded4d198a",
+      "4c4b76c4-3940-4b4a-a561-358cd47e24f7",
+      "e17c21a1-f69a-4a6e-8388-9fdb7e8a9970"
+     ],
+     "extra_event_ids": []
+    },
+    {
+     "instance_id": "stripe-payout-reconciliation-20260916",
+     "start": "2026-09-16T09:09:00+00:00",
+     "end": "2026-09-16T09:17:12+00:00",
+     "variant": [
+      "extra_tab"
+     ],
+     "event_ids": [
+      "9692debc-2c98-4ee9-b2dd-e5ff3d9b9bea",
+      "a57c35aa-e6c8-4ab8-a069-cd75c7d5405b",
+      "92576382-1141-4d89-934c-2beba5da131e",
+      "edd74efb-8b05-4050-9111-96a217bb69b8",
+      "08430270-aa1a-4291-a01c-a819d25af2c9"
+     ],
+     "extra_event_ids": [
+      "86b441c1-a3b0-4c9f-b1b3-d773014832ac"
+     ]
+    },
+    {
+     "instance_id": "stripe-payout-reconciliation-20260917",
+     "start": "2026-09-17T08:57:00+00:00",
+     "end": "2026-09-17T09:04:58+00:00",
+     "variant": [],
+     "event_ids": [
+      "0b9a5ac2-70b6-4cc5-b96c-5185f31b9cac",
+      "38a85982-a96c-4f87-a50a-4c4ff1b497d8",
+      "e4988079-8148-4aab-9fb2-3c3c4944c66d",
+      "a62cf315-bda8-42d5-8d5c-b4a8374eabcd",
+      "02910e1b-14da-4fd8-b69a-cf5c18e4b1e4"
+     ],
+     "extra_event_ids": []
+    },
+    {
+     "instance_id": "stripe-payout-reconciliation-20260918",
+     "start": "2026-09-18T09:14:00+00:00",
+     "end": "2026-09-18T09:19:47+00:00",
+     "variant": [],
+     "event_ids": [
+      "6200a0c2-c033-4dff-8afa-094edb378bae",
+      "f359143d-fc94-4902-8a06-9c80b6e6f621",
+      "b59876d9-c86d-48f7-a369-df2c52cce829",
+      "9047a6e5-ca6e-4a5d-ad9d-1fca600c8cbc",
+      "baf00548-b4ac-4059-83eb-621e3bcd0a25"
+     ],
+     "extra_event_ids": []
+    }
+   ]
+  },
+  {
+   "slug": "weekly-expense-report",
+   "name": "Weekly expense report",
+   "cadence": "weekly",
+   "local_weekday": 0,
+   "instances": [
+    {
+     "instance_id": "weekly-expense-report-20260831",
+     "start": "2026-08-31T10:29:00+00:00",
+     "end": "2026-08-31T10:48:52+00:00",
+     "variant": [],
+     "event_ids": [
+      "300b3779-8707-4511-a2cc-55f1132c0a48",
+      "db5f578c-4a9a-45bf-9d8a-fcc138dd4ecf",
+      "0d54c396-a9cb-4801-a03c-e8f8d8024c02",
+      "c83e7e6e-d03c-4dde-acc7-8811af71eda5",
+      "e56be1ae-a9ef-4153-879c-fce440450454",
+      "f3317238-a81b-474a-80bb-652073593828",
+      "61a52102-0d76-417d-a5e4-94420760493f",
+      "1ce4ba12-64ac-4c2d-a1da-caae379fbddf",
+      "0b55a1e3-3a6a-4645-b9c4-06f9ea64f3b1",
+      "14765adf-6885-4543-b987-8871258937f7",
+      "e699eee4-7521-4bdf-9ab0-66154d2882a9",
+      "7baaf6a1-2b86-4163-9bb2-08247344135d"
+     ],
+     "extra_event_ids": []
+    },
+    {
+     "instance_id": "weekly-expense-report-20260907",
+     "start": "2026-09-07T10:38:00+00:00",
+     "end": "2026-09-07T11:31:59+00:00",
+     "variant": [
+      "interrupted_40min_call"
+     ],
+     "event_ids": [
+      "e3676eb7-0d62-4c78-a822-939233f9a7d9",
+      "1c8f6432-c79c-4ed5-bc32-731d72979237",
+      "88564543-6b36-4201-8bd3-eeaa0e267f25",
+      "2b601d82-c9af-47f9-aeca-4255c5a3ee8c",
+      "3178b85d-8039-4f7a-b685-c62e44b671b9",
+      "7f9aa057-b2ce-4ea0-bce0-b3d92ec8ab0c",
+      "211b5733-354d-4840-a93c-5255c9e65d68",
+      "de60e60d-25e2-4e95-8ee9-9efec67faaf2",
+      "f55a48bd-d0db-4e44-894a-e770d711eb90"
+     ],
+     "extra_event_ids": []
+    },
+    {
+     "instance_id": "weekly-expense-report-20260914",
+     "start": "2026-09-14T10:23:00+00:00",
+     "end": "2026-09-14T10:36:33+00:00",
+     "variant": [],
+     "event_ids": [
+      "f562c124-18d9-43a4-ba0b-7404d616336c",
+      "8cda14c1-fa4e-4923-b178-62a21df9be7b",
+      "799647f3-2218-4c80-a2d3-1630d729e3d8",
+      "f6c0e7d7-a43f-4fa0-8458-530e73314a08",
+      "b4282b33-1fe4-4964-95a3-a9a8f4533549",
+      "999f8a3b-07ac-4c32-802c-c63a53ad5559",
+      "84923a87-b78b-42a7-8a1c-7f7e267f82d8",
+      "3b299cd6-4f05-4897-9c61-bda4b0639192",
+      "6745a8ff-5198-40c4-9e56-0a6264f03856"
+     ],
+     "extra_event_ids": []
+    }
+   ]
+  }
+ ],
+ "one_off_tasks": [
+  {
+   "task": "Pricing page - Webflow",
+   "start": "2026-08-31T16:08:00+00:00",
+   "event_ids": [
+    "41cf0dcf-570d-43c4-96d7-cdb042e3ccdd",
+    "e4a3ae63-3ab3-4e0f-a353-ca9ffbd3a573",
+    "94df76a9-f936-4969-8545-b794d6215690"
+   ]
+  },
+  {
+   "task": "Podcast guest prep - Google Docs",
+   "start": "2026-08-31T11:00:00+00:00",
+   "event_ids": [
+    "8d87cbb5-944c-4f7f-b3ae-e75fb79d12b1",
+    "791761a9-3b21-496b-b1ee-dc3b87a0a69c"
+   ]
+  },
+  {
+   "task": "SOC 2 evidence - Vanta",
+   "start": "2026-09-01T11:01:00+00:00",
+   "event_ids": [
+    "bafde61e-3837-41b2-82d9-e14ac1c85443",
+    "a250f0b4-9c72-405f-ba18-7e4196ad3f0a"
+   ]
+  },
+  {
+   "task": "Data processing addendum - Google Docs",
+   "start": "2026-09-01T14:04:00+00:00",
+   "event_ids": [
+    "2321d9b5-f952-47ce-84d6-71deefc7f8dd",
+    "b0caed93-589e-45fc-874e-db5be6cb2d3e",
+    "7a97260b-9146-457c-acba-ff59bf97cdd0"
+   ]
+  },
+  {
+   "task": "Offsite planning - Google Sheets",
+   "start": "2026-09-02T14:10:00+00:00",
+   "event_ids": [
+    "2dc5bdb3-2898-4226-b039-26ed1d06b156",
+    "bf593483-00f8-47b9-bc8f-5082c578ff36",
+    "c1f07b59-f857-42ae-bfa4-7b192cf39fb2"
+   ]
+  },
+  {
+   "task": "Job post: Senior Backend Engineer - Greenhouse",
+   "start": "2026-09-02T11:09:00+00:00",
+   "event_ids": [
+    "b19fe9cf-df7c-4159-aa84-214ed5cee42f",
+    "018f11ef-234f-40e2-90e6-e17f8e04f858",
+    "71a1b50c-b51f-418f-a36e-c79deab7e01d"
+   ]
+  },
+  {
+   "task": "docker-compose.yml - acme-api",
+   "start": "2026-09-03T13:04:00+00:00",
+   "event_ids": [
+    "1bd882a3-5ed4-4092-b9a4-f18e07c56e16",
+    "44870878-5586-4eb3-bcfc-9275499e752f",
+    "e01becbf-e3fb-4acb-8f85-d0c1f08390fc"
+   ]
+  },
+  {
+   "task": "Onboarding v3 - Figma",
+   "start": "2026-09-03T11:09:00+00:00",
+   "event_ids": [
+    "b2c26b54-42cd-4a32-9ef0-cf11b0fbfe0b",
+    "3aaf9c0f-47b9-46fa-83ee-192e9a12e8e2",
+    "d4b350ce-3823-4d03-9e9d-f39af817f97a"
+   ]
+  },
+  {
+   "task": "zsh - acme-web",
+   "start": "2026-09-04T14:00:00+00:00",
+   "event_ids": [
+    "cb131c16-be8a-4fec-b3ef-08003c4edd82",
+    "a9edb40e-13fb-40ea-87be-532327251254",
+    "98731ecc-ee47-4011-bf1c-da1117119175"
+   ]
+  },
+  {
+   "task": "zsh - acme-api",
+   "start": "2026-09-04T11:00:00+00:00",
+   "event_ids": [
+    "fabab2c0-eae7-4973-86d1-89e3de1fdd42",
+    "08a5629f-5351-45a1-bc99-57896c492742",
+    "1de87201-bcb4-4fdb-85f5-8a290475427b"
+   ]
+  },
+  {
+   "task": "Conference talk proposal - Sessionize",
+   "start": "2026-09-07T13:09:00+00:00",
+   "event_ids": [
+    "f6bc6848-c63b-4c68-a943-53b6ee4afc80",
+    "d7ab497e-7cb4-4346-bcd0-53e96be50c1e",
+    "ceb2148c-7bb7-4f68-8071-ab1ded2be088"
+   ]
+  },
+  {
+   "task": "README.md - acme-cli",
+   "start": "2026-09-07T16:09:00+00:00",
+   "event_ids": [
+    "8ef38cd0-04e3-48fd-ad02-2c91f5215460",
+    "718cb525-cc32-4733-87eb-44b68eddf8b4",
+    "a78a2e2e-7436-4da2-96f6-2a35b1a5bd5b"
+   ]
+  },
+  {
+   "task": "Security training - KnowBe4",
+   "start": "2026-09-08T13:09:00+00:00",
+   "event_ids": [
+    "6a14a5d9-1ee4-4a5e-aac6-76376caef84b",
+    "ba917886-9a1c-4b03-ab2b-f2a7bfa8acfb"
+   ]
+  },
+  {
+   "task": "Mobile nav redesign - Figma",
+   "start": "2026-09-08T14:10:00+00:00",
+   "event_ids": [
+    "5ec667d6-c2b0-4a58-80cd-499df30f353b",
+    "b6fad1ee-f394-4085-84ce-1a8304c9ea4f",
+    "ac713e39-dff3-4fd8-a116-9f43bff01775"
+   ]
+  },
+  {
+   "task": "Incident 2026-09-02 postmortem - Google Docs",
+   "start": "2026-09-09T11:01:00+00:00",
+   "event_ids": [
+    "f6651288-c6d0-4a99-b120-4ec6077878d2",
+    "ddf6f7e8-f3e3-4a76-9146-8cf336ffebf8",
+    "ef508afb-a295-4a34-a7db-6d13ed5d152d"
+   ]
+  },
+  {
+   "task": "Customer interview notes - Notion",
+   "start": "2026-09-09T13:01:00+00:00",
+   "event_ids": [
+    "d52150dd-bc7d-4714-8427-eb84ab1e2735",
+    "efe39faf-020d-46ee-8ad2-5eeecb9ba556",
+    "f1c6bde5-67cf-43a1-9734-27b1ba81a967"
+   ]
+  },
+  {
+   "task": "Partnership agreement - DocuSign",
+   "start": "2026-09-10T13:02:00+00:00",
+   "event_ids": [
+    "74381ae3-a934-4f3d-ab86-360d9a392c86",
+    "dec3a086-217c-432d-9b10-5e2cc3937fe9"
+   ]
+  },
+  {
+   "task": "rate_limiter.go - acme-gateway",
+   "start": "2026-09-10T16:09:00+00:00",
+   "event_ids": [
+    "be650f6b-bf4a-4495-bd11-82ffb17501df",
+    "cc2ff79e-c0a8-4f56-90f6-1eaa14f80164",
+    "17c3a6ec-00c8-4bee-984f-c50b73e8758c"
+   ]
+  },
+  {
+   "task": "Vendor security questionnaire - Google Forms",
+   "start": "2026-09-11T14:10:00+00:00",
+   "event_ids": [
+    "6f490be5-fb93-44eb-aa0c-0646cb23839e",
+    "1b860324-208a-4dfa-8649-ae235b14fac0",
+    "5cf4cddc-b2ef-4859-ad0d-79245c75daa5"
+   ]
+  },
+  {
+   "task": "Marketing site hero - Figma",
+   "start": "2026-09-11T11:09:00+00:00",
+   "event_ids": [
+    "802a21d3-b2c3-4cfa-b7a0-51f04df1a3a4",
+    "81f10603-5c1d-43fe-aa53-6345cfa1a641"
+   ]
+  },
+  {
+   "task": "invoice_export.ts - acme-web",
+   "start": "2026-09-14T14:09:00+00:00",
+   "event_ids": [
+    "0901738f-c504-409e-8302-b1e753a58991",
+    "342a938c-0db5-451e-aa4b-58255056d3b2",
+    "efc2d94d-bcb0-45df-a181-e96b5f0334ae"
+   ]
+  },
+  {
+   "task": "Annual plan discount analysis - Google Sheets",
+   "start": "2026-09-14T16:07:00+00:00",
+   "event_ids": [
+    "fc037f89-ba76-4bf3-aa42-dd71f54b9ffa",
+    "2203e2a3-9944-438f-8328-4294ce8e7b52",
+    "0aba12ac-64a6-4f96-a25e-fb60f8c2fa83"
+   ]
+  },
+  {
+   "task": "Customer churn survey - Typeform",
+   "start": "2026-09-15T13:03:00+00:00",
+   "event_ids": [
+    "1d4e81d7-49dc-44d4-9a2a-639e23abac00",
+    "28d4cf60-1ff8-42ce-85fd-e78486f30b95",
+    "87ebe908-e4fa-4d78-aa41-ea938346d5b9"
+   ]
+  },
+  {
+   "task": "Invoice PDF template - Figma",
+   "start": "2026-09-15T16:04:00+00:00",
+   "event_ids": [
+    "5b764403-2dec-4f0c-8320-a764482bff52",
+    "7cd6697a-9ac4-4a2f-90f4-d85d55b5999c"
+   ]
+  },
+  {
+   "task": "Q4 hiring plan - Google Docs",
+   "start": "2026-09-16T14:00:00+00:00",
+   "event_ids": [
+    "e81d5541-ceb0-4efc-ad9d-68fb3d3deaf6",
+    "52105462-d628-4cde-ae23-87872d61422b",
+    "bb0f60cc-f3ec-481c-b40c-0f1252f279bc",
+    "e6c7664e-f1ce-408d-b461-ce6da53c2da6"
+   ]
+  },
+  {
+   "task": "auth_service.py - acme-api",
+   "start": "2026-09-16T16:07:00+00:00",
+   "event_ids": [
+    "58f190ec-5f20-4438-b22c-161b39f8b2f2",
+    "b57472b9-968d-42ff-b6c4-dd5212a93641",
+    "cb9f1fab-bcb5-42b3-841a-c86b8d2dbe6a",
+    "01fec69c-077b-414f-bdc2-51c73a5d20fa"
+   ]
+  },
+  {
+   "task": "Sales kickoff.key",
+   "start": "2026-09-17T13:05:00+00:00",
+   "event_ids": [
+    "0cfc3111-1c28-433c-956c-f2a541b54aa7",
+    "b11a9075-04ed-4d6d-9840-1bd10041b84a"
+   ]
+  },
+  {
+   "task": "zsh - acme-infra",
+   "start": "2026-09-17T16:08:00+00:00",
+   "event_ids": [
+    "c3444a08-b389-4689-a1f3-582be3bb122f",
+    "c802d189-e78c-48d9-be60-b723bf1dbd86",
+    "2a601876-e5aa-4625-b367-ec0ab53a0dce"
+   ]
+  },
+  {
+   "task": "All-hands October.key",
+   "start": "2026-09-18T16:10:00+00:00",
+   "event_ids": [
+    "904c7cfd-8498-4945-b3e0-1b62341a5d89",
+    "917460c0-34aa-4a7d-a219-bcb51dfdd74e"
+   ]
+  },
+  {
+   "task": "Office lease renewal - Gmail",
+   "start": "2026-09-18T11:02:00+00:00",
+   "event_ids": [
+    "54a8a616-2af0-41a5-8ff3-7a6fc411169e",
+    "40f747c8-7803-4a91-9a8f-bf5801bbe504"
+   ]
+  }
+ ],
+ "noise": [
+  {
+   "start": "2026-08-31T08:40:00+00:00",
+   "event_ids": [
+    "615a5ac5-4cbb-4053-992b-d31ebf4a63ca",
+    "51c73134-f484-4624-bf14-706752adab65"
+   ]
+  },
+  {
+   "start": "2026-08-31T15:36:00+00:00",
+   "event_ids": [
+    "dadb74db-05dd-4730-92a8-8f9bc0b34a08",
+    "50977357-102b-4313-86eb-753e86125b22"
+   ]
+  },
+  {
+   "start": "2026-09-01T08:34:00+00:00",
+   "event_ids": [
+    "0b93dc7c-54f1-44b8-9fcf-1c9e0b5c0a4a",
+    "416ba091-e69d-49e1-83a8-c707d6570011"
+   ]
+  },
+  {
+   "start": "2026-09-01T15:34:00+00:00",
+   "event_ids": [
+    "1b4b5782-8517-49bb-aa21-ae344725b1c8",
+    "3c06f2a8-ba53-427a-9d71-8796ef9a5d78"
+   ]
+  },
+  {
+   "start": "2026-09-02T08:43:00+00:00",
+   "event_ids": [
+    "449ece9b-b729-45b4-ba7a-5e8eddefaa0e",
+    "b896f024-3b30-48fb-b4ce-511e7f5fde81"
+   ]
+  },
+  {
+   "start": "2026-09-02T15:40:00+00:00",
+   "event_ids": [
+    "de63719e-8325-4db2-9bd8-45410ab070c9",
+    "baa73bec-a4e4-4b49-b2a6-7db99cba1d72"
+   ]
+  },
+  {
+   "start": "2026-09-03T08:37:00+00:00",
+   "event_ids": [
+    "494ee3f7-58a6-488c-a582-8b505f17b8ed",
+    "495a9600-b89a-46f2-bcf5-2b84794c1e92"
+   ]
+  },
+  {
+   "start": "2026-09-04T08:49:00+00:00",
+   "event_ids": [
+    "39f3dbb4-7dfe-402c-a6e7-2a99d024a914",
+    "08b2a032-40b1-4d91-9619-50b758476e52"
+   ]
+  },
+  {
+   "start": "2026-09-07T08:43:00+00:00",
+   "event_ids": [
+    "ebba2cff-c715-427c-8896-f728bb931075",
+    "033b2ca6-7dcd-46bc-847e-db4bb86d4643"
+   ]
+  },
+  {
+   "start": "2026-09-07T10:44:33+00:00",
+   "event_ids": [
+    "36d0e0cc-06df-4d1e-a5be-cea043955a92",
+    "22bf925f-dfdd-4d9b-adb3-a098904ac946",
+    "a57e871a-efad-47f0-a937-b3cacbbd8ee3",
+    "3e2c4e87-924a-48de-b0bd-1a5833c316da"
+   ],
+   "note": "40-minute Zoom call"
+  },
+  {
+   "start": "2026-09-07T15:22:00+00:00",
+   "event_ids": [
+    "b4720fbf-c15b-4f69-af1e-2715052cf451",
+    "a3acadd0-8066-4dc2-9de1-8d02c428cef7"
+   ]
+  },
+  {
+   "start": "2026-09-09T15:27:00+00:00",
+   "event_ids": [
+    "a8cf686c-3ff2-408a-b4f2-6428e265d150",
+    "fee982bd-4100-4a3b-90d5-011887051729"
+   ]
+  },
+  {
+   "start": "2026-09-10T08:39:00+00:00",
+   "event_ids": [
+    "b2a397cb-a7ad-4a75-960b-b974b63ef54f",
+    "1989e659-2291-4456-90e3-cc7449546b11"
+   ]
+  },
+  {
+   "start": "2026-09-11T08:32:00+00:00",
+   "event_ids": [
+    "c634b907-ca47-47ea-b030-bf56574a8639",
+    "4ac19bdb-452f-4f22-adf2-f3a8f4c2cf6a"
+   ]
+  },
+  {
+   "start": "2026-09-11T15:41:00+00:00",
+   "event_ids": [
+    "97ac1f61-4f25-4fba-9a47-509f2b37aeee",
+    "4663419a-813c-4fee-9caf-35c6b85d9832"
+   ]
+  },
+  {
+   "start": "2026-09-14T15:19:00+00:00",
+   "event_ids": [
+    "a5a1b58e-4ae1-4d6e-a4ca-26840e25b879",
+    "aa86384c-ff2a-473e-9e98-99fb177f6fbc"
+   ]
+  },
+  {
+   "start": "2026-09-15T15:44:00+00:00",
+   "event_ids": [
+    "86dbf10f-52c6-4d7c-b8e5-6a7b666fc8d9",
+    "43b9c0a1-e8c3-4035-8e6b-55460d34c429"
+   ]
+  },
+  {
+   "start": "2026-09-18T15:47:00+00:00",
+   "event_ids": [
+    "311befbf-962c-49da-9714-9d1cc9ba59d0",
+    "9d1bba7b-b703-4766-bcd2-a1047b6e0778"
+   ]
+  }
+ ]
+}

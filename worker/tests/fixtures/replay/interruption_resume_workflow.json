@@ -13,8 +13,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Chrome", "title": "PR #42 - Review Changes"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.9, 0.1, 0.0, 0.0]
+      "metadata_json": {}
     },
     {
       "id": "evt-002",
@@ -26,8 +25,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Chrome", "title": "PR #42 - Files changed"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.9, 0.1, 0.0, 0.0]
+      "metadata_json": {}
     },
     {
       "id": "evt-003",
@@ -39,8 +37,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Chrome", "title": "PR #42 - Diff view"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.9, 0.1, 0.0, 0.0]
+      "metadata_json": {}
     },
     {
       "id": "evt-004",
@@ -52,8 +49,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Chrome", "title": "PR #42 - Reviewing main.py"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.9, 0.1, 0.0, 0.0]
+      "metadata_json": {}
     },
     {
       "id": "evt-005",
@@ -65,8 +61,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Chrome", "title": "PR #42 - Add comment"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.9, 0.1, 0.0, 0.0]
+      "metadata_json": {}
     },
     {
       "id": "evt-006",
@@ -78,8 +73,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Slack", "title": "Slack - #dev-alerts"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.1, 0.8, 0.1, 0.0]
+      "metadata_json": {}
     },
     {
       "id": "evt-007",
@@ -91,8 +85,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Slack", "title": "Slack - #dev-alerts"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.1, 0.8, 0.1, 0.0]
+      "metadata_json": {}
     },
     {
       "id": "evt-008",
@@ -104,8 +97,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Chrome", "title": "PR #42 - Files changed"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.9, 0.1, 0.0, 0.0]
+      "metadata_json": {}
     },
     {
       "id": "evt-009",
@@ -117,8 +109,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Chrome", "title": "PR #42 - Review utils.py"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.9, 0.1, 0.0, 0.0]
+      "metadata_json": {}
     },
     {
       "id": "evt-010",
@@ -130,8 +121,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Chrome", "title": "PR #42 - Checks"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.9, 0.1, 0.0, 0.0]
+      "metadata_json": {}
     },
     {
       "id": "evt-011",
@@ -143,8 +133,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Chrome", "title": "PR #42 - Test file diffs"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.9, 0.1, 0.0, 0.0]
+      "metadata_json": {}
     },
     {
       "id": "evt-012",
@@ -156,8 +145,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Chrome", "title": "Gmail - Inbox"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.1, 0.0, 0.8, 0.1]
+      "metadata_json": {}
     },
     {
       "id": "evt-013",
@@ -169,8 +157,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Chrome", "title": "Gmail - Team standup notes"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.1, 0.0, 0.8, 0.1]
+      "metadata_json": {}
     },
     {
       "id": "evt-014",
@@ -182,8 +169,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Chrome", "title": "PR #42 - Files changed"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.9, 0.1, 0.0, 0.0]
+      "metadata_json": {}
     },
     {
       "id": "evt-015",
@@ -195,8 +181,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Chrome", "title": "PR #42 - Write review"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.9, 0.1, 0.0, 0.0]
+      "metadata_json": {}
     },
     {
       "id": "evt-016",
@@ -208,8 +193,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Chrome", "title": "PR #42 - Final review"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.9, 0.1, 0.0, 0.0]
+      "metadata_json": {}
     },
     {
       "id": "evt-017",
@@ -221,8 +205,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Chrome", "title": "PR #42 - Submit review"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.9, 0.1, 0.0, 0.0]
+      "metadata_json": {}
     },
     {
       "id": "evt-018",
@@ -234,8 +217,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Chrome", "title": "Reddit - r/programming"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.0, 0.9, 0.0, 0.1]
+      "metadata_json": {}
     },
     {
       "id": "evt-019",
@@ -247,8 +229,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Chrome", "title": "Reddit - Interesting Discussion"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.0, 0.9, 0.0, 0.1]
+      "metadata_json": {}
     },
     {
       "id": "evt-020",
@@ -260,8 +241,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Chrome", "title": "PR #42 - Ready to merge"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.9, 0.1, 0.0, 0.0]
+      "metadata_json": {}
     }
   ],
   "ground_truth": {

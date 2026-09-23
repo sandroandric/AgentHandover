@@ -463,6 +463,7 @@ class JourneyWorker:
                 continuity_tracker=self.continuity_tracker,
                 variant_detector=self.variant_detector,
                 evidence_normalizer=self.evidence_normalizer,
+                now=self.clock.now(),
                 **writers,
             )
             self._last_passive_discovery = self.clock.now()

@@ -11,8 +11,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Chrome", "title": "Linear - Current Sprint"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.85, 0.15, 0.00, 0.00]
+      "metadata_json": {}
     },
     {
       "id": "evt-002",
@@ -24,8 +23,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Chrome", "title": "Linear - Backlog"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.86, 0.14, 0.00, 0.00]
+      "metadata_json": {}
     },
     {
       "id": "evt-003",
@@ -37,8 +35,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Chrome", "title": "Linear - Backlog Prioritization"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.84, 0.16, 0.00, 0.00]
+      "metadata_json": {}
     },
     {
       "id": "evt-004",
@@ -50,8 +47,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Chrome", "title": "Linear - TEAM-301 Estimation"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.85, 0.15, 0.00, 0.00]
+      "metadata_json": {}
     },
     {
       "id": "evt-005",
@@ -63,8 +59,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Chrome", "title": "Linear - TEAM-302 Assignment"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.86, 0.14, 0.00, 0.00]
+      "metadata_json": {}
     },
     {
       "id": "evt-006",
@@ -76,8 +71,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Chrome", "title": "Linear - Sprint Board"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.84, 0.16, 0.00, 0.00]
+      "metadata_json": {}
     },
     {
       "id": "evt-007",
@@ -89,8 +83,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Chrome", "title": "Linear - Sprint Capacity"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.85, 0.15, 0.00, 0.00]
+      "metadata_json": {}
     },
     {
       "id": "evt-008",
@@ -102,8 +95,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Chrome", "title": "Linear - Current Sprint"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.85, 0.15, 0.00, 0.00]
+      "metadata_json": {}
     },
     {
       "id": "evt-009",
@@ -115,8 +107,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Chrome", "title": "Linear - Backlog"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.86, 0.14, 0.00, 0.00]
+      "metadata_json": {}
     },
     {
       "id": "evt-010",
@@ -128,8 +119,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Chrome", "title": "Linear - TEAM-303"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.84, 0.16, 0.00, 0.00]
+      "metadata_json": {}
     },
     {
       "id": "evt-011",
@@ -141,8 +131,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Chrome", "title": "Linear - TEAM-304"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.85, 0.15, 0.00, 0.00]
+      "metadata_json": {}
     },
     {
       "id": "evt-012",
@@ -154,8 +143,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Chrome", "title": "Linear - TEAM-305 Assignment"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.86, 0.14, 0.00, 0.00]
+      "metadata_json": {}
     },
     {
       "id": "evt-013",
@@ -167,8 +155,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Chrome", "title": "Linear - Sprint Board Updated"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.84, 0.16, 0.00, 0.00]
+      "metadata_json": {}
     },
     {
       "id": "evt-014",
@@ -180,8 +167,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Chrome", "title": "Linear - Sprint Scope Review"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.85, 0.15, 0.00, 0.00]
+      "metadata_json": {}
     },
     {
       "id": "evt-015",
@@ -193,8 +179,7 @@
       "frame_diff_json": {"diff_type": "action"},
       "window_json": {"app": "Chrome", "title": "Linear - Sprint Finalized"},
       "kind_json": {"DwellSnapshot": {}},
-      "metadata_json": {},
-      "embedding": [0.86, 0.14, 0.00, 0.00]
+      "metadata_json": {}
     }
   ],
   "ground_truth": {
