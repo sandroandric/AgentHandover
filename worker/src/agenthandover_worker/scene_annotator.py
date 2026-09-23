@@ -40,6 +40,7 @@ from agenthandover_worker.dom import accessible_name, flatten_dom, implicit_role
 from agenthandover_worker.event_helpers import display_name, is_bundle_id, parse_json_field
 from agenthandover_worker.json_extract import extract_json
 from agenthandover_worker.model_profiles import STANDARD_TIER
+from agenthandover_worker.privacy_zones import is_system_ui
 from agenthandover_worker.ollama import (  # noqa: F401 - OllamaUnavailable re-exported
     OllamaClient,
     OllamaUnavailable,
@@ -164,6 +165,12 @@ class AnnotationResult:
     visual_text_proxy: str | None = None
     # True when the annotation came from the annotation cache (no model call).
     cached: bool = False
+
+
+def skip_record(result: AnnotationResult) -> str:
+    """What a skipped row stores in ``scene_annotation_json``: the reason
+    (``{"skip_reason": "system_ui"}``), or nothing."""
+    return json.dumps(result.annotation) if result.annotation else ""
 
 
 # ---------------------------------------------------------------------------
@@ -906,6 +913,7 @@ class SceneAnnotator:
             "failed": 0,
             "missing_screenshot": 0,
             "deferred": 0,
+            "system_ui": 0,
         }
         # Monotonic deadlines for the transport-error backoff and the
         # cached /api/tags probe.
@@ -1037,6 +1045,18 @@ class SceneAnnotator:
         # and the cache key.
         window = parse_json_field(event, "window_json")
         metadata = parse_json_field(event, "metadata_json")
+
+        # A notification banner, Control Center, Spotlight, the Dock: no
+        # workflow on screen, so no model call (privacy_zones.SYSTEM_UI_APPS).
+        if is_system_ui(event):
+            self._stats["system_ui"] += 1
+            self.discard_screenshot(event, artifact_dir)
+            return AnnotationResult(
+                event_id=event_id,
+                status="skipped",
+                annotation={"skip_reason": "system_ui"},
+                error="system_ui",
+            )
 
         # --- Locate screenshot ---
         screenshot_path = find_screenshot(event, artifact_dir)

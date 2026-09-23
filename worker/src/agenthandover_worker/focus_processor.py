@@ -27,7 +27,12 @@ from agenthandover_worker.event_helpers import (
     parse_json_field,
     parse_timestamp,
 )
-from agenthandover_worker.scene_annotator import SceneAnnotator, as_compact, page_for_event
+from agenthandover_worker.scene_annotator import (
+    SceneAnnotator,
+    as_compact,
+    page_for_event,
+    skip_record,
+)
 from agenthandover_worker.frame_differ import FrameDiffer
 from agenthandover_worker.sop_generator import SOPGenerator, GeneratedSOP
 
@@ -693,7 +698,7 @@ class FocusProcessor:
                 stats["annotated"] += 1
             elif result.status in ("skipped", "missing_screenshot"):
                 db.save_annotation(  # type: ignore[union-attr]
-                    event_id, "", status=result.status
+                    event_id, skip_record(result), status=result.status
                 )
                 stats["skipped"] += 1
             elif result.status == "deferred":
