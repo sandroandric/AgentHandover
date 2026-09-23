@@ -23,7 +23,7 @@ from typing import Any
 
 from agenthandover_worker.confidence import compute_v2_confidence
 from agenthandover_worker.dom import select_anchor
-from agenthandover_worker.event_helpers import display_name
+from agenthandover_worker.event_helpers import describe_focused_field, display_name
 from agenthandover_worker.json_extract import extract_json
 from agenthandover_worker.ollama import OllamaClient
 
@@ -348,6 +348,8 @@ Respond with ONLY the JSON object."""
 # Verbatim fields (typed text, URLs, compose fields, copied text) are cut to
 # this many characters each in the SOP prompt.
 _VERBATIM_MAX_CHARS = 200
+# A shell command is quoted whole up to this many characters.
+_COMMAND_MAX_CHARS = 300
 
 
 def _one_line(text: object, limit: int = _VERBATIM_MAX_CHARS) -> str:
@@ -362,8 +364,17 @@ def _format_timeline_entry(
     diff: dict | None,
     timestamp: str,
     clipboard_context: dict | None = None,
+    *,
+    focused_field: dict | None = None,
+    shell_commands: list[dict] | None = None,
 ) -> str:
-    """Format a single timeline entry for the SOP generation prompt."""
+    """Format a single timeline entry for the SOP generation prompt.
+
+    *focused_field* is the frame's focused element (:func:`event_helpers.
+    focused_field`, read through Accessibility); *shell_commands* are the
+    commands the shell hook recorded since the previous frame.  Both are
+    recorded facts, rendered verbatim for the steps to quote.
+    """
     lines = []
 
     # Time + app
@@ -397,6 +408,15 @@ def _format_timeline_entry(
         active = ui.get("active_element", "")
         if active:
             lines.append(f"  Active: {active}")
+    if focused_field:
+        lines.append(f"  Focused field: {describe_focused_field(focused_field)}")
+
+    # Commands run in a terminal since the previous frame, exactly as typed.
+    for cmd in shell_commands or []:
+        command = str(cmd.get("command") or "").replace("\n", "\\n")[:_COMMAND_MAX_CHARS]
+        if command:
+            cwd = str(cmd.get("cwd") or "")
+            lines.append(f"  >>> SHELL COMMAND{f' (in {cwd})' if cwd else ''}: {command}")
 
     # Verbatim text the steps must quote: what was typed, the links on
     # screen, and an open compose window's fields.
@@ -495,6 +515,8 @@ def _build_focus_prompt(
         entries.append(_format_timeline_entry(
             i, annotation, diff, timestamp,
             clipboard_context=clipboard_ctx,
+            focused_field=frame.get("focused_field"),
+            shell_commands=frame.get("shell_commands"),
         ))
 
     timeline_text = "\n\n".join(entries)
@@ -577,6 +599,8 @@ def _build_passive_prompt(
                 _format_timeline_entry(
                     i, annotation, diff, timestamp,
                     clipboard_context=clipboard_ctx,
+                    focused_field=frame.get("focused_field"),
+                    shell_commands=frame.get("shell_commands"),
                 )
             )
         demo_text = f"--- Demonstration {demo_idx + 1} ({len(timeline)} frames) ---\n"
@@ -682,6 +706,8 @@ def _build_enriched_passive_prompt(
                 _format_timeline_entry(
                     i, annotation, diff, timestamp,
                     clipboard_context=clipboard_ctx,
+                    focused_field=frame.get("focused_field"),
+                    shell_commands=frame.get("shell_commands"),
                 )
             )
         demo_text = f"--- Demonstration {demo_idx + 1} ({len(timeline)} frames) ---\n"
@@ -949,6 +975,17 @@ def _vlm_sop_to_template(
                 f["dom_snapshot_id"] for f in frames if f.get("dom_snapshot_id")
             )),
         }
+        # Recorded facts of the cited frames, not model output: the focused
+        # field (Accessibility) and the exact shell commands.
+        fields = [
+            {**f["focused_field"], **({"event_id": f["event_id"]} if f.get("event_id") else {})}
+            for f in frames if f.get("focused_field")
+        ]
+        if fields:
+            step["evidence"]["focused_fields"] = fields
+        commands = [c for f in frames for c in f.get("shell_commands") or []]
+        if commands:
+            step["evidence"]["shell_commands"] = commands
         step["anchor"] = _anchor_for_step(raw_step, frames)
 
         steps.append(step)

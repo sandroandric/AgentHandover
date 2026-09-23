@@ -921,6 +921,11 @@ class TestFocusProcessorDomNodes:
             def get_click_intents(self, start, end):
                 return []
 
+
+            def get_shell_commands(self, start, end):
+
+                return []
+
             def get_dom_snapshots_near_timestamp(self, ts, url, tolerance_sec=5.0):
                 if "example.com" in url:
                     return [{
@@ -964,6 +969,11 @@ class TestFocusProcessorDomNodes:
                 }
 
             def get_click_intents(self, start, end):
+                return []
+
+
+            def get_shell_commands(self, start, end):
+
                 return []
 
             def get_dom_snapshots_near_timestamp(self, ts, url, tolerance_sec=5.0):

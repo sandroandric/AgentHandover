@@ -443,6 +443,51 @@ class WorkerDB:
             })
         return clicks
 
+    def get_shell_commands(self, start: str, end: str) -> list[dict]:
+        """Commands the opt-in shell hook recorded between *start* and *end*
+        (inclusive), in time order: dicts with event_id, timestamp, cwd and
+        command (``ShellCommand`` events, already redacted by the daemon)."""
+        cur = self._conn.execute(
+            "SELECT id, timestamp, "
+            "       json_extract(kind_json, '$.cwd') AS cwd, "
+            "       json_extract(kind_json, '$.command') AS command "
+            "FROM events "
+            "WHERE json_extract(kind_json, '$.type') = 'ShellCommand' "
+            "  AND julianday(timestamp) BETWEEN julianday(?) AND julianday(?) "
+            "ORDER BY julianday(timestamp) ASC",
+            (start, end),
+        )
+        return [
+            {
+                "event_id": row["id"],
+                "timestamp": row["timestamp"],
+                "cwd": row["cwd"] or "",
+                "command": row["command"] or "",
+            }
+            for row in cur.fetchall()
+            if row["command"]
+        ]
+
+    def get_sleep_boundaries(self, since: str | None = None) -> list[tuple[str, str]]:
+        """``(slept_at, woke_at)`` of each ``SystemSleep`` event (optionally
+        only those waking at or after *since*), deduplicated, in time order.
+        No episode or task segment may span one."""
+        sql = (
+            "SELECT DISTINCT json_extract(kind_json, '$.slept_at') AS slept_at, "
+            "       json_extract(kind_json, '$.woke_at') AS woke_at "
+            "FROM events WHERE json_extract(kind_json, '$.type') = 'SystemSleep' "
+        )
+        params: tuple = ()
+        if since:
+            sql += "AND julianday(json_extract(kind_json, '$.woke_at')) >= julianday(?) "
+            params = (since,)
+        sql += "ORDER BY julianday(slept_at) ASC"
+        return [
+            (row["slept_at"], row["woke_at"])
+            for row in self._conn.execute(sql, params).fetchall()
+            if row["slept_at"] and row["woke_at"]
+        ]
+
     # ------------------------------------------------------------------
     # Episodes
     # ------------------------------------------------------------------

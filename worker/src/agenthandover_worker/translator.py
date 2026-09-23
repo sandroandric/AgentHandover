@@ -72,6 +72,8 @@ _KIND_INTENT_MAP: dict[str, str] = {
     "WindowTitleChange": "navigate",
     "KeyPress": "type",
     "SecureFieldFocus": "secure_focus",
+    "ShellCommand": "run_command",
+    "SystemSleep": "system_sleep",
 }
 
 

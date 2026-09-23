@@ -39,6 +39,16 @@ from agenthandover_worker.clipboard_linker import ClipboardLink, ClipboardLinker
 logger = logging.getLogger(__name__)
 
 
+def _is_system_sleep(event: dict) -> bool:
+    """True for the daemon's ``SystemSleep`` boundary event."""
+    raw = event.get("kind_json")
+    try:
+        kind = json.loads(raw) if isinstance(raw, str) else raw
+    except (json.JSONDecodeError, TypeError):
+        return False
+    return isinstance(kind, dict) and kind.get("type") == "SystemSleep"
+
+
 @dataclass
 class Episode:
     """A contiguous segment of events sharing a common thread."""
@@ -118,6 +128,12 @@ class EpisodeBuilder:
         completed: list[Episode] = []
 
         for event in events:
+            if _is_system_sleep(event):
+                # The Mac slept: every open episode ends here.
+                completed.extend(open_episodes.values())
+                open_episodes.clear()
+                continue
+
             thread_id = self._get_thread_id(event)
             ts = self._parse_timestamp(event)
 
