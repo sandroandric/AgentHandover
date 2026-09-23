@@ -51,6 +51,17 @@ def test_vlm_block_command_prints_the_block():
     assert out == mp.vlm_block(mp.get_tier("recommended"))
 
 
+def test_shared_vlm_block_fixture_carries_the_python_block():
+    """tests/fixtures/vlm_block/recommended.toml is what the Rust setup
+    (``tiers::apply_vlm_block``) and the Swift onboarding
+    (``ModelTiers.applyVLMBlock``) must produce; its managed lines are
+    this module's ``vlm_block``."""
+    text = (REPO_ROOT / "tests" / "fixtures" / "vlm_block" / "recommended.toml").read_text()
+    start = text.index("[vlm]\n")
+    block = mp.vlm_block(mp.get_tier("recommended"))
+    assert text[start:start + len(block)] == block
+
+
 def test_unknown_tier_is_an_error():
     proc = subprocess.run(
         [sys.executable, "-m", "agenthandover_worker.model_profiles",

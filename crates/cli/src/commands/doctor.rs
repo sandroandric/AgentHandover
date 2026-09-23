@@ -6,6 +6,7 @@ use agenthandover_common::observation::{
     capture_socket_path, observation_socket_path, snapshot_at,
 };
 
+use agenthandover_common::tiers;
 use crate::paths;
 
 /// Detect which install channel produced this AgentHandover installation.
@@ -260,12 +261,15 @@ pub fn run() -> Result<()> {
                 "vlm.mode = remote (using cloud API)",
             );
         } else {
-            let annotation_model = read_config_string_field(&config_str, "vlm", "annotation_model")
-                .unwrap_or_else(|| "qwen3.5:2b".to_string());
-            let sop_model = read_config_string_field(&config_str, "vlm", "sop_model")
-                .unwrap_or_else(|| "qwen3.5:4b".to_string());
+            // Missing model keys come from the config's tier, else the
+            // RAM tier, exactly as the worker resolves them.
+            let (_, annotation_model, sop_model) = tiers::resolve_models(
+                read_config_string_field(&config_str, "vlm", "tier").as_deref(),
+                read_config_string_field(&config_str, "vlm", "annotation_model").as_deref(),
+                read_config_string_field(&config_str, "vlm", "sop_model").as_deref(),
+            );
             let embedding_model = read_config_string_field(&config_str, "embedding", "model")
-                .unwrap_or_else(|| "nomic-embed-text".to_string());
+                .unwrap_or_else(|| tiers::table().embedding_model.clone());
 
             let models_output = std::process::Command::new("ollama")
                 .arg("list")

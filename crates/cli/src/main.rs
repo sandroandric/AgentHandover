@@ -71,6 +71,10 @@ enum Commands {
         /// Set up VLM only
         #[arg(long)]
         vlm: bool,
+        /// Model tier to set up (standard, recommended, performance,
+        /// max_quality); default: the config's tier, else the RAM's
+        #[arg(long)]
+        tier: Option<String>,
     },
     /// Run pre-flight checks
     Doctor,
@@ -226,7 +230,9 @@ fn main() -> Result<()> {
             SopsAction::Retry { failure_id } => commands::sops::retry(&failure_id),
         },
         Commands::Watch => commands::watch::run(),
-        Commands::Setup { check, extension, vlm } => commands::setup::run(check, extension, vlm),
+        Commands::Setup { check, extension, vlm, tier } => {
+            commands::setup::run(check, extension, vlm, tier.as_deref())
+        }
         Commands::Doctor => commands::doctor::run(),
         Commands::Uninstall { purge_data } => commands::uninstall::run(purge_data),
         Commands::Focus { action } => match action {
