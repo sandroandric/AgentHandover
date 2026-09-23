@@ -58,23 +58,33 @@ max_compute_minutes_per_day = 20
 # model = "gpt-4o-mini"        # provider-specific model name
 # api_key_env = "OPENAI_API_KEY"  # env var name (NEVER store keys directly!)
 # --- v2 scene annotation pipeline ---
-# Model tiers (auto-detected by RAM during onboarding):
-#   8GB:  qwen3.5:2b + qwen3.5:4b (6.1 GB, standard)
-#   16GB: gemma4:12b-it-qat (7.2 GB, recommended — 12B dense, single model)
-#   24GB: gemma4:12b-it-qat (7.2 GB, performance — headroom for more frames)
-#   48GB: gemma4:31b-it-qat (18 GB, max quality — frontier intelligence)
-# QAT (Gemma 4 16/24/48GB tiers) requires Ollama 0.30.6+.  The 8GB Qwen
-# tier works on older Ollama.  Settings per model are auto-tuned via
-# model_profiles.py.
-annotation_model = "qwen3.5:2b"   # model for per-frame annotation
-sop_model = "qwen3.5:4b"          # model for SOP generation
+# Model tiers: the table is TIERS in worker/src/agenthandover_worker/
+# model_profiles.py, installed as tiers.json next to this file (copy in
+# resources/tiers.json).  Onboarding and `agenthandover setup` write
+# `tier`, `annotation_model` and `sop_model`; a missing model key falls
+# back to the named tier, else to the tier this Mac's RAM recommends:
+#   standard     (any):  qwen3.5:4b annotates and writes Skills
+#   recommended  (16GB): qwen3.5:4b annotates, gemma4:12b-it-qat writes Skills
+#   performance  (24GB): same models as recommended
+#   max_quality  (48GB): qwen3.5:4b annotates, gemma4:31b-it-qat writes Skills
+# The Gemma 4 QAT tags need Ollama 0.34.0+.  Settings per model are
+# auto-tuned via model_profiles.py.
+tier = "standard"
+annotation_model = "qwen3.5:4b"   # model for per-frame annotation
+sop_model = "qwen3.5:4b"          # model for Skill generation and synthesis
+# reasoning_model = ""             # the LLM reasoner's model; empty = sop_model
+# sop_ab = false                   # max_quality: A/B arm gemma4:26b-a4b-it-qat as sop_model
 annotation_enabled = true          # enable continuous scene annotation pipeline
 stale_skip_count = 3               # skip after N consecutive non-workflow same-app frames
 sliding_window_max_age_sec = 600   # 10 min max age for context window
 annotation_timeout_seconds = 180   # per annotation call; also bounds the model preload at worker start
 
+[embedding]
+model = "nomic-embed-text"         # text embeddings (search_document:/search_query:/clustering: prefixes)
+image_embeddings = false           # SigLIP screenshot embeddings (optional embeddings-apple extra)
+
 [focus]
-max_session_hours = 4              # a recording never stopped is closed as stale after this long
+max_session_hours = 4             # a recording never stopped is closed as stale after this long
 
 [llm]
 enhance_sops = true

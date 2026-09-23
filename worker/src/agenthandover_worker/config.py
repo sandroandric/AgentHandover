@@ -21,7 +21,7 @@ from __future__ import annotations
 import logging
 import platform
 import tomllib
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import time as dt_time
 from pathlib import Path
 from typing import Any
@@ -58,13 +58,27 @@ class VlmConfig:
     model: str = ""
     api_key_env: str = ""
     annotation_enabled: bool = True
-    annotation_model: str = "qwen3.5:2b"
-    sop_model: str = "qwen3.5:4b"
+    # The RAM tier onboarding or ``agenthandover setup`` chose; a model key
+    # the file leaves out comes from this tier, else from the tier this
+    # Mac's RAM recommends (``model_profiles.TIERS``, the one tier table).
+    tier: str = ""
+    annotation_model: str = ""
+    sop_model: str = ""
+    # The LLM reasoner's model; empty means ``sop_model``.
+    reasoning_model: str = ""
+    # A/B flag: use the tier's ``ab_sop_model`` (48 GB: the 26B MoE) as
+    # the SOP model.
+    sop_ab: bool = False
     stale_skip_count: int = 3
     sliding_window_max_age_sec: int = 600
     ollama_host: str = DEFAULT_OLLAMA_HOST
     # Per annotation call; also bounds the model preload at worker start.
     annotation_timeout_seconds: float = 180.0
+
+    @property
+    def reasoner_model(self) -> str:
+        """The model the LLM reasoner runs: the SOP model unless overridden."""
+        return self.reasoning_model or self.sop_model
 
 
 @dataclass(frozen=True)
@@ -146,8 +160,10 @@ class KnowledgeConfig:
 
 @dataclass(frozen=True)
 class EmbeddingConfig:
-    """``[embedding]``."""
+    """``[embedding]``: one model for every text embedding (the vector KB
+    and the task segmenter), always used with nomic's task prefixes."""
 
+    model: str = "nomic-embed-text"
     image_embeddings: bool = False
 
 
@@ -171,7 +187,7 @@ class Config:
     """The whole of ``config.toml`` as the worker reads it."""
 
     path: Path | None = None  # the file read, None when it did not exist
-    vlm: VlmConfig = field(default_factory=VlmConfig)
+    vlm: VlmConfig = field(default_factory=lambda: _vlm({}))
     llm: LlmConfig = field(default_factory=LlmConfig)
     sop: SopConfig = field(default_factory=SopConfig)
     idle_jobs: IdleJobsConfig = field(default_factory=IdleJobsConfig)
@@ -216,7 +232,7 @@ def load_config(path: str | Path | None = None) -> Config:
     zones = privacy.get("zones", {})
     return Config(
         path=file,
-        vlm=_build(VlmConfig, "vlm", section("vlm")),
+        vlm=_vlm(section("vlm")),
         llm=_build(LlmConfig, "llm", section("llm")),
         sop=_build(SopConfig, "sop", section("sop")),
         idle_jobs=_idle_jobs(section("idle_jobs")),
@@ -290,6 +306,26 @@ def _coerce(value: Any, default: Any) -> Any:
     if isinstance(default, str):
         return value if isinstance(value, str) else None
     return None
+
+
+def _vlm(values: dict) -> VlmConfig:
+    """``[vlm]`` with the model keys it leaves out filled from the tier table."""
+    from agenthandover_worker.model_profiles import get_tier, recommend_tier
+
+    base = _build(VlmConfig, "vlm", values)
+    tier = get_tier(base.tier) if base.tier else None
+    if base.tier and tier is None:
+        logger.warning("[vlm] tier = %r is not a known tier; using RAM's", base.tier)
+    tier = tier or recommend_tier()
+    sop_model = base.sop_model or tier.sop_model
+    if base.sop_ab and tier.ab_sop_model:
+        sop_model = tier.ab_sop_model
+    return replace(
+        base,
+        tier=tier.id,
+        annotation_model=base.annotation_model or tier.annotation_model,
+        sop_model=sop_model,
+    )
 
 
 def _idle_jobs(values: dict) -> IdleJobsConfig:

@@ -75,8 +75,10 @@ def build_mcp_server():
                     from agenthandover_worker.config import load_config
                     from agenthandover_worker.vector_kb import VectorKB, VectorKBConfig
 
+                    cfg = load_config()
                     _state["vkb"] = (VectorKB(db_path, VectorKBConfig(
-                        ollama_host=load_config().vlm.ollama_host,
+                        embedding_model=cfg.embedding.model,
+                        ollama_host=cfg.vlm.ollama_host,
                     )), "")
                 except Exception as exc:
                     logger.warning("VectorKB init failed", exc_info=True)

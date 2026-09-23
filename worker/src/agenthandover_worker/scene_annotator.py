@@ -978,9 +978,11 @@ class SceneAnnotator:
             try:
                 vec = self._image_embedder.embed_image(screenshot_path)
                 if vec:
+                    from agenthandover_worker.vector_kb import ImageEmbedder
+
                     self._vector_kb.upsert(
                         "visual", event_id, f"image:{event_id}",
-                        embedding=vec,
+                        embedding=vec, prefix="", model=ImageEmbedder.MODEL_NAME,
                     )
             except Exception:
                 logger.debug("Image embedding failed for %s", event_id, exc_info=True)

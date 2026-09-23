@@ -247,8 +247,10 @@ class SessionLinker:
         """Semantic similarity via vector KB, with Jaccard fallback."""
         if self._vector_kb is not None:
             try:
-                from agenthandover_worker.vector_kb import VectorKB
-                embs = self._vector_kb.compute_embeddings([a, b])
+                from agenthandover_worker.vector_kb import CLUSTERING_PREFIX, VectorKB
+                embs = self._vector_kb.compute_embeddings(
+                    [a, b], prefix=CLUSTERING_PREFIX,
+                )
                 if len(embs) == 2 and embs[0] and embs[1]:
                     return VectorKB.cosine_similarity(embs[0], embs[1])
             except Exception:

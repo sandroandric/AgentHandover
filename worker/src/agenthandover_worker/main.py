@@ -4103,7 +4103,9 @@ def main(argv: list[str] | None = None) -> None:
     vlm_queue = VLMFallbackQueue()
     from agenthandover_worker.llm_reasoning import LLMReasoner, ReasoningConfig
     llm_reasoner = LLMReasoner(
-        config=ReasoningConfig(ollama_host=vlm_cfg.ollama_host),
+        config=ReasoningConfig(
+            model=vlm_cfg.reasoner_model, ollama_host=vlm_cfg.ollama_host,
+        ),
         vlm_queue=vlm_queue,
     )
 
@@ -4112,6 +4114,7 @@ def main(argv: list[str] | None = None) -> None:
     try:
         from agenthandover_worker.vector_kb import VectorKB, VectorKBConfig
         vkb_config = VectorKBConfig(
+            embedding_model=cfg.embedding.model,
             ollama_host=vlm_cfg.ollama_host,
         )
         vector_kb = VectorKB(args.db_path, vkb_config)
@@ -4246,7 +4249,7 @@ def main(argv: list[str] | None = None) -> None:
     # Check Ollama compatibility and log the active model profiles
     try:
         from agenthandover_worker.model_profiles import (
-            get_profile, ollama_supports_gemma4,
+            MINIMUM_OLLAMA_VERSION_FOR_GEMMA4, get_profile, ollama_supports_gemma4,
         )
 
         # Warn if using Gemma 4 but Ollama is too old
@@ -4257,12 +4260,13 @@ def main(argv: list[str] | None = None) -> None:
             ollama_host = vlm_cfg.ollama_host
             if not ollama_supports_gemma4(ollama_host):
                 logger.warning(
-                    "Gemma 4 QAT models require Ollama 0.30.6+. "
+                    "Gemma 4 QAT models require Ollama %s+. "
                     "Current version is too old (pulls will fail with HTTP 412). "
                     "Update the official app: https://ollama.com/download "
                     "(or: brew install --cask ollama-app). "
                     "Note: the Homebrew 'ollama' formula does not bundle the "
-                    "GGUF runner — use the official app instead."
+                    "GGUF runner — use the official app instead.",
+                    MINIMUM_OLLAMA_VERSION_FOR_GEMMA4,
                 )
 
         # Log active model profiles
@@ -4390,8 +4394,9 @@ def main(argv: list[str] | None = None) -> None:
                 else:
                     backend_type = None  # type: ignore[assignment]
                 if backend_type is not None:
-                    # Read optional model override from config.toml [vlm] section
-                    config_model = vlm_cfg.model
+                    # [vlm] model, else the annotation model (the config
+                    # loader fills that from the tier table when unset)
+                    config_model = vlm_cfg.model or vlm_cfg.annotation_model
                     vlm_kwargs: dict = {"backend": backend_type}
                     if config_model:
                         vlm_kwargs["model_name"] = config_model
@@ -4549,6 +4554,7 @@ def main(argv: list[str] | None = None) -> None:
 
         # Task segmenter for passive discovery (CPU-only, no GPU)
         seg_config = SegmenterConfig(
+            embedding_model=cfg.embedding.model,
             ollama_host=vlm_cfg.ollama_host,
         )
         task_segmenter = TaskSegmenter(
@@ -5454,6 +5460,15 @@ def main(argv: list[str] | None = None) -> None:
                                 logger.debug("Preserved text embedding failed", exc_info=True)
                     except Exception:
                         logger.debug("OCR text preservation failed", exc_info=True)
+
+                    # Drop vectors past retention and vectors from another
+                    # embedding model (a model change re-embeds, never mixes
+                    # vector spaces).  Runs at startup and then nightly.
+                    if vector_kb is not None:
+                        try:
+                            vector_kb.purge_stale()
+                        except Exception:
+                            logger.debug("Vector KB purge failed", exc_info=True)
 
                     _last_daily_batch = today_str
 

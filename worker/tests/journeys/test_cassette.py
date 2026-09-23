@@ -78,7 +78,7 @@ def call_sites(host: str, tmp_path: Path) -> dict:
         )[0],
         "kb_embed": lambda: kb.compute_embeddings(["open report", "send email"]),
         "segment_embed": lambda: task_segmenter._compute_embeddings(
-            ["open report"], host=host
+            ["open report"], model="nomic-embed-text", host=host
         ),
         "version": lambda: model_profiles.check_ollama_version(host),
     }

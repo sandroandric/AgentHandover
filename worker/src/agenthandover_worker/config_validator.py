@@ -43,6 +43,15 @@ class ConfigValidator:
             val = vlm.get(key)
             if val is not None and (not isinstance(val, str) or not val.strip()):
                 issues.append(ConfigIssue("vlm", key, "warning", f"{key} should be a non-empty model name"))
+        tier = vlm.get("tier")
+        if tier is not None:
+            from agenthandover_worker.model_profiles import TIERS, get_tier
+
+            if not isinstance(tier, str) or get_tier(tier) is None:
+                issues.append(ConfigIssue(
+                    "vlm", "tier", "warning",
+                    "tier should be one of " + ", ".join(t.id for t in TIERS),
+                ))
         # Numeric bounds
         for key, lo, hi in [("max_jobs_per_day", 1, 10000), ("max_queue_size", 1, 50000), ("max_compute_minutes_per_day", 1, 1440)]:
             val = vlm.get(key)

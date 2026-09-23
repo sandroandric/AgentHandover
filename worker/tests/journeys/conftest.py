@@ -51,11 +51,18 @@ class TempHome:
             return self.data_dir / "config.toml"
         return self.path / ".config" / "agenthandover" / "config.toml"
 
-    def configure(self, *, ollama_host: str, extra: str = "") -> None:
-        """Write ``config.toml``; ``extra`` is appended verbatim (more TOML sections)."""
+    def configure(
+        self, *, ollama_host: str, tier: str = "standard", extra: str = "",
+    ) -> None:
+        """Write ``config.toml``; ``extra`` is appended verbatim (more TOML sections).
+
+        ``tier`` names the RAM tier whose models the worker runs, so a
+        journey's model calls (and its cassette keys) do not depend on the
+        RAM of the machine running the test.
+        """
         self.config_file.parent.mkdir(parents=True, exist_ok=True)
         self.config_file.write_text(
-            f'[vlm]\nollama_host = "{ollama_host}"\n\n'
+            f'[vlm]\nollama_host = "{ollama_host}"\ntier = "{tier}"\n\n'
             "[knowledge]\nquery_api_enabled = false\n"
             + (f"\n{extra}\n" if extra else ""),
             encoding="utf-8",
@@ -96,9 +103,11 @@ def cassette(temp_home: TempHome) -> Callable[..., Cassette]:
     the worker's config at it.  A replay miss fails the test at teardown."""
     with ExitStack() as stack:
 
-        def start(journey: str, *, record: bool | None = None) -> Cassette:
+        def start(
+            journey: str, *, record: bool | None = None, tier: str = "standard",
+        ) -> Cassette:
             tape = stack.enter_context(open_cassette(journey, record=record))
-            temp_home.configure(ollama_host=tape.host)
+            temp_home.configure(ollama_host=tape.host, tier=tier)
             return tape
 
         yield start
