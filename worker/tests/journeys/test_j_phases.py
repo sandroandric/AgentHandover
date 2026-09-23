@@ -11,7 +11,12 @@ them, then the SOP model unloaded before the annotation model is used again.
 
 from __future__ import annotations
 
+import os
+
+import pytest
+
 from agenthandover_worker.model_profiles import get_tier, get_profile
+from journeys.cassette import CASSETTE_DIR
 from journeys.focus_run import start_focus_run, tick_until_skill
 
 JOURNEY = "focus_dailynews_recommended"
@@ -33,6 +38,13 @@ def _event(entry: dict) -> tuple[str, str] | None:
     return ("load", model)
 
 
+@pytest.mark.skipif(
+    not (CASSETTE_DIR / f"{JOURNEY}.jsonl").exists() and os.environ.get("AH_RECORD") != "1",
+    reason=(
+        f"cassettes/{JOURNEY}.jsonl is not recorded yet: record it with "
+        "AH_RECORD=1 against the test Mac's Ollama 0.34.2 (gemma4:12b-it-qat)"
+    ),
+)
 def test_two_model_focus_run_uses_one_model_at_a_time(
     events_db, worker, clock, temp_home, cassette,
 ) -> None:
