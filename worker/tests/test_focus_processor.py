@@ -714,7 +714,8 @@ class TestProcessFocusSessionsV2:
         assert result == 1
         assert mock_processor.process_session.call_count == 1
         assert mock_writer.write_sop.call_count == 1
-        assert mock_index.update_index.call_count == 1
+        # The writer keeps its own catalogue; the pipeline writes none.
+        assert mock_index.update_index.call_count == 0
         # Signal file should be removed
         assert not signal_path.exists()
 
