@@ -67,6 +67,10 @@ pub struct ObserverConfig {
     /// `[privacy] capture_input_values`: whether the focused element's
     /// `AXValue` is read (never for a secure field).
     pub capture_input_values: bool,
+    /// `[privacy] read_app_state`: whether supported apps are queried
+    /// through AppleScript (each first query triggers a macOS consent
+    /// prompt, so this is opt-in).
+    pub read_app_state: bool,
 }
 
 impl Default for ObserverConfig {
@@ -87,6 +91,7 @@ impl Default for ObserverConfig {
             capture_socket: agenthandover_common::observation::capture_socket_path(),
             state_dir: agenthandover_common::status::data_dir(),
             capture_input_values: false,
+            read_app_state: false,
         }
     }
 }
@@ -312,7 +317,8 @@ pub async fn run_observer_loop(
                         {
                             // App state (page URL, document, message) is
                             // content: never read for a zoned window.
-                            let should_query = zone == Zone::Full
+                            let should_query = config.read_app_state
+                                && zone == Zone::Full
                                 && applescript_last_query
                                     .get(to.as_str())
                                     .is_none_or(|last| last.elapsed() >= applescript_throttle);

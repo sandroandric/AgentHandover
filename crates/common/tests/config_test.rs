@@ -65,4 +65,14 @@ fn test_config_example_parses() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config.example.toml");
     let config = AppConfig::from_file(&path).unwrap();
     assert_eq!(config.observer.t_dwell_seconds, 3);
+    assert!(!config.privacy.read_app_state, "AppleScript app state is opt-in");
+}
+
+/// Reading app state through AppleScript makes macOS ask the user to let
+/// AgentHandover "control" each app; it must never be on unless chosen.
+#[test]
+fn test_read_app_state_defaults_off() {
+    assert!(!AppConfig::default().privacy.read_app_state);
+    let config = AppConfig::from_toml_str("[privacy]\nenable_inline_secret_redaction = true\nenable_clipboard_preview = false\nclipboard_preview_max_chars = 200\nsecure_field_drop = true\n").unwrap();
+    assert!(!config.privacy.read_app_state);
 }

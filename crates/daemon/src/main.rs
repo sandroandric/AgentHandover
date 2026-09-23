@@ -185,6 +185,7 @@ async fn main() -> Result<()> {
             dir
         },
         capture_input_values: app_config.privacy.capture_input_values,
+        read_app_state: app_config.privacy.read_app_state,
         // Sockets and the state dir: the standard locations.
         ..ObserverConfig::default()
     };

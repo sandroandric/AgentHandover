@@ -71,6 +71,12 @@ pub struct PrivacyConfig {
     /// docs) is captured regardless, like any other visible page text.
     #[serde(default)]
     pub capture_input_values: bool,
+    /// Read the open document, page or message from supported apps
+    /// (Safari, Mail, Notes, ...) through AppleScript.  Off by default:
+    /// macOS asks the user, per app, to let AgentHandover "control" it,
+    /// so it must only run after the user opted in knowingly.
+    #[serde(default)]
+    pub read_app_state: bool,
     #[serde(default)]
     pub zones: PrivacyZonesConfig,
 }
@@ -257,6 +263,7 @@ impl Default for PrivacyConfig {
             clipboard_preview_max_chars: 200,
             secure_field_drop: true,
             capture_input_values: false,
+            read_app_state: false,
             zones: PrivacyZonesConfig::default(),
         }
     }

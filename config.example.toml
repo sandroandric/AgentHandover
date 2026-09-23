@@ -20,6 +20,7 @@ enable_clipboard_preview = false
 clipboard_preview_max_chars = 200
 secure_field_drop = true
 capture_input_values = false     # include <input>/<textarea> values in browser DOM snapshots
+read_app_state = false           # read the open document/page/message from Safari, Mail, Notes... via AppleScript (macOS asks per app)
 
 [browser]
 extension_id = "jpemkdcihaijkolbkankcldmiimmmnfo"
