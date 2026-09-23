@@ -89,36 +89,43 @@ class AnnotationCache:
         self._conn.commit()
 
     def lookup(self, key: CacheKey) -> dict | None:
-        """The cached annotation for *key*, or None."""
-        rows = self._conn.execute(
-            "SELECT ocr_simhash, annotation_json FROM annotation_cache "
-            "WHERE app = ? AND title_hash = ? ORDER BY used_at DESC LIMIT ?",
-            (key.app, key.title_hash, _CANDIDATES),
-        ).fetchall()
-        for stored, annotation_json in rows:
-            if ((stored & _MASK64) ^ key.ocr_simhash).bit_count() > MAX_HAMMING:
-                continue
-            try:
-                annotation = json.loads(annotation_json)
-            except (json.JSONDecodeError, TypeError):
-                continue
-            self._conn.execute(
-                "UPDATE annotation_cache SET used_at = "
-                "strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
-                "WHERE app = ? AND title_hash = ? AND ocr_simhash = ?",
-                (key.app, key.title_hash, stored),
-            )
-            self._conn.commit()
-            return annotation
+        """The cached annotation for *key*, or None (also when the database
+        is busy: a miss only costs a model call)."""
+        try:
+            rows = self._conn.execute(
+                "SELECT ocr_simhash, annotation_json FROM annotation_cache "
+                "WHERE app = ? AND title_hash = ? ORDER BY used_at DESC LIMIT ?",
+                (key.app, key.title_hash, _CANDIDATES),
+            ).fetchall()
+            for stored, annotation_json in rows:
+                if ((stored & _MASK64) ^ key.ocr_simhash).bit_count() > MAX_HAMMING:
+                    continue
+                try:
+                    annotation = json.loads(annotation_json)
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                self._conn.execute(
+                    "UPDATE annotation_cache SET used_at = "
+                    "strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
+                    "WHERE app = ? AND title_hash = ? AND ocr_simhash = ?",
+                    (key.app, key.title_hash, stored),
+                )
+                self._conn.commit()
+                return annotation
+        except sqlite3.Error:
+            logger.debug("Annotation cache lookup failed", exc_info=True)
         return None
 
     def store(self, key: CacheKey, annotation: dict) -> None:
-        self._conn.execute(
-            "INSERT OR REPLACE INTO annotation_cache "
-            "(app, title_hash, ocr_simhash, annotation_json) VALUES (?, ?, ?, ?)",
-            (key.app, key.title_hash, _signed(key.ocr_simhash), json.dumps(annotation)),
-        )
-        self._conn.commit()
+        try:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO annotation_cache "
+                "(app, title_hash, ocr_simhash, annotation_json) VALUES (?, ?, ?, ?)",
+                (key.app, key.title_hash, _signed(key.ocr_simhash), json.dumps(annotation)),
+            )
+            self._conn.commit()
+        except sqlite3.Error:
+            logger.debug("Annotation cache store failed", exc_info=True)
 
     def prune(self, *, max_age_days: int = 14, max_rows: int = 20_000) -> int:
         """Drop rows unused for *max_age_days* and the least recently used

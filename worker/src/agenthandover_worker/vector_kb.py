@@ -444,12 +444,13 @@ class VectorKB:
             min_score=min_score,
         )
 
-    def _sync_index(self) -> dict[str, _Row]:
+    def _sync_index(self, *, reload: bool = True) -> dict[str, _Row]:
         """Bring the in-memory index up to date with the table.
 
         Rows written since the last sync are read through the
         ``updated_at`` index; a row count that then disagrees with the
-        table (rows deleted, possibly by another process) reloads it all.
+        table (rows deleted, possibly by another process) reloads it all,
+        once (a writer racing the reload is caught by the next search).
         """
         if self._index is None:
             self._index, self._index_mark = {}, ""
@@ -465,9 +466,9 @@ class VectorKB:
             if updated > self._index_mark:
                 self._index_mark = updated
         (total,) = self._conn.execute("SELECT COUNT(*) FROM vector_store").fetchone()
-        if total != len(self._index):
+        if total != len(self._index) and reload:
             self._index = None
-            return self._sync_index()
+            return self._sync_index(reload=False)
         return self._index
 
     def search_by_vector(
