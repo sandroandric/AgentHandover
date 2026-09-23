@@ -270,7 +270,7 @@ def replay(
     start: datetime,
     end: datetime,
     cassette: Path | None = None,
-    record: bool = False,
+    record: bool | None = None,
     upstream: str | None = None,
     ollama: str | None = None,
     vlm: dict | None = None,
@@ -481,7 +481,7 @@ def main(argv: list[str] | None = None) -> int:
     models = parser.add_mutually_exclusive_group(required=True)
     models.add_argument("--cassette", type=Path, help="Ollama cassette (.jsonl)")
     models.add_argument("--ollama", help="a live Ollama host")
-    parser.add_argument("--record", action="store_true",
+    parser.add_argument("--record", action="store_true", default=None,
                         help="record cassette misses from --upstream")
     parser.add_argument("--upstream", help="Ollama to record from (with --record)")
     parser.add_argument("--vlm", action="append", default=[], metavar="KEY=VALUE",
