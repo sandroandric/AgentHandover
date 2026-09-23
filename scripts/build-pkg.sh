@@ -3,8 +3,20 @@ set -euo pipefail
 
 SCRIPTS_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPTS_DIR/.." && pwd)"
-# Read version from Info.plist (source of truth)
-VERSION="${VERSION:-$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "${REPO_ROOT}/app/AgentHandoverApp/Sources/AgentHandoverApp/Info.plist" 2>/dev/null || echo "0.1.0")}"
+# The version every component carries (Cargo workspace, worker, app,
+# extension); scripts/version.py refuses when they disagree. The Rust
+# binaries are prebuilt with their version compiled in, so a VERSION that
+# differs from the tree's cannot be stamped here: stamp the tree and rebuild.
+REPO_VERSION="$(python3 "${SCRIPTS_DIR}/version.py" check)" || {
+    echo "FATAL: component versions disagree; run: python3 scripts/version.py set <version>" >&2
+    exit 1
+}
+if [ -n "${VERSION:-}" ] && [ "${VERSION}" != "${REPO_VERSION}" ]; then
+    echo "FATAL: VERSION=${VERSION} but the tree is ${REPO_VERSION}." >&2
+    echo "  Run: python3 scripts/version.py set ${VERSION}, then just package-pkg." >&2
+    exit 1
+fi
+VERSION="${REPO_VERSION}"
 PKG_ROOT="$(mktemp -d)"
 SCRIPTS_STAGING="$(mktemp -d)"
 OUTPUT="${REPO_ROOT}/target/AgentHandover-${VERSION}.pkg"
