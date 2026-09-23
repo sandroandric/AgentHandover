@@ -13,14 +13,12 @@ struct MenuBarView: View {
     @StateObject private var agentDetector = AgentDetector()
     @Environment(\.openWindow) private var openWindow
 
-    // Focus recording state
-    @State private var isRecording = false
-    @State private var focusSessionTitle: String = ""
-    @State private var focusSessionId: UUID?
-    @State private var recordingStartTime: Date?
+    // Focus recording: the session itself lives in focus-session.json
+    // (appState.focusState); the view only holds the title being typed and
+    // the clock for the elapsed time.
+    @State private var newSessionTitle: String = ""
     @State private var showTitlePrompt = false
-    @State private var elapsedTimer: Timer?
-    @State private var elapsedSeconds: Int = 0
+    @State private var now = Date()
     @State private var showMoreActions = false
     @State private var wasPausedBeforeFocus = false
     @State private var qaWindowShown = false
@@ -126,11 +124,15 @@ struct MenuBarView: View {
                 delegate.pendingOnboarding = false
                 delegate.showOnboarding()
             }
-            syncFocusState()
         }
-        .onDisappear {
-            elapsedTimer?.invalidate()
-            elapsedTimer = nil
+        // While the popover is open, follow focus-session.json each second so
+        // `agenthandover focus start/stop` shows up here, and tick the clock.
+        .task {
+            while !Task.isCancelled {
+                appState.readFocusSession()
+                if isRecording { now = Date() }
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+            }
         }
     }
 
@@ -216,7 +218,7 @@ struct MenuBarView: View {
 
     private var statusSubtitle: String {
         if isRecording {
-            return "\(focusSessionTitle) \u{00B7} \(formattedElapsed)"
+            return "\(recordingTitle) \u{00B7} \(formattedElapsed)"
         }
         if appState.userStopped { return "Tap Start to resume learning" }
         if appState.health == .starting { return "Waiting for the daemon and worker to report" }
@@ -424,7 +426,7 @@ struct MenuBarView: View {
                                 .easeInOut(duration: 0.8).repeatForever(autoreverses: true),
                                 value: pulsingOpacity
                             )
-                        Text(focusSessionTitle)
+                        Text(recordingTitle)
                             .font(.system(size: 12, weight: .medium))
                             .lineLimit(1)
                         Spacer()
@@ -464,7 +466,7 @@ struct MenuBarView: View {
                     Text("What are you about to do?")
                         .font(.system(size: 12, weight: .medium))
 
-                    TextField("e.g. File expense report", text: $focusSessionTitle)
+                    TextField("e.g. File expense report", text: $newSessionTitle)
                         .textFieldStyle(.roundedBorder)
                         .font(.system(size: 12))
 
@@ -484,7 +486,7 @@ struct MenuBarView: View {
                     HStack {
                         Button("Cancel") {
                             showTitlePrompt = false
-                            focusSessionTitle = ""
+                            newSessionTitle = ""
                         }
                         .font(.system(size: 11))
                         .foregroundColor(.secondary)
@@ -502,7 +504,7 @@ struct MenuBarView: View {
                                     .cornerRadius(6)
                             }
                         } else {
-                            Button(action: { startFocusSession(title: focusSessionTitle) }) {
+                            Button(action: { startFocusSession(title: newSessionTitle) }) {
                                 HStack(spacing: 4) {
                                     Image(systemName: "record.circle")
                                         .font(.system(size: 10))
@@ -515,7 +517,7 @@ struct MenuBarView: View {
                                 .foregroundColor(.white)
                                 .cornerRadius(6)
                             }
-                            .disabled(focusSessionTitle.trimmingCharacters(in: .whitespaces).isEmpty)
+                            .disabled(newSessionTitle.trimmingCharacters(in: .whitespaces).isEmpty)
                         }
                     }
                 }
@@ -529,14 +531,14 @@ struct MenuBarView: View {
                     RoundedRectangle(cornerRadius: cardRadius)
                         .stroke((appState.screenRecordingGranted && appState.accessibilityGranted) ? darkNavy.opacity(0.12) : warmOrange.opacity(0.3), lineWidth: contraBorder)
                     )
-            } else if appState.focusSessionProcessing {
+            } else if let processingTitle {
                 // Focus session stopped, worker is processing
                 HStack(spacing: 10) {
                     ProgressView()
                         .controlSize(.small)
 
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Analyzing \"\(appState.focusSessionTitle)\"")
+                        Text("Analyzing \"\(processingTitle)\"")
                             .font(.system(size: 12, weight: .medium))
                             .lineLimit(1)
                         Text("AI is reviewing your screenshots - 2-5 min")
@@ -788,33 +790,31 @@ struct MenuBarView: View {
 
     // MARK: - Focus Recording Helpers
 
+    private var isRecording: Bool {
+        if case .recording = appState.focusState { return true }
+        return false
+    }
+
+    private var recordingTitle: String {
+        if case .recording(_, let title, _) = appState.focusState { return title }
+        return ""
+    }
+
+    private var processingTitle: String? {
+        if case .processing(let title) = appState.focusState { return title }
+        return nil
+    }
+
     private var pulsingOpacity: Double {
         isRecording ? 0.3 : 1.0
     }
 
     private var formattedElapsed: String {
-        let minutes = elapsedSeconds / 60
-        let seconds = elapsedSeconds % 60
-        return String(format: "%d:%02d", minutes, seconds)
-    }
-
-    private func syncFocusState() {
-        if appState.focusSessionActive {
-            isRecording = true
-            focusSessionTitle = appState.focusSessionTitle
-            focusSessionId = UUID(uuidString: appState.focusSessionId ?? "")
-            if let startedStr = appState.focusSessionStartedAt {
-                let fmt = ISO8601DateFormatter()
-                if let restored = fmt.date(from: startedStr) {
-                    recordingStartTime = restored
-                    elapsedSeconds = Int(Date().timeIntervalSince(restored))
-                    elapsedTimer?.invalidate()
-                    elapsedTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in
-                        elapsedSeconds += 1
-                    }
-                }
-            }
+        guard case .recording(_, _, let startedAt?) = appState.focusState else {
+            return "0:00"
         }
+        let elapsed = max(0, Int(now.timeIntervalSince(startedAt)))
+        return String(format: "%d:%02d", elapsed / 60, elapsed % 60)
     }
 
     private var recordPermissionMessage: String {
@@ -883,17 +883,21 @@ struct MenuBarView: View {
         // Remember user's paused state so we restore it after recording
         wasPausedBeforeFocus = appState.userStopped
 
-        let sessionId = UUID()
-
         // Write focus signal BEFORE starting daemon so it picks up the
         // session on its first event loop iteration — no missed events.
-        let signal: [String: Any] = [
-            "session_id": sessionId.uuidString,
-            "title": title,
-            "started_at": ISO8601DateFormatter().string(from: Date()),
-            "status": "recording"
-        ]
-        writeFocusSignalFile(signal)
+        do {
+            try FocusSignal.start(
+                title: title.trimmingCharacters(in: .whitespacesAndNewlines),
+                in: appState.statusDir
+            )
+        } catch {
+            print("Failed to write focus-session.json: \(error)")
+            return
+        }
+        appState.readFocusSession()
+        now = Date()
+        showTitlePrompt = false
+        newSessionTitle = ""
 
         // Always ensure daemon is running (startDaemon is a no-op if already alive)
         // Then resume capture in case daemon was paused.
@@ -908,45 +912,29 @@ struct MenuBarView: View {
                 let _ = await client.resumeCapture()
             }
         }
-
-        focusSessionId = sessionId
-        focusSessionTitle = title
-        recordingStartTime = Date()
-        isRecording = true
-        showTitlePrompt = false
-        elapsedSeconds = 0
-
-        elapsedTimer?.invalidate()
-        elapsedTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in
-            elapsedSeconds += 1
-        }
     }
 
+    /// Stops the recording session, whether the app or the CLI started it:
+    /// the signal keeps its session id, title and start time.
     private func stopFocusSession() {
-        guard let sessionId = focusSessionId else { return }
-
-        var startedAt: String
-        if let startTime = recordingStartTime {
-            startedAt = ISO8601DateFormatter().string(from: startTime)
-        } else if let existing = readExistingSignalStartedAt() {
-            startedAt = existing
-        } else {
-            startedAt = ISO8601DateFormatter().string(from: Date())
+        do {
+            guard try FocusSignal.stop(in: appState.statusDir) != nil else {
+                appState.readFocusSession()
+                return
+            }
+        } catch {
+            print("Failed to write focus-session.json: \(error)")
+            return
         }
-
-        let signal: [String: Any] = [
-            "session_id": sessionId.uuidString,
-            "title": focusSessionTitle,
-            "started_at": startedAt,
-            "status": "stopped"
-        ]
-        writeFocusSignalFile(signal)
+        // Shows "Analyzing..." immediately so the user knows it's working.
+        appState.readFocusSession()
 
         // Start worker to process the session.
         // If user was paused before recording, send pause_capture to the
         // daemon so it stays alive (future recordings need it) but stops
         // emitting passive events.  If user was observing, keep capturing.
         let restorePaused = wasPausedBeforeFocus
+        wasPausedBeforeFocus = false
         DispatchQueue.global(qos: .userInitiated).async {
             ServiceController.startWorker()
 
@@ -964,51 +952,6 @@ struct MenuBarView: View {
                 }
             }
         }
-
-        elapsedTimer?.invalidate()
-        elapsedTimer = nil
-        isRecording = false
-
-        // Show "Analyzing..." immediately so the user knows it's working
-        appState.focusSessionProcessing = true
-        appState.focusSessionTitle = focusSessionTitle
-
-        focusSessionId = nil
-        recordingStartTime = nil
-        focusSessionTitle = ""
-        elapsedSeconds = 0
-    }
-
-    private func writeFocusSignalFile(_ signal: [String: Any]) {
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        let dir = home.appendingPathComponent("Library/Application Support/agenthandover")
-        let target = dir.appendingPathComponent("focus-session.json")
-        let tmp = dir.appendingPathComponent(".focus-session.json.tmp")
-
-        do {
-            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-            let data = try JSONSerialization.data(withJSONObject: signal, options: .prettyPrinted)
-            try data.write(to: tmp, options: .atomic)
-            if FileManager.default.fileExists(atPath: target.path) {
-                try FileManager.default.removeItem(at: target)
-            }
-            try FileManager.default.moveItem(at: tmp, to: target)
-        } catch {
-            print("Failed to write focus-session.json: \(error)")
-        }
-    }
-
-    private func readExistingSignalStartedAt() -> String? {
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        let path = home.appendingPathComponent(
-            "Library/Application Support/agenthandover/focus-session.json"
-        )
-        guard let data = try? Data(contentsOf: path),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let startedAt = json["started_at"] as? String else {
-            return nil
-        }
-        return startedAt
     }
 
     private static let windowIdToTitle: [String: String] = [
