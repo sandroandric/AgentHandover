@@ -24,6 +24,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from agenthandover_worker.json_extract import extract_json
+from agenthandover_worker.model_profiles import STANDARD_TIER
 from agenthandover_worker.ollama import OllamaClient
 
 logger = logging.getLogger(__name__)
@@ -243,7 +244,7 @@ def _parse_json_response(raw: str) -> dict | None:
 class SynthesizerConfig:
     """Configuration for the behavioral synthesizer."""
 
-    model: str = "qwen3.5:4b"
+    model: str = STANDARD_TIER.sop_model  # main() passes the configured model
     ollama_host: str = "http://localhost:11434"
     # Output budget including any thinking tokens (plan: synthesis <= 3k).
     num_predict: int = 3000

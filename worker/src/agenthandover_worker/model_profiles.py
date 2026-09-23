@@ -577,6 +577,10 @@ TIERS: tuple[Tier, ...] = (
 )
 
 
+# The tier every Mac can run: the library default of every model setting.
+STANDARD_TIER = TIERS[0]
+
+
 def machine_ram_gb() -> int:
     """Physical memory in whole GiB (what "a 16 GB Mac" reports)."""
     try:

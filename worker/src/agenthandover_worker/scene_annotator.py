@@ -27,6 +27,7 @@ from pathlib import Path
 
 from agenthandover_worker.event_helpers import display_name, is_bundle_id, parse_json_field
 from agenthandover_worker.json_extract import extract_json
+from agenthandover_worker.model_profiles import STANDARD_TIER
 from agenthandover_worker.ollama import (  # noqa: F401 - OllamaUnavailable re-exported
     OllamaClient,
     OllamaUnavailable,
@@ -137,7 +138,7 @@ ANNOTATION_KEEP_ALIVE = "30m"
 class AnnotationConfig:
     """Configuration for the scene annotator."""
 
-    model: str = "qwen3.5:2b"
+    model: str = STANDARD_TIER.annotation_model  # main() passes the configured model
     ollama_host: str = "http://localhost:11434"
     stale_skip_count: int = 3
     sliding_window_size: int = 3

@@ -21,6 +21,7 @@ import time
 from dataclasses import dataclass
 
 from agenthandover_worker.json_extract import extract_json
+from agenthandover_worker.model_profiles import STANDARD_TIER
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +33,7 @@ SESSION_GAP_THRESHOLD = 600  # 10 minutes
 class DiffConfig:
     """Configuration for the frame differ."""
 
-    model: str = "qwen3.5:2b"
+    model: str = STANDARD_TIER.annotation_model  # main() passes the configured model
     ollama_host: str = "http://localhost:11434"
     num_predict: int = 400
     session_gap_seconds: int = SESSION_GAP_THRESHOLD
