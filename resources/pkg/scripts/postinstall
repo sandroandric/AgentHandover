@@ -267,6 +267,8 @@ if [ "${NO_SERVICES}" != "1" ]; then
         as_user tccutil reset ScreenCapture com.agenthandover.daemon >/dev/null 2>&1 || true
         as_user tccutil reset Accessibility com.agenthandover.daemon >/dev/null 2>&1 || true
         as_user defaults write com.agenthandover.app hasCompletedOnboarding -bool false || warn "could not reset onboarding state"
+        # A setup step saved by an earlier install (the app resumes setup there).
+        as_user defaults delete com.agenthandover.app onboardingStep >/dev/null 2>&1 || true
     fi
     as_user launchctl disable "gui/${CONSOLE_UID}/com.agenthandover.daemon" 2>/dev/null || true
 fi
