@@ -14,6 +14,7 @@ import logging
 import sqlite3
 import uuid
 from pathlib import Path
+from collections.abc import Callable
 from typing import Self
 
 logger = logging.getLogger(__name__)
@@ -43,6 +44,8 @@ class WorkerDB:
 
         uri = f"file:{resolved}?mode=ro"
         self._conn = sqlite3.connect(uri, uri=True)
+        # Worker-owned tables already created through this instance.
+        self._ensured: set[str] = set()
         self._conn.row_factory = sqlite3.Row
 
         # Enable WAL reads — even though we are read-only, setting the
@@ -62,6 +65,30 @@ class WorkerDB:
     # ------------------------------------------------------------------
     # Query helpers
     # ------------------------------------------------------------------
+
+    def _ensure_once(self, ensure: "Callable[[sqlite3.Connection], None]") -> None:
+        """Run a ``CREATE TABLE IF NOT EXISTS`` helper once per instance.
+
+        Readers call this before querying a worker-owned table; after the
+        first success they go straight to the held read connection instead
+        of opening a writable connection per call.
+        """
+        name = ensure.__name__
+        if name in self._ensured:
+            return
+        db_path = self._get_writable_path()
+        if not db_path:
+            return
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute("PRAGMA busy_timeout = 5000;")
+            ensure(conn)
+            conn.commit()
+            self._ensured.add(name)
+        except sqlite3.Error:
+            pass
+        finally:
+            conn.close()
 
     def _refresh_read_snapshot(self) -> None:
         """End any implicit read transaction so the next SELECT sees fresh data.
@@ -210,6 +237,93 @@ class WorkerDB:
             (limit,),
         )
         return self._rows_to_dicts(cur.fetchall())
+
+    def expire_annotation_backlog(self, max_age_hours: float = 24.0) -> list[dict]:
+        """Give up on passive frames that waited too long for annotation.
+
+        Pending rows outside any focus session and older than
+        *max_age_hours* are marked ``skipped`` (the passive loop takes the
+        oldest first, so an old backlog would otherwise hold back today's
+        frames).  Returns the expired rows so their screenshots can be
+        deleted.
+        """
+        where = (
+            "annotation_status = 'pending' "
+            "AND json_extract(metadata_json, '$.focus_session_id') IS NULL "
+            "AND julianday(timestamp) < julianday('now') - ? / 24.0"
+        )
+        rows = self._rows_to_dicts(self._conn.execute(
+            f"SELECT id, metadata_json, artifact_ids_json FROM events WHERE {where}",
+            (max_age_hours,),
+        ).fetchall())
+        if not rows:
+            return []
+        db_path = self._get_writable_path()
+        if not db_path:
+            return []
+        write_conn = sqlite3.connect(db_path)
+        try:
+            write_conn.execute("PRAGMA busy_timeout = 5000;")
+            write_conn.executemany(
+                "UPDATE events SET annotation_status = 'skipped' "
+                "WHERE id = ? AND annotation_status = 'pending'",
+                [(r["id"],) for r in rows],
+            )
+            write_conn.commit()
+        except sqlite3.Error as exc:
+            logger.error("Failed to expire the annotation backlog: %s", exc)
+            return []
+        finally:
+            write_conn.close()
+        logger.info(
+            "Expired %d passive frame(s) older than %.0fh without annotation",
+            len(rows), max_age_hours,
+        )
+        return rows
+
+    # ------------------------------------------------------------------
+    # Worker state (small persisted values: dates, counters)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _ensure_worker_state_table(write_conn: sqlite3.Connection) -> None:
+        write_conn.execute(
+            "CREATE TABLE IF NOT EXISTS worker_state ("
+            "  key TEXT PRIMARY KEY,"
+            "  value TEXT NOT NULL"
+            ")"
+        )
+
+    def get_state(self, key: str) -> str | None:
+        """A value the worker persisted with :meth:`set_state`, or None."""
+        self._ensure_once(self._ensure_worker_state_table)
+        try:
+            row = self._conn.execute(
+                "SELECT value FROM worker_state WHERE key = ?", (key,),
+            ).fetchone()
+        except sqlite3.OperationalError:
+            return None
+        return row[0] if row else None
+
+    def set_state(self, key: str, value: str) -> bool:
+        db_path = self._get_writable_path()
+        if not db_path:
+            return False
+        write_conn = sqlite3.connect(db_path)
+        try:
+            write_conn.execute("PRAGMA busy_timeout = 5000;")
+            self._ensure_worker_state_table(write_conn)
+            write_conn.execute(
+                "INSERT OR REPLACE INTO worker_state (key, value) VALUES (?, ?)",
+                (key, value),
+            )
+            write_conn.commit()
+            return True
+        except sqlite3.Error as exc:
+            logger.error("Failed to persist worker state %s: %s", key, exc)
+            return False
+        finally:
+            write_conn.close()
 
     def get_recent_annotations(
         self,
@@ -735,19 +849,7 @@ class WorkerDB:
         """
         import json as _json
 
-        # Ensure table exists before querying (read-only conn can't create)
-        # We need to use a writable connection to ensure the table exists.
-        db_path = self._get_writable_path()
-        if db_path:
-            init_conn = sqlite3.connect(db_path)
-            try:
-                init_conn.execute("PRAGMA busy_timeout = 5000;")
-                self._ensure_episode_store_table(init_conn)
-                init_conn.commit()
-            except sqlite3.Error:
-                pass
-            finally:
-                init_conn.close()
+        self._ensure_once(self._ensure_episode_store_table)
 
         try:
             cursor = self._conn.execute(
@@ -767,6 +869,25 @@ class WorkerDB:
         except sqlite3.OperationalError:
             # Table doesn't exist yet (first run)
             return []
+
+    def episode_steps_watermark(self, max_age_days: int = 14) -> tuple[int, int]:
+        """``(COUNT(*), MAX(rowid))`` of the stored episodes that
+        :meth:`get_all_episode_steps` would load.
+
+        Any saved or re-saved episode raises the rowid (INSERT OR REPLACE
+        writes a new row) and an episode ageing out lowers the count, so an
+        unchanged watermark means SOP mining would see the same input.
+        """
+        self._ensure_once(self._ensure_episode_store_table)
+        try:
+            count, top = self._conn.execute(
+                "SELECT COUNT(*), COALESCE(MAX(rowid), 0) FROM translated_episodes "
+                "WHERE created_at >= strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?)",
+                (f"-{max_age_days} days",),
+            ).fetchone()
+        except sqlite3.OperationalError:
+            return (0, 0)
+        return (count, top)
 
     def cleanup_old_episodes(self, max_age_days: int = 14) -> int:
         """Remove episodes older than *max_age_days*.
@@ -799,17 +920,7 @@ class WorkerDB:
 
     def count_stored_episodes(self) -> int:
         """Return the number of episodes in the store."""
-        db_path = self._get_writable_path()
-        if db_path:
-            init_conn = sqlite3.connect(db_path)
-            try:
-                init_conn.execute("PRAGMA busy_timeout = 5000;")
-                self._ensure_episode_store_table(init_conn)
-                init_conn.commit()
-            except sqlite3.Error:
-                pass
-            finally:
-                init_conn.close()
+        self._ensure_once(self._ensure_episode_store_table)
 
         try:
             cursor = self._conn.execute(
@@ -1010,17 +1121,7 @@ class WorkerDB:
         """Return all segments for a given cluster, ordered by start time."""
         import json as _json
 
-        db_path = self._get_writable_path()
-        if db_path:
-            init_conn = sqlite3.connect(db_path)
-            try:
-                init_conn.execute("PRAGMA busy_timeout = 5000;")
-                self._ensure_task_segments_table(init_conn)
-                init_conn.commit()
-            except sqlite3.Error:
-                pass
-            finally:
-                init_conn.close()
+        self._ensure_once(self._ensure_task_segments_table)
 
         self._refresh_read_snapshot()
         try:
@@ -1062,17 +1163,7 @@ class WorkerDB:
         Used by the passive discovery pipeline to find clusters ready for
         SOP generation.
         """
-        db_path = self._get_writable_path()
-        if db_path:
-            init_conn = sqlite3.connect(db_path)
-            try:
-                init_conn.execute("PRAGMA busy_timeout = 5000;")
-                self._ensure_task_segments_table(init_conn)
-                init_conn.commit()
-            except sqlite3.Error:
-                pass
-            finally:
-                init_conn.close()
+        self._ensure_once(self._ensure_task_segments_table)
 
         self._refresh_read_snapshot()
         try:
@@ -1172,17 +1263,7 @@ class WorkerDB:
 
         Does NOT include ``sop_json`` in the result (too large for list views).
         """
-        db_path = self._get_writable_path()
-        if db_path:
-            init_conn = sqlite3.connect(db_path)
-            try:
-                init_conn.execute("PRAGMA busy_timeout = 5000;")
-                self._ensure_generated_sops_table(init_conn)
-                init_conn.commit()
-            except sqlite3.Error:
-                pass
-            finally:
-                init_conn.close()
+        self._ensure_once(self._ensure_generated_sops_table)
 
         self._refresh_read_snapshot()
         try:
@@ -1206,17 +1287,7 @@ class WorkerDB:
 
     def get_generated_sop(self, sop_id: str) -> dict | None:
         """Return a single SOP by ID, including ``sop_json`` parsed back to dict."""
-        db_path = self._get_writable_path()
-        if db_path:
-            init_conn = sqlite3.connect(db_path)
-            try:
-                init_conn.execute("PRAGMA busy_timeout = 5000;")
-                self._ensure_generated_sops_table(init_conn)
-                init_conn.commit()
-            except sqlite3.Error:
-                pass
-            finally:
-                init_conn.close()
+        self._ensure_once(self._ensure_generated_sops_table)
 
         self._refresh_read_snapshot()
         try:
@@ -1238,17 +1309,7 @@ class WorkerDB:
 
     def get_generated_sop_by_slug(self, slug: str) -> dict | None:
         """Return the most recent SOP matching *slug*, including parsed ``sop_json``."""
-        db_path = self._get_writable_path()
-        if db_path:
-            init_conn = sqlite3.connect(db_path)
-            try:
-                init_conn.execute("PRAGMA busy_timeout = 5000;")
-                self._ensure_generated_sops_table(init_conn)
-                init_conn.commit()
-            except sqlite3.Error:
-                pass
-            finally:
-                init_conn.close()
+        self._ensure_once(self._ensure_generated_sops_table)
 
         self._refresh_read_snapshot()
         try:
@@ -1325,17 +1386,7 @@ class WorkerDB:
 
     def get_approved_sops(self) -> list[dict]:
         """Return all approved SOPs, including parsed ``sop_json``."""
-        db_path = self._get_writable_path()
-        if db_path:
-            init_conn = sqlite3.connect(db_path)
-            try:
-                init_conn.execute("PRAGMA busy_timeout = 5000;")
-                self._ensure_generated_sops_table(init_conn)
-                init_conn.commit()
-            except sqlite3.Error:
-                pass
-            finally:
-                init_conn.close()
+        self._ensure_once(self._ensure_generated_sops_table)
 
         self._refresh_read_snapshot()
         try:
@@ -1415,17 +1466,7 @@ class WorkerDB:
 
         Sorted by created_at DESC (newest first).
         """
-        db_path = self._get_writable_path()
-        if db_path:
-            init_conn = sqlite3.connect(db_path)
-            try:
-                init_conn.execute("PRAGMA busy_timeout = 5000;")
-                self._ensure_failed_generations_table(init_conn)
-                init_conn.commit()
-            except sqlite3.Error:
-                pass
-            finally:
-                init_conn.close()
+        self._ensure_once(self._ensure_failed_generations_table)
 
         self._refresh_read_snapshot()
         try:
@@ -1445,17 +1486,7 @@ class WorkerDB:
 
     def get_failed_generation(self, failure_id: str) -> dict | None:
         """Return a single failure with parsed context_json."""
-        db_path = self._get_writable_path()
-        if db_path:
-            init_conn = sqlite3.connect(db_path)
-            try:
-                init_conn.execute("PRAGMA busy_timeout = 5000;")
-                self._ensure_failed_generations_table(init_conn)
-                init_conn.commit()
-            except sqlite3.Error:
-                pass
-            finally:
-                init_conn.close()
+        self._ensure_once(self._ensure_failed_generations_table)
 
         self._refresh_read_snapshot()
         try:

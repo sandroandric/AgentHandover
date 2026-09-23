@@ -21,6 +21,7 @@ AC power, a locked screen, or two minutes without input (``ioreg``).
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import platform
@@ -451,6 +452,71 @@ def parse_screen_locked(ioreg_plist: bytes) -> bool:
         isinstance(user, dict) and user.get("CGSSessionScreenIsLocked") is True
         for user in users
     )
+
+
+# ---------------------------------------------------------------------------
+# AnnotationBudget — daily cap on passive annotation
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class AnnotationBudget:
+    """Frames and Ollama compute spent on passive annotation in one local day.
+
+    ``[vlm] annotation_max_frames_per_day`` and
+    ``annotation_max_compute_minutes_per_day`` set the caps; compute is
+    Ollama's own ``prompt_eval_duration + eval_duration``.  The counters
+    belong to ``date`` and start over when :meth:`roll` sees a new one.
+    Focus recordings are not charged.
+    """
+
+    max_frames: int
+    max_compute_seconds: float
+    date: str = ""
+    frames: int = 0
+    compute_seconds: float = 0.0
+
+    def roll(self, today: str) -> None:
+        if today != self.date:
+            self.date, self.frames, self.compute_seconds = today, 0, 0.0
+
+    def exhausted(self) -> bool:
+        return (
+            self.frames >= self.max_frames
+            or self.compute_seconds >= self.max_compute_seconds
+        )
+
+    def charge(self, compute_seconds: float) -> None:
+        """Count one frame sent to the model and its compute."""
+        self.frames += 1
+        self.compute_seconds += max(compute_seconds, 0.0)
+
+    def to_json(self) -> str:
+        return json.dumps({
+            "date": self.date,
+            "frames": self.frames,
+            "compute_seconds": round(self.compute_seconds, 3),
+        })
+
+    def load(self, raw: str | None) -> None:
+        """Restore the counters persisted by :meth:`to_json` (if any)."""
+        try:
+            saved = json.loads(raw) if raw else {}
+            self.date = str(saved.get("date", ""))
+            self.frames = int(saved.get("frames", 0))
+            self.compute_seconds = float(saved.get("compute_seconds", 0.0))
+        except (ValueError, TypeError, AttributeError):
+            self.date, self.frames, self.compute_seconds = "", 0, 0.0
+
+    def status(self) -> dict:
+        """The counters as published in ``worker-status.json``."""
+        return {
+            "date": self.date,
+            "frames": self.frames,
+            "max_frames": self.max_frames,
+            "compute_minutes": round(self.compute_seconds / 60.0, 2),
+            "max_compute_minutes": round(self.max_compute_seconds / 60.0, 2),
+        }
 
 
 # ---------------------------------------------------------------------------

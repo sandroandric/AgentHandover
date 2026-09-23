@@ -66,6 +66,8 @@ class KnowledgeBase:
 
     def __init__(self, root: Path | None = None) -> None:
         self._root = Path(root) if root is not None else DEFAULT_KNOWLEDGE_DIR
+        # list_procedures() cache: file name -> ((mtime_ns, size, inode), data)
+        self._procedure_cache: dict[str, tuple[tuple[int, int, int], dict]] = {}
 
     @property
     def root(self) -> Path:
@@ -115,15 +117,40 @@ class KnowledgeBase:
         return self._read_json(path)
 
     def list_procedures(self) -> list[dict]:
-        """List all procedures with summary info."""
+        """Every procedure in the procedures directory, by file name.
+
+        Parsed files are cached by ``(st_mtime_ns, st_size, st_ino)``: a
+        call that finds no file changed parses nothing.  The returned dicts
+        are shared with the cache, so callers must not modify them (edit a
+        copy from :meth:`get_procedure` and save it instead).
+        """
         proc_dir = self._root / _PROCEDURES_DIR
-        if not proc_dir.is_dir():
+        try:
+            entries = sorted(
+                (e for e in os.scandir(proc_dir)
+                 if e.name.endswith(".json") and not e.name.startswith(".")),
+                key=lambda e: e.name,
+            )
+        except OSError:  # no directory yet
             return []
+        cache = self._procedure_cache
+        fresh: dict[str, tuple[tuple[int, int, int], dict]] = {}
         results = []
-        for p in sorted(proc_dir.glob("*.json")):
-            data = self._read_json(p)
+        for entry in entries:
+            try:
+                st = entry.stat()
+            except OSError:
+                continue
+            signature = (st.st_mtime_ns, st.st_size, st.st_ino)
+            hit = cache.get(entry.name)
+            if hit is not None and hit[0] == signature:
+                data = hit[1]
+            else:
+                data = self._read_json(Path(entry.path))
             if data is not None:
+                fresh[entry.name] = (signature, data)
                 results.append(data)
+        self._procedure_cache = fresh
         return results
 
     def backfill_procedures(self) -> int:

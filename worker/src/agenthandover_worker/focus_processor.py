@@ -201,7 +201,7 @@ class FocusProcessor:
             events, FOCUS_KEYFRAMES,
             click_times=click_times, clipboard_ids=clipboard_ids,
         )
-        self._drop_frames(db, events, keyframes, screenshots_dir)
+        all_frames = events
         events = select_keyframes(
             keyframes, SOP_KEYFRAMES,
             click_times=click_times, clipboard_ids=clipboard_ids,
@@ -211,16 +211,18 @@ class FocusProcessor:
         self._remaining_dir = screenshots_dir
 
         # Step 1: Ensure the SOP keyframes are annotated.  During the transport
-        # backoff, don't hit Ollama at all; the session waits.
+        # backoff, don't hit Ollama at all; the session waits untouched.
         needs_annotation = any(
             e.get("annotation_status", "pending") not in _ANNOTATION_DONE
             for e in events
         )
         if needs_annotation and not self.annotator.ready():
+            self._remaining = []
             return GeneratedSOP(
                 sop={}, success=False, deferred=True,
                 error="Annotation deferred: Ollama unavailable",
             )
+        self._drop_frames(db, all_frames, keyframes, screenshots_dir)
         ann_stats = self._ensure_annotations(db, events, screenshots_dir)
         logger.info(
             "Focus v2 annotation: %d annotated, %d skipped, %d failed, %d deferred",
