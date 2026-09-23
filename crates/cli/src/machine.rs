@@ -732,9 +732,16 @@ pub fn diagnose_headroom(
                 Level::Warn,
                 format!("Swap in use: {} (more than {})", gb(swap), gb(SWAP_LIMIT_BYTES)),
                 vec![
-                    "The Mac is short of memory; the worker does not load the Skills model \
-                     while this lasts."
-                        .into(),
+                    if ollama::model_installed(&[annotation.to_string()], sop) {
+                        // One model for both roles: nothing extra is loaded.
+                        "The Mac is short of memory; any app that loads more now pushes it \
+                         further into swap. AgentHandover keeps using its one loaded model."
+                            .into()
+                    } else {
+                        "The Mac is short of memory; the worker does not load the Skills model \
+                         while this lasts."
+                            .into()
+                    },
                     "Fix: close memory-heavy apps, or restart the Mac.".into(),
                 ],
             ));
@@ -1315,11 +1322,20 @@ mod tests {
     }
 
     #[test]
+    fn heavy_swap_with_two_models_holds_back_the_skills_model() {
+        let t = &tiers();
+        let (_, f) = diagnose_headroom(t, &mem(12 * GB, &[], Some(44 * GB), None), "Performance", "qwen3.5:4b", "gemma4:12b-it-qat");
+        assert!(text(&f[1]).contains("does not load the Skills model"), "{}", text(&f[1]));
+    }
+
+    #[test]
     fn heavy_swap_and_a_full_disk_warn() {
         let t = &tiers();
         let (_, f) = diagnose_headroom(t, &mem(12 * GB, &[], Some(44 * GB), Some(4 * GB)), "Standard", "qwen3.5:4b", "qwen3.5:4b");
         assert_eq!(f[1].level, Level::Warn);
         assert_eq!(f[1].title, "Swap in use: 44.0 GB (more than 8.0 GB)");
+        // One model for both roles: the worker loads nothing extra.
+        assert!(text(&f[1]).contains("keeps using its one loaded model"), "{}", text(&f[1]));
         assert_eq!(f[2].level, Level::Warn);
         assert_eq!(f[2].title, "Free disk: 4.0 GB (less than 10.0 GB)");
     }
