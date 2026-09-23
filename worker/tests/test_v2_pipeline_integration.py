@@ -303,7 +303,7 @@ class TestProcessAnnotations:
         annotator = SceneAnnotator(AnnotationConfig())
         call_args_capture: list = []
 
-        def _capture_annotate(event, *, recent_annotations=None, artifact_dir=None):
+        def _capture_annotate(event, *, recent_annotations=None, artifact_dir=None, page=None):
             call_args_capture.append({
                 "event_id": event.get("id"),
                 "recent_annotations": recent_annotations,

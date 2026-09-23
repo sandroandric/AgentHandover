@@ -80,27 +80,32 @@ class _Recorder:
         return resp
 
 
-def _valid_annotation() -> dict:
-    return {
+def _valid_annotation(**overrides) -> dict:
+    annotation = {
         "app": "Google Chrome",
         "location": "https://example.com/inbox",
-        "visible_content": {"headings": ["Inbox"], "labels": [], "values": []},
-        "ui_state": {
-            "active_element": "", "modals_or_popups": "", "scroll_position": "top",
-        },
-        "key_text": {
-            "email_addresses": [], "urls": [], "names": [],
-            "typed_text": "", "selected_text": "",
-        },
-        "compose": {
-            "is_compose_window_open": False, "recipient": "", "subject": "",
-            "body_first_line": "", "send_button_state": "not_visible",
-        },
         "task_context": {
-            "what_doing": "Reading the inbox", "likely_next": "Open a message",
-            "is_workflow": False,
+            "is_workflow": False, "what_doing": "Reading the inbox",
+            "next_likely": "Open a message",
         },
+        "ui_state": {"active_element": "", "modal": ""},
+        "key_text": {"typed_text": "", "urls": [], "emails": []},
+        "visible_items": [],
+        "needs_vision": False,
     }
+    annotation.update(overrides)
+    return annotation
+
+
+# Enough screen text for a text-first call (TEXT_FIRST_MIN_CHARS).
+_INBOX_OCR = {"ocr": {"elements": [
+    {"text": "Inbox (3)"},
+    {"text": "Quarterly report draft - please review the attached numbers"},
+    {"text": "Team offsite: agenda and travel details for next month"},
+    {"text": "Your invoice for September is ready to download"},
+    {"text": "Weekly metrics dashboard summary for the growth team"},
+    {"text": "Compose"},
+]}}
 
 
 def _event_with_screenshot(tmp_path: Path, event_id: str = "evt-1", **extra) -> dict:
@@ -149,7 +154,9 @@ class TestAnnotationRequest:
             delete_screenshot_after_processing=False,
         ))
         with patch("urllib.request.urlopen", rec):
-            result = annotator.annotate_event(_event_with_screenshot(tmp_path))
+            result = annotator.annotate_event(
+                _event_with_screenshot(tmp_path, metadata=_INBOX_OCR),
+            )
 
         assert result.status == "completed"
         assert len(rec.requests) == 1
@@ -161,10 +168,13 @@ class TestAnnotationRequest:
         assert body["format"] == ANNOTATION_JSON_SCHEMA
         assert body["keep_alive"] == "30m"
         assert body["think"] is False
-        assert body["options"]["num_predict"] == profile.ann_num_predict == 600
+        assert body["options"]["num_predict"] == profile.ann_num_predict == 300
         assert body["options"]["num_ctx"] == profile.ann_num_ctx == 4096
         assert body["options"]["temperature"] == 0.0
-        assert body["images"]
+        # Text first: enough screen text, so no image.
+        assert "images" not in body
+        assert body["prompt"].endswith(sa.TEXT_REQUEST)
+        assert "_vision" not in result.annotation
         # The static instructions travel as the system prompt (cacheable
         # prefix); the per-frame prompt holds only frame-specific text.
         assert body["system"] == annotation_system_prompt(profile.ann_system)
@@ -174,20 +184,33 @@ class TestAnnotationRequest:
     @pytest.mark.parametrize("model", sorted(_PROFILES))
     def test_every_profile_uses_the_annotation_budget(self, model):
         profile = get_profile(model)
-        assert profile.ann_num_predict == 600
+        assert profile.ann_num_predict == 300
         assert profile.ann_num_ctx == 4096
         assert profile.ann_temperature == 0.0
         assert profile.ann_think is False
 
-    def test_schema_keeps_the_current_21_leaves(self):
-        # C3a keeps the current annotation schema; C3b compacts it.
-        assert _count_leaves(ANNOTATION_JSON_SCHEMA) == 21
+    def test_schema_is_the_compact_12_leaves(self):
+        assert _count_leaves(ANNOTATION_JSON_SCHEMA) == 12
+        assert list(ANNOTATION_JSON_SCHEMA["properties"]) == [
+            "app", "location", "task_context", "ui_state", "key_text",
+            "visible_items", "needs_vision",
+        ]
         assert set(ANNOTATION_JSON_SCHEMA["required"]) == set(
             ANNOTATION_JSON_SCHEMA["properties"]
         )
+        item = ANNOTATION_JSON_SCHEMA["properties"]["visible_items"]["items"]
+        assert set(item["properties"]) == {"label", "chosen"}
         # Every key the instructions describe is in the schema.
         for key in ANNOTATION_JSON_SCHEMA["properties"]:
             assert f'"{key}"' in sa.ANNOTATION_INSTRUCTIONS
+        for key in ("is_workflow", "what_doing", "next_likely", "active_element",
+                    "modal", "typed_text", "urls", "emails", "label", "chosen"):
+            assert f'"{key}"' in sa.ANNOTATION_INSTRUCTIONS
+
+    def test_default_annotation_model_is_qwen_4b(self):
+        from agenthandover_worker.config import VlmConfig
+
+        assert AnnotationConfig().model == VlmConfig().annotation_model == "qwen3.5:4b"
 
     def test_invalid_output_is_not_asked_twice(self, tmp_path):
         rec = _Recorder({"response": '{"app": "Chrome", "loc', "done_reason": "length"})
@@ -351,7 +374,7 @@ class TestScreenTextInjection:
         inside, after = body.split("\n</untrusted_screen_text>", 1)
         assert "Inbox" in inside and "WINDOW: evil" in inside
         assert "</untrusted_screen_text>" not in inside
-        assert "Annotate this screenshot" in after
+        assert after.endswith(sa.TEXT_REQUEST)
 
     def test_guard_neutralises_injection_and_reports_it(self):
         text, record = sa.guard_screen_text(f"Inbox (3)\n{INJECTION}\nSend")

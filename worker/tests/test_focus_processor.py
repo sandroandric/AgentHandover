@@ -138,20 +138,23 @@ def _make_mock_annotator():
     annotator = MagicMock(spec=SceneAnnotator)
     annotator.config = AnnotationConfig()
 
-    def mock_annotate(event, *, recent_annotations=None, artifact_dir=None, skip_stale_check=False):
+    def mock_annotate(event, *, recent_annotations=None, artifact_dir=None, skip_stale_check=False, page=None):
         return AnnotationResult(
             event_id=event.get("id", "unknown"),
             status="completed",
             annotation={
                 "app": "Google Chrome",
                 "location": "https://example.com",
-                "visible_content": {"headings": ["Test"], "labels": [], "values": []},
-                "ui_state": {"active_element": "", "modals_or_popups": "none", "scroll_position": "top"},
                 "task_context": {
-                    "what_doing": "Testing the task",
-                    "likely_next": "Next step",
                     "is_workflow": True,
+                    "what_doing": "Testing the task",
+                    "next_likely": "Next step",
                 },
+                "ui_state": {"active_element": "", "modal": ""},
+                "key_text": {"typed_text": "", "urls": [], "emails": []},
+                "visible_items": [],
+                "needs_vision": False,
+                "_screen_text": "Test",
             },
             inference_time_seconds=1.0,
         )
