@@ -64,6 +64,31 @@ def test_focus_packet_matches_the_reviewed_golden(
     assert_matches_golden("focus_dailynews.claude-skill.md", render_packet(proc, target="claude-skill"))
 
 
+def test_focus_recording_bypasses_a_closed_hourly_gate(
+    events_db, worker, clock, temp_home, cassette,
+) -> None:
+    """With passive annotation's hourly gate already closed, the focus
+    recording still becomes the golden Skill, and none of its model calls
+    (annotation, diffs, SOP) is charged to the passive budget."""
+    run = start_focus_run(
+        events_db=events_db, worker=worker, clock=clock,
+        temp_home=temp_home, cassette=cassette,
+        vlm={"annotation_max_frames_per_hour": 1},
+    )
+    budget = run.worker.annotation_budget
+    budget.roll(clock.now())
+    budget.charge_frame(model_call=True)
+    assert budget.pause_reason() == "annotation_hourly_budget_exhausted"
+    spent = (budget.frames, budget.compute_seconds)
+
+    proc = tick_until_skill(run, clock)
+
+    assert run.tape.served, "the focus run called no model"
+    assert (budget.frames, budget.compute_seconds) == spent
+    assert budget.pause_reason() == "annotation_hourly_budget_exhausted"
+    assert_matches_golden("focus_dailynews.claude-skill.md", render_packet(proc, target="claude-skill"))
+
+
 def test_focus_run_stays_within_its_model_budget(
     events_db, worker, clock, temp_home, cassette,
 ) -> None:

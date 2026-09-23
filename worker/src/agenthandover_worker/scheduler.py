@@ -28,10 +28,13 @@ import platform
 import plistlib
 import subprocess
 import xml.parsers.expat
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, time
 from time import monotonic
+
+from agenthandover_worker.ops_telemetry import MODEL_USAGE
 
 logger = logging.getLogger(__name__)
 
@@ -455,47 +458,116 @@ def parse_screen_locked(ioreg_plist: bytes) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# AnnotationBudget — daily cap on passive annotation
+# AnnotationBudget — daily and hourly caps on passive model use
 # ---------------------------------------------------------------------------
+
+HOUR_SECONDS = 3600.0
+DAILY_BUDGET_REASON = "annotation_budget_exhausted"
+HOURLY_BUDGET_REASON = "annotation_hourly_budget_exhausted"
+
+
+def model_compute_seconds() -> float:
+    """Ollama's prompt + generation seconds over every model since start-up."""
+    return sum(
+        usage.get("prompt_eval_seconds", 0.0) + usage.get("eval_seconds", 0.0)
+        for usage in MODEL_USAGE.snapshot().values()
+    )
 
 
 @dataclass
 class AnnotationBudget:
-    """Frames and Ollama compute spent on passive annotation in one local day.
+    """What passive model use has spent in the local day and the last hour.
 
-    ``[vlm] annotation_max_frames_per_day`` and
-    ``annotation_max_compute_minutes_per_day`` set the caps; compute is
-    Ollama's own ``prompt_eval_duration + eval_duration``.  The counters
-    belong to ``date`` and start over when :meth:`roll` sees a new one.
-    Focus recordings are not charged.
+    Two caps per local day (``[vlm] annotation_max_frames_per_day``:
+    frames sent to the model, cache hits free; and
+    ``annotation_max_compute_minutes_per_day``) and two per rolling hour
+    (``annotation_max_frames_per_hour``: frames annotated, cache hits
+    included, since each one feeds the diff, classification and search
+    steps; and ``annotation_max_compute_minutes_per_hour``).  Compute is
+    Ollama's own ``prompt_eval_duration + eval_duration`` of every model
+    call made under :func:`charged_to`: annotation, activity
+    classification, frame diffs, passive discovery.  Focus recordings are
+    not charged.
+
+    :meth:`roll` sets the time: the day's counters start over on a new
+    date, the hour's charges older than an hour drop out.
     """
 
     max_frames: int
     max_compute_seconds: float
+    max_frames_per_hour: int = 60
+    max_compute_seconds_per_hour: float = 600.0
     date: str = ""
     frames: int = 0
     compute_seconds: float = 0.0
+    # Epoch seconds of the last roll; charges are stamped with it.
+    now: float = 0.0
+    # [time, frames annotated, compute seconds] per charge in the last hour.
+    recent: list = field(default_factory=list)
 
-    def roll(self, today: str) -> None:
-        if today != self.date:
-            self.date, self.frames, self.compute_seconds = today, 0, 0.0
-
-    def exhausted(self) -> bool:
-        return (
-            self.frames >= self.max_frames
-            or self.compute_seconds >= self.max_compute_seconds
+    @classmethod
+    def from_config(cls, vlm: object) -> "AnnotationBudget":
+        """The budget ``[vlm]`` configures (a ``config.VlmConfig``)."""
+        return cls(
+            max_frames=vlm.annotation_max_frames_per_day,
+            max_compute_seconds=vlm.annotation_max_compute_minutes_per_day * 60.0,
+            max_frames_per_hour=vlm.annotation_max_frames_per_hour,
+            max_compute_seconds_per_hour=vlm.annotation_max_compute_minutes_per_hour * 60.0,
         )
 
-    def charge(self, compute_seconds: float) -> None:
-        """Count one frame sent to the model and its compute."""
-        self.frames += 1
-        self.compute_seconds += max(compute_seconds, 0.0)
+    def roll(self, now: datetime) -> None:
+        """Move to *now* (local wall time for the date, as ``datetime.now()``)."""
+        today = now.date().isoformat()
+        if today != self.date:
+            self.date, self.frames, self.compute_seconds = today, 0, 0.0
+        self.now = now.timestamp()
+        cutoff = self.now - HOUR_SECONDS
+        self.recent = [entry for entry in self.recent if entry[0] > cutoff]
+
+    def hour(self) -> tuple[int, float]:
+        """(frames annotated, compute seconds) in the hour before :attr:`now`."""
+        cutoff = self.now - HOUR_SECONDS
+        live = [entry for entry in self.recent if entry[0] > cutoff]
+        return (
+            int(sum(entry[1] for entry in live)),
+            float(sum(entry[2] for entry in live)),
+        )
+
+    def pause_reason(self) -> str | None:
+        """Why passive model use must wait, or None while both caps allow it."""
+        if (
+            self.frames >= self.max_frames
+            or self.compute_seconds >= self.max_compute_seconds
+        ):
+            return DAILY_BUDGET_REASON
+        frames, seconds = self.hour()
+        if frames >= self.max_frames_per_hour or seconds >= self.max_compute_seconds_per_hour:
+            return HOURLY_BUDGET_REASON
+        return None
+
+    def exhausted(self) -> bool:
+        return self.pause_reason() is not None
+
+    def charge_frame(self, *, model_call: bool) -> None:
+        """Count one annotated frame: in the hour always, in the day only
+        when the model was called for it (not a cache hit)."""
+        if model_call:
+            self.frames += 1
+        self.recent.append([self.now, 1, 0.0])
+
+    def charge_compute(self, seconds: float) -> None:
+        """Count Ollama compute (see :func:`charged_to`)."""
+        seconds = max(seconds, 0.0)
+        if seconds:
+            self.compute_seconds += seconds
+            self.recent.append([self.now, 0, seconds])
 
     def to_json(self) -> str:
         return json.dumps({
             "date": self.date,
             "frames": self.frames,
             "compute_seconds": round(self.compute_seconds, 3),
+            "recent": [[t, f, round(s, 3)] for t, f, s in self.recent],
         })
 
     def load(self, raw: str | None) -> None:
@@ -505,18 +577,48 @@ class AnnotationBudget:
             self.date = str(saved.get("date", ""))
             self.frames = int(saved.get("frames", 0))
             self.compute_seconds = float(saved.get("compute_seconds", 0.0))
+            self.recent = [
+                [float(t), int(f), float(s)] for t, f, s in saved.get("recent", [])
+            ]
         except (ValueError, TypeError, AttributeError):
-            self.date, self.frames, self.compute_seconds = "", 0, 0.0
+            self.date, self.frames, self.compute_seconds, self.recent = "", 0, 0.0, []
 
     def status(self) -> dict:
         """The counters as published in ``worker-status.json``."""
+        hour_frames, hour_seconds = self.hour()
         return {
             "date": self.date,
             "frames": self.frames,
             "max_frames": self.max_frames,
             "compute_minutes": round(self.compute_seconds / 60.0, 2),
             "max_compute_minutes": round(self.max_compute_seconds / 60.0, 2),
+            "hour_frames": hour_frames,
+            "max_frames_per_hour": self.max_frames_per_hour,
+            "hour_compute_minutes": round(hour_seconds / 60.0, 2),
+            "max_compute_minutes_per_hour": round(
+                self.max_compute_seconds_per_hour / 60.0, 2,
+            ),
         }
+
+
+@contextmanager
+def charged_to(budget: AnnotationBudget | None) -> Iterator[None]:
+    """Charge *budget* the Ollama compute of every model call made inside
+    the block (nothing when *budget* is None, as for focus recordings).
+
+    The one way passive model use is charged: wrap each passive step that
+    can call a model, so its calls count against the same hourly and
+    daily caps as annotation.  The worker's loop is one thread, so the
+    difference in :data:`MODEL_USAGE` over the block is that block's.
+    """
+    if budget is None:
+        yield
+        return
+    before = model_compute_seconds()
+    try:
+        yield
+    finally:
+        budget.charge_compute(model_compute_seconds() - before)
 
 
 # ---------------------------------------------------------------------------

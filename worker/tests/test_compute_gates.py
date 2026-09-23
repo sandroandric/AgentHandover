@@ -28,6 +28,7 @@ from agenthandover_worker.annotation_cache import (
     AnnotationCache,
     CacheKey,
     cache_key,
+    normalise_screen_text,
     simhash64,
 )
 from agenthandover_worker.db import WorkerDB
@@ -39,7 +40,7 @@ from agenthandover_worker.scene_annotator import (
     AnnotationResult,
     SceneAnnotator,
 )
-from agenthandover_worker.scheduler import AnnotationBudget
+from agenthandover_worker.scheduler import AnnotationBudget, charged_to
 from agenthandover_worker.sop_dedup import deduplicate_templates
 from daemon_db import create_daemon_db
 
@@ -106,7 +107,7 @@ class TestAnnotationBudget:
             )
 
         budget = AnnotationBudget(max_frames=1500, max_compute_seconds=5 * 60)
-        budget.roll("2026-09-23")
+        budget.roll(datetime(2026, 9, 23, 12, 0))
         with WorkerDB(events_db) as db, \
                 patch.object(annotator, "ready", return_value=True), \
                 patch.object(annotator, "annotate_event", side_effect=annotate):
@@ -155,8 +156,9 @@ class TestAnnotationBudget:
 
     def test_counters_start_over_on_a_new_local_day_and_persist(self, events_db):
         budget = AnnotationBudget(max_frames=10, max_compute_seconds=60)
-        budget.roll("2026-09-22")
-        budget.charge(30.0)
+        budget.roll(datetime(2026, 9, 22, 12, 0))
+        budget.charge_frame(model_call=True)
+        budget.charge_compute(30.0)
         with WorkerDB(events_db) as db:
             db.set_state("annotation_budget", budget.to_json())
             restored = AnnotationBudget(max_frames=10, max_compute_seconds=60)
@@ -164,10 +166,204 @@ class TestAnnotationBudget:
         assert (restored.date, restored.frames, restored.compute_seconds) == (
             "2026-09-22", 1, 30.0,
         )
-        restored.roll("2026-09-22")
+        restored.roll(datetime(2026, 9, 22, 12, 30))
         assert restored.frames == 1
-        restored.roll("2026-09-23")
+        restored.roll(datetime(2026, 9, 23, 0, 5))
         assert (restored.frames, restored.compute_seconds) == (0, 0.0)
+
+
+# ---------------------------------------------------------------------------
+# Hourly gate and the charging helper (WP-F2)
+# ---------------------------------------------------------------------------
+
+
+def _usage(model: str, seconds: float) -> None:
+    """One Ollama reply of *seconds* compute (half prompt, half generation)."""
+    half = int(seconds / 2 * 10**9)
+    MODEL_USAGE.record(model, "generate", Response(
+        text="{}", prompt_eval_duration=half, eval_duration=half,
+    ))
+
+
+class TestHourlyGate:
+
+    T0 = datetime(2026, 9, 23, 10, 0)
+
+    def test_frames_close_the_hour_and_reopen_as_it_rolls(self):
+        budget = AnnotationBudget(
+            max_frames=1500, max_compute_seconds=3600, max_frames_per_hour=3,
+        )
+        for minute in (0, 10, 20):
+            budget.roll(self.T0 + timedelta(minutes=minute))
+            assert budget.pause_reason() is None
+            budget.charge_frame(model_call=minute == 0)  # two cache hits
+        assert budget.pause_reason() == "annotation_hourly_budget_exhausted"
+        assert (budget.frames, budget.hour()) == (1, (3, 0.0))
+        # An hour after the first frame, one slot is free again.
+        budget.roll(self.T0 + timedelta(minutes=60, seconds=1))
+        assert budget.hour() == (2, 0.0)
+        assert budget.pause_reason() is None
+
+    def test_compute_closes_the_hour_and_the_day_wins_over_the_hour(self):
+        budget = AnnotationBudget(
+            max_frames=1500, max_compute_seconds=900, max_compute_seconds_per_hour=600,
+        )
+        budget.roll(self.T0)
+        budget.charge_compute(600.0)
+        assert budget.pause_reason() == "annotation_hourly_budget_exhausted"
+        budget.roll(self.T0 + timedelta(hours=1, seconds=1))
+        assert budget.pause_reason() is None
+        budget.charge_compute(300.0)
+        assert budget.pause_reason() == "annotation_budget_exhausted"
+        status = budget.status()
+        assert (status["hour_compute_minutes"], status["compute_minutes"]) == (5.0, 15.0)
+
+    def test_the_hour_survives_a_restart(self, events_db):
+        budget = AnnotationBudget(max_frames=1500, max_compute_seconds=3600)
+        budget.roll(self.T0)
+        budget.charge_compute(599.0)
+        budget.charge_frame(model_call=True)
+        with WorkerDB(events_db) as db:
+            db.set_state("annotation_budget", budget.to_json())
+            restored = AnnotationBudget(max_frames=1500, max_compute_seconds=3600)
+            restored.load(db.get_state("annotation_budget"))
+        restored.roll(self.T0 + timedelta(minutes=30))
+        assert restored.hour() == (1, 599.0)
+        restored.charge_compute(1.0)
+        assert restored.pause_reason() == "annotation_hourly_budget_exhausted"
+
+    def test_passive_annotation_stops_at_the_hourly_gate_with_rows_pending(
+        self, events_db, tmp_path,
+    ):
+        """Every annotated frame counts in the hour, a cache hit too; the
+        rest stays pending with its JPEG."""
+        now = datetime.now(timezone.utc)
+        shots = tmp_path / "shots"
+        shots.mkdir()
+        for i in range(5):
+            img = shots / f"h{i}.jpg"
+            img.write_bytes(b"\xff\xd8\xff")
+            _insert(events_db, f"h{i}", now - timedelta(minutes=10 - i),
+                    {"screenshot_path": str(img)})
+        annotator = SceneAnnotator(AnnotationConfig(model="hour-gate-model:1b"))
+        cached = iter([False, True, True])
+
+        def annotate(event, **kwargs):
+            return AnnotationResult(
+                event_id=event["id"], status="completed",
+                annotation={"app": "Chrome"}, cached=next(cached),
+            )
+
+        budget = AnnotationBudget(
+            max_frames=1500, max_compute_seconds=3600, max_frames_per_hour=3,
+        )
+        budget.roll(datetime.now())
+        with WorkerDB(events_db) as db, \
+                patch.object(annotator, "ready", return_value=True), \
+                patch.object(annotator, "annotate_event", side_effect=annotate):
+            stats = wm._process_annotations(db, annotator, shots, budget=budget)
+        assert stats["annotated"] == 3 and stats["budget_exhausted"] is True
+        assert budget.pause_reason() == "annotation_hourly_budget_exhausted"
+        assert budget.frames == 1  # the day counts model calls only
+        statuses = _statuses(events_db)
+        assert [statuses[f"h{i}"] for i in (3, 4)] == ["pending", "pending"]
+        assert (shots / "h3.jpg").exists() and (shots / "h4.jpg").exists()
+
+    def test_charged_to_charges_every_model_in_the_block(self):
+        budget = AnnotationBudget(max_frames=10, max_compute_seconds=3600)
+        budget.roll(self.T0)
+        _usage("charge-a:1b", 4.0)  # outside the block: not charged
+        with charged_to(budget):
+            _usage("charge-a:1b", 2.0)
+            _usage("charge-b:1b", 1.0)
+        assert budget.compute_seconds == pytest.approx(3.0)
+        assert budget.hour()[1] == pytest.approx(3.0)
+        with charged_to(None):  # focus: nothing to charge
+            _usage("charge-a:1b", 5.0)
+        assert budget.compute_seconds == pytest.approx(3.0)
+
+    def test_a_frame_diff_call_reduces_the_remaining_budget(self, events_db):
+        """A passive frame's LLM diff is charged; a focus frame's is not."""
+        now = datetime.now(timezone.utc)
+        annotation = json.dumps({"app": "Chrome", "task_context": {"what_doing": "x"}})
+        for eid, minute, meta in (
+            ("d0", 0, {}), ("d1", 1, {}), ("d2", 2, {"focus_session_id": "s1"}),
+        ):
+            _insert(events_db, eid, now - timedelta(minutes=10 - minute), meta)
+        conn = sqlite3.connect(str(events_db))
+        conn.execute(
+            "UPDATE events SET annotation_status = 'completed', scene_annotation_json = ?",
+            (annotation,),
+        )
+        conn.execute("UPDATE events SET frame_diff_json = '{}' WHERE id = 'd0'")
+        conn.commit()
+        conn.close()
+
+        differ = wm.FrameDiffer()
+        calls = []
+
+        def diff_pair(prev, curr):
+            calls.append(curr["id"])
+            _usage("diff-model:1b", 3.0)
+            return MagicMock(diff={"diff_type": "action", "step_description": "x"},
+                             inference_time_seconds=3.0)
+
+        budget = AnnotationBudget(
+            max_frames=1500, max_compute_seconds=3600, max_compute_seconds_per_hour=600,
+        )
+        budget.roll(datetime.now())
+        before = budget.status()
+        with WorkerDB(events_db) as db, patch.object(differ, "diff_pair", side_effect=diff_pair):
+            stats = wm._process_diffs(db, differ, budget=budget)
+        assert calls == ["d1", "d2"] and stats["diffs"] == 2
+        assert budget.compute_seconds == pytest.approx(3.0)  # d1 only
+        assert budget.hour() == (0, pytest.approx(3.0))
+        assert budget.status()["hour_compute_minutes"] > before["hour_compute_minutes"]
+
+
+# ---------------------------------------------------------------------------
+# Cache key normalisation (WP-F2)
+# ---------------------------------------------------------------------------
+
+
+class TestNormaliseScreenText:
+
+    @pytest.mark.parametrize("volatile, steady", [
+        ("updated 5s ago", "updated 42s ago"),
+        ("updated 3 min ago", "updated 1 hour ago"),
+        ("Edited just now", "Edited 2 days ago"),
+        ("sent a minute ago", "sent 15 mins ago"),
+        ("Last sync 09:41", "Last sync 23:05:17"),
+        ("Meeting at 9:30 AM", "Meeting at 11:00 pm"),
+        ("Ln 12, Col 4", "Ln 318, Col 27"),
+        ("Line 7, Column 1", "Line 90, Column 12"),
+        ("Inbox (3)", "Inbox (1,204)"),
+        ("backlog at 80 frames", "backlog at 12345 frames"),
+    ])
+    def test_volatile_parts_fold_to_the_same_text(self, volatile, steady):
+        assert normalise_screen_text(volatile) == normalise_screen_text(steady)
+
+    def test_each_kind_becomes_one_token(self):
+        assert normalise_screen_text(
+            "updated 5s ago at 10:42 Ln 3, Col 9 item 12"
+        ).split() == ["updated", "_reltime_", "at", "_clock_", "_textpos_", "item", "0"]
+
+    def test_words_stay_apart(self):
+        assert normalise_screen_text("Quarterly report") != normalise_screen_text("Annual report")
+        assert normalise_screen_text("Sonnet ago") == "Sonnet ago"  # no number, no time
+
+    def test_the_key_is_normalised_and_the_title_is_not(self, events_db):
+        screen = ("Grafana worker latency p95 annotation latency queue depth "
+                  "updated {n}s ago, {m} events, last scrape 10:{s}")
+        a = cache_key("Chrome", "Grafana", screen.format(n=3, m=120, s="04"))
+        b = cache_key("Chrome", "Grafana", screen.format(n=58, m=9001, s="59"))
+        assert a == b
+        assert cache_key("Chrome", "Invoice 1234", screen.format(n=3, m=1, s="00")).title_hash != \
+            cache_key("Chrome", "Invoice 5678", screen.format(n=3, m=1, s="00")).title_hash
+        cache = AnnotationCache(events_db)
+        cache.store(a, {"app": "Chrome"})
+        assert cache.lookup(b) == {"app": "Chrome"}
+        cache.close()
 
 
 # ---------------------------------------------------------------------------
@@ -196,7 +392,7 @@ class TestAnnotationCache:
         assert cache.lookup(near) is not None
         far = CacheKey(key.app, key.title_hash, key.ocr_simhash ^ 0b1111)
         assert cache.lookup(far) is None
-        assert simhash64(_SCREEN.upper()) == key.ocr_simhash  # case-insensitive
+        assert simhash64(normalise_screen_text(_SCREEN.upper())) == key.ocr_simhash  # case-insensitive
         cache.close()
 
     def test_different_screen_title_or_app_misses(self, events_db):

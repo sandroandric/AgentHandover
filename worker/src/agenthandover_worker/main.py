@@ -25,7 +25,7 @@ from pathlib import Path
 from agenthandover_worker import trigger_spool
 from agenthandover_worker import workflow_mining
 from agenthandover_worker.clipboard_linker import ClipboardLinker
-from agenthandover_worker.event_helpers import focused_field
+from agenthandover_worker.event_helpers import focused_field, parse_json_field
 from agenthandover_worker.config import EXPORT_ADAPTERS, load_config
 from agenthandover_worker.confidence import ConfidenceScorer, is_native_app_context
 from agenthandover_worker.db import WorkerDB
@@ -50,7 +50,12 @@ from agenthandover_worker.scene_annotator import (
 from agenthandover_worker.sop_generator import SOPGenerator, SOPGeneratorConfig, _generate_slug
 from agenthandover_worker.sop_linter import lint_sop
 from agenthandover_worker.task_segmenter import TaskSegmenter, SegmenterConfig
-from agenthandover_worker.scheduler import AnnotationBudget, IdleJobGate, SchedulerConfig
+from agenthandover_worker.scheduler import (
+    AnnotationBudget,
+    IdleJobGate,
+    SchedulerConfig,
+    charged_to,
+)
 from agenthandover_worker.translator import SemanticTranslator
 from agenthandover_worker.vlm_queue import VLMFallbackQueue, VLMJob
 from agenthandover_worker.loop_guard import (
@@ -241,11 +246,12 @@ def _process_annotations(
     Returns stats dict with counts of annotated/skipped/failed/blocked/
     deferred events, and ``budget_exhausted``.
 
-    With a *budget*, each frame sent to the model is charged its Ollama
-    compute (prompt + generation time of the annotation model); once the
-    day's frames or compute are spent the batch stops, leaving the rows
-    pending with their screenshots for the next local day.  Cache hits
-    cost nothing.
+    With a *budget*, each frame's model calls (annotation and activity
+    classification) are charged to it under :func:`charged_to`, and each
+    annotated frame counts against the hour (and, when the model was
+    called, the day); once either cap is spent the batch stops, leaving
+    the rows pending with their screenshots until the hour or the day
+    allows more.
 
     Focus-session events (tagged with ``focus_session_id`` in metadata)
     are excluded in the query and left to the focus_processor. The scene
@@ -322,30 +328,25 @@ def _process_annotations(
         )
 
         # Run annotation
-        compute_before = _model_compute_seconds(annotator.config.model)
-        result = annotator.annotate_event(
-            event,
-            recent_annotations=recent,
-            artifact_dir=str(screenshots_dir),
-            page=page_for_event(db, event),
-        )
-        if (
-            budget is not None
-            and not result.cached
-            and result.status in ("completed", "failed")
-        ):
-            budget.charge(
-                _model_compute_seconds(annotator.config.model) - compute_before
+        with charged_to(budget):
+            result = annotator.annotate_event(
+                event,
+                recent_annotations=recent,
+                artifact_dir=str(screenshots_dir),
+                page=page_for_event(db, event),
             )
+        if budget is not None and result.status in ("completed", "failed"):
+            budget.charge_frame(model_call=not result.cached)
 
         # Save result to DB
         if result.status == "completed" and result.annotation:
             # Enrich with activity classification (Phase 1)
             if activity_classifier is not None:
                 try:
-                    cls_result = activity_classifier.classify(
-                        result.annotation, event_context=event,
-                    )
+                    with charged_to(budget):
+                        cls_result = activity_classifier.classify(
+                            result.annotation, event_context=event,
+                        )
                     tc = result.annotation.setdefault("task_context", {})
                     tc["activity_type"] = cls_result.activity_type.value
                     tc["learnability"] = cls_result.learnability.value
@@ -436,12 +437,6 @@ def _run_daily_maintenance(
             logger.debug("Daily %s failed", name, exc_info=True)
 
 
-def _model_compute_seconds(model: str) -> float:
-    """Ollama's prompt + generation seconds for *model* since start-up."""
-    usage = MODEL_USAGE.snapshot().get(model, {})
-    return usage.get("prompt_eval_seconds", 0.0) + usage.get("eval_seconds", 0.0)
-
-
 def _discard_screenshot(event: dict, screenshots_dir: Path) -> None:
     """Delete an event's JPEG (only inside *screenshots_dir*)."""
     from agenthandover_worker.scene_annotator import find_screenshot
@@ -504,12 +499,14 @@ def _process_diffs(
     differ: "FrameDiffer",
     *,
     batch_size: int = 10,
+    budget: "AnnotationBudget | None" = None,
 ) -> dict:
     """Process annotated events that need frame-to-frame diffs.
 
     For each event, finds the previous annotated event and computes
     the diff (either a code-only marker for edge cases or an LLM-based
-    action diff).
+    action diff).  A passive frame's diff call is charged to *budget*
+    (a focus-session frame's is not).
 
     Returns stats dict with counts of diffs/edge_cases/failed.
     """
@@ -534,7 +531,9 @@ def _process_diffs(
             continue
 
         # Compute diff
-        result = differ.diff_pair(prev_event, event)
+        focus = parse_json_field(event, "metadata_json").get("focus_session_id")
+        with charged_to(None if focus else budget):
+            result = differ.diff_pair(prev_event, event)
 
         # Save
         db.save_frame_diff(event_id, json.dumps(result.diff))
@@ -765,8 +764,9 @@ def _write_worker_status(
     """Atomically write worker-status.json (tmp + fsync + rename).
 
     ``annotation_paused_reason`` says why passive annotation is not running
-    (``annotation_budget_exhausted``, ``on_battery_user_active``), or is
-    None while it runs.
+    (``annotation_budget_exhausted`` for the day,
+    ``annotation_hourly_budget_exhausted`` for the rolling hour,
+    ``on_battery_user_active``), or is None while it runs.
     """
     status = {
         "pid": os.getpid(),
@@ -4897,11 +4897,9 @@ def main(argv: list[str] | None = None) -> None:
     _PASSIVE_DISCOVERY_INTERVAL = 7200
     total_passive_sops: int = 0
 
-    # Passive annotation's daily budget and why it is paused (if it is).
-    annotation_budget = AnnotationBudget(
-        max_frames=vlm_cfg.annotation_max_frames_per_day,
-        max_compute_seconds=vlm_cfg.annotation_max_compute_minutes_per_day * 60.0,
-    )
+    # Passive model use's hourly and daily budget, and why passive
+    # annotation is paused (if it is).
+    annotation_budget = AnnotationBudget.from_config(vlm_cfg)
     annotation_paused_reason: str | None = None
     # SOP mining input seen by the last run_pipeline (see its docstring).
     mining_watermark: dict = {}
@@ -4959,6 +4957,7 @@ def main(argv: list[str] | None = None) -> None:
         _last_passive_discovery = time.monotonic()
         daily_jobs_date = db.get_state(DAILY_JOBS_STATE_KEY) or ""
         annotation_budget.load(db.get_state(ANNOTATION_BUDGET_STATE_KEY))
+        saved_budget_json = annotation_budget.to_json()
 
         # App and CLI requests arrive through the trigger spool; each kind
         # maps to one handler.
@@ -5225,9 +5224,10 @@ def main(argv: list[str] | None = None) -> None:
                 if pending_vlm and vlm_worker is not None:
                     gate_result = idle_gate.check()
                     if gate_result.can_run:
-                        vlm_completed_events = _process_vlm_jobs(
-                            db, pending_vlm, vlm_worker, vlm_queue
-                        )
+                        with charged_to(annotation_budget):
+                            vlm_completed_events = _process_vlm_jobs(
+                                db, pending_vlm, vlm_worker, vlm_queue
+                            )
                         # VLM reconciliation: reset events with completed VLM
                         # boosts so the pipeline re-evaluates them with higher
                         # confidence scores.
@@ -5256,31 +5256,26 @@ def main(argv: list[str] | None = None) -> None:
                     ):
                         scene_annotator.discard_screenshot(expired, screenshots_dir)
                     # Passive annotation runs on AC, with the screen locked,
-                    # or after two idle minutes, within the daily budget.
-                    # Focus recordings were processed above regardless.
-                    annotation_budget.roll(datetime.now().date().isoformat())
+                    # or after two idle minutes, within the hourly and
+                    # daily budget.  Focus recordings were processed above
+                    # regardless.
+                    annotation_budget.roll(datetime.now())
                     allowed, why = idle_gate.passive_annotation_allowed()
                     ann_stats = {
                         "annotated": 0, "skipped": 0, "failed": 0,
                         "blocked": 0, "deferred": 0, "budget_exhausted": False,
                     }
                     if allowed:
-                        frames_before = annotation_budget.frames
                         ann_stats = _process_annotations(
                             db, scene_annotator, screenshots_dir,
                             privacy_checker=privacy_checker,
                             activity_classifier=activity_classifier,
                             budget=annotation_budget,
                         )
-                        if annotation_budget.frames != frames_before:
-                            db.set_state(
-                                ANNOTATION_BUDGET_STATE_KEY,
-                                annotation_budget.to_json(),
-                            )
                     if not allowed:
                         reason = why
                     elif ann_stats["budget_exhausted"]:
-                        reason = "annotation_budget_exhausted"
+                        reason = annotation_budget.pause_reason()
                     else:
                         reason = None
                     if reason != annotation_paused_reason:
@@ -5324,7 +5319,9 @@ def main(argv: list[str] | None = None) -> None:
                             )
 
                 if frame_differ is not None and v2_schema_ok:
-                    diff_stats = _process_diffs(db, frame_differ)
+                    diff_stats = _process_diffs(
+                        db, frame_differ, budget=annotation_budget,
+                    )
                     total_v2_diffs += diff_stats["diffs"]
 
                     if diff_stats["diffs"] > 0 or diff_stats["failed"] > 0:
@@ -5368,22 +5365,23 @@ def main(argv: list[str] | None = None) -> None:
 
                     if should_segment:
                         try:
-                            pd_sops = _process_passive_discovery(
-                                db,
-                                knowledge_base=knowledge_base,
-                                segmenter=task_segmenter,
-                                sop_generator=sop_generator,
-                                openclaw_writer=sop_writer,
-                                skill_md_writer=skill_md_writer,
-                                claude_skill_writer=claude_skill_writer,
-                                index_generator=index_generator,
-                                sop_auto_approve=sop_auto_approve,
-                                procedure_writer=procedure_writer,
-                                kb_export_adapter=kb_export_adapter,
-                                continuity_tracker=continuity_tracker,
-                                variant_detector=variant_detector,
-                                evidence_normalizer=evidence_normalizer,
-                            )
+                            with charged_to(annotation_budget):
+                                pd_sops = _process_passive_discovery(
+                                    db,
+                                    knowledge_base=knowledge_base,
+                                    segmenter=task_segmenter,
+                                    sop_generator=sop_generator,
+                                    openclaw_writer=sop_writer,
+                                    skill_md_writer=skill_md_writer,
+                                    claude_skill_writer=claude_skill_writer,
+                                    index_generator=index_generator,
+                                    sop_auto_approve=sop_auto_approve,
+                                    procedure_writer=procedure_writer,
+                                    kb_export_adapter=kb_export_adapter,
+                                    continuity_tracker=continuity_tracker,
+                                    variant_detector=variant_detector,
+                                    evidence_normalizer=evidence_normalizer,
+                                )
                             if pd_sops > 0:
                                 total_passive_sops += pd_sops
                                 total_sops_generated += pd_sops
@@ -5398,6 +5396,11 @@ def main(argv: list[str] | None = None) -> None:
                                 exc_info=True,
                             )
                         _last_passive_discovery = _now_mono_pd
+
+                # What passive model use spent survives a restart.
+                if annotation_budget.to_json() != saved_budget_json:
+                    saved_budget_json = annotation_budget.to_json()
+                    db.set_state(ANNOTATION_BUDGET_STATE_KEY, saved_budget_json)
 
                 # Write status file after each cycle (heartbeat).
                 # Use authoritative DB count for pending VLM jobs (the
@@ -5776,7 +5779,8 @@ def main(argv: list[str] | None = None) -> None:
 
                     # Phase 5: Curation queue refresh
                     try:
-                        curation_summary = procedure_curator.curate()
+                        with charged_to(annotation_budget):
+                            curation_summary = procedure_curator.curate()
                         if curation_summary.total_queue_items > 0:
                             logger.info(
                                 "Curation: %d item(s) (%d merges, %d upgrades, %d stale, %d drift)",

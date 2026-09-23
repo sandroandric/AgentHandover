@@ -78,6 +78,11 @@ class VlmConfig:
     # When either is spent, passive rows wait for the next local day.
     annotation_max_frames_per_day: int = 1500
     annotation_max_compute_minutes_per_day: float = 60.0
+    # The same per rolling hour, so one busy hour cannot spend the day:
+    # frames annotated (cache hits included) and Ollama compute of every
+    # passive model call (annotation, frame diffs, passive discovery).
+    annotation_max_frames_per_hour: int = 60
+    annotation_max_compute_minutes_per_hour: float = 10.0
 
     @property
     def reasoner_model(self) -> str:
@@ -260,6 +265,8 @@ _POSITIVE = {
     ("vlm", "annotation_timeout_seconds"),
     ("vlm", "annotation_max_frames_per_day"),
     ("vlm", "annotation_max_compute_minutes_per_day"),
+    ("vlm", "annotation_max_frames_per_hour"),
+    ("vlm", "annotation_max_compute_minutes_per_hour"),
     ("focus", "max_session_hours"),
     ("embedding", "retention_days"),
     ("embedding", "max_rows"),

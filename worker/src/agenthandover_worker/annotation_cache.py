@@ -2,10 +2,11 @@
 reuses that annotation instead of calling the model.
 
 A frame's key is its app, a hash of its window title, and a 64-bit simhash
-of its screen text (the OCR lines that go into the annotation prompt).  A
+of its screen text (the OCR lines that go into the annotation prompt) after
+:func:`normalise_screen_text` folded what changes on a screen that shows
+the same thing (relative times, clocks, cursor positions, numbers).  A
 lookup matches a stored row with the same app and title whose simhash is
-within ``MAX_HAMMING`` bits, so a clock tick or a cursor blink in the OCR
-still hits.  Frames with too little screen text (``MIN_OCR_CHARS``) are
+within ``MAX_HAMMING`` bits, so OCR noise still hits.  Frames with too little screen text (``MIN_OCR_CHARS``) are
 never cached: app and title alone do not say what is on screen.
 
 The table lives in the events database next to the rows it summarises and
@@ -31,6 +32,37 @@ _CANDIDATES = 64
 
 _TOKEN_RE = re.compile(r"\w+", re.UNICODE)
 _MASK64 = (1 << 64) - 1
+
+
+# Screen text that changes while the screen shows the same thing: a relative
+# time ("5s ago", "updated 3 min ago", "just now"), a clock, an editor's
+# cursor position.  Each becomes one token, then every number (digits,
+# with any "," or "." grouping) becomes "0", before the simhash.  The window title is hashed as is, so
+# two screens that differ only in a number still need the same title to
+# share an annotation.
+_UNIT = (
+    r"(?:s|secs?|seconds?|m|mins?|minutes?|h|hrs?|hours?|d|days?|w|wks?|weeks?"
+    r"|mo|mos|months?|y|yrs?|years?)"
+)
+_RELATIVE_TIME_RE = re.compile(
+    rf"\b(?:(?:\d+|an?|a few)\s*{_UNIT}\s+ago|just now|moments? ago)\b", re.IGNORECASE,
+)
+_CLOCK_RE = re.compile(
+    r"\b\d{1,2}:\d{2}(?::\d{2})?(?:\s*[ap]\.?m\b\.?)?", re.IGNORECASE,
+)
+_TEXT_POSITION_RE = re.compile(
+    r"\b(?:Ln|Line)\s*\d+\s*,\s*(?:Col|Column)\s*\d+\b", re.IGNORECASE,
+)
+_DIGITS_RE = re.compile(r"\d+(?:[.,]\d+)*")
+
+
+def normalise_screen_text(text: str) -> str:
+    """*text* with its volatile parts folded, for the cache key only (the
+    prompt gets the real text)."""
+    text = _RELATIVE_TIME_RE.sub(" _reltime_ ", text)
+    text = _CLOCK_RE.sub(" _clock_ ", text)
+    text = _TEXT_POSITION_RE.sub(" _textpos_ ", text)
+    return _DIGITS_RE.sub("0", text)
 
 
 def simhash64(text: str) -> int:
@@ -62,7 +94,7 @@ def cache_key(app: str, title: str, ocr_text: str) -> CacheKey | None:
     return CacheKey(
         app=app,
         title_hash=hashlib.sha256(title.encode()).hexdigest()[:32],
-        ocr_simhash=simhash64(ocr_text),
+        ocr_simhash=simhash64(normalise_screen_text(ocr_text)),
     )
 
 
