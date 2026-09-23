@@ -23,8 +23,9 @@ JSON is dumped with sorted keys, so option order does not matter.
 
 Fault injection (control endpoints, not counted as API requests):
   ``/__cassette/down?n=N``        answer the next N API requests with HTTP 503
-  ``/__cassette/slow?seconds=S[&n=N]``  delay API answers by S seconds
-                                  (the next N, or all until reset)
+  ``/__cassette/slow?seconds=S[&n=N][&path=P]``  delay API answers by S
+                                  seconds (the next N, or all until reset;
+                                  with ``path``, only requests to that path)
   ``/__cassette/reset``           clear both
 For a true refused connection, call ``stop()`` and later ``start()``: the
 server comes back on the same port.
@@ -173,6 +174,9 @@ class Cassette:
         self._down = 0
         self._slow_seconds = 0.0
         self._slow_remaining: int | None = None
+        self._slow_path: str | None = None
+        # (path, request body) of every API request answered late.
+        self.delayed: list[tuple[str, dict]] = []
         self._lock = threading.Lock()
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
@@ -238,29 +242,36 @@ class Cassette:
         with self._lock:
             self._down = n
 
-    def set_slow(self, seconds: float, n: int | None = None) -> None:
+    def set_slow(
+        self, seconds: float, n: int | None = None, path: str | None = None,
+    ) -> None:
         with self._lock:
             self._slow_seconds = seconds
             self._slow_remaining = n
+            self._slow_path = path
 
     def reset_faults(self) -> None:
         with self._lock:
             self._down = 0
             self._slow_seconds = 0.0
             self._slow_remaining = None
+            self._slow_path = None
 
-    def _take_faults(self) -> tuple[bool, float]:
+    def _take_faults(self, path: str) -> tuple[bool, float]:
         """Consume one request's worth of fault budget: (down, delay)."""
         with self._lock:
             if self._down > 0:
                 self._down -= 1
                 return True, 0.0
+            if self._slow_path is not None and path != self._slow_path:
+                return False, 0.0
             delay = self._slow_seconds
             if delay and self._slow_remaining is not None:
                 self._slow_remaining -= 1
                 if self._slow_remaining <= 0:
                     self._slow_seconds = 0.0
                     self._slow_remaining = None
+                    self._slow_path = None
             return False, delay
 
     def fault_state(self) -> dict:
@@ -269,6 +280,7 @@ class Cassette:
                 "down": self._down,
                 "slow_seconds": self._slow_seconds,
                 "slow_remaining": self._slow_remaining,
+                "slow_path": self._slow_path,
             }
 
     # -- answering ---------------------------------------------------------
@@ -364,12 +376,18 @@ class _Handler(BaseHTTPRequestHandler):
         if url.path.startswith("/__cassette/"):
             status, body = self._control(url.path, parse_qs(url.query))
         elif url.path in API_PATHS:
-            down, delay = self.cassette._take_faults()
+            down, delay = self.cassette._take_faults(url.path)
             if down:
                 status, body = 503, _error("cassette: simulated Ollama outage")
             else:
                 if delay:
                     time.sleep(delay)
+                    try:
+                        request = json.loads(raw_body) if raw_body else {}
+                    except json.JSONDecodeError:
+                        request = {}
+                    with self.cassette._lock:
+                        self.cassette.delayed.append((url.path, request))
                 try:
                     status, body = self.cassette.answer(method, url.path, raw_body)
                 except json.JSONDecodeError as exc:
@@ -390,8 +408,10 @@ class _Handler(BaseHTTPRequestHandler):
                 cassette.set_down(int(query.get("n", ["1"])[0]))
             elif path == "/__cassette/slow":
                 n = query.get("n")
+                only = query.get("path")
                 cassette.set_slow(
-                    float(query["seconds"][0]), int(n[0]) if n else None
+                    float(query["seconds"][0]), int(n[0]) if n else None,
+                    only[0] if only else None,
                 )
             elif path == "/__cassette/reset":
                 cassette.reset_faults()

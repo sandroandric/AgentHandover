@@ -1,0 +1,31 @@
+{
+  "name": "passive_privacy",
+  "description": "One minute of passive capture: a GitHub login open in 1Password, its password copied and pasted into a Gmail draft, then a password-reset page whose URL carries ?token=.",
+  "source": {
+    "kind": "generated",
+    "by": "worker/tests/journeys/record/generate_passive_privacy.py"
+  },
+  "schema_version": 4,
+  "recorded_start": "2026-09-15T10:00:00.400892+00:00",
+  "recorded_end": "2026-09-15T10:00:58.000051+00:00",
+  "secrets": {
+    "password": "Tr0ub4dor&3-horse-battery",
+    "reset_token": "8f3a9c2e71b04d55a0c4"
+  },
+  "row_counts": {
+    "events": 9,
+    "by_kind": {
+      "AppSwitch": 2,
+      "ClipboardChange": 1,
+      "DwellSnapshot": 4,
+      "FocusChange": 1,
+      "WindowTitleChange": 1
+    },
+    "chrome_extension": 2,
+    "clipboard_with_preview": 0,
+    "dom_snapshots": 0,
+    "focus_tagged": 0,
+    "with_ocr_text": 3,
+    "with_screenshot": 3
+  }
+}

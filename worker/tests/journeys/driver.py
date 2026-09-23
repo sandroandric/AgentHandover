@@ -15,7 +15,8 @@ the loop body's processors in the loop's order:
    (or the v1 path when the v2 pipeline is off);
 3. ``run_pipeline`` over one ``EventRetryGuard`` batch of unprocessed
    events, marking them processed and persisting VLM jobs;
-4. ``_process_annotations`` and ``_process_diffs``;
+4. ``_process_annotations`` within main()'s daily ``AnnotationBudget``
+   (rolled on the clock's date) and ``_process_diffs``;
 5. ``_process_passive_discovery`` every 2 hours of *clock* time (the timer
    starts when the worker is built, as main() seeds it at loop entry)
    while no focus session is pending;
@@ -23,9 +24,11 @@ the loop body's processors in the loop's order:
 
 Not driven here, because they only exist inline in ``main()``: the VLM
 fallback job runner (needs ``VLMWorker``), the idle-gate shortcut for
-passive discovery (reads real system idle time), the daily batch, the
-staleness / lifecycle / curation pass and the status heartbeat.  Journeys
-that need those wait for WP-S6.
+passive discovery and passive annotation (both read real system idle
+time and power state; the driver runs as if on AC), the expiry of the
+passive annotation backlog (compares with SQLite's real ``now``), the
+daily batch, the staleness / lifecycle / curation pass and the status
+heartbeat.  Journeys that need those wait for WP-S6.
 
 ``main()`` logs an exception inside an iteration and carries on with the
 next one (shrinking or quarantining the event batch); ``run_tick()`` lets it
@@ -41,9 +44,11 @@ from pathlib import Path
 
 from agenthandover_worker import main as wm
 from agenthandover_worker import trigger_spool
+from agenthandover_worker.annotation_cache import AnnotationCache
 from agenthandover_worker.config import load_config
 from agenthandover_worker.loop_guard import EventRetryGuard
 from agenthandover_worker.ollama import OllamaError
+from agenthandover_worker.scheduler import AnnotationBudget
 
 PASSIVE_DISCOVERY_INTERVAL = timedelta(seconds=7200)  # main(): _PASSIVE_DISCOVERY_INTERVAL
 
@@ -119,6 +124,11 @@ class JourneyWorker:
         cfg = load_config()
         self.cfg = cfg
         vlm_cfg = cfg.vlm
+        # Passive annotation's daily budget, as main() builds it.
+        self.annotation_budget = AnnotationBudget(
+            max_frames=vlm_cfg.annotation_max_frames_per_day,
+            max_compute_seconds=vlm_cfg.annotation_max_compute_minutes_per_day * 60.0,
+        )
         features = cfg.features
         host = vlm_cfg.ollama_host
 
@@ -243,7 +253,9 @@ class JourneyWorker:
         self.focus_processor = None
         self.task_segmenter = None
         self.sop_generator = None
+        self.annotation_cache = None
         if vlm_cfg.annotation_enabled:
+            self.annotation_cache = AnnotationCache(self.db_path)
             self.scene_annotator = wm.SceneAnnotator(
                 config=wm.AnnotationConfig(
                     model=vlm_cfg.annotation_model,
@@ -253,6 +265,7 @@ class JourneyWorker:
                 ),
                 image_embedder=None,
                 vector_kb=self.vector_kb,
+                cache=self.annotation_cache,
             )
             self.scene_annotator.preload()
             self.frame_differ = wm.FrameDiffer(
@@ -358,6 +371,8 @@ class JourneyWorker:
         if self.vector_kb is not None:
             self.vector_kb.close()
         self.activity_searcher.close()
+        if self.annotation_cache is not None:
+            self.annotation_cache.close()
 
     def __enter__(self) -> "JourneyWorker":
         return self
@@ -441,10 +456,12 @@ class JourneyWorker:
         if self.scene_annotator is not None and not self.v2_schema_ok:
             self.v2_schema_ok = wm._check_v2_schema(db)
         if self.scene_annotator is not None and self.v2_schema_ok:
+            self.annotation_budget.roll(self.clock.now().date().isoformat())
             ann_stats = wm._process_annotations(
                 db, self.scene_annotator, self.screenshots_dir,
                 privacy_checker=self.privacy_checker,
                 activity_classifier=self.activity_classifier,
+                budget=self.annotation_budget,
             )
             if ann_stats["annotated"] > 0:
                 self.activity_searcher.refresh_index()

@@ -1,0 +1,25 @@
+{
+  "name": "passive_volatile_hour",
+  "description": "One hour of passive capture at 20 frames a minute (1,200 frames) while switching between Slack, Terminal, VS Code and three Chrome tabs every 20-60 s.",
+  "source": {
+    "kind": "generated",
+    "by": "worker/tests/journeys/record/generate_passive_volatile_hour.py"
+  },
+  "schema_version": 3,
+  "recorded_start": "2026-09-15T11:00:00.200908+00:00",
+  "recorded_end": "2026-09-15T11:59:57.500355+00:00",
+  "row_counts": {
+    "events": 1289,
+    "by_kind": {
+      "AppSwitch": 76,
+      "DwellSnapshot": 1200,
+      "WindowTitleChange": 13
+    },
+    "chrome_extension": 0,
+    "clipboard_with_preview": 0,
+    "dom_snapshots": 0,
+    "focus_tagged": 0,
+    "with_ocr_text": 1200,
+    "with_screenshot": 1200
+  }
+}
