@@ -1,0 +1,32 @@
+{
+  "name": "focus_iana_typed",
+  "description": "1-minute typing-only focus recording (the test Mac's session 46b767ef): Safari on the IANA reserved domains page, then two lines typed into a new TextEdit document; nothing copied or pasted.",
+  "source": {
+    "kind": "generated",
+    "by": "worker/tests/journeys/record/generate_focus_iana_typed.py",
+    "note": "Rebuilt from the live session's actions; its model answers are recorded into cassettes/focus_iana_typed.jsonl on the test Mac."
+  },
+  "schema_version": 5,
+  "recorded_start": "2026-09-24T09:12:00.900354+00:00",
+  "recorded_end": "2026-09-24T09:12:58.900749+00:00",
+  "focus_session": {
+    "session_id": "a925e7a1-f077-469f-91c5-aaf003e8b84b",
+    "title": "Note the IANA reserved domains",
+    "started_at": "2026-09-24T09:11:59Z",
+    "stopped_at": "2026-09-24T09:13:00Z"
+  },
+  "row_counts": {
+    "events": 31,
+    "by_kind": {
+      "AppSwitch": 1,
+      "DwellSnapshot": 29,
+      "WindowTitleChange": 1
+    },
+    "chrome_extension": 0,
+    "clipboard_with_preview": 0,
+    "dom_snapshots": 0,
+    "focus_tagged": 31,
+    "with_ocr_text": 29,
+    "with_screenshot": 29
+  }
+}

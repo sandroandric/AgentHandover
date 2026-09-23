@@ -10,8 +10,8 @@ typed text" happened in no frame; and the second typed line was in no
 step.
 
 :func:`ground_steps` checks the generated steps against the timeline in
-code, after generation (the prompt asks for the same things; it does not
-decide):
+code, after generation (the SOP prompt asks each step for its frames; the
+checks do not depend on the model following it):
 
 1. Every step cites the frames it comes from (``evidence.frames``).  A
    step citing none is dropped, unless no step cites any (then nothing
@@ -77,7 +77,6 @@ _MIN_TYPED_CHARS = 8
 # The text-entry roles whose own label or placeholder is not typed text.
 _TEXT_ROLES = frozenset({"textbox", "searchbox", "combobox"})
 
-DROPPED = "dropped"
 REWRITTEN = "rewritten"
 ADDED = "added"
 INPUT_ADDED = "input_added"

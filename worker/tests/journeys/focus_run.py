@@ -70,18 +70,20 @@ def start_focus_run(
     vlm: dict | None = None,
     journey: str = FOCUS_CASSETTE,
     tier: str = "standard",
+    fixture: str = "focus_dailynews",
 ) -> FocusRun:
     """Models, cassette, fixture and signal in place; no tick run yet.
 
     ``ollama_down_for`` asks the cassette (``/__cassette/down``) to answer
     that many API requests with HTTP 503 before the worker starts; ``vlm``
     adds ``[vlm]`` keys to the worker's config.  ``journey`` names the
-    cassette and ``tier`` the RAM tier whose models the worker runs."""
+    cassette, ``tier`` the RAM tier whose models the worker runs and
+    ``fixture`` the recorded session."""
     tape = cassette(journey, tier=tier, vlm=vlm)
     if ollama_down_for:
         with urllib.request.urlopen(f"{tape.host}/__cassette/down?n={ollama_down_for}") as reply:
             assert json.load(reply)["down"] == ollama_down_for
-    fixture = events_db("focus_dailynews", rebase_to=clock.now())
+    fixture = events_db(fixture, rebase_to=clock.now())
     fixture.write_focus_signal(temp_home.data_dir)
     run = FocusRun(fixture=fixture, worker=worker(fixture, adapter=adapter), tape=tape)
     processor = run.worker.focus_processor

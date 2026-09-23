@@ -28,6 +28,7 @@ from agenthandover_worker import __version__
 from agenthandover_worker.event_helpers import display_name
 from agenthandover_worker.ledger import SLOTS, unknown_slots
 from agenthandover_worker.procedure_schema import procedure_steps, step_key
+from agenthandover_worker.step_grounding import REWRITTEN
 
 Target = Literal[
     "claude-skill",
@@ -334,7 +335,7 @@ def _render_step(num: int, step: dict) -> list[str]:
         lines.append(f"   Unconfirmed: {clipboard['reason']}")
     # Part of the step named what its frames do not show and was cut.
     grounding = (step.get("evidence") or {}).get("grounding")
-    if isinstance(grounding, dict) and grounding.get("status") == "rewritten":
+    if isinstance(grounding, dict) and grounding.get("status") == REWRITTEN:
         lines.append(f"   Unconfirmed: {grounding.get('reason')}")
     # Any other observed parameter (DOM-derived steps carry e.g. ``value``).
     params = step.get("parameters")
