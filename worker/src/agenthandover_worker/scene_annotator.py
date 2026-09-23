@@ -722,6 +722,32 @@ DEFER_BACKOFF_SECONDS = 60.0
 PROBE_TTL_SECONDS = 60.0
 
 
+def find_screenshot(event: dict, artifact_dir: str | Path | None) -> str | None:
+    """Resolve the screenshot file path for an event.
+
+    The daemon records the JPEG it saved in ``metadata.screenshot_path``;
+    that is the only on-disk copy of the frame. When *artifact_dir* is
+    given, a path outside it is rejected, because the file is deleted
+    after annotation and event metadata must not be able to point that
+    deletion anywhere else.
+    """
+    metadata = parse_json_field(event, "metadata_json")
+    screenshot_path = metadata.get("screenshot_path")
+    if not isinstance(screenshot_path, str) or not screenshot_path:
+        return None
+    path = Path(screenshot_path)
+    if not path.is_file():
+        return None
+    if artifact_dir and not path.resolve().is_relative_to(
+        Path(artifact_dir).resolve()
+    ):
+        logger.warning(
+            "Ignoring screenshot outside %s: %s", artifact_dir, screenshot_path,
+        )
+        return None
+    return screenshot_path
+
+
 # ---------------------------------------------------------------------------
 # SceneAnnotator
 # ---------------------------------------------------------------------------
@@ -872,7 +898,7 @@ class SceneAnnotator:
                 # event is saved as "skipped"), so its JPEG has no further
                 # use and is deleted now rather than at the TTL sweep.
                 self._stats["skipped_stale"] += 1
-                self._delete_screenshot(self._find_screenshot(event, artifact_dir))
+                self._delete_screenshot(find_screenshot(event, artifact_dir))
                 logger.debug(
                     "Stale-skip event %s (app=%s, %d consecutive)",
                     event_id,
@@ -889,7 +915,7 @@ class SceneAnnotator:
                 self._stale.reset()
 
         # --- Locate screenshot ---
-        screenshot_path = self._find_screenshot(event, artifact_dir)
+        screenshot_path = find_screenshot(event, artifact_dir)
         if screenshot_path is None:
             self._stats["missing_screenshot"] += 1
             return AnnotationResult(
@@ -1090,42 +1116,3 @@ class SceneAnnotator:
         except OSError:
             logger.debug("Failed to delete screenshot %s", screenshot_path, exc_info=True)
 
-    # ------------------------------------------------------------------
-    # Screenshot location
-    # ------------------------------------------------------------------
-
-    def _find_screenshot(
-        self,
-        event: dict,
-        artifact_dir: str | Path | None,
-    ) -> str | None:
-        """Resolve the screenshot file path for an event.
-
-        The daemon records the JPEG it saved in ``metadata.screenshot_path``;
-        that is the only on-disk copy of the frame. When *artifact_dir* is
-        given, a path outside it is rejected, because the file is deleted
-        after annotation and event metadata must not be able to point that
-        deletion anywhere else.
-        """
-        metadata_raw = event.get("metadata_json", "{}")
-        try:
-            metadata = json.loads(metadata_raw) if metadata_raw else {}
-        except (json.JSONDecodeError, TypeError):
-            metadata = {}
-        if not isinstance(metadata, dict):
-            return None
-
-        screenshot_path = metadata.get("screenshot_path")
-        if not isinstance(screenshot_path, str) or not screenshot_path:
-            return None
-        path = Path(screenshot_path)
-        if not path.is_file():
-            return None
-        if artifact_dir and not path.resolve().is_relative_to(
-            Path(artifact_dir).resolve()
-        ):
-            logger.warning(
-                "Ignoring screenshot outside %s: %s", artifact_dir, screenshot_path,
-            )
-            return None
-        return screenshot_path

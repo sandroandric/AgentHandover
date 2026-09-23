@@ -5,11 +5,21 @@ four observation tiers (full, metadata-only, blocked, pause) with
 default blocked lists for sensitive apps and URLs, configurable
 per-user overrides, and time-based auto-pause windows.
 
+The daemon evaluates the same zones before it captures a frame
+(``crates/daemon/src/observer/privacy_zones.rs``): a blocked window never
+gets a screenshot.  This checker is the second line, on stored events: it
+catches frames written before a zone was configured, by an older daemon,
+or while the browser URL was not yet known, and the caller deletes their
+JPEG.
+
 Defence layers:
 1. Auto-pause time windows (highest priority — blocks everything)
-2. URL pattern matching (fnmatch glob, case-insensitive)
-3. App name / bundle ID pattern matching (fnmatch glob)
+2. URL pattern matching (fnmatch glob)
+3. App name / bundle ID / window title pattern matching (fnmatch glob)
 4. Default blocked lists for password managers, banking, auth sites
+
+Every match is case-insensitive: patterns are folded once, at construction,
+and each candidate once per check.
 """
 
 from __future__ import annotations
@@ -21,6 +31,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, time as dt_time
 from enum import Enum
 from typing import ClassVar
+
+from agenthandover_worker.event_helpers import display_name, parse_json_field
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +87,10 @@ class PrivacyZoneChecker:
     Merges a default blocked list (password managers, banking apps) with
     user-supplied configuration.  The most restrictive tier always wins
     when multiple rules match.
+
+    The default lists are mirrored in the daemon
+    (``DEFAULT_BLOCKED_APPS`` / ``DEFAULT_BLOCKED_URLS`` in
+    ``crates/daemon/src/observer/privacy_zones.rs``); a test keeps them equal.
     """
 
     # Default blocked apps — password managers, keychains, security tools
@@ -110,22 +126,24 @@ class PrivacyZoneChecker:
     def __init__(self, config: PrivacyZoneConfig | None = None) -> None:
         cfg = config or PrivacyZoneConfig()
 
-        # Merge user-blocked apps with defaults
-        self._blocked_apps: set[str] = set(self._DEFAULT_BLOCKED)
-        for pattern in cfg.blocked:
-            self._blocked_apps.add(pattern)
+        # Every pattern is case-folded once, here.
+        def fold(patterns) -> list[str]:
+            folded: list[str] = []
+            for pattern in patterns:
+                p = str(pattern).casefold()
+                if p not in folded:
+                    folded.append(p)
+            return folded
 
-        # Merge user-blocked URLs with defaults
-        self._blocked_urls: list[str] = list(self._DEFAULT_BLOCKED_URLS)
-        for pattern in cfg.blocked_urls:
-            if pattern not in self._blocked_urls:
-                self._blocked_urls.append(pattern)
-
+        # User-blocked apps and URLs are merged with the defaults.
+        self._blocked_apps: list[str] = fold([*self._DEFAULT_BLOCKED, *cfg.blocked])
+        self._blocked_urls: list[str] = fold(
+            [*self._DEFAULT_BLOCKED_URLS, *cfg.blocked_urls]
+        )
         # Explicit full-observation overrides
-        self._full_observation: list[str] = list(cfg.full_observation)
-
+        self._full_observation: list[str] = fold(cfg.full_observation)
         # Metadata-only patterns
-        self._metadata_only: list[str] = list(cfg.metadata_only)
+        self._metadata_only: list[str] = fold(cfg.metadata_only)
 
         # Parse auto-pause time windows into (start, end) tuples
         self._auto_pause_windows: list[tuple[dt_time, dt_time]] = []
@@ -151,30 +169,32 @@ class PrivacyZoneChecker:
 
         Checks (in order of priority):
           1. Auto-pause time windows → BLOCKED
-          2. App name from window_json → tier per check_app()
+          2. App and title from window_json → tier per check_app()
           3. URL from metadata_json → tier per check_url()
 
         The most restrictive result across all checks wins.
 
         Args:
             event: Raw event dict as stored in the daemon DB.  Expected
-                keys: ``window_json`` (JSON string with ``app`` and
-                optionally ``app_bundle_id``), ``metadata_json`` (JSON
-                string, may contain ``url``), ``kind_json``.
+                keys: ``window_json`` (JSON with ``app_id`` —
+                ``pid:<pid>:<name>`` for native windows, a bundle id for
+                browser events — and ``title``), ``metadata_json`` (JSON,
+                may contain ``url``), ``kind_json``.
 
         Returns:
             The applicable ObservationTier.
         """
-        # 1. Auto-pause overrides everything
-        if self.is_auto_paused():
+        # 1. Auto-pause overrides everything.  The window is checked at the
+        # time the event happened, not when the worker reaches it.
+        if self.is_auto_paused(self._event_local_time(event)):
             return ObservationTier.BLOCKED
 
         most_restrictive = ObservationTier.FULL
 
         # 2. Extract app info from window_json
-        app_name, bundle_id = self._extract_app_info(event)
-        if app_name or bundle_id:
-            app_tier = self.check_app(bundle_id, app_name)
+        app_name, bundle_id, title = self._extract_app_info(event)
+        if app_name or bundle_id or title:
+            app_tier = self.check_app(bundle_id, app_name, title)
             most_restrictive = self._most_restrictive(most_restrictive, app_tier)
 
         # 3. Extract URL from metadata_json
@@ -185,8 +205,10 @@ class PrivacyZoneChecker:
 
         return most_restrictive
 
-    def check_app(self, bundle_id: str, app_name: str) -> ObservationTier:
-        """Determine the observation tier for an app.
+    def check_app(
+        self, bundle_id: str, app_name: str, title: str = "",
+    ) -> ObservationTier:
+        """Determine the observation tier for an app (and its window title).
 
         Checks in order:
           1. Explicit full_observation patterns → FULL
@@ -201,39 +223,37 @@ class PrivacyZoneChecker:
         Args:
             bundle_id: macOS bundle identifier (e.g. "com.1password.1password").
             app_name: Human-readable app name (e.g. "1Password").
+            title: The window title.
 
         Returns:
             The applicable ObservationTier.
         """
-        candidates = [app_name, bundle_id]
+        candidates = [
+            c.casefold() for c in (app_name, bundle_id, title) if c
+        ]
 
-        # Check explicit full-observation override first
-        for pattern in self._full_observation:
-            for candidate in candidates:
-                if candidate and fnmatch.fnmatch(candidate, pattern):
-                    return ObservationTier.FULL
+        def matches(patterns: list[str]) -> bool:
+            return any(
+                fnmatch.fnmatchcase(candidate, pattern)
+                for pattern in patterns
+                for candidate in candidates
+            )
 
-        # Check blocked apps
-        for blocked in self._blocked_apps:
-            for candidate in candidates:
-                if not candidate:
-                    continue
-                if fnmatch.fnmatch(candidate, blocked):
-                    return ObservationTier.BLOCKED
-
-        # Check metadata-only apps
-        for pattern in self._metadata_only:
-            for candidate in candidates:
-                if candidate and fnmatch.fnmatch(candidate, pattern):
-                    return ObservationTier.METADATA_ONLY
-
+        # Explicit full-observation override first, then blocked, then
+        # metadata-only.
+        if matches(self._full_observation):
+            return ObservationTier.FULL
+        if matches(self._blocked_apps):
+            return ObservationTier.BLOCKED
+        if matches(self._metadata_only):
+            return ObservationTier.METADATA_ONLY
         return ObservationTier.FULL
 
     def check_url(self, url: str) -> ObservationTier:
         """Determine the observation tier for a URL.
 
         Uses case-insensitive fnmatch glob matching against blocked
-        URL patterns (defaults + user-supplied).
+        URL patterns (defaults + user-supplied, folded at construction).
 
         Args:
             url: The full URL string to check.
@@ -244,26 +264,27 @@ class PrivacyZoneChecker:
         if not url:
             return ObservationTier.FULL
 
-        url_lower = url.lower()
+        folded = url.casefold()
         for pattern in self._blocked_urls:
-            if fnmatch.fnmatch(url_lower, pattern.lower()):
+            if fnmatch.fnmatchcase(folded, pattern):
                 return ObservationTier.BLOCKED
 
         return ObservationTier.FULL
 
-    def is_auto_paused(self) -> bool:
-        """Check if the current local time falls within any auto-pause window.
+    def is_auto_paused(self, at: dt_time | None = None) -> bool:
+        """Check if local time *at* (default: now) falls within any
+        auto-pause window.
 
         Supports overnight windows (e.g. "22:00-06:00" means paused
         from 10pm to 6am).
 
         Returns:
-            True if observation should be paused right now.
+            True if observation is paused at that time.
         """
         if not self._auto_pause_windows:
             return False
 
-        now = datetime.now().time()
+        now = at if at is not None else datetime.now().time()
 
         for start, end in self._auto_pause_windows:
             if start <= end:
@@ -310,30 +331,43 @@ class PrivacyZoneChecker:
             return None
 
     @staticmethod
-    def _extract_app_info(event: dict) -> tuple[str, str]:
-        """Extract (app_name, bundle_id) from an event's window_json.
+    def _extract_app_info(event: dict) -> tuple[str, str, str]:
+        """Extract (app_name, bundle_id, title) from an event's window_json.
 
-        Returns ("", "") if window_json is missing or unparseable.
+        The daemon writes ``app_id``: ``pid:<pid>:<name>`` for native
+        windows (the ``pid:<pid>:`` prefix is stripped: the name is the app
+        name) and a bundle id for browser extension events.  Legacy
+        ``app`` / ``app_name`` / ``app_bundle_id`` keys are honoured too.
+
+        Returns ("", "", "") if window_json is missing or unparseable.
         """
-        window_json_raw = event.get("window_json", "")
-        if not window_json_raw:
-            return ("", "")
+        window = parse_json_field(event, "window_json")
+        if not window:
+            return ("", "", "")
 
+        app_id = str(window.get("app_id") or "")
+        app_name = str(window.get("app") or window.get("app_name") or "")
+        if not app_name and app_id:
+            app_name = display_name(app_id)
+        bundle_id = str(window.get("app_bundle_id") or "")
+        if not bundle_id and app_id and not app_id.startswith("pid:"):
+            bundle_id = app_id
+        title = str(window.get("title") or "")
+        return (app_name, bundle_id, title)
+
+    @staticmethod
+    def _event_local_time(event: dict) -> dt_time | None:
+        """The event's timestamp as local wall-clock time, or None."""
+        raw = event.get("timestamp")
+        if not isinstance(raw, str) or not raw:
+            return None
         try:
-            window = (
-                json.loads(window_json_raw)
-                if isinstance(window_json_raw, str)
-                else window_json_raw
-            )
-        except (json.JSONDecodeError, TypeError):
-            return ("", "")
-
-        if not isinstance(window, dict):
-            return ("", "")
-
-        app_name = str(window.get("app", window.get("app_name", "")))
-        bundle_id = str(window.get("app_bundle_id", ""))
-        return (app_name, bundle_id)
+            stamp = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if stamp.tzinfo is None:
+            return None
+        return stamp.astimezone().time()
 
     @staticmethod
     def _extract_url(event: dict) -> str:

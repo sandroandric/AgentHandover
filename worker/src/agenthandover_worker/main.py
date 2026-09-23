@@ -244,11 +244,17 @@ def _process_annotations(
     When Ollama is unreachable (``annotator.ready()`` is False, or a call
     returns ``deferred``) the batch stops: the rows stay pending and their
     screenshots are kept for the next attempt after the backoff.
+
+    The privacy zone check (the second line behind the daemon's, which
+    keeps a blocked window from being captured at all) needs no model, so
+    it runs first, Ollama up or not: a blocked or metadata-only frame's
+    JPEG is deleted at once, never left waiting for the annotator.
     """
     stats = {"annotated": 0, "skipped": 0, "failed": 0, "blocked": 0, "deferred": 0}
     unannotated = db.get_unannotated_events(limit=batch_size, exclude_focus=True)
-    if not unannotated or not annotator.ready():
+    if not unannotated:
         return stats
+    ollama_ready: bool | None = None
 
     for event in unannotated:
         event_id = event.get("id", "unknown")
@@ -259,11 +265,13 @@ def _process_annotations(
             from agenthandover_worker.privacy_zones import ObservationTier
             tier = privacy_checker.check_event(event)
             if tier == ObservationTier.BLOCKED:
+                _discard_screenshot(event, screenshots_dir)
                 db.save_annotation(event_id, "", status="privacy_blocked")
                 stats["blocked"] += 1
                 logger.debug("Event %s blocked by privacy zone", event_id[:8])
                 continue
             if tier == ObservationTier.METADATA_ONLY:
+                _discard_screenshot(event, screenshots_dir)
                 # Save minimal metadata annotation (app + timestamp, no content)
                 metadata_annotation = json.dumps({
                     "privacy_tier": "metadata_only",
@@ -274,6 +282,11 @@ def _process_annotations(
                 stats["skipped"] += 1
                 logger.debug("Event %s metadata-only by privacy zone", event_id[:8])
                 continue
+
+        if ollama_ready is None:
+            ollama_ready = annotator.ready()
+        if not ollama_ready:
+            break
 
         # Get sliding window context (last N annotations within time window)
         recent = db.get_recent_annotations(
@@ -353,6 +366,63 @@ def _process_annotations(
             )
 
     return stats
+
+
+def _discard_screenshot(event: dict, screenshots_dir: Path) -> None:
+    """Delete an event's JPEG (only inside *screenshots_dir*)."""
+    from agenthandover_worker.scene_annotator import find_screenshot
+
+    path = find_screenshot(event, screenshots_dir)
+    if path is None:
+        return
+    try:
+        Path(path).unlink(missing_ok=True)
+    except OSError:
+        logger.warning("Could not delete screenshot %s", path, exc_info=True)
+
+
+# A JPEG this young may belong to an event the daemon has not inserted yet
+# (it writes the file, then sends the event to its storage writer).
+ORPHAN_MIN_AGE_SECONDS = 300
+
+
+def _sweep_orphan_screenshots(
+    db: "WorkerDB",
+    screenshots_dir: Path,
+    *,
+    min_age_seconds: float = ORPHAN_MIN_AGE_SECONDS,
+) -> int:
+    """Delete JPEGs in *screenshots_dir* that no pending event refers to.
+
+    Run at worker start.  A frame's JPEG is needed only until its event is
+    annotated (or blocked by a privacy zone); after that every path deletes
+    it.  Anything else in the directory is an orphan: frames of blocked or
+    metadata-only windows kept by an older worker, frames of events that
+    were purged, files left by a crash.  Files younger than
+    *min_age_seconds* are left alone.  Returns the number deleted.
+    """
+    if not screenshots_dir.is_dir():
+        return 0
+    referenced = {
+        str(Path(p).resolve()) for p in db.pending_screenshot_paths()
+    }
+    cutoff = time.time() - min_age_seconds
+    removed = 0
+    for path in screenshots_dir.iterdir():
+        if path.suffix.lower() not in (".jpg", ".jpeg") or not path.is_file():
+            continue
+        if str(path.resolve()) in referenced:
+            continue
+        try:
+            if path.stat().st_mtime > cutoff:
+                continue
+            path.unlink()
+            removed += 1
+        except OSError:
+            logger.debug("Could not remove orphan screenshot %s", path, exc_info=True)
+    if removed:
+        logger.info("Removed %d orphaned screenshot(s) from %s", removed, screenshots_dir)
+    return removed
 
 
 def _process_diffs(
@@ -4680,6 +4750,7 @@ def main(argv: list[str] | None = None) -> None:
 
     with WorkerDB(args.db_path) as db:
         logger.info("Connected to database, entering main loop")
+        _sweep_orphan_screenshots(db, screenshots_dir)
 
         # Initialize evidence extractor now that DB is available
         from agenthandover_worker.evidence_extractor import EvidenceExtractor

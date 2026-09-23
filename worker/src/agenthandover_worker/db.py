@@ -211,6 +211,16 @@ class WorkerDB:
         )
         return self._rows_to_dicts(cur.fetchall())
 
+    def pending_screenshot_paths(self) -> list[str]:
+        """``metadata.screenshot_path`` of every event still pending
+        annotation (passive and focus): the JPEGs that are still needed."""
+        cur = self._conn.execute(
+            "SELECT json_extract(metadata_json, '$.screenshot_path') FROM events "
+            "WHERE annotation_status = 'pending' "
+            "AND json_extract(metadata_json, '$.screenshot_path') IS NOT NULL"
+        )
+        return [row[0] for row in cur.fetchall() if isinstance(row[0], str) and row[0]]
+
     def get_recent_annotations(
         self,
         before_timestamp: str,

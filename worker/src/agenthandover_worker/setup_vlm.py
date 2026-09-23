@@ -10,8 +10,10 @@ or:
 
 from __future__ import annotations
 
+import json
 import os
 import platform
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -212,79 +214,61 @@ def prompt_remote_setup() -> dict | None:
     }
 
 
-def _write_remote_config(result: dict) -> None:
-    """Update config.toml [vlm] section with remote mode settings.
+_REMOTE_KEYS = ("mode", "provider", "model", "api_key_env")
+_SECTION_HEADER = re.compile(r"^[ \t]*\[")
+_VLM_HEADER = re.compile(r"^[ \t]*\[vlm\][ \t]*(#.*)?$")
+_REMOTE_KEY_LINE = re.compile(
+    r"^[ \t]*(?:" + "|".join(_REMOTE_KEYS) + r")[ \t]*="
+)
 
-    Reads the existing TOML, updates the [vlm] fields, and writes back.
-    If the file doesn't exist, creates it with just the [vlm] section.
+
+def set_remote_vlm_fields(text: str, fields: dict[str, str]) -> str:
+    """Set the remote-mode keys of ``[vlm]`` in config.toml *text*, in place.
+
+    Existing ``mode``/``provider``/``model``/``api_key_env`` lines inside
+    the ``[vlm]`` block are removed and the new ones inserted right after
+    the ``[vlm]`` header; every other line (comments, other keys, every
+    other section, ``[privacy.zones]`` included) is kept byte for byte.
+    Without a ``[vlm]`` section one is appended.  The same edit the app's
+    onboarding makes (``OnboardingView.writeRemoteVLMConfig``), scoped to
+    the ``[vlm]`` block.
     """
-    import tomllib
+    new_lines = [f"{key} = {json.dumps(fields[key])}\n" for key in _REMOTE_KEYS]
+    lines = text.splitlines(keepends=True)
+    header = next((i for i, line in enumerate(lines) if _VLM_HEADER.match(line)), None)
+    if header is None:
+        prefix = text if not text or text.endswith("\n") else text + "\n"
+        return prefix + ("\n" if prefix else "") + "[vlm]\n" + "".join(new_lines)
 
+    end = next(
+        (i for i in range(header + 1, len(lines)) if _SECTION_HEADER.match(lines[i])),
+        len(lines),
+    )
+    kept = [line for line in lines[header + 1:end] if not _REMOTE_KEY_LINE.match(line)]
+    header_line = lines[header] if lines[header].endswith("\n") else lines[header] + "\n"
+    return "".join(lines[:header] + [header_line] + new_lines + kept + lines[end:])
+
+
+def _write_remote_config(result: dict) -> None:
+    """Point config.toml's ``[vlm]`` section at the chosen remote provider.
+
+    Edits the file in place (:func:`set_remote_vlm_fields`): comments and
+    every other section survive.  Creates the file when it is missing.
+    """
     config_file = _config_path()
     config_file.parent.mkdir(parents=True, exist_ok=True)
-
-    # Read existing config (preserve other sections)
-    existing_lines: list[str] = []
-    if config_file.is_file():
-        existing_lines = config_file.read_text(encoding="utf-8").splitlines(keepends=True)
-
-    # Strategy: find [vlm] section and insert/update mode/provider/model/api_key_env
-    # Simple approach: rewrite the file with updated [vlm] fields
-    cfg: dict = {}
-    if config_file.is_file():
-        with open(config_file, "rb") as f:
-            cfg = tomllib.load(f)
-
-    vlm = cfg.get("vlm", {})
-    vlm["mode"] = "remote"
-    vlm["provider"] = result["provider"]
-    vlm["model"] = result["model"]
-    vlm["api_key_env"] = result["api_key_env"]
-    cfg["vlm"] = vlm
-
-    # Write back preserving readability
-    # We'll rebuild TOML manually to keep comments from example
-    # For simplicity, just write the updated fields
-    _write_toml_config(config_file, cfg)
+    text = config_file.read_text(encoding="utf-8") if config_file.is_file() else ""
+    config_file.write_text(
+        set_remote_vlm_fields(text, {
+            "mode": "remote",
+            "provider": result["provider"],
+            "model": result["model"],
+            "api_key_env": result["api_key_env"],
+        }),
+        encoding="utf-8",
+    )
 
     print(f"\n  ✓ Config written to {config_file}")
-
-
-def _write_toml_config(path: Path, cfg: dict) -> None:
-    """Write a dict as TOML to *path*.
-
-    Uses a simple serializer (no third-party TOML writer needed).
-    """
-    lines: list[str] = []
-    # Write top-level simple keys first (none expected, but just in case)
-    for key, val in cfg.items():
-        if not isinstance(val, dict):
-            lines.append(f"{key} = {_toml_value(val)}")
-
-    # Write sections
-    for section, values in cfg.items():
-        if isinstance(values, dict):
-            lines.append(f"\n[{section}]")
-            for key, val in values.items():
-                lines.append(f"{key} = {_toml_value(val)}")
-
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-
-
-def _toml_value(val: object) -> str:
-    """Format a Python value as a TOML literal."""
-    if isinstance(val, bool):
-        return "true" if val else "false"
-    if isinstance(val, int):
-        return str(val)
-    if isinstance(val, float):
-        return str(val)
-    if isinstance(val, str):
-        return f'"{val}"'
-    if isinstance(val, list):
-        items = ", ".join(_toml_value(v) for v in val)
-        return f"[{items}]"
-    return f'"{val}"'
 
 
 # The local VLM backend is the Ollama Python client on every platform.
