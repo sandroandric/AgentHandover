@@ -1,7 +1,8 @@
 """VLM scene annotation for captured screenshots.
 
 Processes DwellSnapshot/ScrollReadSnapshot frames through a local VLM
-(qwen3.5:2b with think=False) to produce structured semantic annotations.
+(the tier's annotation model, qwen3.5:4b, with think=False) to produce
+structured semantic annotations.
 Each annotation describes what the user is doing, what's visible on screen,
 and whether the activity is part of a meaningful workflow.
 

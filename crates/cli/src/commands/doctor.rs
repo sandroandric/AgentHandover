@@ -235,11 +235,8 @@ pub fn run() -> Result<()> {
 
     // Check 16: Required models pulled
     //
-    // v0.2.0 introduced RAM-based model tiers (Qwen 3.5 for 8GB, Gemma 4
-    // for 16GB+). The previous version of this check hardcoded
-    // `qwen3.5:2b` + `qwen3.5:4b` which is wrong for anyone on a 16GB+
-    // Mac — they'd have Gemma 4 installed and doctor would report both
-    // qwen models as missing. False failures.
+    // The models depend on the RAM tier (tiers.json), so a hard-coded
+    // list reports false failures on every other tier.
     //
     // Correct approach: read the user's config.toml to find their
     // ACTUALLY configured annotation_model + sop_model + embedding
@@ -277,9 +274,8 @@ pub fn run() -> Result<()> {
                 .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
                 .unwrap_or_default();
 
-            // Gemma 4 is a single-model tier where annotation_model ==
-            // sop_model; deduplicate so we don't report the same model
-            // twice with different purposes.
+            // The standard tier runs one model for both jobs; deduplicate
+            // so we don't report the same model twice.
             let mut models_to_check: Vec<(String, &str)> = Vec::new();
             if !annotation_model.is_empty() {
                 models_to_check.push((annotation_model.clone(), "scene annotation"));

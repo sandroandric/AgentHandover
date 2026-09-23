@@ -51,10 +51,10 @@ cask "agenthandover" do
       1. Accessibility + Screen Recording permissions (System Settings)
       2. Installing Ollama (opens https://ollama.com/download/mac) or
          `brew install --cask ollama-app` — required for local AI models
-      3. Pulling the Gemma 4 model tier that matches your Mac's RAM
+      3. Pulling the model tier that matches your Mac's RAM
       4. Loading the Chrome extension (optional, for in-browser capture)
 
-    The Gemma 4 tiers use QAT checkpoints that require Ollama 0.30.6 or
+    The Gemma 4 tiers use QAT checkpoints that require Ollama 0.34.0 or
     later.  Install the official Ollama app (the Homebrew `ollama` formula
     does not bundle the GGUF runner — use `--cask ollama-app` instead).
 
