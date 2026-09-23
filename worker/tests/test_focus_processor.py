@@ -1134,3 +1134,149 @@ class TestClipboardAttach:
         ]
         processor._attach_clipboard_context(events)
         assert "snap-only" in processor._clipboard_map
+
+
+# ---------------------------------------------------------------------------
+# The Skill draft is saved right after SOP generation (WP-C9)
+# ---------------------------------------------------------------------------
+
+
+class _Crash(BaseException):
+    """The worker stopping mid-tick (not an ``Exception``: nothing catches it)."""
+
+
+def _focus_v2_with_synthesizer(tmp_path, db_path, session_id, processor, synthesizer):
+    from agenthandover_worker.main import _process_focus_sessions_v2
+
+    writer = MagicMock()
+    writer.get_sops_dir.return_value = tmp_path / "sops"
+    with WorkerDB(db_path) as db:
+        with patch("agenthandover_worker.main._status_dir", return_value=tmp_path):
+            return _process_focus_sessions_v2(
+                db,
+                focus_processor=processor,
+                openclaw_writer=writer,
+                index_generator=MagicMock(),
+                screenshots_dir=str(tmp_path),
+                behavioral_synthesizer=synthesizer,
+                knowledge_base=MagicMock(get_procedure=MagicMock(return_value=None)),
+            )
+
+
+def _records(db_path, slug):
+    with WorkerDB(db_path) as db:
+        return [r for r in db.get_generated_sops() if r["slug"] == slug]
+
+
+class TestFocusDraftSavedAfterGeneration:
+
+    SESSION = "focus-draft-1"
+
+    def _session(self, tmp_path):
+        (tmp_path / "focus-session.json").write_text(json.dumps({
+            "session_id": self.SESSION, "status": "stopped",
+            "title": "Check Domain Availability",
+        }))
+        db_path = _create_test_db(tmp_path)
+        _insert_focus_events(db_path, self.SESSION, count=3, annotated=True)
+        sop = generated_sop_template("check_domain_availability")
+        return db_path, sop
+
+    @staticmethod
+    def _generated(sop):
+        """What the generator returned (the worker adds fields to it later)."""
+        return {k: v for k, v in sop.items() if k != "_fingerprint"}
+
+    def test_the_draft_is_saved_before_synthesis_and_approved_after(self, tmp_path):
+        from agenthandover_worker.main import FOCUS_DRAFT_FILE
+
+        db_path, sop = self._session(tmp_path)
+        slug = sop["slug"]
+        processor = MagicMock()
+        processor.process_session.return_value = GeneratedSOP(sop=sop, inference_time_seconds=549.0)
+        processor._last_rich_observations = []
+        seen = {}
+
+        def synthesize(slug_arg, procedure, observations, force=False):
+            # Synthesis runs after the draft is on disk and in the queue.
+            seen["records"] = _records(db_path, slug)
+            seen["draft"] = json.loads((tmp_path / FOCUS_DRAFT_FILE).read_text())
+            return MagicMock(goal="", strategy="", guardrails=[])
+
+        synthesizer = MagicMock()
+        synthesizer.synthesize.side_effect = synthesize
+
+        exported = _focus_v2_with_synthesizer(
+            tmp_path, db_path, self.SESSION, processor, synthesizer,
+        )
+
+        assert [r["status"] for r in seen["records"]] == ["draft"]
+        assert seen["records"][0]["source_id"] == self.SESSION
+        assert seen["draft"]["session_id"] == self.SESSION
+        assert self._generated(seen["draft"]["sop_template"]) == self._generated(sop)
+        assert seen["draft"]["inference_time_seconds"] == 549.0
+        # Exported: the same record, now approved; the draft state is gone.
+        assert exported == 1
+        assert [r["status"] for r in _records(db_path, slug)] == ["approved"]
+        assert not (tmp_path / FOCUS_DRAFT_FILE).exists()
+
+    def test_a_restart_after_generation_resumes_from_the_saved_sop(self, tmp_path):
+        from agenthandover_worker.main import FOCUS_DRAFT_FILE
+
+        db_path, sop = self._session(tmp_path)
+        slug = sop["slug"]
+        processor = MagicMock()
+        processor.process_session.return_value = GeneratedSOP(sop=sop, inference_time_seconds=549.0)
+        processor._last_rich_observations = []
+        crashing = MagicMock()
+        crashing.synthesize.side_effect = _Crash()
+
+        with pytest.raises(_Crash):
+            _focus_v2_with_synthesizer(tmp_path, db_path, self.SESSION, processor, crashing)
+        assert processor.process_session.call_args.kwargs["saved"] is None
+        assert [r["status"] for r in _records(db_path, slug)] == ["draft"]
+        assert (tmp_path / "focus-session.json").exists()
+        assert (tmp_path / FOCUS_DRAFT_FILE).exists()
+
+        # The restarted worker: the processor gets the saved SOP back and
+        # returns it (FocusProcessor.process_session does, below); no
+        # second record is written.
+        restarted = MagicMock()
+        restarted.process_session.side_effect = lambda *a, saved=None, **k: saved
+        restarted._last_rich_observations = []
+        synthesizer = MagicMock()
+        synthesizer.synthesize.return_value = MagicMock(goal="", strategy="", guardrails=[])
+        exported = _focus_v2_with_synthesizer(
+            tmp_path, db_path, self.SESSION, restarted, synthesizer,
+        )
+        saved = restarted.process_session.call_args.kwargs["saved"]
+        assert self._generated(saved.sop) == self._generated(sop)
+        assert saved.inference_time_seconds == 549.0
+        assert exported == 1
+        assert [r["status"] for r in _records(db_path, slug)] == ["approved"]
+        assert not (tmp_path / FOCUS_DRAFT_FILE).exists()
+
+    def test_a_draft_of_another_session_is_not_resumed(self, tmp_path):
+        from agenthandover_worker.main import FOCUS_DRAFT_FILE, _read_focus_draft
+
+        (tmp_path / FOCUS_DRAFT_FILE).write_text(json.dumps({
+            "session_id": "older", "sop_template": {"slug": "x"},
+        }))
+        assert _read_focus_draft(tmp_path, self.SESSION) is None
+        assert _read_focus_draft(tmp_path, "older").sop == {"slug": "x"}
+
+    def test_process_session_returns_the_saved_sop_without_generating(self, tmp_path):
+        db_path = _create_test_db(tmp_path)
+        _insert_focus_events(db_path, self.SESSION, count=3, annotated=True)
+        saved = GeneratedSOP(sop={"slug": "saved"}, inference_time_seconds=549.0)
+        with WorkerDB(db_path) as db:
+            sop_gen = _make_mock_sop_generator()
+            processor = FocusProcessor(_make_mock_annotator(), _make_mock_differ(), sop_gen)
+            result = processor.process_session(
+                db, self.SESSION, "Task", db.get_focus_session_events(self.SESSION),
+                screenshots_dir=str(tmp_path), saved=saved,
+            )
+        assert result is saved
+        assert sop_gen.generate_from_focus.call_count == 0
+        # The rich observations synthesis uses are rebuilt from the frames.
+        assert processor._last_rich_observations and processor._last_rich_observations[0]
