@@ -107,6 +107,19 @@ def test_every_tier_model_has_a_registered_profile_and_a_size():
     assert mp.get_tier("standard").models == ["qwen3.5:4b", "nomic-embed-text"]
 
 
+def test_each_tiers_sop_model_holds_the_largest_measured_generation_call():
+    """WP-C9's per-model context: the largest generation-phase call measured
+    on focus_dailynews (the SOP call, 6,619 prompt tokens at the 20-keyframe
+    cap) plus the model's num_predict fits its ``sop_num_ctx``.  On the
+    16 GB tier that model is qwen3.5:4b (WP-F6) at 24,576."""
+    largest_prompt = 6_619
+    for tier in mp.TIERS:
+        profile = mp.get_profile(tier.sop_model)
+        assert largest_prompt + profile.sop_num_predict <= profile.sop_num_ctx, tier.id
+    recommended = mp.get_profile(mp.get_tier("recommended").sop_model)
+    assert (recommended.model, recommended.sop_num_ctx) == ("qwen3.5:4b", 24_576)
+
+
 def test_minimum_ollama_version():
     assert mp.MINIMUM_OLLAMA_VERSION_FOR_GEMMA4 == "0.34.0"
     assert mp.version_at_least("0.34.2", "0.34.0")
