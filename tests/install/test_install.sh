@@ -9,6 +9,9 @@
 #              so the probe must skip it and pick a 3.11+ one
 #   upgrade    second install over it, with a stub "app" process running
 #              that preinstall must stop; then a broken venv is rebuilt
+#   tiers      upgrades over a config on the 16 GB tier's pre-WP-F6 models:
+#              doctor warns, postinstall migrates it with one backup, and a
+#              customised block is kept
 #   tcc        upgrades over a stand-in app: an unchanged code signature
 #              keeps the grants; a changed one resets Accessibility and
 #              Screen Recording as the install user
@@ -368,6 +371,68 @@ check "postinstall exits 0" test "${rc}" -eq 0
 [ "${rc}" -eq 0 ] || sed 's/^/    | /' "${WORK}/rebuild-post.log"
 check "postinstall rebuilt the venv" contains "${WORK}/rebuild-post.log" "Existing Python environment is broken or too old; rebuilding it."
 check "rebuilt venv imports the worker" "${P}/lib/venv/bin/python" -c "import agenthandover_worker, mcp"
+
+# ---------------------------------------------------------------------------
+# tiers: an upgrade over a config on a tier's earlier default models
+# ---------------------------------------------------------------------------
+echo ""
+echo "== upgrade over a config on the 16 GB tier's pre-WP-F6 models =="
+# The [vlm] block onboarding wrote for "recommended" before WP-F6, with a
+# hand-set key: an Ollama host on a closed port, so doctor contacts none.
+CFG="${DD}/config.toml"
+cp "${CFG}" "${WORK}/config.standard"
+"${GOOD_PY}" - "${CFG}" <<'PY'
+import pathlib, sys
+p = pathlib.Path(sys.argv[1])
+text = p.read_text(encoding="utf-8")
+standard = ('[vlm]\nmode = "local"\ntier = "standard"\n'
+            'annotation_model = "qwen3.5:4b"\nsop_model = "qwen3.5:4b"\n')
+assert text.count(standard) == 1, text
+p.write_text(text.replace(standard, (
+    '[vlm]\nmode = "local"\ntier = "recommended"\n'
+    'annotation_model = "qwen3.5:4b"\nsop_model = "gemma4:12b-it-qat"\n'
+    'ollama_host = "http://127.0.0.1:9"\n')), encoding="utf-8")
+PY
+cp "${CFG}" "${WORK}/config.old-tier"
+run_doctor "${P}" "${WORK}/doctor-old-tier.log"
+check "doctor warns that config.toml pins the tier's earlier models" contains "${WORK}/doctor-old-tier.log" \
+    "WARN Config pins the Recommended tier's earlier models (qwen3.5:4b + gemma4:12b-it-qat)"
+check "doctor names the fix" contains "${WORK}/doctor-old-tier.log" "Fix: agenthandover setup --tier recommended"
+run_script "${P}" postinstall "${GOOD_PY}" "${WORK}/tier-post.log"
+rc=$?
+check "postinstall exits 0" test "${rc}" -eq 0
+[ "${rc}" -eq 0 ] || sed 's/^/    | /' "${WORK}/tier-post.log"
+check "postinstall says what it migrated and why" contains "${WORK}/tier-post.log" \
+    "Migrated [vlm] in ${CFG}: tier \"recommended\": sop_model gemma4:12b-it-qat -> qwen3.5:4b"
+check "only sop_model changed; every other byte of config.toml kept" bash -c \
+    'sed "s/^sop_model = \"gemma4:12b-it-qat\"\$/sop_model = \"qwen3.5:4b\"/" "$1" | cmp -s - "$2"' \
+    _ "${WORK}/config.old-tier" "${CFG}"
+check "config [vlm] block is the worker's recommended block" bash -c \
+    '"$1" -m agenthandover_worker.model_profiles vlm-block recommended > "$3/vlm.recommended" \
+     && grep -A4 "^\[vlm\]$" "$2" | cmp -s - "$3/vlm.recommended"' \
+    _ "${P}/lib/venv/bin/python" "${CFG}" "${WORK}"
+TIER_BACKUPS=("${DD}"/config.toml.*.bak)
+check "one timestamped backup, holding the old config" bash -c \
+    '[ "$#" -eq 2 ] && [ -f "$2" ] && cmp -s "$1" "$2"' _ "${WORK}/config.old-tier" "${TIER_BACKUPS[@]}"
+check "the install marker is not the backup" test -f "${DD}/config.toml.bak"
+run_doctor "${P}" "${WORK}/doctor-new-tier.log"
+check "doctor no longer warns about the tier's models" \
+    bash -c '! grep -qF "earlier models" "$1"' _ "${WORK}/doctor-new-tier.log"
+run_script "${P}" postinstall "${GOOD_PY}" "${WORK}/tier-post2.log"
+check "a second upgrade keeps the migrated block" contains "${WORK}/tier-post2.log" \
+    "Kept [vlm] in ${CFG} as it is: already the current models of tier \"recommended\""
+TIER_BACKUPS=("${DD}"/config.toml.*.bak)
+check "a second upgrade writes no second backup" test "${#TIER_BACKUPS[@]}" -eq 1
+
+# A block the user chose: another Skills model stays, and no backup.
+rm -f "${DD}"/config.toml.*.bak
+sed -i '' 's/^sop_model = "qwen3.5:4b"$/sop_model = "gemma4:31b-it-qat"/' "${CFG}"
+cp "${CFG}" "${WORK}/config.custom"
+run_script "${P}" postinstall "${GOOD_PY}" "${WORK}/tier-post3.log"
+check "a customised block is kept byte for byte" cmp -s "${WORK}/config.custom" "${CFG}"
+check "postinstall says why it kept it" contains "${WORK}/tier-post3.log" "(set by hand)"
+check "no backup of a kept config" bash -c '! ls "$1"/config.toml.*.bak >/dev/null 2>&1' _ "${DD}"
+cp "${WORK}/config.standard" "${CFG}"
 
 # ---------------------------------------------------------------------------
 # tcc: an upgrade that changes the app's code signature
