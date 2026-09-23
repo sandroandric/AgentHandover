@@ -1718,6 +1718,7 @@ def _process_focus_sessions_v2(
         kb_export_adapter=kb_export_adapter,
         knowledge_base=knowledge_base,
         vector_kb=vector_kb,
+        sop_generator=getattr(focus_processor, "sop_generator", None),
     )
     if pending_export is not None:
         return pending_export
@@ -2241,8 +2242,13 @@ def _check_focus_answers(
     kb_export_adapter: "KnowledgeBaseExportAdapter | None" = None,
     knowledge_base=None,
     vector_kb=None,
+    sop_generator: "SOPGenerator | None" = None,
 ) -> int | None:
     """Check for pending focus Q&A answers and complete export if ready.
+
+    The typed answers revise the steps they concern through one call on
+    *sop_generator* (the SOP model, in the generation phase: focus answers
+    make the phase urgent), see :func:`_revise_steps_from_answers`.
 
     Returns:
         Number of SOPs exported if answers were processed.
@@ -2304,6 +2310,8 @@ def _check_focus_answers(
                 "Failed to merge focus Q&A answers for '%s'",
                 title, exc_info=True,
             )
+        if sop_generator is not None:
+            _revise_steps_from_answers(procedure_dict, qa_result, sop_generator, title)
 
     sop_templates = [procedure_dict]
 
@@ -2355,6 +2363,41 @@ def _check_focus_answers(
         title, exported, qa_status,
     )
     return exported
+
+
+def _revise_steps_from_answers(
+    procedure: dict, qa_result: "FocusQAResult", sop_generator: "SOPGenerator", title: str,
+) -> list[dict]:
+    """Apply the typed answers of a focus session to the steps they
+    concern (in place): one ``SOPGenerator.revise`` call for all of them
+    (none when no typed answer may change a step), validated and applied
+    by ``focus_questioner.apply_answer_revisions``.  Accepted guesses
+    change nothing.  When the model is unavailable or its answer is
+    unusable, the steps stay as recorded: the answers are still in the
+    Skill's clarifications.  Returns the applied revisions."""
+    from agenthandover_worker.focus_questioner import (
+        answer_revision_prompt,
+        apply_answer_revisions,
+    )
+
+    prompt = answer_revision_prompt(procedure, qa_result)
+    if prompt is None:
+        return []
+    try:
+        response = sop_generator.revise(prompt)
+    except ConnectionError as exc:
+        logger.warning(
+            "Focus v2 '%s': the typed answers could not revise the steps "
+            "(model unavailable: %s); they stay in the clarifications", title, exc,
+        )
+        return []
+    except (ValueError, TimeoutError, RuntimeError) as exc:
+        logger.warning(
+            "Focus v2 '%s': the answer revision was unusable (%s); steps unchanged",
+            title, exc,
+        )
+        return []
+    return apply_answer_revisions(procedure, qa_result, response)
 
 
 def _process_passive_discovery(

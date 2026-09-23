@@ -560,6 +560,10 @@ def _build_focus_prompt(
 
 MAX_FRAMES_PER_DEMO = 25
 
+# Output tokens of a revision call (``SOPGenerator.revise``): a few steps
+# of JSON, not a whole SOP.
+REVISION_NUM_PREDICT = 1500
+
 
 def _sample_demo_frames(timeline: list[dict], demo_idx: int) -> list[dict]:
     """Sample frames from a demonstration to stay within prompt budget.
@@ -1525,6 +1529,33 @@ class SOPGenerator:
             format_json=True,
             extra_options=profile.sop_options(),
         )
+
+    def revise(self, prompt: str) -> dict:
+        """One small call on the SOP model for a revision of a Skill (the
+        user's answers applied to its steps): thinking off, JSON only,
+        :data:`REVISION_NUM_PREDICT` tokens, counted as SOP generation.
+
+        Returns the parsed JSON object.  Raises ``ConnectionError`` when
+        Ollama (or the generation model) is unavailable, ``ValueError``
+        when the answer is not a JSON object."""
+        from agenthandover_worker.model_profiles import get_profile
+
+        before_generation_call(self)
+        profile = get_profile(self.config.model)
+        raw, _elapsed = _call_ollama(
+            model=self.config.model,
+            prompt=prompt,
+            host=self.config.ollama_host,
+            num_predict=REVISION_NUM_PREDICT,
+            system=sop_system_prompt(profile.sop_system),
+            timeout=self.config.retry_timeout,
+            think=False,
+            format_json=True,
+            extra_options={
+                k: v for k, v in profile.sop_options().items() if k != "num_predict"
+            },
+        )
+        return extract_json(raw)
 
     def generate_from_focus(
         self,

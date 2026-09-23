@@ -26,6 +26,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
+from agenthandover_worker.clipboard_grounding import COPIED, COPY, PASTE, claims, rewrite
 from agenthandover_worker.redaction import redact
 
 if TYPE_CHECKING:
@@ -110,6 +111,11 @@ _LEGACY_MERGE_CATEGORIES = frozenset({
 
 _MAX_QUESTIONS = 3
 
+_NO_CLIPBOARD_NOTE = (
+    "\n\nCLIPBOARD: no copy, cut or paste was recorded during this session: "
+    "the user typed the text. Do not ask about copying or pasting."
+)
+
 
 # ---------------------------------------------------------------------------
 # LLM prompt for question generation
@@ -136,7 +142,7 @@ STEPS:
 
 APPS INVOLVED: {apps}
 URLS DETECTED: {urls}
-INPUTS/VARIABLES: {variables}
+INPUTS/VARIABLES: {variables}{clipboard_note}
 
 Put yourself in the agent's position. Think step by step:
 - Could you actually execute each step with the information given?
@@ -247,6 +253,17 @@ class FocusQuestioner:
         else:
             variables = "(none)"
 
+        # What the clipboard recorded in the session (None: no record).  A
+        # session that copied nothing is told so, as the SOP prompt is, and
+        # the synthesized text's copy wording is not handed on as a fact.
+        # The steps are the Skill's, already grounded (clipboard_grounding,
+        # step_grounding).
+        recorded = _session_clipboard(sop_template)
+        note = ""
+        if recorded == set():
+            note = _NO_CLIPBOARD_NOTE
+            description, strategy = rewrite(description or ""), rewrite(strategy or "")
+
         # The procedure's text quotes the screen: redacted before the
         # model sees it.
         prompt = _QUESTIONER_PROMPT.format(
@@ -257,6 +274,7 @@ class FocusQuestioner:
             apps=redact(apps),
             urls=redact(urls),
             variables=redact(variables),
+            clipboard_note=note,
         )
 
         result = self._reasoner.reason_json(
@@ -272,7 +290,9 @@ class FocusQuestioner:
             )
             return []
 
-        return self._parse_questions(result.value)
+        return drop_unrecorded_clipboard_questions(
+            self._parse_questions(result.value), recorded,
+        )
 
     @staticmethod
     def _parse_questions(data: dict) -> list[FocusQuestion]:
@@ -500,6 +520,240 @@ class FocusQuestioner:
                 # Otherwise leave the answer in agent_clarifications only —
                 # we don't have enough information to know what specific
                 # field the answer should overwrite.
+
+
+def _session_clipboard(sop_template: dict | None) -> set[str] | None:
+    """The clipboard kinds the session recorded (``copy``, ``paste``), from
+    the SOP template's ``session_clipboard``; None without a record."""
+    kinds = (sop_template or {}).get("session_clipboard")
+    return None if kinds is None else {str(k) for k in kinds}
+
+
+def drop_unrecorded_clipboard_questions(
+    questions: list[FocusQuestion], recorded: set[str] | None,
+) -> list[FocusQuestion]:
+    """*questions* without those that assume a copy or paste the clipboard
+    did not record (*recorded*: the session's clipboard kinds; None keeps
+    every question).  The live run asked "Should I copy the exact text
+    ..." of a session that only typed.  A copy needs a recorded copy, a
+    paste a recorded paste or copy (the rule of ``clipboard_grounding``)."""
+    if recorded is None:
+        return questions
+    supported = {COPY: COPY in recorded, COPIED: COPY in recorded,
+                 PASTE: PASTE in recorded or COPY in recorded}
+    kept = []
+    for q in questions:
+        claimed = claims([q.question, q.context, q.default])
+        if any(not supported[c] for c in claimed):
+            logger.info(
+                "Focus questioner: dropped a question that assumes an unrecorded "
+                "copy or paste: %r", q.question,
+            )
+            continue
+        kept.append(q)
+    return kept
+
+
+# ---------------------------------------------------------------------------
+# Typed answers revise the steps
+# ---------------------------------------------------------------------------
+
+_REVISION_PROMPT = """\
+A user recorded this workflow, then answered questions about it. Revise \
+the steps so that they do what the user's answers say.
+
+STEPS:
+{steps_text}
+
+ANSWERS:
+{answers_text}
+
+Return a JSON object:
+{{
+  "revisions": [
+    {{
+      "answer": <the answer's number>,
+      "replaces": [<the numbers of the steps the answer changes>],
+      "steps": [
+        {{"action": "<what to do: short, imperative>", "input": "<exact text to type, or empty>", "verify": "<what shows it worked>"}}
+      ]
+    }}
+  ]
+}}
+
+Rules:
+- Change only what an answer says. An answer that changes no step gets no revision.
+- "steps" take the place of the steps in "replaces", in order; there may be more or fewer of them.
+- Text the user says to type goes in "input", in the user's words.
+- If no answer changes a step, return {{"revisions": []}}
+
+Respond with ONLY the JSON object."""
+
+# Categories whose answer fills a procedure field (``merge_answers``), not
+# a step.
+_FIELD_CATEGORIES = frozenset({
+    "strategy", "goal", "purpose", "approach",
+    "scope", "scheduling", "recurrence", "frequency",
+})
+# A revision replaces at most this many steps more than it names.
+_MAX_ADDED_STEPS = 2
+USER_ANSWER = "user_answer"
+
+
+def _revisable(qa_result: FocusQAResult) -> list[int]:
+    """The indexes of the typed answers that may change steps: not an
+    accepted guess (it confirms nothing), not a field's answer (strategy,
+    scope), not a URL the deterministic rewrite already put in its steps."""
+    indexes = []
+    for idx, q in enumerate(qa_result.questions):
+        answer = str(qa_result.answers.get(idx) or "").strip()
+        if not answer or qa_result.source(idx) != ANSWER_TYPED:
+            continue
+        if q.category.lower().replace(" ", "_") in _FIELD_CATEGORIES:
+            continue
+        if q.step_indexes and answer.startswith(("r/", "/r/", "http://", "https://", "/")):
+            continue
+        indexes.append(idx)
+    return indexes
+
+
+def answer_revision_prompt(proc: dict, qa_result: FocusQAResult) -> str | None:
+    """The prompt of the one revision call for a session's typed answers
+    (``SOPGenerator.revise``), or None when no typed answer may change a
+    step (no call).  Steps and answers are numbered from 1; each answer
+    says which steps its question was about."""
+    indexes = _revisable(qa_result)
+    steps = [s for s in proc.get("steps") or [] if isinstance(s, dict)]
+    if not indexes or not steps:
+        return None
+    step_lines = []
+    for n, s in enumerate(steps, 1):
+        line = f"{n}. {s.get('action') or s.get('step') or ''}"
+        app = s.get("app") or (s.get("parameters") or {}).get("app")
+        if app:
+            line += f" (in {app})"
+        if s.get("input"):
+            line += f" [input: {s['input']}]"
+        step_lines.append(line)
+    answer_lines = []
+    for n, idx in enumerate(indexes, 1):
+        q = qa_result.questions[idx]
+        about = ", ".join(str(i + 1) for i in q.step_indexes if 0 <= i < len(steps))
+        answer_lines.append(
+            f"{n}. Question{f' (about steps {about})' if about else ''}: {q.question}\n"
+            f"   Answer: {str(qa_result.answers[idx]).strip()}"
+        )
+    return _REVISION_PROMPT.format(
+        steps_text=redact("\n".join(step_lines)),
+        answers_text=redact("\n".join(answer_lines)),
+    )
+
+
+def apply_answer_revisions(
+    proc: dict, qa_result: FocusQAResult, response: dict,
+) -> list[dict]:
+    """Apply the revision call's *response* to *proc*'s steps (in place);
+    returns one record per applied revision.
+
+    A revision is kept only when it answers a typed answer, replaces steps
+    that exist (the question's own steps when it named any), does not
+    touch a step another revision replaced, and brings 1 to (replaced + 2)
+    steps with an action.  Each new step keeps the app, location and
+    frames of the steps it replaces, and its evidence says it came from
+    the answer: ``source: "user_answer"`` and ``user_answer`` (the
+    clarification it answers, the question, the answer and the replaced
+    actions).  The steps are renumbered."""
+    indexes = _revisable(qa_result)
+    steps = [s for s in proc.get("steps") or [] if isinstance(s, dict)]
+    revisions = response.get("revisions") if isinstance(response, dict) else None
+    if not isinstance(revisions, list) or not steps:
+        return []
+    clarifications = proc.get("agent_clarifications") or []
+    taken: set[int] = set()
+    planned: list[tuple[list[int], list[dict], int]] = []
+    for revision in revisions:
+        if not isinstance(revision, dict):
+            continue
+        try:
+            number = int(revision.get("answer"))
+            if number < 1:
+                continue
+            idx = indexes[number - 1]
+            replaced = sorted({int(n) - 1 for n in revision.get("replaces") or []})
+        except (TypeError, ValueError, IndexError):
+            continue
+        new_steps = [
+            s for s in revision.get("steps") or []
+            if isinstance(s, dict) and str(s.get("action") or "").strip()
+        ]
+        allowed = set(qa_result.questions[idx].step_indexes) or set(range(len(steps)))
+        if (
+            not replaced or not set(replaced) <= allowed & set(range(len(steps)))
+            or taken & set(replaced)
+            or not 1 <= len(new_steps) <= len(replaced) + _MAX_ADDED_STEPS
+        ):
+            logger.info("Focus Q&A: revision for answer %d not applied: %r", idx, revision)
+            continue
+        taken.update(replaced)
+        planned.append((replaced, new_steps, idx))
+
+    applied: list[dict] = []
+    # From the last position back, so earlier positions stay valid.
+    for replaced, new_steps, idx in sorted(planned, key=lambda p: -p[0][0]):
+        q = qa_result.questions[idx]
+        answer = str(qa_result.answers[idx]).strip()
+        old = [steps[i] for i in replaced]
+        clarification = max(
+            (i for i, c in enumerate(clarifications)
+             if isinstance(c, dict) and c.get("question") == q.question),
+            default=None,
+        )
+        origin = {
+            "clarification": clarification, "question": q.question, "answer": answer,
+            "replaced": [str(s.get("action") or "") for s in old],
+        }
+        base = old[0]
+        built = []
+        for new in new_steps:
+            action = str(new["action"]).strip()
+            built.append({
+                **{k: base.get(k) for k in ("app", "location", "target", "on_failure")
+                   if k in base},
+                "action": action,
+                "description": f"As the user answered: {answer}",
+                "input": str(new.get("input") or "").strip(),
+                "verify": str(new.get("verify") or "").strip() or str(base.get("verify") or ""),
+                "anchor": None,
+                "selector": None,
+                "parameters": {},
+                "confidence": base.get("confidence", 0.0),
+                "evidence": {
+                    "frames": list(dict.fromkeys(
+                        f for s in old for f in (s.get("evidence") or {}).get("frames") or []
+                    )),
+                    "dom_snapshot_ids": list(dict.fromkeys(
+                        d for s in old
+                        for d in (s.get("evidence") or {}).get("dom_snapshot_ids") or []
+                    )),
+                    "source": USER_ANSWER,
+                    "user_answer": origin,
+                },
+            })
+        steps[replaced[0]:replaced[-1] + 1] = [
+            *built, *(s for i, s in enumerate(steps[replaced[0]:replaced[-1] + 1],
+                                              replaced[0]) if i not in replaced),
+        ]
+        applied.append({**origin, "steps": [s["action"] for s in built]})
+    for n, step in enumerate(steps):
+        step["index"] = n
+        step["step_id"] = f"step_{n + 1}"
+    proc["steps"] = steps
+    if applied:
+        logger.info(
+            "Focus Q&A: %d typed answer(s) revised the steps: %s", len(applied),
+            "; ".join(f"{a['replaced']} -> {a['steps']}" for a in applied),
+        )
+    return list(reversed(applied))
 
 
 # ---------------------------------------------------------------------------
