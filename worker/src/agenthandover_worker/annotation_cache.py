@@ -2,10 +2,11 @@
 reuses that annotation instead of calling the model.
 
 A frame's key is its app, a hash of its window title, and a 64-bit simhash
-of its screen text (the OCR lines that go into the annotation prompt).  A
+of its screen text (the OCR lines that go into the annotation prompt) after
+:func:`normalise_screen_text` folded what changes on a screen that shows
+the same thing (relative times, clocks, cursor positions, numbers).  A
 lookup matches a stored row with the same app and title whose simhash is
-within ``MAX_HAMMING`` bits, so a clock tick or a cursor blink in the OCR
-still hits.  Frames with too little screen text (``MIN_OCR_CHARS``) are
+within ``MAX_HAMMING`` bits, so OCR noise still hits.  Frames with too little screen text (``MIN_OCR_CHARS``) are
 never cached: app and title alone do not say what is on screen.
 
 The table lives in the events database next to the rows it summarises and
@@ -35,8 +36,8 @@ _MASK64 = (1 << 64) - 1
 
 # Screen text that changes while the screen shows the same thing: a relative
 # time ("5s ago", "updated 3 min ago", "just now"), a clock, an editor's
-# cursor position.  Each becomes one token, then every run of digits
-# becomes "0", before the simhash.  The window title is hashed as is, so
+# cursor position.  Each becomes one token, then every number (digits,
+# with any "," or "." grouping) becomes "0", before the simhash.  The window title is hashed as is, so
 # two screens that differ only in a number still need the same title to
 # share an annotation.
 _UNIT = (
@@ -52,7 +53,7 @@ _CLOCK_RE = re.compile(
 _TEXT_POSITION_RE = re.compile(
     r"\b(?:Ln|Line)\s*\d+\s*,\s*(?:Col|Column)\s*\d+\b", re.IGNORECASE,
 )
-_DIGITS_RE = re.compile(r"\d+")
+_DIGITS_RE = re.compile(r"\d+(?:[.,]\d+)*")
 
 
 def normalise_screen_text(text: str) -> str:
