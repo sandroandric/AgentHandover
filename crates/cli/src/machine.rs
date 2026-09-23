@@ -768,11 +768,13 @@ pub struct Report {
     pub headroom: Option<Headroom>,
 }
 
-/// The configured tier: `(label, annotation_model, sop_model)`.
+/// The configured tier and models.
 pub struct ConfiguredModels {
     pub tier_label: String,
     pub annotation: String,
     pub sop: String,
+    /// False with `[vlm] mode = "remote"` (a cloud API writes the Skills).
+    pub local: bool,
 }
 
 /// Probe this Mac and the service at `host_url`.
@@ -812,7 +814,12 @@ pub fn gather(host_url: &str, models: &ConfiguredModels) -> Report {
                 &models.sop,
             );
             headroom = Some(h);
-            findings.extend(f);
+            // With `[vlm] mode = "remote"` the tier's models do not run
+            // here: the figures stay in the report (onboarding offers the
+            // local tiers), but they are no finding.
+            if models.local {
+                findings.extend(f);
+            }
         }
     }
     Report {

@@ -365,7 +365,12 @@ fn configured_models(config_str: &str) -> machine::ConfiguredModels {
         read_config_string_field(config_str, "vlm", "annotation_model").as_deref(),
         read_config_string_field(config_str, "vlm", "sop_model").as_deref(),
     );
-    machine::ConfiguredModels { tier_label: tier.label.clone(), annotation, sop }
+    machine::ConfiguredModels {
+        tier_label: tier.label.clone(),
+        annotation,
+        sop,
+        local: read_config_string_field(config_str, "vlm", "mode").as_deref() != Some("remote"),
+    }
 }
 
 /// What doctor says about `[privacy] read_app_state`: nothing when it is
@@ -736,23 +741,7 @@ fn launch_agents_dir() -> std::path::PathBuf {
 }
 
 fn free_disk_gb() -> u64 {
-    #[cfg(unix)]
-    {
-        use std::ffi::CString;
-        let c_path = CString::new("/").unwrap();
-        unsafe {
-            let mut stat: libc::statvfs = std::mem::zeroed();
-            if libc::statvfs(c_path.as_ptr(), &mut stat) == 0 {
-                stat.f_bavail as u64 * stat.f_frsize as u64 / (1024 * 1024 * 1024)
-            } else {
-                0
-            }
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        0
-    }
+    machine::free_disk_now().unwrap_or(0) / (1024 * 1024 * 1024)
 }
 
 fn check_native_messaging_manifest() -> bool {
