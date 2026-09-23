@@ -286,24 +286,25 @@ agenthandover start all  # Start daemon + worker
 
 ### AI Models
 
-AgentHandover auto-detects your Mac's RAM during onboarding and recommends the best model tier. The small Qwen 3.5 4B model annotates every screen on every tier (it stays loaded and answers within the per-frame budget); the larger model writes Skills and behavioural syntheses, where quality matters and calls are rare:
+AgentHandover auto-detects your Mac's RAM during onboarding and recommends the best model tier; you can pick another tier or name your own models in onboarding or `config.toml`. The small Qwen 3.5 4B model annotates every screen on every tier (it answers within the per-frame budget). Up to 16 GB it also writes Skills and behavioural syntheses: measured on a 16 GB Mac it wrote a Skill in 153 s against Gemma 4 12B's 230 s (29.5 against 12.1 tokens/s), of comparable quality, and Gemma does not fit next to ordinary apps there. From 24 GB a larger Gemma 4 model writes Skills, where quality matters and calls are rare:
 
 | RAM | Tier | Screen annotation | Skill generation | Download |
 |-----|------|-------------------|------------------|----------|
 | 8 GB | Standard | Qwen 3.5 4B | Qwen 3.5 4B | ~4 GB |
-| 16 GB | Recommended | Qwen 3.5 4B | Gemma 4 12B QAT | ~11 GB |
+| 16 GB | Recommended | Qwen 3.5 4B | Qwen 3.5 4B | ~4 GB |
 | 24 GB | Performance | Qwen 3.5 4B | Gemma 4 12B QAT | ~11 GB |
 | 48 GB+ | Max Quality | Qwen 3.5 4B | Gemma 4 31B QAT | ~22 GB |
 
 The table lives in one place (`TIERS` in `worker/src/agenthandover_worker/model_profiles.py`, installed as `tiers.json`); onboarding, `agenthandover setup --vlm [--tier ID]`, `agenthandover doctor` and the worker all read it. `agenthandover bench --tier ID --cassette FILE` measures a tier's models on a recorded session's prompts (tok/s and agreement with the recorded answers).
 
-The Gemma 4 tiers use Google's QAT (Quantization-Aware Training) checkpoints — near-original quality at a much smaller footprint. They require **Ollama 0.34.0+** (install the [official app](https://ollama.com/download), or `brew install --cask ollama-app` — the Homebrew `ollama` *formula* does not bundle the GGUF runner). The 8 GB Qwen tier works on older Ollama. All models run fully local.
+The Gemma 4 tiers (24 GB and up) use Google's QAT (Quantization-Aware Training) checkpoints — near-original quality at a much smaller footprint. They require **Ollama 0.34.0+** (install the [official app](https://ollama.com/download), or `brew install --cask ollama-app` — the Homebrew `ollama` *formula* does not bundle the GGUF runner). The Qwen tiers (8 and 16 GB) work on older Ollama. All models run fully local.
 
 ```bash
-# Or pull manually (Recommended tier):
-ollama pull qwen3.5:4b          # Screen annotation (~3.4 GB)
-ollama pull gemma4:12b-it-qat   # Skill generation (~7.2 GB)
+# Or pull manually (Standard and Recommended tiers):
+ollama pull qwen3.5:4b          # Screen annotation and Skill generation (~3.4 GB)
 ollama pull nomic-embed-text    # Semantic search (~274 MB)
+# Performance tier (24 GB) adds:
+ollama pull gemma4:12b-it-qat   # Skill generation (~7.2 GB)
 ```
 
 ### Chrome extension
@@ -334,7 +335,7 @@ sudo installer -pkg target/AgentHandover-*.pkg -target /
 
 ### Choose your AI model
 
-AgentHandover defaults to local models via Ollama (Gemma 4 QAT for 16 GB+ Macs, Qwen 3.5 for 8 GB): free, fast, private. Supported backends:
+AgentHandover defaults to local models via Ollama (Qwen 3.5 4B on 8 and 16 GB Macs, with Gemma 4 QAT writing Skills from 24 GB): free, fast, private. Supported backends:
 
 | Backend | Best for |
 |---------|----------|

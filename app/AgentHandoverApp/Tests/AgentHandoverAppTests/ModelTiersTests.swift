@@ -56,22 +56,29 @@ final class ModelTiersTests: XCTestCase {
     func testTheMeasuredSplit() throws {
         let table = try ModelTierTable.load(from: Self.tiersURL)
         XCTAssertEqual(Set(table.tiers.map(\.annotationModel)), ["qwen3.5:4b"])
+        // WP-F6: 16 GB runs qwen3.5:4b for both roles; Gemma 4 writes Skills from 24 GB.
+        XCTAssertEqual(table.tiers.map(\.sopModel),
+                       ["qwen3.5:4b", "qwen3.5:4b", "gemma4:12b-it-qat", "gemma4:31b-it-qat"])
         let recommended = try XCTUnwrap(table.tier(id: "recommended"))
-        XCTAssertEqual(table.models(for: recommended), ["qwen3.5:4b", "gemma4:12b-it-qat", "nomic-embed-text"])
-        XCTAssertTrue(table.needsNewOllama(table.models(for: recommended)))
+        XCTAssertEqual(table.models(for: recommended), ["qwen3.5:4b", "nomic-embed-text"])
+        XCTAssertFalse(table.needsNewOllama(table.models(for: recommended)))
+        XCTAssertEqual(table.downloadLabel(for: recommended), "~4 GB")
+        let performance = try XCTUnwrap(table.tier(id: "performance"))
+        XCTAssertEqual(table.models(for: performance), ["qwen3.5:4b", "gemma4:12b-it-qat", "nomic-embed-text"])
+        XCTAssertTrue(table.needsNewOllama(table.models(for: performance)))
         XCTAssertFalse(table.needsNewOllama(table.models(for: table.tiers[0])))
         XCTAssertEqual(table.sizeLabel("qwen3.5:4b"), "3.4 GB")
         XCTAssertEqual(table.sizeLabel("nomic-embed-text"), "270 MB")
-        XCTAssertEqual(table.downloadLabel(for: recommended), "~11 GB")
+        XCTAssertEqual(table.downloadLabel(for: performance), "~11 GB")
     }
 
     func testVLMBlockMatchesTheSharedFixture() throws {
         let table = try ModelTierTable.load(from: Self.tiersURL)
-        let tier = try XCTUnwrap(table.tier(id: "recommended"))
+        let tier = try XCTUnwrap(table.tier(id: "performance"))
         let block = ModelTierTable.vlmBlock(
             tierID: tier.id, annotationModel: tier.annotationModel, sopModel: tier.sopModel)
         let once = ModelTierTable.applyVLMBlock(block, to: try fixture("input.toml"))
-        XCTAssertEqual(once, try fixture("recommended.toml"))
+        XCTAssertEqual(once, try fixture("performance.toml"))
         XCTAssertEqual(ModelTierTable.applyVLMBlock(block, to: once), once)
     }
 

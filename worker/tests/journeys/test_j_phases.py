@@ -1,8 +1,9 @@
 """J-phases (WP-C9): on a tier with two models, one model is loaded at a time.
 
-The ``focus_dailynews`` recording runs on the Recommended tier (qwen3.5:4b
-annotates, gemma4:12b-it-qat writes the Skill) against its recorded
-cassette.  The request sequence the cassette served must be phase-ordered:
+The ``focus_dailynews`` recording runs on the Performance tier (qwen3.5:4b
+annotates, gemma4:12b-it-qat writes the Skill; since WP-F6 the Recommended
+tier runs qwen3.5:4b for both, so it has no model switch to prove) against
+its recorded cassette.  The request sequence the cassette served must be phase-ordered:
 the annotation model's calls, then the annotation model unloaded and the
 SOP model loaded once with the context its calls use, the generation calls
 (SOP, synthesis, questions) with no annotation-model call between two of
@@ -19,8 +20,8 @@ from agenthandover_worker.model_profiles import get_tier, get_profile
 from journeys.cassette import CASSETTE_DIR
 from journeys.focus_run import start_focus_run, tick_until_skill
 
-JOURNEY = "focus_dailynews_recommended"
-TIER = get_tier("recommended")
+JOURNEY = "focus_dailynews_performance"
+TIER = get_tier("performance")
 QWEN, GEMMA = TIER.annotation_model, TIER.sop_model
 
 

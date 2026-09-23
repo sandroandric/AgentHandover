@@ -1,6 +1,6 @@
 # A config as the installer leaves it, plus a hand-set [vlm] key, a stale
 # model key and a following section: onboarding and `agenthandover setup`
-# must turn it into recommended.toml byte for byte.
+# must turn it into performance.toml byte for byte.
 
 [export]
 adapter = "all"

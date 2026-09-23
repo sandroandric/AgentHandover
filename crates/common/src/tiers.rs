@@ -205,9 +205,26 @@ mod tests {
     }
 
     #[test]
+    fn the_measured_split() {
+        // WP-F6: 16 GB runs qwen3.5:4b for both roles; Gemma 4 writes Skills from 24 GB.
+        let sop: Vec<(&str, &str)> = table()
+            .tiers
+            .iter()
+            .map(|t| (t.id.as_str(), t.sop_model.as_str()))
+            .collect();
+        assert_eq!(
+            sop,
+            [("standard", "qwen3.5:4b"), ("recommended", "qwen3.5:4b"),
+             ("performance", "gemma4:12b-it-qat"), ("max_quality", "gemma4:31b-it-qat")]
+        );
+        let recommended = table().get("recommended").unwrap();
+        assert_eq!(table().models(recommended), ["qwen3.5:4b", "nomic-embed-text"]);
+    }
+
+    #[test]
     fn resolve_fills_missing_keys_from_the_tier() {
-        let (tier, ann, sop) = resolve_models(Some("recommended"), None, Some(""));
-        assert_eq!(tier.id, "recommended");
+        let (tier, ann, sop) = resolve_models(Some("performance"), None, Some(""));
+        assert_eq!(tier.id, "performance");
         assert_eq!((ann.as_str(), sop.as_str()), ("qwen3.5:4b", "gemma4:12b-it-qat"));
         let (_, ann, _) = resolve_models(Some("nope"), Some("custom:1"), None);
         assert_eq!(ann, "custom:1");
@@ -215,8 +232,8 @@ mod tests {
 
     #[test]
     fn apply_matches_the_shared_fixture() {
-        let tier = table().get("recommended").unwrap();
-        assert_eq!(apply_vlm_block(&fixture("input.toml"), tier), fixture("recommended.toml"));
+        let tier = table().get("performance").unwrap();
+        assert_eq!(apply_vlm_block(&fixture("input.toml"), tier), fixture("performance.toml"));
         // Idempotent.
         let once = apply_vlm_block(&fixture("input.toml"), tier);
         assert_eq!(apply_vlm_block(&once, tier), once);
