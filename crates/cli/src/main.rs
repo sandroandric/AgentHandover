@@ -3,6 +3,7 @@ use clap::{Parser, Subcommand};
 
 mod commands;
 mod display;
+mod ollama;
 mod paths;
 mod trigger;
 

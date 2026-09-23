@@ -8,7 +8,7 @@ use anyhow::Result;
 use colored::Colorize;
 use agenthandover_common::{config::AppConfig, pid, status, tiers};
 
-use crate::paths;
+use crate::{ollama, paths};
 
 /// Chrome Native Messaging host name -- must match `crates/daemon/src/ipc/native_messaging.rs:26`
 const NM_HOST_NAME: &str = "com.agenthandover.host";
@@ -623,37 +623,40 @@ fn step_vlm(check_only: bool, tier_arg: Option<&str>) -> Result<()> {
         tiers::machine_ram_gb(),
     );
 
-    let Some(path) = find_ollama() else {
-        println!(
-            "  {} Ollama {}",
-            "~".yellow(),
-            "not installed (VLM features disabled)".yellow()
-        );
-        if !check_only {
-            println!("    To enable VLM features, install Ollama:");
-            println!("      • Download: {}", "https://ollama.com/download/mac".cyan());
+    // Ask the service over HTTP, as doctor does (see crate::ollama): the
+    // `ollama` CLI need not be on the PATH for a running service to serve.
+    let Some(installed) = ollama::installed_models(ollama::BASE_URL) else {
+        if find_ollama().is_some() || std::path::Path::new("/Applications/Ollama.app").exists() {
             println!(
-                "    Then run {} again.",
+                "  {} Ollama is not running: open the Ollama app, then run {} again.",
+                "✗".red(),
                 "agenthandover setup --vlm".cyan()
             );
+        } else {
+            println!(
+                "  {} Ollama {}",
+                "~".yellow(),
+                "not installed (VLM features disabled)".yellow()
+            );
+            if !check_only {
+                println!("    To enable VLM features, install Ollama:");
+                println!("      • Download: {}", "https://ollama.com/download/mac".cyan());
+                println!(
+                    "    Then run {} again.",
+                    "agenthandover setup --vlm".cyan()
+                );
+            }
         }
         return Ok(());
     };
-    println!("  {} Ollama installed at: {}", "✓".green(), path.display());
-
-    let Some(installed) = ollama_models(&path) else {
-        println!(
-            "  {} Ollama is not running: open the Ollama app, then run {} again.",
-            "✗".red(),
-            "agenthandover setup --vlm".cyan()
-        );
-        return Ok(());
-    };
-    let missing: Vec<&str> = models
-        .iter()
-        .copied()
-        .filter(|m| !installed.iter().any(|i| i == m))
-        .collect();
+    let service_version = ollama::version(ollama::BASE_URL);
+    println!(
+        "  {} Ollama running at {} ({})",
+        "✓".green(),
+        ollama::BASE_URL,
+        service_version.as_deref().unwrap_or("version unknown")
+    );
+    let missing = missing_models(&models, &installed);
 
     if missing.is_empty() {
         println!("  {} Models present: {}", "✓".green(), models.join(", "));
@@ -671,8 +674,8 @@ fn step_vlm(check_only: bool, tier_arg: Option<&str>) -> Result<()> {
     let needs_new_ollama = missing.iter().any(|m| m.starts_with("gemma4"));
     let minimum = &table.minimum_ollama_version_for_gemma4;
     if needs_new_ollama {
-        match ollama_version(&path) {
-            Some(v) if !version_at_least(&v, minimum) => {
+        match &service_version {
+            Some(v) if !version_at_least(v, minimum) => {
                 println!(
                     "  {} Gemma 4 QAT models need Ollama {}+; you have {}. Update the app at {}.",
                     "✗".red(),
@@ -691,26 +694,35 @@ fn step_vlm(check_only: bool, tier_arg: Option<&str>) -> Result<()> {
     persist_tier(tier)?;
     for model in &missing {
         println!("    Pulling {}...", model.bold());
-        match std::process::Command::new(&path)
-            .args(["pull", model])
-            .stdout(std::process::Stdio::inherit())
-            .stderr(std::process::Stdio::inherit())
-            .status()
-        {
-            Ok(exit) if exit.success() => {
-                println!("  {} Model {} pulled", "✓".green(), model.bold());
+        let mut last_status = String::new();
+        let mut progress_line = false;
+        let pulled = ollama::pull(ollama::BASE_URL, model, |event| {
+            if let ollama::PullEvent::Status(status, percent) = event {
+                if let Some(p) = percent {
+                    print!("\r      {status} {p}%   ");
+                    let _ = std::io::Write::flush(&mut std::io::stdout());
+                    progress_line = true;
+                } else if *status != last_status {
+                    if std::mem::take(&mut progress_line) {
+                        println!();
+                    }
+                    println!("      {status}");
+                }
+                last_status = status.clone();
             }
-            Ok(exit) => {
+        });
+        if progress_line {
+            println!();
+        }
+        match pulled {
+            Ok(()) => println!("  {} Model {} pulled", "✓".green(), model.bold()),
+            Err(e) => {
                 println!(
-                    "\n  {} Pull of {} failed (exit code: {:?}); make sure the Ollama app is open.",
+                    "  {} Pull of {} failed: {}; make sure the Ollama app is open.",
                     "✗".red(),
                     model,
-                    exit.code()
+                    e
                 );
-                return Ok(());
-            }
-            Err(e) => {
-                println!("\n  {} Failed to run ollama: {}", "✗".red(), e);
                 return Ok(());
             }
         }
@@ -750,32 +762,14 @@ fn persist_tier(tier: &tiers::Tier) -> Result<()> {
     Ok(())
 }
 
-/// `ollama list`'s model names (`:latest` dropped); None if it failed.
-fn ollama_models(ollama_path: &std::path::Path) -> Option<Vec<String>> {
-    let output = std::process::Command::new(ollama_path).arg("list").output().ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    Some(parse_ollama_list(&String::from_utf8_lossy(&output.stdout)))
-}
-
-fn parse_ollama_list(stdout: &str) -> Vec<String> {
-    stdout
-        .lines()
-        .skip(1) // header
-        .filter_map(|line| line.split_whitespace().next())
-        .map(|name| name.strip_suffix(":latest").unwrap_or(name).to_string())
+/// The tier's models that are not installed (`name` and `name:latest`
+/// count as the same model).
+fn missing_models<'a>(models: &[&'a str], installed: &[String]) -> Vec<&'a str> {
+    models
+        .iter()
+        .copied()
+        .filter(|m| !ollama::model_installed(installed, m))
         .collect()
-}
-
-/// `ollama --version` → "0.34.2".
-fn ollama_version(ollama_path: &std::path::Path) -> Option<String> {
-    let output = std::process::Command::new(ollama_path).arg("--version").output().ok()?;
-    let text = String::from_utf8_lossy(&output.stdout);
-    text.split_whitespace()
-        .rev()
-        .find(|w| w.chars().next().is_some_and(|c| c.is_ascii_digit()))
-        .map(str::to_string)
 }
 
 /// `version` ("0.34.2-rc1") >= `minimum` ("0.34.0").
@@ -794,11 +788,17 @@ mod vlm_tests {
     use super::*;
 
     #[test]
-    fn parses_ollama_list() {
-        let out = "NAME                 ID      SIZE   MODIFIED\n\
-                   qwen3.5:4b           2a65    3.4 GB 1 day ago\n\
-                   nomic-embed-text:latest 0a10 274 MB 2 days ago\n";
-        assert_eq!(parse_ollama_list(out), ["qwen3.5:4b", "nomic-embed-text"]);
+    fn latest_tags_are_not_missing() {
+        let installed = vec!["qwen3.5:4b".to_string(), "nomic-embed-text:latest".to_string()];
+        assert!(missing_models(&["qwen3.5:4b", "nomic-embed-text"], &installed).is_empty());
+        assert_eq!(
+            missing_models(&["gemma4:12b-it-qat", "nomic-embed-text:latest"], &installed),
+            ["gemma4:12b-it-qat"]
+        );
+        assert_eq!(
+            missing_models(&["nomic-embed-text"], &["nomic-embed-text:v1.5".to_string()]),
+            ["nomic-embed-text"]
+        );
     }
 
     #[test]
