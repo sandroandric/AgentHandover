@@ -53,6 +53,8 @@ pub enum ExtensionMessageType {
     DwellSnapshot,
     ScrollSnapshot,
     SecureFieldStatus,
+    /// A `paste` DOM event (Cmd-V, Edit > Paste, context menu).
+    Paste,
 }
 
 /// Top-level envelope for an inbound native message from the browser extension.
@@ -497,6 +499,8 @@ fn convert_to_event(msg: &ExtensionMessage) -> Option<Event> {
         ExtensionMessageType::DwellSnapshot => EventKind::DwellSnapshot,
         ExtensionMessageType::ScrollSnapshot => EventKind::ScrollReadSnapshot,
         ExtensionMessageType::SecureFieldStatus => EventKind::SecureFieldFocus,
+        // The pasted content's hash is added by `capture::paste::resolve_paste`.
+        ExtensionMessageType::Paste => EventKind::PasteDetected { matched_copy_hash: None },
     };
 
     // Only origin + pathname of the page URL is stored: query strings and
@@ -670,6 +674,25 @@ mod tests {
             }
             other => panic!("expected ClickIntent, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_convert_paste() {
+        let msg: ExtensionMessage = serde_json::from_value(serde_json::json!({
+            "type": "paste",
+            "seq": 7,
+            "timestamp": "2026-01-01T00:00:00Z",
+            "payload": {
+                "target": {"tagName": "TEXTAREA", "ariaLabel": "Comment"},
+                "tabId": 3,
+                "url": "https://tracker.example.com/issues/12?draft=1",
+            },
+        }))
+        .unwrap();
+        let event = convert_to_event(&msg).unwrap();
+        assert_eq!(event.kind, EventKind::PasteDetected { matched_copy_hash: None });
+        assert_eq!(event.metadata["url"], "https://tracker.example.com/issues/12");
+        assert_eq!(event.metadata["target"]["ariaLabel"], "Comment");
     }
 
     #[test]

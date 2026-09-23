@@ -21,7 +21,8 @@ export type ExtensionMessageType =
   | 'click_intent'
   | 'dwell_snapshot'
   | 'scroll_snapshot'
-  | 'secure_field_status';
+  | 'secure_field_status'
+  | 'paste';
 
 // ---------------------------------------------------------------------------
 // Daemon -> Extension message types

@@ -461,11 +461,9 @@ async fn main() -> Result<()> {
             // Spawn the forwarder that converts ClipboardMessage -> ObserverMessage
             let fwd_tx = clip_tx;
             let forwarder = tokio::spawn(async move {
-                let mut hash_tracker = clipboard_monitor::ClipboardHashTracker::new();
                 while let Some(msg) = clip_event_rx.recv().await {
                     match msg {
                         clipboard_monitor::ClipboardMessage::Change(change) => {
-                            hash_tracker.record(change.content_hash.clone());
                             let event = agenthandover_common::event::Event {
                                 id: uuid::Uuid::new_v4(),
                                 timestamp: change.timestamp,
@@ -640,6 +638,7 @@ async fn run_native_messaging_bridge() -> Result<()> {
 
     let forwarder_tx = tx;
     let forwarder_tab_id = Arc::clone(&last_active_tab_id);
+    let paste_db_path = db_path.clone();
     let forwarder_handle = tokio::spawn(async move {
         let mut message_count: u64 = 0;
         let mut last_heartbeat_write = std::time::Instant::now();
@@ -667,6 +666,19 @@ async fn run_native_messaging_bridge() -> Result<()> {
                     warn!("Failed to write extension heartbeat: {}", e);
                 }
                 last_heartbeat_write = std::time::Instant::now();
+            }
+
+            // A paste is matched to its copy (pasteboard hash vs stored
+            // ClipboardChange) off this loop: matching may wait for the
+            // copy's row to land.
+            if matches!(event.kind, agenthandover_common::event::EventKind::PasteDetected { .. }) {
+                let (paste_tx, db) = (forwarder_tx.clone(), paste_db_path.clone());
+                tokio::spawn(async move {
+                    let event =
+                        agenthandover_daemon::capture::paste::resolve_paste(event, &db).await;
+                    let _ = paste_tx.send(ObserverMessage::Event { event }).await;
+                });
+                continue;
             }
 
             match forwarder_tx.try_send(ObserverMessage::Event { event }) {

@@ -2,11 +2,11 @@
 //!
 //! Polls NSPasteboard.generalPasteboard's changeCount every 500ms.
 //! On change, captures content types, byte size, SHA-256 hash, and entropy score.
-//! Emits ClipboardChange events and tracks recent hashes for paste matching.
+//! Emits ClipboardChange events; `capture::paste` matches pastes against
+//! their stored hashes.
 
 use crate::capture::clipboard::{clipboard_preview, hash_content, is_high_entropy};
 use chrono::{DateTime, Utc};
-use std::collections::VecDeque;
 use std::ffi::CStr;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -42,55 +42,6 @@ pub struct ClipboardChangeEvent {
     /// user enabled `[privacy] enable_clipboard_preview`.  None for non-text
     /// types or high-entropy content (potential secrets).
     pub content_preview: Option<String>,
-}
-
-/// Tracks recent clipboard hashes for paste detection.
-/// Keeps hashes for the last 30 minutes.
-pub struct ClipboardHashTracker {
-    entries: VecDeque<(String, DateTime<Utc>)>,
-    max_age: Duration,
-}
-
-impl ClipboardHashTracker {
-    pub fn new() -> Self {
-        Self {
-            entries: VecDeque::new(),
-            max_age: Duration::from_secs(30 * 60), // 30 minutes
-        }
-    }
-
-    /// Record a new clipboard hash.
-    pub fn record(&mut self, hash: String) {
-        self.prune();
-        self.entries.push_back((hash, Utc::now()));
-    }
-
-    /// Check if a paste matches a recent copy by hash.
-    pub fn find_match(&self, hash: &str) -> Option<String> {
-        self.entries
-            .iter()
-            .rev()
-            .find(|(h, _)| h == hash)
-            .map(|(h, _)| h.clone())
-    }
-
-    /// Remove entries older than max_age.
-    fn prune(&mut self) {
-        let cutoff = Utc::now() - chrono::Duration::from_std(self.max_age).unwrap_or_default();
-        while let Some((_, ts)) = self.entries.front() {
-            if *ts < cutoff {
-                self.entries.pop_front();
-            } else {
-                break;
-            }
-        }
-    }
-}
-
-impl Default for ClipboardHashTracker {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 /// Get the current NSPasteboard.generalPasteboard changeCount.
@@ -325,33 +276,6 @@ mod tests {
             assert!(!m.content_types.is_empty());
             assert!(!m.content_hash.is_empty());
         }
-    }
-
-    #[test]
-    fn test_clipboard_hash_tracker() {
-        let mut tracker = ClipboardHashTracker::new();
-        tracker.record("abc123".to_string());
-        tracker.record("def456".to_string());
-
-        assert_eq!(tracker.find_match("abc123"), Some("abc123".to_string()));
-        assert_eq!(tracker.find_match("def456"), Some("def456".to_string()));
-        assert_eq!(tracker.find_match("nonexistent"), None);
-    }
-
-    #[test]
-    fn test_clipboard_hash_tracker_prune() {
-        let mut tracker = ClipboardHashTracker {
-            entries: VecDeque::new(),
-            max_age: Duration::from_secs(0), // Expire immediately.
-        };
-        tracker.entries.push_back((
-            "old_hash".to_string(),
-            Utc::now() - chrono::Duration::seconds(1),
-        ));
-
-        // Pruning should remove the expired entry.
-        tracker.prune();
-        assert!(tracker.entries.is_empty());
     }
 
     #[tokio::test]

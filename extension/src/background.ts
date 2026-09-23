@@ -157,6 +157,7 @@ chrome.runtime.onMessage.addListener(
       case 'dwell_snapshot':
       case 'scroll_snapshot':
       case 'secure_field_status':
+      case 'paste':
         forwardToDaemon(message, tabId, url);
         sendResponse({ ok: true });
         break;
@@ -183,7 +184,8 @@ interface ContentScriptMessage {
     | 'click_intent'
     | 'dwell_snapshot'
     | 'scroll_snapshot'
-    | 'secure_field_status';
+    | 'secure_field_status'
+    | 'paste';
   payload?: Record<string, unknown>;
 }
 
