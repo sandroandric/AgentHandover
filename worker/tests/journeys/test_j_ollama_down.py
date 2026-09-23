@@ -28,7 +28,7 @@ from agenthandover_worker.config import VlmConfig
 from agenthandover_worker.model_profiles import get_profile
 from agenthandover_worker.scene_annotator import annotation_system_prompt
 from agenthandover_worker.skill_render import render_packet
-from journeys.focus_run import start_focus_run, tick_until_skill
+from journeys.focus_run import needs_focus_sop_recording, start_focus_run, tick_until_skill
 from journeys.packet import assert_matches_golden
 
 DOWN_REQUESTS = 40
@@ -51,6 +51,7 @@ def _focus_statuses(fixture) -> dict:
         conn.close()
 
 
+@needs_focus_sop_recording
 def test_ollama_down_defers_the_session_then_writes_the_same_skill(
     events_db, worker, clock, temp_home, cassette,
 ) -> None:
@@ -113,6 +114,7 @@ def test_default_annotation_timeout_outlasts_a_cold_model_load() -> None:
     assert VlmConfig().annotation_timeout_seconds >= 2 * COLD_LOAD_SECONDS
 
 
+@needs_focus_sop_recording
 def test_ollama_slow_first_annotation_still_succeeds(
     events_db, worker, clock, temp_home, cassette,
 ) -> None:
@@ -138,6 +140,7 @@ def test_ollama_slow_first_annotation_still_succeeds(
     assert_matches_golden("focus_dailynews.claude-skill.md", render_packet(proc, target="claude-skill"))
 
 
+@needs_focus_sop_recording
 def test_ollama_slower_than_the_timeout_is_deferred_then_asked_again(
     events_db, worker, clock, temp_home, cassette,
 ) -> None:

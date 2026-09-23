@@ -21,8 +21,17 @@ import pytest
 
 from agenthandover_worker.execution_monitor import ExecutionMonitor, ExecutionStatus
 from agenthandover_worker.skill_render import render_packet
-from journeys.focus_run import approve_for_agents, start_focus_run, tick_until_skill
+from journeys.focus_run import (
+    approve_for_agents,
+    needs_focus_sop_recording,
+    start_focus_run,
+    tick_until_skill,
+)
 from journeys.packet import parse_packet
+
+# Every test here starts from the focus_dailynews Skill, so it skips
+# together with that cassette's SOP entry.
+pytestmark = needs_focus_sop_recording
 
 mcp = pytest.importorskip("mcp", reason="J-mcp needs the mcp SDK (the worker's [mcp] extra)")
 from mcp import ClientSession, StdioServerParameters  # noqa: E402

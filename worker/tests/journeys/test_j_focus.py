@@ -16,8 +16,12 @@ from agenthandover_worker.ledger import readiness, validate_knowledge
 from agenthandover_worker.model_profiles import get_profile
 from agenthandover_worker.scene_annotator import annotation_system_prompt
 from agenthandover_worker.skill_render import render_packet
-from journeys.focus_run import start_focus_run, tick_until_skill
+from journeys.focus_run import needs_focus_sop_recording, start_focus_run, tick_until_skill
 from journeys.packet import assert_matches_golden, parse_packet
+
+# Every test here runs the focus_dailynews SOP call (the golden comparison
+# included): it skips together with that cassette entry.
+pytestmark = needs_focus_sop_recording
 
 # WP-C5: a focus run annotates at most this many keyframes before the Skill.
 KEYFRAMES = 20

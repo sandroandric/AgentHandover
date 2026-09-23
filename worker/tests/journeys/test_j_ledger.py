@@ -13,11 +13,12 @@ from __future__ import annotations
 import pytest
 
 from agenthandover_worker.ledger import readiness
-from journeys.focus_run import start_focus_run, tick_until_skill
+from journeys.focus_run import needs_focus_sop_recording, start_focus_run, tick_until_skill
 
 RUNS = ("focus_dailynews", "focus_dailynews_skip", "focus_dailynews_diverge")
 
 
+@needs_focus_sop_recording
 @pytest.mark.xfail(strict=True, reason=(
     "waits on WP-L2..WP-L4 (contrast learning, triggers and divergence, "
     "micro-questions) and the focus_dailynews_skip / focus_dailynews_diverge fixtures"

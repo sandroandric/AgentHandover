@@ -19,9 +19,15 @@ import pytest
 
 from agenthandover_worker import trigger_spool
 from agenthandover_worker.skill_render import description, render_packet
-from journeys.focus_run import approve_for_agents, start_focus_run, tick_until_skill
+from journeys.focus_run import (
+    approve_for_agents,
+    needs_focus_sop_recording,
+    start_focus_run,
+    tick_until_skill,
+)
 
 
+@needs_focus_sop_recording
 @pytest.mark.parametrize("adapter", ["openclaw", "claude-skill"])
 def test_approve_for_agents_walks_to_agent_ready_and_writes_the_skill(
     adapter, events_db, worker, clock, temp_home, cassette,
@@ -67,6 +73,7 @@ def test_approve_for_agents_walks_to_agent_ready_and_writes_the_skill(
         }
 
 
+@needs_focus_sop_recording
 def test_auto_approved_draft_reaches_no_agent_until_approved_for_agents(
     events_db, worker, clock, temp_home, cassette,
 ) -> None:
@@ -99,6 +106,7 @@ def test_auto_approved_draft_reaches_no_agent_until_approved_for_agents(
     assert (skills / slug / "SKILL.md").is_file()
 
 
+@needs_focus_sop_recording
 def test_claude_skill_adapter_writes_only_the_skill_and_the_index_command(
     events_db, worker, clock, temp_home, cassette,
 ) -> None:

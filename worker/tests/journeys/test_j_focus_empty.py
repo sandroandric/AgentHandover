@@ -16,7 +16,7 @@ import os
 import time
 
 from agenthandover_worker import main as wm
-from journeys.focus_run import start_focus_run, tick_until_skill
+from journeys.focus_run import needs_focus_sop_recording, start_focus_run, tick_until_skill
 
 SESSION = "0e7f0c55-daemon-was-down"
 
@@ -65,6 +65,7 @@ def test_a_session_with_no_events_is_closed_as_nothing_recorded(
     assert journey.knowledge_base.list_procedures() == []
 
 
+@needs_focus_sop_recording
 def test_the_next_recorded_session_clears_the_old_outcome(
     events_db, worker, clock, temp_home, cassette,
 ) -> None:

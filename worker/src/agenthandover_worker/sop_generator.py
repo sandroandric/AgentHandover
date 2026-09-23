@@ -137,6 +137,10 @@ Generate a JSON SOP with this exact structure:
 Rules:
 - EVERY STEP MUST INCLUDE A NON-EMPTY `description` AND `verify`. The `description` explains why and how; the `verify` describes what tells the agent the step worked. Empty strings for these fields are not acceptable and will cause the SOP to be rejected.
 - Each step's "frames" lists the numbers of the TIMELINE frames ("Frame N") that show it; use only numbers from the timeline.
+- Order the steps as the frames happened.
+- Name a link, button or tab only when its text is in the frame's Screen text or Items; a title seen only in a tab strip or menu is not a control the user clicked.
+- Write a Select or Scroll step only when a frame shows it.
+- Every line the user typed appears in a step's input.
 - Include EVERY meaningful step (navigation, data entry, confirmation, copy, paste, submit, save). Intermediate actions like typing into a field and then submitting are TWO separate steps — do not collapse them into one. The agent needs both the input action AND the submit action visible to execute correctly.
 - Skip redundant frames (reading, scrolling without action)
 - DETECT ACCIDENTAL CLICKS vs INTENTIONAL NAVIGATION: use your \

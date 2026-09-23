@@ -12,19 +12,43 @@ merges each question's default.
 from __future__ import annotations
 
 import json
+import os
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
+import pytest
+
 from agenthandover_worker import trigger_spool
-from journeys.cassette import Cassette
+from journeys.cassette import CASSETTE_DIR, Cassette, load_entries
 from journeys.conftest import TempHome
 from journeys.driver import Clock, JourneyWorker
 from journeys.fixture_loader import LoadedFixture
 
 FOCUS_CASSETTE = "focus_dailynews"
 TICK_SECONDS = 30
+
+# The focus SOP request after the step rules joined FOCUS_SOP_PROMPT's Rules
+# (order as the frames happened, name only controls the frame shows, Select
+# or Scroll only when shown, every typed line in an input): the prompt text
+# is part of the request, so focus_dailynews needs this SOP answer recorded
+# (and the synthesis, questions and revision calls that follow it, whose
+# keys depend on that answer).
+FOCUS_SOP_MISSING_KEYS: tuple[str, ...] = (
+    "605fb76f02df578ce1f8b3d6d7be83b2d6ea240e0027a1824d969560c42463df",
+)
+_FOCUS_ENTRIES = load_entries(CASSETTE_DIR / f"{FOCUS_CASSETTE}.jsonl")
+needs_focus_sop_recording = pytest.mark.skipif(
+    any(key not in _FOCUS_ENTRIES for key in FOCUS_SOP_MISSING_KEYS)
+    and os.environ.get("AH_RECORD") != "1",
+    reason=(
+        f"cassettes/{FOCUS_CASSETTE}.jsonl lacks the focus SOP request with the "
+        "step rules in its prompt (WP-Q2 merge): "
+        + ", ".join(k for k in FOCUS_SOP_MISSING_KEYS if k not in _FOCUS_ENTRIES)
+        + " (and the calls it unblocks); re-record with AH_RECORD=1 on the test Mac"
+    ),
+)
 
 
 @dataclass

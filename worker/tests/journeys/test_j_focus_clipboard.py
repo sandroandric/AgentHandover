@@ -18,19 +18,19 @@ import pytest
 
 from agenthandover_worker.skill_render import render_packet
 from journeys.cassette import CASSETTE_DIR, load_entries
-from journeys.focus_run import start_focus_run, tick_until_skill
+from journeys.focus_run import needs_focus_sop_recording, start_focus_run, tick_until_skill
 from journeys.packet import parse_packet
 
 _CLAIM = re.compile(r"\b(copy|copies|copied|copying|paste|pastes|pasted|pasting)\b", re.I)
 
 # The requests the no-clipboard run makes that the focus_dailynews cassette
 # does not hold: the SOP prompt carries the "no copy, cut or paste was
-# recorded" note and the frames' copy wording rewritten (WP-Q1), and so does
-# the questions call (WP-Q2b: the same note, and the synthesized text's copy
-# wording rewritten); the annotations and diffs replay as they are.
+# recorded" note and the frames' copy wording rewritten (WP-Q1) and the step
+# rules (WP-Q2 merge); the questions call that follows carries the same note
+# (WP-Q2b), and its key depends on the SOP answer, so it is known only once
+# the SOP call is recorded.  The annotations and diffs replay as they are.
 NO_CLIPBOARD_MISSING_KEYS: tuple[str, ...] = (
-    "5c9d3d77a4f54ff7b8a52e0e48a54e0b1acc5889921e04e2f817b2d9413efc00",  # the SOP call
-    "758a0d834fd2b061d439d7823256d6b8b901b8a4967c590e3213e6e65348925d",  # the questions call
+    "b722181570966a262ab16d97d9f26dd2f17a6761d82a66af41dcb42071f0630e",  # the SOP call
 )
 _ENTRIES = load_entries(CASSETTE_DIR / "focus_dailynews.jsonl")
 needs_no_clipboard_recording = pytest.mark.skipif(
@@ -38,7 +38,7 @@ needs_no_clipboard_recording = pytest.mark.skipif(
     and os.environ.get("AH_RECORD") != "1",
     reason=(
         "cassettes/focus_dailynews.jsonl lacks the requests of the recording "
-        "without its clipboard events (WP-Q1, WP-Q2b): "
+        "without its clipboard events (WP-Q1, WP-Q2b, WP-Q2 merge): "
         + ", ".join(k for k in NO_CLIPBOARD_MISSING_KEYS if k not in _ENTRIES)
         + " (and the calls they unblock); re-record with AH_RECORD=1 on the test Mac"
     ),
@@ -49,6 +49,7 @@ def _claims(text: str) -> list[str]:
     return [line for line in text.splitlines() if _CLAIM.search(line)]
 
 
+@needs_focus_sop_recording
 def test_recorded_copies_keep_their_copy_and_paste_steps(
     events_db, worker, clock, temp_home, cassette,
 ) -> None:
