@@ -231,7 +231,6 @@ def prune_claude_skills(skills_dir: Path) -> list[str]:
     removed slugs.
     """
     from agenthandover_worker.claude_skill_writer import forget_export
-
     from agenthandover_worker.ledger import handoff_gate
 
     removed: list[str] = []
