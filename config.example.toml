@@ -95,7 +95,7 @@ max_enhancements_per_day = 20
 # max_tokens = 800
 
 [openclaw]
-workspace_path = "~/.openclaw/workspace"   # where `agenthandover connect openclaw` writes
+workspace_path = "~/.openclaw/workspace"   # where `agenthandover connect openclaw` looks for the workspace
 
 [sop]
 # When false (default), generated Skills are saved as drafts for review in

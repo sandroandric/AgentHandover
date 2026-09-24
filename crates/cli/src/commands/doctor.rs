@@ -211,9 +211,11 @@ pub fn run() -> Result<()> {
         .collect();
     if !enabled.is_empty() {
         check_pass(&mut counts, &format!("Browser extension (in {})", enabled.join(", ")));
+        print_extension_path(&extension);
     } else if let Some(off) = extension.installed_in.first() {
         let hint = format!("turned off in {}: switch it on in its extensions page", off.browser);
         check_skip(&mut counts, "Browser extension", &hint);
+        print_extension_path(&extension);
     } else if let Some(path) = &extension.build_path {
         let hint = format!(
             "not loaded in a browser: open chrome://extensions, turn on Developer mode, \
@@ -891,6 +893,14 @@ fn check_native_messaging_manifest() -> bool {
     }
 
     true
+}
+
+/// The extension directory doctor found (what Load unpacked takes, and
+/// what `agenthandover setup --extension` copies), under its check line.
+fn print_extension_path(extension: &browser_extension::Report) {
+    if let Some(path) = &extension.build_path {
+        println!("    → {}", path.display());
+    }
 }
 
 #[cfg(test)]

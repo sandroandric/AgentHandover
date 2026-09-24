@@ -4,6 +4,8 @@ use clap::{Parser, Subcommand};
 mod browser_extension;
 mod commands;
 mod display;
+#[cfg(test)]
+mod docs_tests;
 mod machine;
 mod ollama;
 mod paths;
@@ -182,9 +184,9 @@ enum FocusAction {
     },
     /// Stop the active focus recording session
     Stop,
-    /// Answer pending questions about the focus recording and complete SOP export
+    /// Answer the focus recording's pending questions in the terminal
     Finalize,
-    /// Skip pending questions and export with default answers
+    /// Skip the pending questions (the Skill keeps them as not yet known)
     SkipQuestions,
 }
 
@@ -208,7 +210,7 @@ enum SopsAction {
     Dir,
     /// List draft SOPs awaiting review
     Drafts,
-    /// Approve a draft SOP for export
+    /// Approve a draft SOP (agents see it only once promoted to agent_ready)
     Approve {
         /// SOP slug or ID
         slug_or_id: String,

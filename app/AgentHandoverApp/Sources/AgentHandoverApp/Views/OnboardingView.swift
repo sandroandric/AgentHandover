@@ -547,7 +547,7 @@ struct OnboardingView: View {
                 Image(systemName: "lock.fill")
                     .font(.system(size: 10, weight: .semibold))
                     .foregroundColor(.white.opacity(0.7))
-                Text("Everything runs locally on your Mac")
+                Text("Runs on your Mac. Cloud models are opt-in.")
                     .font(.system(size: 12, weight: .medium, design: .rounded))
                     .foregroundColor(.white.opacity(0.7))
             }
