@@ -96,8 +96,46 @@ struct PeerPolicy {
         guard getsockopt(fd, SOL_LOCAL, LOCAL_PEERTOKEN, &token, &tokenLen) == 0 else {
             return "no peer audit token"
         }
+        if Self.validated.contains(token, requirement: requirement) { return nil }
         let status = Self.check(auditToken: token, requirement: requirement)
-        return status == errSecSuccess ? nil : "peer \(path) fails the code requirement (\(status))"
+        guard status == errSecSuccess else {
+            return "peer \(path) fails the code requirement (\(status))"
+        }
+        Self.validated.insert(token, requirement: requirement)
+        return nil
+    }
+
+    /// Peer processes whose signature already passed. The check hashes the
+    /// peer's code, and the daemon connects many times a minute: re-checking
+    /// each connection was most of the idle app's CPU on the test Mac. A
+    /// process is keyed by its audit token's PID and PID version (`exec`
+    /// and PID reuse both change the version), so a new or re-executed
+    /// process is checked again; refusals are never remembered.
+    static let validated = ValidatedPeers()
+
+    final class ValidatedPeers {
+        private let lock = NSLock()
+        private var keys: [String] = []
+        private static let capacity = 32
+
+        private static func key(_ token: audit_token_t, _ requirement: String) -> String {
+            // audit_token_t: val[5] is the PID, val[7] its version.
+            "\(token.val.5):\(token.val.7):\(requirement)"
+        }
+
+        func contains(_ token: audit_token_t, requirement: String) -> Bool {
+            let key = Self.key(token, requirement)
+            lock.lock(); defer { lock.unlock() }
+            return keys.contains(key)
+        }
+
+        func insert(_ token: audit_token_t, requirement: String) {
+            let key = Self.key(token, requirement)
+            lock.lock(); defer { lock.unlock() }
+            guard !keys.contains(key) else { return }
+            keys.append(key)
+            if keys.count > Self.capacity { keys.removeFirst(keys.count - Self.capacity) }
+        }
     }
 
     static func executablePath(of pid: pid_t) -> String? {
