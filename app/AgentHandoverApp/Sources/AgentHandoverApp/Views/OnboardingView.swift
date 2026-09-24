@@ -2310,7 +2310,7 @@ struct OnboardingView: View {
     }
 
     private func isOllamaInstalled() -> Bool {
-        findOllamaPath() != nil
+        OllamaModels.executablePath() != nil
     }
 
     private func getOllamaVersion(_ ollamaPath: String) -> String? {
@@ -2359,34 +2359,6 @@ struct OnboardingView: View {
         return vParts[2] >= mParts[2]
     }
 
-    private func findOllamaPath() -> String? {
-        let paths = [
-            "/usr/local/bin/ollama",
-            "/opt/homebrew/bin/ollama",
-            "/Applications/Ollama.app/Contents/Resources/ollama",
-        ]
-        if let knownPath = paths.first(where: { FileManager.default.fileExists(atPath: $0) }) {
-            return knownPath
-        }
-
-        let whichProcess = Process()
-        whichProcess.executableURL = URL(fileURLWithPath: "/usr/bin/which")
-        whichProcess.arguments = ["ollama"]
-        let outputPipe = Pipe()
-        whichProcess.standardOutput = outputPipe
-
-        do {
-            try whichProcess.run()
-            let output = String(data: outputPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            whichProcess.waitUntilExit()
-            guard whichProcess.terminationStatus == 0 else { return nil }
-            return (output?.isEmpty == false) ? output : nil
-        } catch {
-            return nil
-        }
-    }
-
     private func modelRow(_ name: String, _ size: String, _ description: String) -> some View {
         HStack(alignment: .top, spacing: 8) {
             Text("\u{2022}")
@@ -2409,7 +2381,7 @@ struct OnboardingView: View {
     }
 
     private func pullOllamaModel() {
-        guard let ollamaPath = findOllamaPath() else { return }
+        guard let ollamaPath = OllamaModels.executablePath() else { return }
 
         vlmPullInProgress = true
         vlmPullOutput = "Starting download..."
@@ -2452,18 +2424,11 @@ struct OnboardingView: View {
 
         DispatchQueue.global(qos: .userInitiated).async {
             // Check which models are already pulled
-            let listProcess = Process()
-            listProcess.executableURL = URL(fileURLWithPath: ollamaPath)
-            listProcess.arguments = ["list"]
-            let listPipe = Pipe()
-            listProcess.standardOutput = listPipe
-            try? listProcess.run()
-            let installedModels = String(data: listPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-            listProcess.waitUntilExit()
+            let installedModels = (try? OllamaModels.installed(ollamaPath: ollamaPath).get()) ?? []
 
             for (index, (model, purpose)) in models.enumerated() {
                 // Skip if already installed
-                if installedModels.contains(model) {
+                if OllamaModels.missing([model], installed: installedModels).isEmpty {
                     DispatchQueue.main.async {
                         vlmPullOutput = "[\(index + 1)/\(models.count)] \(model) already installed"
                     }
@@ -2474,44 +2439,15 @@ struct OnboardingView: View {
                     vlmPullOutput = "[\(index + 1)/\(models.count)] Pulling \(model) (\(purpose))..."
                 }
 
-                let process = Process()
-                process.executableURL = URL(fileURLWithPath: ollamaPath)
-                process.arguments = ["pull", model]
-
-                let pipe = Pipe()
-                process.standardOutput = pipe
-                process.standardError = pipe
-
-                do {
-                    try process.run()
-
-                    // Read output asynchronously
-                    pipe.fileHandleForReading.readabilityHandler = { handle in
-                        let data = handle.availableData
-                        if !data.isEmpty, let output = String(data: data, encoding: .utf8) {
-                            let lastLine = output.components(separatedBy: "\n")
-                                .filter { !$0.isEmpty }
-                                .last ?? ""
-                            DispatchQueue.main.async {
-                                vlmPullOutput = "[\(index + 1)/\(models.count)] \(model): \(String(lastLine.prefix(60)))"
-                            }
-                        }
+                let failure = OllamaModels.pull(model, ollamaPath: ollamaPath) { line in
+                    DispatchQueue.main.async {
+                        vlmPullOutput = "[\(index + 1)/\(models.count)] \(model): \(String(line.prefix(60)))"
                     }
-
-                    process.waitUntilExit()
-                    pipe.fileHandleForReading.readabilityHandler = nil
-
-                    if process.terminationStatus != 0 {
-                        DispatchQueue.main.async {
-                            vlmPullInProgress = false
-                            vlmPullOutput = "Failed to pull \(model). Make sure Ollama is running."
-                        }
-                        return
-                    }
-                } catch {
+                }
+                if let failure {
                     DispatchQueue.main.async {
                         vlmPullInProgress = false
-                        vlmPullOutput = "Failed to run ollama: \(error.localizedDescription)"
+                        vlmPullOutput = failure
                     }
                     return
                 }
@@ -2568,19 +2504,19 @@ struct OnboardingView: View {
 
     private func refreshVLMSetupState(force: Bool = false) {
         guard force || currentStep == 6 else { return }
-        let requiredModels = requiredLocalModels.map(canonicalModelName)
+        let requiredModels = requiredLocalModels.map(OllamaModels.canonical)
         vlmStateRefreshing = true
         appState.refreshStatus()
 
         DispatchQueue.global(qos: .userInitiated).async {
-            let ollamaPath = findOllamaPath()
+            let ollamaPath = OllamaModels.executablePath()
             let installed = ollamaPath != nil
             var running = false
             var hasRequiredModels = false
             var statusMessage = ""
 
             if let ollamaPath {
-                switch queryOllamaModels(at: ollamaPath) {
+                switch OllamaModels.installed(ollamaPath: ollamaPath) {
                 case .success(let installedModels):
                     running = true
                     let missingModels = requiredModels.filter { !installedModels.contains($0) }
@@ -2615,47 +2551,6 @@ struct OnboardingView: View {
                 self.appState.vlmAvailable = self.localVLMReady
             }
         }
-    }
-
-    private func queryOllamaModels(at ollamaPath: String) -> Result<Set<String>, Error> {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: ollamaPath)
-        process.arguments = ["list"]
-        let outputPipe = Pipe()
-        process.standardOutput = outputPipe
-        process.standardError = outputPipe
-
-        do {
-            try process.run()
-            let output = String(data: outputPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-            process.waitUntilExit()
-            guard process.terminationStatus == 0 else {
-                return .failure(NSError(domain: "OllamaList", code: Int(process.terminationStatus)))
-            }
-
-            let modelNames = Set(
-                output
-                    .components(separatedBy: "\n")
-                    .dropFirst()
-                    .compactMap { line -> String? in
-                        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
-                        guard !trimmed.isEmpty else { return nil }
-                        guard let rawName = trimmed.components(separatedBy: .whitespaces).first else { return nil }
-                        return canonicalModelName(rawName)
-                    }
-            )
-            return .success(modelNames)
-        } catch {
-            return .failure(error)
-        }
-    }
-
-    private func canonicalModelName(_ name: String) -> String {
-        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.hasSuffix(":latest") {
-            return String(trimmed.dropLast(":latest".count))
-        }
-        return trimmed
     }
 
     private func launchOllamaApp() {

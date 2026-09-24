@@ -195,6 +195,28 @@ struct MenuBarView: View {
             }
             .buttonStyle(.plain)
         }
+
+        // A model the worker needs is not pulled: nothing is processed.
+        if hasCompletedOnboarding, appState.workerRunning,
+           let row = ModelUpgrade.missingModelRow(
+               vlmAvailable: appState.vlmAvailable,
+               missingModels: appState.workerStatus?.missing_models) {
+            Button(action: { delegate.showModelDownload() }) {
+                HStack(spacing: 8) {
+                    Image(systemName: "arrow.down.circle.fill")
+                        .font(.system(size: 12))
+                        .foregroundColor(warmOrange)
+                    Text(row)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(darkNavy.opacity(0.7))
+                    Spacer()
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 8)
+                .background(warmOrange.opacity(0.08))
+            }
+            .buttonStyle(.plain)
+        }
         } // VStack
     }
 
