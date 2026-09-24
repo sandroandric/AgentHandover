@@ -5,15 +5,25 @@ Jaccard similarity on normalized tokens.  When the same kind of task
 appears on multiple days, it creates a :class:`LinkedTask` that tracks
 total duration, span, and status.
 
-Linked tasks are persisted at ``{kb_root}/observations/session_links.json``.
+Linked tasks are persisted at ``{kb_root}/observations/session_links.json``,
+together with the model's YES/NO judgements of intent pairs, so a pair is
+asked about once rather than on every daily pass.
+
+Cost per daily pass: the intents not yet embedded are embedded in one
+batched call, every pair is compared in memory, tasks already in a link are
+not compared again, and at most :data:`_MAX_LLM_CHECKS_PER_PASS` new pairs
+go to the model.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
+import hashlib
 import json
 import logging
+import math
+import operator
 import re
 import uuid
 from typing import TYPE_CHECKING
@@ -48,6 +58,10 @@ _THRESHOLDS = {"jaccard": _JACCARD_THRESHOLD, "cosine": _COSINE_THRESHOLD}
 # below: at or above the threshold the intents link without a model call,
 # so a verdict there would change nothing.
 _LLM_BAND = {"jaccard": 0.25, "cosine": 0.08}
+# New pairs in that band sent to the model per daily pass.  A pair once
+# answered is remembered (``judgements`` in session_links.json), so the
+# pairs over the cap are asked on a later day.
+_MAX_LLM_CHECKS_PER_PASS = 10
 
 # Days of inactivity before a link is marked stale
 _STALE_DAYS = 14
@@ -83,6 +97,14 @@ class SessionLinker:
         self._vector_kb = vector_kb
         # Intent text -> its embedding, so each intent is embedded once.
         self._embeddings: dict[str, list[float]] = {}
+        # Intents the model gave no vector for in this pass: their pairs
+        # use Jaccard instead of retrying the model for every pair.
+        self._not_embedded: set[str] = set()
+        # Pair key -> the model's answer (True, False, or None for an
+        # answer that was neither), persisted with the links.
+        self._judgements: dict[str, bool | None] = {}
+        self._consulted: set[str] = set()
+        self._llm_checks_left = _MAX_LLM_CHECKS_PER_PASS
         self._links: list[LinkedTask] = []
         self._load_links()
 
@@ -121,8 +143,22 @@ class SessionLinker:
                     "matched_procedure": task.get("matched_procedure", None),
                 })
 
-        # Group tasks by intent similarity
-        used_indices: set[int] = set()
+        self._begin_pass(
+            [t["intent"] for t in all_tasks]
+            + [link.intent for link in self._links if link.status != "completed"]
+        )
+
+        # A task already in a link was placed on an earlier pass: it is
+        # neither matched nor grouped again.
+        linked = {
+            (s["date"], s["task_index"])
+            for link in self._links
+            for s in link.sessions
+        }
+        used_indices: set[int] = {
+            i for i, t in enumerate(all_tasks)
+            if (t["date"], t["task_index"]) in linked
+        }
         for i, task_a in enumerate(all_tasks):
             if i in used_indices:
                 continue
@@ -210,6 +246,11 @@ class SessionLinker:
 
         # Update stale status
         self._update_stale_status()
+        # Keep the judgements this pass consulted or made; the others are
+        # of pairs no longer compared (linked, or out of the lookback).
+        self._judgements = {
+            k: v for k, v in self._judgements.items() if k in self._consulted
+        }
         self._save_links()
         return list(self._links)
 
@@ -233,6 +274,43 @@ class SessionLinker:
     # Intent similarity
     # ------------------------------------------------------------------
 
+    def _begin_pass(self, intents: list[str]) -> None:
+        """Reset the per-pass model budget and embed, in one batched call,
+        the pass's intents that have no embedding yet."""
+        self._llm_checks_left = _MAX_LLM_CHECKS_PER_PASS
+        self._consulted = set()
+        self._not_embedded = set()
+        texts = list(dict.fromkeys(t for t in intents if t))
+        # Only the pass's intents are kept, so the cache does not grow.
+        keep = set(texts)
+        self._embeddings = {t: e for t, e in self._embeddings.items() if t in keep}
+        self._embed(texts)
+
+    def _embed(self, texts) -> None:
+        """Embed the *texts* not embedded yet, in one call.  A text the
+        model gives no vector for (or every text, when the call fails) is
+        not tried again until the next pass: its pairs use Jaccard."""
+        missing = [
+            t for t in dict.fromkeys(texts)
+            if t not in self._embeddings and t not in self._not_embedded
+        ]
+        if self._vector_kb is None or not missing:
+            return
+        try:
+            from agenthandover_worker.vector_kb import CLUSTERING_PREFIX
+            embs = self._vector_kb.compute_embeddings(
+                missing, prefix=CLUSTERING_PREFIX,
+            )
+        except Exception:
+            logger.debug("Intent embedding failed, linking by Jaccard", exc_info=True)
+            embs = []
+        for text, emb in zip(missing, embs):
+            norm = math.sqrt(sum(x * x for x in emb)) if emb else 0.0
+            if norm > 0.0:
+                # Stored unit-length: a cosine is then a dot product.
+                self._embeddings[text] = [x / norm for x in emb]
+        self._not_embedded.update(t for t in missing if t not in self._embeddings)
+
     def _normalize_intent(self, intent: str) -> str:
         """Normalize an intent string: lowercase, strip punctuation, remove stop words."""
         text = intent.lower()
@@ -244,36 +322,34 @@ class SessionLinker:
     def _intent_similarity(self, a: str, b: str) -> tuple[float, str]:
         """``(score, metric)``: the cosine of the intents' embeddings when
         the vector KB can embed them, else token Jaccard."""
-        if self._vector_kb is not None:
-            try:
-                from agenthandover_worker.vector_kb import CLUSTERING_PREFIX, VectorKB
-                missing = [t for t in dict.fromkeys((a, b)) if t not in self._embeddings]
-                if missing:
-                    embs = self._vector_kb.compute_embeddings(
-                        missing, prefix=CLUSTERING_PREFIX,
-                    )
-                    self._embeddings.update(
-                        (t, e) for t, e in zip(missing, embs) if e
-                    )
-                if a in self._embeddings and b in self._embeddings:
-                    return VectorKB.cosine_similarity(
-                        self._embeddings[a], self._embeddings[b],
-                    ), "cosine"
-            except Exception:
-                logger.debug("Vector similarity failed, falling back to Jaccard")
+        self._embed((a, b))
+        ea, eb = self._embeddings.get(a), self._embeddings.get(b)
+        if ea is not None and eb is not None and len(ea) == len(eb):
+            return sum(map(operator.mul, ea, eb)), "cosine"
         return self._jaccard_similarity(a, b), "jaccard"
 
     def _intents_match(self, a: str, b: str) -> bool:
         """Two intents are the same recurring task: the score reaches its
         metric's threshold, or it falls in the band just below and the LLM
-        says YES."""
+        says YES (remembered from an earlier pass, or asked while the
+        pass's budget lasts)."""
         score, metric = self._intent_similarity(a, b)
         threshold = _THRESHOLDS[metric]
         if score >= threshold:
             return True
-        if self._llm_reasoner is not None and score >= threshold - _LLM_BAND[metric]:
-            return self._semantic_check(a, b) is True
-        return False
+        if self._llm_reasoner is None or score < threshold - _LLM_BAND[metric]:
+            return False
+        key = _pair_key(a, b)
+        self._consulted.add(key)
+        if key in self._judgements:
+            return self._judgements[key] is True
+        if self._llm_checks_left <= 0:
+            return False
+        self._llm_checks_left -= 1
+        answered, verdict = self._semantic_check(a, b)
+        if answered:
+            self._judgements[key] = verdict
+        return verdict is True
 
     def _jaccard_similarity(self, a: str, b: str) -> float:
         """Jaccard similarity on normalized tokens (fallback)."""
@@ -287,14 +363,18 @@ class SessionLinker:
         union = tokens_a | tokens_b
         return len(intersection) / len(union)
 
-    def _semantic_check(self, intent_a: str, intent_b: str) -> bool | None:
+    def _semantic_check(
+        self, intent_a: str, intent_b: str,
+    ) -> tuple[bool, bool | None]:
         """Use LLM to determine if two intents describe the same workflow.
 
-        Returns True if the LLM says YES, False if NO, None on
-        failure/ambiguity/abstention.
+        Returns ``(answered, verdict)``: *verdict* is True for YES, False
+        for NO, None for an answer that is neither; *answered* is False
+        when the model gave no answer (failure, abstention, over budget),
+        which is not remembered.
         """
         if self._llm_reasoner is None:
-            return None
+            return False, None
 
         # Intents are model summaries of the screen: redacted like every
         # other screen-derived text before it reaches a prompt.
@@ -309,11 +389,11 @@ class SessionLinker:
                 prompt, caller="session_linker.semantic_check",
             )
             if result.success and not result.abstained:
-                return result.value  # True, False, or None (ambiguous)
+                return True, result.value  # True, False, or None (ambiguous)
         except Exception:
             logger.debug("LLM semantic check failed", exc_info=True)
 
-        return None
+        return False, None
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -387,6 +467,12 @@ class SessionLinker:
             self._links = []
             return
 
+        judgements = data.get("judgements", {})
+        if isinstance(judgements, dict):
+            self._judgements = {
+                str(k): v for k, v in judgements.items() if v in (True, False, None)
+            }
+
         self._links = []
         for item in data.get("links", []):
             self._links.append(
@@ -422,7 +508,15 @@ class SessionLinker:
                 }
                 for link in self._links
             ],
+            "judgements": self._judgements,
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
         path = self._kb.root / "observations" / "session_links.json"
         self._kb.atomic_write_json(path, data)
+
+
+def _pair_key(a: str, b: str) -> str:
+    """Order-insensitive key of an intent pair (a hash: the file does not
+    hold a second copy of the intents)."""
+    first, second = sorted((a, b))
+    return hashlib.sha256(f"{first}\x00{second}".encode("utf-8")).hexdigest()

@@ -2556,6 +2556,11 @@ def _process_passive_discovery(
 
         # The draft carries its observations: count, recurrence, value.
         result.sop.update(candidate.template_evidence())
+        # Its steps' anchors: the elements its runs clicked (no model).
+        try:
+            workflow_mining.anchor_draft_steps(db, result.sop, candidate.observations)
+        except Exception:
+            logger.warning("Anchoring the passive steps of '%s' failed", task_label[:60], exc_info=True)
         sop_templates = [result.sop]
         slug = result.sop.get("slug", "")
 
@@ -2934,6 +2939,12 @@ def _process_retry_triggers(
                             episode_count=len(pending_segs),
                             observations=workflow_mining.observation_pointers(pending_segs),
                         )
+                        try:
+                            workflow_mining.anchor_draft_steps(db, result.sop, pending_segs)
+                        except Exception:
+                            logger.warning(
+                                "Anchoring the passive steps of '%s' failed", title, exc_info=True,
+                            )
 
                         # Lint before save+export
                         if not _lint_and_log(result.sop, "retry_passive"):

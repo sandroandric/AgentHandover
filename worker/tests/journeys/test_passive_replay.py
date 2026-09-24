@@ -134,11 +134,10 @@ CASSETTE = CASSETTE_DIR / f"{NAME}.jsonl"
 # The calls the replay makes that the cassette lacks since it runs the
 # worker's own daily pass (stages.daily), found with AH_RECORD=1
 # AH_RECORD_UPSTREAM at a closed port: the ones whose request depends on no
-# other missing answer (5,860 distinct requests at the closed port).
-# Recording them unblocks the session linker's other embeddings (it embeds
-# each intent once; at a closed port it retried every pair) and its YES/NO
-# checks (they depend on the vectors); record with AH_RECORD=1 on the test
-# Mac until the replay misses nothing.
+# other missing answer.  Recording them unblocks the session linker's later
+# batches (each day's new intents in one call, WP-F12) and its YES/NO checks
+# (they depend on the vectors); record with AH_RECORD=1 on the test Mac
+# until the replay misses nothing.
 DAILY_PASS_MISSING_KEYS: tuple[str, ...] = (
     # The daily summary's embedding, one per day with work.
     "c8fc20b77844f04cd4f85e7b8bf38307e9b696045b329fd10515608ac16a0da3",  # 2026-08-31
@@ -171,8 +170,11 @@ DAILY_PASS_MISSING_KEYS: tuple[str, ...] = (
     "86511cbc66dd6600c4d08a66bc2c2f0bfa4b2079098660693d04f0218e7c5d83",  # 2026-09-16
     "5fe84b91b7dd60ff7104659f5675eb77ea676ab38601d15be26e5ae13ec364e9",  # 2026-09-17
     "192aaf0f39f1a1240a4259b91dc4431e311ead21e6accfdb8e78e66d2be7a5fb",  # 2026-09-18
-    # The session linker's first intent embedding (day 3).
-    "783426732123516105e760924f9131a055e04ba39190a7b17a0805d68a9a8a85",
+    # The session linker's first batch of intent embeddings (day 3).
+    "c4ac6160207dd102c5ceb5338b3b934f7d612768ba1acfb4e692f476683338dc",
+    # WP-F12: the expense report's passive SOP request, changed now that the
+    # interrupted Monday is one observation (test_j_passive.DISCOVERY_MISSING_KEYS).
+    "69d22760a76f69b91aedb45db80086af6ec93f97ea3c39b0787395a2ff58125c",
 )
 _ENTRIES = load_entries(CASSETTE) if CASSETTE.exists() else {}
 needs_daily_recording = pytest.mark.skipif(

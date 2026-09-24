@@ -168,6 +168,54 @@ class TestSessions:
         assert [[f.event_id for f in s] for s in wm.split_sessions(events, slept)] == [["a", "b"], ["c"]]
 
 
+def _call_gap(t0: datetime, resume_location: str = "https://expensify.com/report",
+              call_minutes: int = 40, first_call_after_s: int = 60) -> list[dict]:
+    """Two routine frames, a Zoom call (a frame every ten minutes, as
+    passive_3weeks's interrupted Monday has), then the routine resumes."""
+    zoom = _ann("", app="zoom.us", workflow=False)
+    events = [
+        _event("a", t0, _ann("https://mail.google.com/mail/u/0/#search/receipt")),
+        _event("b", t0 + timedelta(minutes=2), _ann("https://expensify.com/report")),
+    ]
+    call_start = t0 + timedelta(minutes=2, seconds=first_call_after_s)
+    for n in range(call_minutes // 10):
+        events.append(_event(f"z{n}", call_start + timedelta(seconds=600.5 * n), zoom))
+    resume = call_start + timedelta(minutes=call_minutes - 10, seconds=9 * 60 + 55)
+    events.append(_event("c", resume, _ann(resume_location)))
+    return events
+
+
+class TestInterruptedSessions:
+    """WP-F12: a call in another app is activity, not idleness."""
+
+    T0 = datetime(2026, 9, 7, 10, 38, tzinfo=timezone.utc)
+
+    def _ids(self, events, slept=None) -> list[list[str]]:
+        return [[f.event_id for f in s] for s in wm.split_sessions(events, slept)]
+
+    def test_a_forty_minute_call_mid_routine_is_one_session(self) -> None:
+        assert self._ids(_call_gap(self.T0)) == [["a", "b", "c"]]
+
+    def test_the_same_gap_without_frames_is_idleness(self) -> None:
+        events = [e for e in _call_gap(self.T0) if not e["id"].startswith("z")]
+        assert self._ids(events) == [["a", "b"], ["c"]]
+
+    def test_work_resumed_elsewhere_is_another_session(self) -> None:
+        events = _call_gap(self.T0, resume_location="https://dashboard.stripe.com/payouts")
+        assert self._ids(events) == [["a", "b"], ["c"]]
+
+    def test_idle_before_the_call_splits(self) -> None:
+        assert self._ids(_call_gap(self.T0, first_call_after_s=11 * 60)) == [["a", "b"], ["c"]]
+
+    def test_an_interruption_over_an_hour_splits(self) -> None:
+        assert self._ids(_call_gap(self.T0, call_minutes=70)) == [["a", "b"], ["c"]]
+
+    def test_a_sleep_during_the_call_splits(self) -> None:
+        nap = self.T0 + timedelta(minutes=20)
+        slept = [(nap.isoformat(), (nap + timedelta(minutes=1)).isoformat())]
+        assert self._ids(_call_gap(self.T0), slept) == [["a", "b"], ["c"]]
+
+
 @pytest.fixture()
 def db(tmp_db_path: Path):
     with WorkerDB(tmp_db_path) as worker_db:
@@ -829,6 +877,81 @@ class TestSkillsAndObservations:
         wm.review_candidates(db, now=now, kb=kb)
         assert len(kb.get_procedure("payout")["branch_hypotheses"]) == 2
 
+    def _draft(self, db: WorkerDB, promoted: list[dict]) -> str:
+        """The payout routine in the review queue as passive discovery
+        leaves it: a draft template citing the observations it came from."""
+        template = {
+            "slug": "payout", "title": PAYOUT_SKILL["title"],
+            "steps": [
+                {"step": s["action"], "app": s["app"], "parameters": {"location": s["location"]}}
+                for s in PAYOUT_SKILL["steps"]
+            ],
+            "episode_count": len(promoted),
+            "observations": wm.observation_pointers(promoted),
+        }
+        return db.save_generated_sop(
+            "payout", PAYOUT_SKILL["title"], "passive", template, auto_approve=False,
+        )
+
+    def test_a_draft_learns_from_later_runs_as_evidence_only(
+        self, db: WorkerDB, write_conn, tmp_path: Path,
+    ) -> None:
+        """WP-F12: a draft nobody approved yet still learns from its later
+        runs (the ledger's evidence, branches); nothing reaches the
+        knowledge base until the user approves it."""
+        from agenthandover_worker.procedure_schema import sop_to_procedure
+
+        kb = _kb(tmp_path)
+        sop_id = self._draft(db, self._promote(db))
+        for n, day in enumerate((8, 9)):
+            start = datetime(2026, 9, day, 9, tzinfo=timezone.utc)
+            _insert(write_conn, _session_events(f"detour{n}", start, steps=DETOUR))
+        now = datetime(2026, 9, 10, tzinfo=timezone.utc)
+        assert wm.record_observations(db, db.get_annotated_events_in_window(hours=48, now=now), now=now) == 2
+        assert wm.review_candidates(db, now=now, kb=kb) == []
+
+        record = db.get_generated_sop(sop_id)
+        assert record["status"] == "draft"
+        assert kb.get_procedure("payout") is None  # nothing exported
+        template = record["sop_json"]
+        detours = [o["obs_id"] for o in db.get_workflow_observations(since=datetime(2026, 9, 8, tzinfo=timezone.utc))]
+        assert [o["obs_id"] for o in template["observations"]][-2:] == detours
+        assert template["episode_count"] == 5
+        assert [h["step_index"] for h in template["branch_hypotheses"]] == [2, 2]
+        [branch] = template["branches"]
+        assert {e["id"] for e in branch["evidence"] if e["kind"] == "instance"} == set(detours)
+        # Once approved, the procedure holds all of it.
+        proc = sop_to_procedure(template)
+        assert len(proc["evidence"]["observations"]) == 5
+        assert proc["branches"] == [branch] and len(proc["branch_hypotheses"]) == 2
+        # Learned once: a later pass adds nothing.
+        wm.review_candidates(db, now=now, kb=kb)
+        assert len(db.get_generated_sop(sop_id)["sop_json"]["observations"]) == 5
+
+    def test_a_recognised_run_of_a_draft_is_its_evidence(
+        self, db: WorkerDB, write_conn,
+    ) -> None:
+        """Live recognition attaches a run of a draft as it does a Skill's."""
+        sop_id = self._draft(db, self._promote(db))
+        start = datetime(2026, 9, 8, 9, tzinfo=timezone.utc)
+        events = _session_events("live", start)
+        _insert(write_conn, events)
+        assert wm.recognize(db, None, now=start + timedelta(minutes=4)) == "payout"
+        last = start + timedelta(seconds=90 * (len(events) - 1))
+        assert wm.recognize(db, None, now=last + timedelta(minutes=10, seconds=30)) is None
+        (obs,) = db.get_workflow_observations(since=start)
+        template = db.get_generated_sop(sop_id)["sop_json"]
+        assert template["observations"][-1]["obs_id"] == obs["obs_id"]
+        assert db.get_generated_sop(sop_id)["status"] == "draft"
+
+    def test_an_approved_skill_is_not_learned_on_as_a_draft(self, db: WorkerDB) -> None:
+        promoted = self._promote(db)
+        sop_id = self._draft(db, promoted)
+        db.update_sop_status(sop_id, "approved")
+        later = _obs("2026-09-08", key="a")
+        assert db.save_workflow_observation(later)
+        assert not wm.learn_on_draft(db, "payout", [later])
+
     def test_an_instance_that_follows_the_steps_adds_no_hypothesis(
         self, db: WorkerDB, write_conn, tmp_path: Path,
     ) -> None:
@@ -840,3 +963,82 @@ class TestSkillsAndObservations:
         wm.record_observations(db, db.get_annotated_events_in_window(hours=4, now=now), now=now)
         wm.review_candidates(db, now=now, kb=kb)
         assert kb.get_procedure("payout").get("branch_hypotheses", []) == []
+
+
+def _click(write_conn, eid: str, when: datetime, url: str, target: dict) -> None:
+    """A Chrome ClickIntent row as the extension records it."""
+    write_conn.execute(
+        "INSERT INTO events (id, timestamp, kind_json, window_json, display_topology_json, "
+        "primary_display_id, artifact_ids_json, metadata_json, processed) "
+        "VALUES (?, ?, ?, '{}', '[]', '', '[]', ?, 1)",
+        (eid, when.isoformat(), json.dumps({"type": "ClickIntent"}),
+         json.dumps({"url": url, "target": target})),
+    )
+    write_conn.commit()
+
+
+class TestPassiveAnchors:
+    """WP-F12: a passive draft's steps carry the anchor of the element its
+    runs clicked, matched without a model (the focus path's rules over the
+    frames of each run on the step's place)."""
+
+    TEMPLATE_STEPS = [
+        ("Open the payouts list", PAYOUT[0][0]),
+        ("Open today's payout", "https://dashboard.stripe.com/payouts/po_{{payout_id}}"),
+        ("Enter the amount in the sheet", PAYOUT[2][0]),
+        ("Mark the row reconciled", PAYOUT[3][0]),
+        ("Post in #finance", PAYOUT[4][0]),
+    ]
+    # The element clicked just before each frame of a run (None: typing).
+    CLICKS = [
+        {"tagName": "a", "role": "link", "innerText": "Payouts"},
+        {"tagName": "a", "role": "link", "innerText": "$1,204.00"},
+        None,
+        {"tagName": "div", "role": "checkbox", "ariaLabel": "D240 Reconciled"},
+        {"tagName": "button", "ariaLabel": "Send now"},
+    ]
+
+    def _template(self) -> dict:
+        return {"steps": [
+            {"step": text, "parameters": {"location": loc}, "anchor": None, "evidence": {"frames": []}}
+            for text, loc in self.TEMPLATE_STEPS
+        ]}
+
+    def _runs(self, db: WorkerDB, write_conn, days=(1, 2)) -> list[dict]:
+        runs = []
+        for day in days:
+            start = datetime(2026, 9, day, 9, tzinfo=timezone.utc)
+            events = _session_events(f"run{day}", start)
+            _insert(write_conn, events)
+            for i, target in enumerate(self.CLICKS):
+                if target is not None:
+                    _click(write_conn, f"click{day}-{i}", start + timedelta(seconds=90 * i - 3),
+                           PAYOUT[i][0], target)
+            obs = _obs(f"2026-09-{day:02d}", key="a")
+            obs["event_ids_json"] = json.dumps([e["id"] for e in events])
+            runs.append(obs)
+        return runs
+
+    def test_steps_get_the_anchor_of_the_element_they_click(self, db: WorkerDB, write_conn) -> None:
+        runs = self._runs(db, write_conn)
+        # Clicked long after the run: no frame of it shows the result.
+        _click(write_conn, "late", datetime(2026, 9, 1, 11, tzinfo=timezone.utc), PAYOUT[4][0],
+               {"tagName": "button", "ariaLabel": "Send now"})
+        template = self._template()
+
+        assert wm.anchor_draft_steps(db, template, runs) == 4
+        names = [(s["anchor"] or {}).get("name") for s in template["steps"]]
+        assert names == ["Payouts", "$1,204.00", None, "D240 Reconciled", "Send now"]
+        payouts, _payout, sheet, _row, post = template["steps"]
+        assert payouts["evidence"]["click_ids"] == ["click1-0", "click2-0"]
+        assert payouts["evidence"]["frames"] == ["run1-0", "run2-0"]
+        assert post["evidence"]["click_ids"] == ["click1-4", "click2-4"]
+        assert "click_ids" not in sheet["evidence"]  # typed, nothing clicked
+
+    def test_a_step_on_a_page_no_run_visits_gets_no_anchor(self, db: WorkerDB, write_conn) -> None:
+        runs = self._runs(db, write_conn, days=(1,))
+        template = {"steps": [
+            {"step": "Open the payouts list", "parameters": {"location": "https://dashboard.stripe.com/balance"}},
+        ]}
+        assert wm.anchor_draft_steps(db, template, runs) == 0
+        assert "anchor" not in template["steps"][0]
