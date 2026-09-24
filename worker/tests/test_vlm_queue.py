@@ -201,6 +201,48 @@ class TestEnqueueExceedsDailyLimit:
 
         assert queue.enqueue(_make_job()) is False
 
+    def test_the_limit_is_logged_once_a_day_with_a_count(self, caplog) -> None:
+        """Hundreds of rejected jobs make one warning, and the daily reset
+        says how many there were; the next day logs its limit again."""
+        queue = VLMFallbackQueue(budget=QueueBudget(max_jobs_per_day=2))
+        with caplog.at_level("DEBUG", logger="agenthandover_worker.vlm_queue"):
+            for _ in range(2):
+                assert queue.enqueue(_make_job()) is True
+            for _ in range(300):
+                assert queue.enqueue(_make_job()) is False
+            warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+            assert [r.getMessage() for r in warnings] == [
+                "VLM queue daily limit reached (2/2): further jobs are rejected "
+                "until the daily reset, which logs how many"
+            ]
+            assert queue.get_stats().rejected_today == 300
+
+            caplog.clear()
+            queue._today = queue._today - timedelta(days=1)
+            stats = queue.get_stats()
+            (reset,) = [r.getMessage() for r in caplog.records if "daily reset" in r.getMessage()]
+            assert "dispatched=2, rejected over budget=300" in reset
+            assert stats.rejected_today == 0
+
+            caplog.clear()
+            for _ in range(2):
+                queue.enqueue(_make_job())
+            for _ in range(5):
+                queue.enqueue(_make_job())
+            assert sum(r.levelname == "WARNING" for r in caplog.records) == 1
+
+    def test_the_compute_budget_is_logged_once_a_day(self, caplog) -> None:
+        queue = VLMFallbackQueue(budget=QueueBudget(max_compute_minutes_per_day=1.0))
+        job = _make_job()
+        queue.enqueue(job)
+        queue.record_completion(job.job_id, compute_minutes=1.5, result={})
+        with caplog.at_level("WARNING", logger="agenthandover_worker.vlm_queue"):
+            for _ in range(50):
+                assert queue.enqueue(_make_job()) is False
+        assert len(caplog.records) == 1
+        assert "compute budget exhausted" in caplog.records[0].getMessage()
+        assert queue.get_stats().rejected_today == 50
+
 
 # ---------------------------------------------------------------------------
 # Test 4: Dequeue highest priority
