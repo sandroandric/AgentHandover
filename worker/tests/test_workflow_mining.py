@@ -1042,3 +1042,21 @@ class TestPassiveAnchors:
         ]}
         assert wm.anchor_draft_steps(db, template, runs) == 0
         assert "anchor" not in template["steps"][0]
+
+
+def test_a_mark_step_owns_the_checkbox_it_ticks() -> None:
+    """Seen on the passive_3weeks replay: "Open the ... Sheet" owned both
+    sheet clicks, since "Mark ..." was not a click verb, and the step that
+    ticks the Reconciled box got no anchor."""
+    from agenthandover_worker.sop_generator import _owners
+
+    cell = {"target": {"role": "gridcell", "innerText": "C240"}}
+    box = {"target": {"role": "checkbox", "ariaLabel": "D240 Reconciled"}}
+    frame = {"click_targets": [cell, box]}
+    steps = [
+        {"action": "Open the Payout Reconciliation Sheet"},
+        {"action": "Mark the reconciliation row as 'Reconciled' by checking the corresponding box."},
+    ]
+    owners = _owners(steps, [[frame], [frame]])
+    assert owners[id(box)] == 1
+    assert owners[id(cell)] == 0

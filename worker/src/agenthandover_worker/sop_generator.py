@@ -1276,7 +1276,10 @@ def _step_frames(raw_step: dict, timeline: list[dict] | None) -> list[dict]:
 
 
 def _words(text: object) -> set[str]:
-    return {w for w in re.findall(r"[a-z0-9']+", str(text or "").lower()) if len(w) > 2}
+    """Its words, lower-cased; quotes around a word are not part of it
+    ("'Reconciled'" is the word on the Reconciled checkbox)."""
+    words = (w.strip("'") for w in re.findall(r"[a-z0-9']+", str(text or "").lower()))
+    return {w for w in words if len(w) > 2}
 
 
 def _step_words(raw_step: dict) -> set[str]:
@@ -1391,8 +1394,8 @@ def anchor_passive_steps(template: dict, runs: list[list[dict]]) -> int:
 
 # Verbs of a step that clicks something (a button, link, tab, menu item).
 _CLICK_VERB_RE = re.compile(
-    r"(click|press|tap|send|post|submit|open|select|choose|toggle|check|confirm"
-    r"|navigate|go|visit|follow)\b", re.I,
+    r"(click|press|tap|send|post|submit|open|select|choose|toggle|check|uncheck"
+    r"|tick|mark|confirm|navigate|go|visit|follow)\b", re.I,
 )
 
 
