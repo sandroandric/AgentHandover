@@ -51,6 +51,23 @@ needs_recording = pytest.mark.skipif(
         + " (and the calls they unblock); record with AH_RECORD=1 on the test Mac"
     ),
 )
+# The questions are the ledger's since WP-L4 (no model call), so the answer
+# revision's prompt, which quotes the question, and the embedding of the
+# answered procedure are new requests.
+REVISION_MISSING_KEYS: tuple[str, ...] = (
+    "b8ac16d6e56932ea4ab826d4b3316b925337fa874bf71efbf08a96084706167a",  # /api/generate
+    "9bd6ccc1158d3dbfd6bf8ca504c2a69a648fe9e7a6b1d7322f2a57026b5053e8",  # /api/embed
+)
+needs_revision_recording = pytest.mark.skipif(
+    any(key not in _ENTRIES for key in REVISION_MISSING_KEYS)
+    and os.environ.get("AH_RECORD") != "1",
+    reason=(
+        f"cassettes/{JOURNEY}.jsonl lacks the answer revision after the ledger's "
+        "questions (WP-L4): "
+        + ", ".join(k for k in REVISION_MISSING_KEYS if k not in _ENTRIES)
+        + "; record with AH_RECORD=1 on the test Mac"
+    ),
+)
 
 
 def _start(events_db, worker, clock, temp_home, cassette):
@@ -120,6 +137,7 @@ def test_the_typing_session_becomes_the_steps_its_frames_show(
 
 
 @needs_recording
+@needs_revision_recording
 def test_a_typed_answer_revises_the_typing_steps(
     events_db, worker, clock, temp_home, cassette,
 ) -> None:
