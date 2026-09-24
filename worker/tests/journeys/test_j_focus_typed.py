@@ -21,6 +21,7 @@ import pytest
 
 from agenthandover_worker.focus_questioner import FOCUS_QUESTIONS_FILE
 from agenthandover_worker.ledger import derive_knowledge
+from agenthandover_worker.questions import step_questions
 from agenthandover_worker.skill_render import render_packet
 from journeys.cassette import CASSETTE_DIR, load_entries
 from journeys.focus_run import TICK_SECONDS, start_focus_run
@@ -169,3 +170,116 @@ def test_a_typed_answer_revises_the_typing_steps(
     assert {"kind": "answer", "id": f"agent_clarifications.{clarification}"} in (
         derive_knowledge(proc)["steps"]["evidence"]
     )
+
+
+PARTIAL = "Reserved for documentation: example.com"
+
+
+# The answered procedure's embedding (the same request as after the typed
+# answer's revision above): not in the cassette yet.
+ANSWERED_EMBED_KEY = REVISION_MISSING_KEYS[1]
+needs_answered_embed_recording = pytest.mark.skipif(
+    ANSWERED_EMBED_KEY not in _ENTRIES and os.environ.get("AH_RECORD") != "1",
+    reason=(
+        f"cassettes/{JOURNEY}.jsonl lacks the embedding of the answered procedure "
+        f"(WP-F10): {ANSWERED_EMBED_KEY} (/api/embed); record with AH_RECORD=1 on the "
+        "test Mac"
+    ),
+)
+_REVISION_HEADER = "A user recorded this workflow, then answered questions about it."
+
+
+def _ask_the_step_question(run, clock) -> tuple[dict, dict]:
+    """Tick until the Q&A window's questions; returns (the file, the one
+    step question), checked: it names the half-typed line and the finished
+    one, and offers both."""
+    state_dir = run.worker.state_dir
+    questions = _tick_until(run, clock, lambda: _pending_questions(state_dir))
+    step_qs = [q for q in questions["questions"] if q["id"].startswith("step:")]
+    assert len(step_qs) == 1, questions["questions"]
+    asked = step_qs[0]
+    assert asked["category"] == "steps" and asked["step_indexes"] == [2], asked
+    assert f'"{PARTIAL}"' in asked["question"] and f'"{LINE_1}"' in asked["question"]
+    assert asked["choices"] == ["The whole line", f'Only "{PARTIAL}"']
+    # It outranks the goal's hypothesis: the slots' unknowns and this step.
+    assert len(questions["questions"]) == 3
+    assert "goal" not in {q["category"] for q in questions["questions"]}
+    return questions, asked
+
+
+def _submit(state_dir, questions: dict, index: int, answer: str) -> dict:
+    """The app's Submit: *answer* picked for question *index* (typed), the
+    other questions left open."""
+    questions["status"] = "answered"
+    questions["answers"] = {str(index): answer}
+    questions["answer_sources"] = {str(index): "typed"}
+    (state_dir / FOCUS_QUESTIONS_FILE).write_text(json.dumps(questions), encoding="utf-8")
+    return questions
+
+
+def _assert_settled(proc: dict, asked: dict, answer: str, whole: bool) -> None:
+    step = proc["steps"][2]
+    assert step["input"] == (LINE_1 if whole else PARTIAL)
+    origin = step["evidence"]["user_answer"]
+    assert (origin["answer"], origin["question_id"]) == (answer, asked["id"])
+    assert step["evidence"]["grounding"]["user_answer"] == origin
+    assert proc["agent_clarifications"][origin["clarification"]]["answer"] == answer
+    # The steps slot cites the answer next to the frames.
+    steps_slot = derive_knowledge(proc)["steps"]
+    assert steps_slot["status"] == "known"
+    assert {"kind": "answer", "id": f"agent_clarifications.{origin['clarification']}"} in (
+        steps_slot["evidence"]
+    )
+    assert any(e["kind"] == "frame" for e in steps_slot["evidence"])
+    # Settled, it is not asked again, and the packet says what the user said.
+    assert step_questions(proc) == []
+    assert f"The user answered: {answer}" in render_packet(proc, target="claude-skill")
+
+
+@needs_recording
+@pytest.mark.parametrize("whole", [True, False], ids=["the-whole-line", "only-the-start"])
+def test_a_step_question_about_the_typed_line_is_settled_by_a_choice(
+    events_db, worker, clock, temp_home, cassette, whole,
+) -> None:
+    """WP-F10: the model had the first line half typed and step grounding
+    put the finished line in its place; the Q&A window asks which the user
+    typed, and the choice settles the step in code: merging the answers
+    (``merge_answers``, as the worker does) leaves no answer for the
+    revision call to make."""
+    from agenthandover_worker.focus_questioner import (
+        answer_revision_prompt,
+        merge_answers,
+        parse_qa_result_from_file,
+        read_focus_pending,
+    )
+
+    run = _start(events_db, worker, clock, temp_home, cassette)
+    questions, asked = _ask_the_step_question(run, clock)
+    answer = asked["choices"][0 if whole else 1]
+    answered = _submit(run.worker.state_dir, questions, asked["index"], answer)
+
+    qa_result = parse_qa_result_from_file(answered)
+    proc = merge_answers(read_focus_pending(run.worker.state_dir)["procedure"], qa_result)
+    assert answer_revision_prompt(proc, qa_result) is None
+    _assert_settled(proc, asked, answer, whole)
+
+
+@needs_recording
+@needs_answered_embed_recording
+def test_the_worker_settles_the_step_question_without_a_model_call(
+    events_db, worker, clock, temp_home, cassette,
+) -> None:
+    """The same answer through the worker's next ticks: the Skill is saved
+    with the step settled, and no request revised it."""
+    run = _start(events_db, worker, clock, temp_home, cassette)
+    questions, asked = _ask_the_step_question(run, clock)
+    answer = asked["choices"][1]
+    _submit(run.worker.state_dir, questions, asked["index"], answer)
+    clock.advance(seconds=TICK_SECONDS)
+
+    proc = _tick_until(run, clock, lambda: (run.procedures() or [None])[0])
+    assert not any(
+        _REVISION_HEADER in str(e["request"].get("prompt") or e["request"].get("messages"))
+        for e in run.tape.served
+    )
+    _assert_settled(proc, asked, answer, whole=False)
