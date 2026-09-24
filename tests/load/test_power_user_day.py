@@ -1,7 +1,7 @@
 """Load testing suite — simulates a 'power user day' with 10k events.
 
 Per §14.4: Validates observer stays <1% CPU, DB growth bounded and
-reclaimed, VLM queue respects budgets.
+reclaimed.
 """
 
 from __future__ import annotations
@@ -27,12 +27,6 @@ sys.path.insert(0, str(WORKER_SRC))
 
 from agenthandover_worker.episode_builder import EpisodeBuilder
 from agenthandover_worker.negative_demo import NegativeDemoPruner
-from agenthandover_worker.vlm_queue import (
-    VLMFallbackQueue,
-    VLMJob,
-    VLMJobStatus,
-    QueueBudget,
-)
 from agenthandover_worker.confidence import ConfidenceScorer
 from agenthandover_worker.translator import SemanticTranslator, TranslationResult, UIAnchor
 from daemon_db import apply_daemon_migrations
@@ -355,112 +349,6 @@ class TestDBGrowthBounded:
         count = conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
         conn.close()
         assert count == 10000
-
-
-class TestVLMQueueBudgetUnderLoad:
-    """VLM queue respects budgets with many jobs."""
-
-    def test_daily_limit_enforced_under_load(self):
-        queue = VLMFallbackQueue(budget=QueueBudget(max_jobs_per_day=50, max_queue_size=500))
-
-        enqueued = 0
-        for i in range(200):
-            job = VLMJob(
-                job_id=f"job_{i}",
-                event_id=f"event_{i}",
-                episode_id=f"ep_{i}",
-                semantic_step_index=0,
-                confidence_score=0.3,
-                priority_score=random.uniform(0.1, 0.9),
-            )
-            result = queue.enqueue(job)
-            if result:
-                enqueued += 1
-
-        assert enqueued == 50
-
-    def test_queue_backpressure_under_load(self):
-        queue = VLMFallbackQueue(budget=QueueBudget(
-            max_jobs_per_day=1000,  # High daily limit
-            max_queue_size=100,     # Low queue size
-        ))
-
-        for i in range(200):
-            job = VLMJob(
-                job_id=f"job_{i}",
-                event_id=f"event_{i}",
-                episode_id=f"ep_{i}",
-                semantic_step_index=0,
-                confidence_score=random.uniform(0.1, 0.5),
-                priority_score=random.uniform(0.1, 0.9),
-            )
-            queue.enqueue(job)
-
-        stats = queue.get_stats()
-        # Queue should not exceed max_size (pending + processing)
-        active = stats.pending_jobs
-        assert active <= 100
-
-    def test_compute_budget_enforced(self):
-        queue = VLMFallbackQueue(budget=QueueBudget(
-            max_jobs_per_day=1000,
-            max_compute_minutes_per_day=1.0,  # Very tight budget
-        ))
-
-        # Enqueue some jobs
-        for i in range(10):
-            job = VLMJob(
-                job_id=f"job_{i}",
-                event_id=f"event_{i}",
-                episode_id=f"ep_{i}",
-                semantic_step_index=0,
-                confidence_score=0.3,
-                priority_score=0.5 + i * 0.01,  # Descending priority for dequeue order
-            )
-            queue.enqueue(job)
-
-        # Process with heavy compute time
-        completed = 0
-        for _ in range(10):
-            job = queue.dequeue()
-            if job is None:
-                break
-            # Record 0.5 minutes per job — after 2 jobs we hit 1.0 budget
-            queue.record_completion(job.job_id, compute_minutes=0.5, result={"ok": True})
-            completed += 1
-            if not queue.can_dispatch():
-                break
-
-        # Should stop at or before processing all 10
-        assert completed < 10
-
-    def test_enqueue_after_budget_exhausted_rejected(self):
-        queue = VLMFallbackQueue(budget=QueueBudget(
-            max_jobs_per_day=5,
-            max_queue_size=500,
-        ))
-
-        for i in range(5):
-            job = VLMJob(
-                job_id=f"job_{i}",
-                event_id=f"event_{i}",
-                episode_id=f"ep_{i}",
-                semantic_step_index=0,
-                confidence_score=0.3,
-                priority_score=0.5,
-            )
-            assert queue.enqueue(job) is True
-
-        # 6th should be rejected
-        job_6 = VLMJob(
-            job_id="job_6",
-            event_id="event_6",
-            episode_id="ep_6",
-            semantic_step_index=0,
-            confidence_score=0.3,
-            priority_score=0.5,
-        )
-        assert queue.enqueue(job_6) is False
 
 
 class TestEpisodeBuilderUnderLoad:
@@ -787,8 +675,6 @@ class TestPerformanceValidation:
         from agenthandover_worker.clipboard_linker import ClipboardLinker
         from agenthandover_worker.negative_demo import NegativeDemoPruner
         from agenthandover_worker.translator import SemanticTranslator
-        from agenthandover_worker.confidence import ConfidenceScorer
-        from agenthandover_worker.vlm_queue import VLMFallbackQueue
         from agenthandover_worker.main import run_pipeline
 
         events = generate_power_user_day(1000)
@@ -800,8 +686,6 @@ class TestPerformanceValidation:
             clipboard_linker=ClipboardLinker(),
             pruner=NegativeDemoPruner(),
             translator=SemanticTranslator(),
-            scorer=ConfidenceScorer(),
-            vlm_queue=VLMFallbackQueue(),
         )
         elapsed = time.monotonic() - start
 

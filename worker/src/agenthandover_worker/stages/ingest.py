@@ -1,8 +1,8 @@
 """Ingest stage: the event pipeline over the daemon's unprocessed events.
 
 Runs on the control thread (model-free): episodes, clipboard links,
-negative-demo pruning, translation, confidence scoring and VLM fallback
-enqueueing (``main.run_pipeline``), then marks the batch processed.  It
+negative-demo pruning and translation (``main.run_pipeline``), then marks
+the batch processed.  It
 also sets the next poll interval and logs the poll.
 """
 
@@ -23,9 +23,7 @@ def run(ctx: Any, tick: Any) -> dict | None:
     events), also recorded on *tick*."""
     db = ctx.db
     unprocessed = db.get_unprocessed_events(limit=ctx.event_guard.batch_limit)
-    pending_vlm = db.get_pending_vlm_jobs(limit=10)
     tick.unprocessed = len(unprocessed)
-    tick.pending_vlm = len(pending_vlm)
     _log_poll(ctx, tick)
 
     if not unprocessed:
@@ -40,9 +38,6 @@ def run(ctx: Any, tick: Any) -> dict | None:
         clipboard_linker=ctx.clipboard_linker,
         pruner=ctx.pruner,
         translator=ctx.translator,
-        scorer=ctx.scorer,
-        vlm_queue=ctx.vlm_queue,
-        db=db,
     )
     ctx.last_pipeline_duration_ms = int((time.monotonic() - pipeline_start) * 1000)
     tick.pipeline = summary
@@ -60,24 +55,19 @@ def run(ctx: Any, tick: Any) -> dict | None:
         db.mark_events_processed(tick.inflight_event_ids)
     ctx.event_guard.succeeded(tick.inflight_event_ids)
     tick.inflight_event_ids = []
-
-    # Persist in-memory VLM queue jobs to the DB so they survive restarts.
-    if summary["vlm_enqueued"] > 0:
-        wm._persist_vlm_jobs(db, ctx.vlm_queue)
     return summary
 
 
 def _log_poll(ctx: Any, tick: Any) -> None:
     """Log the poll, set the next poll interval, and every
     ``_IDLE_LOG_INTERVAL_SECONDS`` of idleness say the worker is watching."""
-    if tick.unprocessed or tick.pending_vlm:
-        poll_counts = (tick.unprocessed, tick.pending_vlm)
+    if tick.unprocessed:
         logger.log(
-            wm._poll_log_level(poll_counts, ctx.last_logged_poll_counts),
-            "Poll: %d unprocessed events, %d pending VLM jobs",
-            *poll_counts,
+            wm._poll_log_level(tick.unprocessed, ctx.last_logged_poll_count),
+            "Poll: %d unprocessed events",
+            tick.unprocessed,
         )
-        ctx.last_logged_poll_counts = poll_counts
+        ctx.last_logged_poll_count = tick.unprocessed
         ctx.current_interval = wm._next_poll_interval(
             ctx.current_interval, ctx.poll_interval,
             busy=True, triggers_consumed=tick.triggers_consumed,
@@ -86,7 +76,7 @@ def _log_poll(ctx: Any, tick: Any) -> None:
         return
 
     logger.debug("Poll: nothing to do")
-    ctx.last_logged_poll_counts = None
+    ctx.last_logged_poll_count = None
     ctx.current_interval = wm._next_poll_interval(
         ctx.current_interval, ctx.poll_interval,
         busy=False, triggers_consumed=tick.triggers_consumed,

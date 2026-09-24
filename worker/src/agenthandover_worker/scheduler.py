@@ -27,6 +27,7 @@ import os
 import platform
 import plistlib
 import subprocess
+import threading
 import xml.parsers.expat
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -660,6 +661,146 @@ def charged_to(budget: AnnotationBudget | None) -> Iterator[None]:
         yield
     finally:
         budget.charge_compute(model_compute_seconds() - before)
+
+
+# ---------------------------------------------------------------------------
+# ReasoningBudget — the daily cap on the reasoner's and synthesizer's calls
+# ---------------------------------------------------------------------------
+
+REASONING_BUDGET_REASON = "reasoning_budget_exhausted"
+
+
+class ReasoningBudget:
+    """What the LLM reasoner (cluster labels, session links, corrections,
+    curation, quality judgements) and the behavioral synthesizer spent in
+    the local day.
+
+    Two caps per local day: ``[vlm] reasoning_max_calls_per_day`` and
+    ``reasoning_max_compute_minutes_per_day`` (the wall-clock minutes of
+    those calls, a model load included).  Only their calls count: frame
+    annotation and activity classification are the annotation budget's
+    (:class:`AnnotationBudget`), and nothing else spends this one.
+
+    Once either cap is spent, :meth:`allow` answers False until the next
+    local day: the first refusal of the day is logged at INFO, the day's
+    refusals are counted in :meth:`status` (``worker-status.json``
+    ``reasoning_budget``) and :meth:`pause_reason` names the cap
+    (``reasoning_paused_reason``).  *clock* gives the local wall time; the
+    day turns over on its date.  Thread-safe: the inference thread and a
+    trigger's model work may both call.
+    """
+
+    def __init__(
+        self,
+        max_calls: int,
+        max_compute_seconds: float,
+        clock: Callable[[], datetime],
+    ) -> None:
+        self.max_calls = max_calls
+        self.max_compute_seconds = max_compute_seconds
+        self._clock = clock
+        self._lock = threading.Lock()
+        self.date = ""
+        self.calls = 0
+        self.compute_seconds = 0.0
+        # Calls refused today.
+        self.skipped = 0
+
+    @classmethod
+    def from_config(cls, vlm: object, clock: Callable[[], datetime]) -> "ReasoningBudget":
+        """The budget ``[vlm]`` configures (a ``config.VlmConfig``)."""
+        return cls(
+            max_calls=vlm.reasoning_max_calls_per_day,
+            max_compute_seconds=vlm.reasoning_max_compute_minutes_per_day * 60.0,
+            clock=clock,
+        )
+
+    def _roll(self) -> None:
+        """Start the day's counters over on a new local date (lock held)."""
+        today = self._clock().date().isoformat()
+        if today == self.date:
+            return
+        if self.skipped:
+            logger.info(
+                "Reasoning budget: %d model call(s) skipped over the daily "
+                "limit on %s (%d/%d calls, %.1f/%.1f min)",
+                self.skipped, self.date, self.calls, self.max_calls,
+                self.compute_seconds / 60.0, self.max_compute_seconds / 60.0,
+            )
+        self.date, self.calls, self.compute_seconds, self.skipped = today, 0, 0.0, 0
+
+    def _spent(self) -> bool:
+        return (
+            self.calls >= self.max_calls
+            or self.compute_seconds >= self.max_compute_seconds
+        )
+
+    def allow(self, caller: str) -> bool:
+        """Whether *caller* may make a model call now; a refusal is counted
+        (and the day's first one logged at INFO)."""
+        with self._lock:
+            self._roll()
+            if not self._spent():
+                return True
+            self.skipped += 1
+            if self.skipped == 1:
+                logger.info(
+                    "Reasoning budget reached (%d/%d calls, %.1f/%.1f min today): "
+                    "reasoning and synthesis wait for the next local day, "
+                    "starting with %s",
+                    self.calls, self.max_calls,
+                    self.compute_seconds / 60.0, self.max_compute_seconds / 60.0,
+                    caller,
+                )
+            return False
+
+    def charge(self, seconds: float) -> None:
+        """Count one model call that took *seconds*."""
+        with self._lock:
+            self._roll()
+            self.calls += 1
+            self.compute_seconds += max(seconds, 0.0)
+
+    def pause_reason(self) -> str | None:
+        """:data:`REASONING_BUDGET_REASON` while today's budget is spent."""
+        with self._lock:
+            self._roll()
+            return REASONING_BUDGET_REASON if self._spent() else None
+
+    def to_json(self) -> str:
+        with self._lock:
+            return json.dumps({
+                "date": self.date,
+                "calls": self.calls,
+                "compute_seconds": round(self.compute_seconds, 3),
+                "skipped": self.skipped,
+            })
+
+    def load(self, raw: str | None) -> None:
+        """Restore the counters persisted by :meth:`to_json` (if any), so
+        a restart does not hand out a second day's budget."""
+        with self._lock:
+            try:
+                saved = json.loads(raw) if raw else {}
+                self.date = str(saved.get("date", ""))
+                self.calls = int(saved.get("calls", 0))
+                self.compute_seconds = float(saved.get("compute_seconds", 0.0))
+                self.skipped = int(saved.get("skipped", 0))
+            except (ValueError, TypeError, AttributeError):
+                self.date, self.calls, self.compute_seconds, self.skipped = "", 0, 0.0, 0
+
+    def status(self) -> dict:
+        """The counters as published in ``worker-status.json``."""
+        with self._lock:
+            self._roll()
+            return {
+                "date": self.date,
+                "calls": self.calls,
+                "max_calls": self.max_calls,
+                "compute_minutes": round(self.compute_seconds / 60.0, 2),
+                "max_compute_minutes": round(self.max_compute_seconds / 60.0, 2),
+                "skipped": self.skipped,
+            }
 
 
 # ---------------------------------------------------------------------------

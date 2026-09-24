@@ -366,13 +366,11 @@ class TestCreateLlmBackend:
             result = create_llm_backend({"model": ""}, {"mode": "local"})
         assert result is None
 
-    @patch("agenthandover_worker.vlm_worker.VLMWorker")
-    def test_remote_provider_mapping(self, mock_worker_cls):
+    @patch("agenthandover_worker.vlm_worker.create_backend")
+    def test_remote_provider_mapping(self, mock_create):
         mock_backend = MagicMock()
         mock_backend.is_available.return_value = True
-        mock_worker = MagicMock()
-        mock_worker._backend = mock_backend
-        mock_worker_cls.return_value = mock_worker
+        mock_create.return_value = mock_backend
 
         result = create_llm_backend(
             {"model": "gpt-4o-mini"},
@@ -380,21 +378,19 @@ class TestCreateLlmBackend:
         )
         assert result is mock_backend
 
-    @patch("agenthandover_worker.vlm_worker.VLMWorker")
-    def test_remote_unknown_provider_returns_none(self, mock_worker_cls):
+    @patch("agenthandover_worker.vlm_worker.create_backend")
+    def test_remote_unknown_provider_returns_none(self, mock_create):
         result = create_llm_backend(
             {"model": ""},
             {"mode": "remote", "provider": "unknown_provider"},
         )
         assert result is None
 
-    @patch("agenthandover_worker.vlm_worker.VLMWorker")
-    def test_remote_backend_not_available_returns_none(self, mock_worker_cls):
+    @patch("agenthandover_worker.vlm_worker.create_backend")
+    def test_remote_backend_not_available_returns_none(self, mock_create):
         mock_backend = MagicMock()
         mock_backend.is_available.return_value = False
-        mock_worker = MagicMock()
-        mock_worker._backend = mock_backend
-        mock_worker_cls.return_value = mock_worker
+        mock_create.return_value = mock_backend
 
         result = create_llm_backend(
             {"model": ""},

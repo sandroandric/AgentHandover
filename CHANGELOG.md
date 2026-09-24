@@ -70,8 +70,28 @@ are marked *(not yet recorded)*.
 - The MLX and llama.cpp backends (they only served the fallback queue; the
   pipeline always used Ollama), the legacy PrefixSpan miner, the LLM-written
   focus questions, and config keys nothing read.
+- The VLM fallback queue. Every translation the event pipeline rejected
+  queued a job whose answer fed only a confidence boost that decided whether
+  another job was queued; nothing else read it, in local or cloud mode. The
+  queue, its jobs and their worker are gone, and so are `vlm_queue_pending`,
+  `vlm_jobs_today` and `vlm_dropped_today` in `worker-status.json` (and the
+  menu bar's "Processing" count and health warning built on them). Cloud mode
+  now sends nothing unless `[vlm] annotation_enabled = false` (then the older
+  focus path's Skill steps, for a task description and overview).
 
 ### Fixed
+- **Cluster labels and synthesis no longer stop for the day** after 50
+  rejected translations. The fallback queue was also the daily budget of the
+  LLM reasoner and the behavioral synthesizer, so its 50 jobs a day skipped
+  every later reasoning call, logged only at DEBUG (312 cluster labels in the
+  three-week replay). They now have their own budget, `[vlm]
+  reasoning_max_calls_per_day` (300) and
+  `reasoning_max_compute_minutes_per_day` (90); when it is spent,
+  `worker-status.json` says `reasoning_paused_reason:
+  reasoning_budget_exhausted`, `agenthandover status --compute` shows it,
+  and the worker logs it at INFO once a day. Proof:
+  `test_reasoning_budget.py`; the replay's new cluster labels are *not yet
+  recorded*.
 - The app read `model = …` in `[vlm]` as the mode, so it never recognised
   cloud mode. A review card's free-text answer to a step question now revises
   the step, and the revision survives a worker restart.

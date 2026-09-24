@@ -129,23 +129,3 @@ def insert_episode(
     )
     conn.commit()
     return eid
-
-
-def insert_vlm_job(
-    conn: sqlite3.Connection,
-    *,
-    event_id: str,
-    priority: float = 0.5,
-    status: str = "pending",
-    vlm_id: str | None = None,
-) -> str:
-    """Insert a VLM queue job linked to an existing event. Returns the job id."""
-    jid = vlm_id or _new_uuid()
-    ttl = _now_iso()
-    conn.execute(
-        "INSERT INTO vlm_queue (id, event_id, priority, status, ttl_expires_at) "
-        "VALUES (?, ?, ?, ?, ?)",
-        (jid, event_id, priority, status, ttl),
-    )
-    conn.commit()
-    return jid

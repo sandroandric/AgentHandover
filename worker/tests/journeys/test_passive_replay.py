@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import gzip
 import json
+import os
 from collections import Counter
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -15,7 +16,7 @@ import pytest
 from agenthandover_worker.daily_digest import DigestGenerator
 from agenthandover_worker.knowledge_base import KnowledgeBase
 from daemon_db import kb_db
-from journeys.cassette import CASSETTE_DIR
+from journeys.cassette import CASSETTE_DIR, load_entries
 from journeys.fixture_loader import (
     ANNOTATIONS_FILE,
     EVENTS_FILE,
@@ -131,9 +132,54 @@ def test_score_verdicts_and_metrics() -> None:
 
 
 CASSETTE = CASSETTE_DIR / f"{NAME}.jsonl"
+# The task_segmenter.label_cluster calls the replay makes since the reasoner
+# has its own daily budget: the VLM fallback queue it used to share filled
+# with 50 jobs a day, and every later label_cluster call was skipped (312 in
+# the three weeks).  The first answers decide the later clusters' labels,
+# so recording these can reveal more; record with AH_RECORD=1 on the test
+# Mac until the replay misses nothing.
+REASONER_BUDGET_MISSING_KEYS: tuple[str, ...] = (
+    "05b9464377fa4cbad4e96859210ddb15eb0dc28c8955ea38719687c1d3bb2eb4",
+    "093565a4af05ae432c3bac734b809a11a79972cbe4ed0e33c79c13e7190603a4",
+    "0a8395ace2eabd7aff0280c2173198abd3bde984cdd404e19a8f8dbd5883e4b7",
+    "131e1a805ed0bb011ffe7700abd25fabd50f210243df582d617b9c6f90ae23ff",
+    "2a694763f7c0cfc9fd96ed0b1b7e7735dda0a15d81395a86e74e55422dd8cc64",
+    "2c158d54b6a63add0323f4f3715fc77b29c5f479b0f17ac4af551bf4feedd0cb",
+    "38bd97cf32187d11ffbf0318e4cd39533f941710f4826108773c08400459c7ba",
+    "3fd872b8e44566ee7355c0c1f5058a26c599a575832a018a7b8f7a4bbb093770",
+    "406ec3685f01dc7b8576c210840cf09bf1764d08228ba4e4ff1a17789ba96421",
+    "49e99de1d39eec6eaa01882feee8ce7f62b7419ae8d3c293582428127109b21a",
+    "4b1491ba6cab783c4ec0ceb25c95831ce95305e3a701ade3ca5e0d6ce596062a",
+    "4b3f62dbeb48bce950dc5c8da0c2d7e175507e3d3630b4f92b7252ff643b5272",
+    "674ef39acdabe00454ac1116367751ac828d462c240afd9695a9e5c674a7e41e",
+    "6a7ea7f62a68c4d52f8f6c67c166e52e26b34e3b40d1152e0702a43424cd93f3",
+    "76084a9545b7b675db7a80659566d338ccd10170fde8f9c6b3e80ae24494ca92",
+    "7fb3f1d49dbd46aa24c4796fde8c41930bb44a1990b3b20f3ec7cb094ad052e4",
+    "856367ef546baa77bd95710b31c1bae6d334a26fb83754bee119669bc8d98f34",
+    "988564cf2b7f24343d9da09cda5524dce1d32ea2eb8c8dce70cbe8b79c21438b",
+    "b13947f952dba85a87686a3f887552e9afa8341aedca82af0aaf8884339e3142",
+    "b91282e5c1eea8829424acc26af9d32c2a9a4418b2e43775e49960059fdc2be6",
+    "b9f1f827abb58da73dd2cea6701025bf8b93d098b6923d33c741f0b6262aca13",
+    "cc5603c1f05ccf9c6898e1a966f5b568d127f988da5e422c0418d81fba05872b",
+    "d5b2aae170c6dc18ebd516f724360ac0fdd2bf43efe44f1ffbfaa92011a42c49",
+    "d71e2db84768ee2305a053827e587268e08c7594872324c09f751969f733ec75",
+    "d9a0ab93445fe69bda6fb84633a81e445dd51c56d6c7c6e646c55c9bc6e17e3e",
+    "eb61daab954f162da3fb1f4766715230ae02d236cfc012a52169aa4e22984dcf",
+)
+_ENTRIES = load_entries(CASSETTE) if CASSETTE.exists() else {}
+needs_label_recording = pytest.mark.skipif(
+    any(key not in _ENTRIES for key in REASONER_BUDGET_MISSING_KEYS)
+    and os.environ.get("AH_RECORD") != "1",
+    reason=(
+        f"cassettes/{NAME}.jsonl lacks the cluster-label calls the reasoner's "
+        "own budget no longer skips: "
+        + ", ".join(k for k in REASONER_BUDGET_MISSING_KEYS if k not in _ENTRIES)
+        + " (and the calls they unblock); record with AH_RECORD=1 on the test Mac"
+    ),
+)
 
 
-@pytest.mark.skipif(not CASSETTE.exists(), reason="passive_3weeks cassette not recorded")
+@needs_label_recording
 def test_replay_on_passive_3weeks() -> None:
     """Three weeks through run_tick on the virtual clock, models from the
     cassette: the routines are found, nothing else is, no chimera, and

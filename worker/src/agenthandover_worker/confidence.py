@@ -16,7 +16,7 @@ components:
 Threshold behavior (learning stage):
   >= 0.85 : accept as strong semantic step
   0.60–0.85 : accept but mark "needs more examples"  (accept_flagged)
-  <  0.60 : reject; enqueue VLM job if enabled
+  <  0.60 : reject
 
 v2 (VLM-based pipeline): SOP-level confidence score based on four signals:
 
@@ -67,8 +67,8 @@ def is_native_app_context(translation: TranslationResult, context: dict) -> bool
 
     Returns True when there is no URL AND no DOM-based UI anchor
     (aria_label, test_id, inner_text). Native app events lack the rich
-    selectors that browser DOM provides, making VLM-based identification
-    more valuable.
+    selectors that browser DOM provides, so they are held to lower
+    thresholds.
     """
     # If there's a URL, this is a web context
     if translation.pre_state.get("url"):
@@ -95,13 +95,11 @@ class ConfidenceScorer:
 
     ACCEPT_THRESHOLD: float = 0.85
     FLAG_THRESHOLD: float = 0.60
-    NATIVE_APP_VLM_BOOST: float = 0.15
 
     # Native app events lack DOM-level selectors (aria-label, test-id,
     # inner_text), so they can never reach web-level confidence scores.
     # Use lower thresholds for native contexts so that app-level anchors
-    # (app name, window title) + VLM boost can still produce accepted
-    # translations.
+    # (app name, window title) can still produce accepted translations.
     NATIVE_ACCEPT_THRESHOLD: float = 0.40
     NATIVE_FLAG_THRESHOLD: float = 0.15
 
@@ -144,10 +142,7 @@ class ConfidenceScorer:
         state_score = self._score_state_match(translation, context)
         provenance = self._score_provenance(translation, context)
 
-        # Apply VLM confidence boost if available (from completed VLM job)
-        vlm_boost = float(context.get("vlm_boost", 0.0))
-
-        total = max(0.0, min(ui_score + state_score + provenance + vlm_boost, 1.0))
+        total = max(0.0, min(ui_score + state_score + provenance, 1.0))
 
         reasons: list[str] = []
         if ui_score >= 0.35:
@@ -156,8 +151,6 @@ class ConfidenceScorer:
             reasons.append("state_matches")
         if provenance >= 0.15:
             reasons.append("provenance_confirmed")
-        if vlm_boost > 0.0:
-            reasons.append(f"vlm_boost_{vlm_boost:.2f}")
 
         # Detect native app context
         native_app = is_native_app_context(translation, context)

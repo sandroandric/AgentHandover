@@ -386,11 +386,13 @@ class BehavioralSynthesizer:
     def __init__(
         self,
         config: SynthesizerConfig | None = None,
-        vlm_queue: Any | None = None,
+        budget: Any | None = None,
         knowledge_base: Any | None = None,
     ) -> None:
         self.config = config or SynthesizerConfig()
-        self._vlm_queue = vlm_queue
+        # The daily reasoning budget (``scheduler.ReasoningBudget``), shared
+        # with the LLM reasoner.
+        self._budget = budget
         # Set by ``ModelScheduler.register``: switches Ollama to the
         # generation model before a call (see ``before_generation_call``).
         self.before_call: Callable[[], bool] | None = None
@@ -447,10 +449,13 @@ class BehavioralSynthesizer:
             )
             return BehavioralInsights()
 
-        # Budget check — avoid unbounded VLM spending
-        if self._vlm_queue is not None and not self._vlm_queue.can_dispatch():
+        # The budget logs its first refusal of the day at INFO and
+        # publishes the pause; each skip is only a debug line.
+        if self._budget is not None and not self._budget.allow(
+            f"behavioral_synthesizer ({slug})",
+        ):
             logger.debug(
-                "Skipping synthesis for '%s': over daily VLM budget", slug,
+                "Skipping synthesis for '%s': over the daily reasoning budget", slug,
             )
             return BehavioralInsights()
 
@@ -494,17 +499,8 @@ class BehavioralSynthesizer:
             logger.warning("Behavioral synthesis failed for '%s': %s", slug, exc)
             return BehavioralInsights()
 
-        # Record compute time on budget queue
-        if self._vlm_queue is not None:
-            try:
-                import uuid as _uuid
-                self._vlm_queue.record_completion(
-                    job_id=f"synthesis-{_uuid.uuid4().hex[:8]}",
-                    compute_minutes=elapsed / 60.0,
-                    result={"caller": "behavioral_synthesizer", "slug": slug},
-                )
-            except Exception:
-                logger.debug("Failed to record synthesis compute time", exc_info=True)
+        if self._budget is not None:
+            self._budget.charge(elapsed)
 
         # Parse response
         parsed = _parse_json_response(raw_response)

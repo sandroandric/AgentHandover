@@ -349,10 +349,10 @@ def create_llm_backend(
             return None
 
     try:
-        from agenthandover_worker.vlm_worker import VLMWorker
-        worker = VLMWorker(config=config)
-        if worker._backend.is_available():
-            return worker._backend
+        from agenthandover_worker.vlm_worker import create_backend
+        backend = create_backend(config)
+        if backend.is_available():
+            return backend
         logger.info("LLM backend not available — SOP enhancement disabled")
         return None
     except Exception:

@@ -5,7 +5,7 @@ Full pipeline integration test: recorded events -> episodes -> semantic steps
 discovery of a repeated workflow, went with the miner in WP-F5.)
 
 Test scenarios:
-2. Low Confidence -> VLM Queue (poor metadata -> reject -> enqueue)
+2. Low Confidence (poor metadata -> reject)
 3. Manual Edit Detection in Pipeline (edit detection -> v2_draft)
 4. Scheduler Gate Check (favorable vs unfavorable conditions)
 5. Index.md Catalog Verification (multiple SOPs -> index content)
@@ -52,7 +52,6 @@ from agenthandover_worker.sop_format import SOPFormatter
 from agenthandover_worker.sop_inducer import induce_from_focus_session
 from agenthandover_worker.sop_versioner import SOPVersioner
 from agenthandover_worker.translator import SemanticTranslator
-from agenthandover_worker.vlm_queue import QueueBudget, VLMFallbackQueue, VLMJob
 from daemon_db import create_daemon_db
 
 # ---------------------------------------------------------------------------
@@ -357,18 +356,17 @@ def openclaw_workspace(tmp_path: Path) -> Path:
 
 
 # ===================================================================
-# Test 2: Low Confidence -> VLM Queue
+# Test 2: Low Confidence
 # ===================================================================
 
 
-class TestLowConfidenceVLMQueue:
+class TestLowConfidence:
     """Simulate events with poor metadata (no ARIA, no testid, minimal info).
 
-    Events produce low confidence scores (< 0.60) and should be enqueued
-    in the VLM fallback queue. Verify budget constraints are respected.
+    Events produce low confidence scores (< 0.60) and are rejected.
     """
 
-    def test_low_confidence_events_enqueue_to_vlm(
+    def test_low_confidence_events_are_rejected(
         self,
         tmp_db_path: Path,
         write_conn: sqlite3.Connection,
@@ -429,82 +427,6 @@ class TestLowConfidenceVLMQueue:
 
         # All 5 events should have low confidence
         assert len(low_confidence_items) == 5
-
-        # --- Enqueue to VLM fallback queue ---
-        queue = VLMFallbackQueue(budget=QueueBudget(
-            max_jobs_per_day=50,
-            max_queue_size=500,
-            job_ttl_days=7,
-            max_compute_minutes_per_day=20.0,
-        ))
-
-        for event, confidence, intent in low_confidence_items:
-            priority = queue.compute_priority(
-                confidence=confidence,
-                intent=intent,
-                created_at=datetime.now(timezone.utc),
-            )
-
-            job = VLMJob(
-                job_id=f"vlm-{event['id']}",
-                event_id=event["id"],
-                episode_id="episode-test",
-                semantic_step_index=0,
-                confidence_score=confidence,
-                priority_score=priority,
-                query=f"What UI element was clicked at ({event.get('cursor_x')}, {event.get('cursor_y')})?",
-            )
-
-            success = queue.enqueue(job)
-            assert success, f"Should enqueue job for event {event['id']}"
-
-        # Verify queue state
-        stats = queue.get_stats()
-        assert stats.pending_jobs == 5
-        assert stats.jobs_today == 5
-        assert stats.dropped_count == 0
-
-        # Dequeue should return the highest priority job
-        top_job = queue.dequeue()
-        assert top_job is not None
-        assert top_job.confidence_score < 0.60
-
-    def test_vlm_queue_budget_limits(self) -> None:
-        """Verify that budget constraints prevent over-enqueuing."""
-        budget = QueueBudget(
-            max_jobs_per_day=3,
-            max_queue_size=10,
-            job_ttl_days=7,
-            max_compute_minutes_per_day=5.0,
-        )
-        queue = VLMFallbackQueue(budget=budget)
-
-        # Enqueue 3 jobs (at the limit)
-        for i in range(3):
-            job = VLMJob(
-                job_id=f"vlm-limit-{i}",
-                event_id=f"ev-limit-{i}",
-                episode_id="ep-test",
-                semantic_step_index=i,
-                confidence_score=0.3,
-                priority_score=0.5,
-            )
-            assert queue.enqueue(job) is True
-
-        # 4th job should be rejected (daily limit reached)
-        rejected_job = VLMJob(
-            job_id="vlm-limit-rejected",
-            event_id="ev-limit-rejected",
-            episode_id="ep-test",
-            semantic_step_index=3,
-            confidence_score=0.3,
-            priority_score=0.5,
-        )
-        assert queue.enqueue(rejected_job) is False
-
-        stats = queue.get_stats()
-        assert stats.jobs_today == 3
-        assert stats.pending_jobs == 3
 
 
 # ===================================================================

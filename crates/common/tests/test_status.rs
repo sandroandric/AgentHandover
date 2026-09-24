@@ -41,9 +41,6 @@ fn sample_worker_status() -> WorkerStatus {
         last_pipeline_duration_ms: Some(250),
         consecutive_errors: 0,
         vlm_available: true,
-        vlm_queue_pending: 0,
-        vlm_jobs_today: 0,
-        vlm_dropped_today: 0,
         vlm_mode: None,
         vlm_provider: None,
         inference: None,
@@ -501,7 +498,8 @@ fn read_worker_status_reads_the_file_in_a_directory() {
 #[test]
 fn worker_status_deserialize_with_extra_vlm_fields() {
     // Simulate a worker-status.json with vlm_mode/vlm_provider, from a
-    // worker old enough to still write the removed sop_inducer_available.
+    // worker old enough to still write the removed sop_inducer_available
+    // and the removed VLM fallback queue counts.
     let json = r#"{
         "pid": 12345,
         "version": "0.1.0",
@@ -524,7 +522,6 @@ fn worker_status_deserialize_with_extra_vlm_fields() {
     assert_eq!(status.vlm_mode, Some("remote".to_string()));
     assert_eq!(status.vlm_provider, Some("anthropic".to_string()));
     assert!(status.vlm_available);
-    assert_eq!(status.vlm_queue_pending, 5);
 }
 
 // =============================================================================

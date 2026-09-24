@@ -48,7 +48,7 @@ def test_a_manual_run_in_a_terminal_also_logs_to_stderr(tmp_path, capsys):
 
 
 def test_repeated_poll_counts_drop_to_debug():
-    assert _poll_log_level((0, 1), None) == logging.INFO
-    assert _poll_log_level((0, 1), (0, 1)) == logging.DEBUG
-    assert _poll_log_level((3, 1), (0, 1)) == logging.INFO
-    assert _poll_log_level((3, 1), (3, 1)) == logging.DEBUG
+    assert _poll_log_level(1, None) == logging.INFO
+    assert _poll_log_level(1, 1) == logging.DEBUG
+    assert _poll_log_level(3, 1) == logging.INFO
+    assert _poll_log_level(3, 3) == logging.DEBUG

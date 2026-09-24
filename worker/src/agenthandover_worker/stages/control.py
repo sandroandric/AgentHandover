@@ -49,7 +49,7 @@ def submit_model_jobs(ctx: Any, tick: Any) -> list:
         segment.run(ctx, tick)
         daily.run(ctx, tick)
 
-    ctx.control_idle = not tick.unprocessed and not tick.pending_vlm
+    ctx.control_idle = not tick.unprocessed
     jobs: list[tuple[str, int, Callable[[], None]]] = []
     if wm._focus_job_due(wm._status_dir()):
         jobs.append(("focus", P0, lambda: synthesize.run(ctx, tick)))

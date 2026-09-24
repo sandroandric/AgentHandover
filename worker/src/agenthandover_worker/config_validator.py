@@ -52,11 +52,6 @@ class ConfigValidator:
                     "vlm", "tier", "warning",
                     "tier should be one of " + ", ".join(t.id for t in TIERS),
                 ))
-        # Numeric bounds
-        for key, lo, hi in [("max_jobs_per_day", 1, 10000), ("max_queue_size", 1, 50000), ("max_compute_minutes_per_day", 1, 1440)]:
-            val = vlm.get(key)
-            if val is not None and (not isinstance(val, (int, float)) or val < lo or val > hi):
-                issues.append(ConfigIssue("vlm", key, "warning", f"{key} should be between {lo} and {hi}"))
         return issues
 
     def validate_knowledge_section(self, kb: dict) -> list[ConfigIssue]:

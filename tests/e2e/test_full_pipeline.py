@@ -203,8 +203,6 @@ class TestWorkerPipeline:
         from agenthandover_worker.clipboard_linker import ClipboardLinker
         from agenthandover_worker.negative_demo import NegativeDemoPruner
         from agenthandover_worker.translator import SemanticTranslator
-        from agenthandover_worker.confidence import ConfidenceScorer
-        from agenthandover_worker.vlm_queue import VLMFallbackQueue
         from agenthandover_worker.main import run_pipeline
 
         # Create synthetic events as dicts (matching what WorkerDB returns)
@@ -232,8 +230,6 @@ class TestWorkerPipeline:
             clipboard_linker=ClipboardLinker(),
             pruner=NegativeDemoPruner(),
             translator=SemanticTranslator(),
-            scorer=ConfidenceScorer(),
-            vlm_queue=VLMFallbackQueue(),
         )
 
         assert summary["events_in"] == 5

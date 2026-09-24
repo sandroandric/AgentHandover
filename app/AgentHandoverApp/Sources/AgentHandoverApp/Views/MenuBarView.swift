@@ -269,21 +269,12 @@ struct MenuBarView: View {
                     label: "Learned",
                     color: .purple
                 )
-                if appState.sopAgentReadyCount > 0 {
-                    TodayStat(
-                        icon: "checkmark.shield",
-                        value: "\(appState.sopAgentReadyCount)",
-                        label: "Ready",
-                        color: .green
-                    )
-                } else {
-                    TodayStat(
-                        icon: "hourglass",
-                        value: "\(appState.vlmQueuePending)",
-                        label: "Processing",
-                        color: .orange
-                    )
-                }
+                TodayStat(
+                    icon: "checkmark.shield",
+                    value: "\(appState.sopAgentReadyCount)",
+                    label: "Ready",
+                    color: .green
+                )
             }
         }
         .padding(12)

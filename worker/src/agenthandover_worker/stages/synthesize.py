@@ -49,7 +49,6 @@ def run(ctx: Any, tick: Any) -> int:
             clipboard_linker=ctx.clipboard_linker,
             translator=ctx.translator,
             scorer=ctx.scorer,
-            vlm_queue=ctx.vlm_queue,
             sop_enhancer=ctx.sop_enhancer,
             sop_auto_approve=ctx.cfg.sop.auto_approve,
             **ctx.export_kwargs(),

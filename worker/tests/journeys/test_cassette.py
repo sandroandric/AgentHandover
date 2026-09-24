@@ -545,7 +545,7 @@ def test_main_points_the_llm_reasoner_at_the_configured_host(
     built: list = []
 
     class CapturingReasoner:
-        def __init__(self, config=None, vlm_queue=None):
+        def __init__(self, config=None, budget=None):
             built.append(config)
             raise Built
 

@@ -132,13 +132,16 @@ class TestQualityJudge:
 
     def test_over_budget_defaults_to_pass(self) -> None:
         """When LLM is over budget, returns a default-pass assessment."""
-        from unittest.mock import MagicMock
+        from datetime import datetime, timezone
 
-        # Create a mock VLM queue that says "over budget"
-        mock_queue = MagicMock()
-        mock_queue.can_dispatch.return_value = False
+        from agenthandover_worker.scheduler import ReasoningBudget
 
-        reasoner = LLMReasoner(vlm_queue=mock_queue)
+        # A reasoning budget already spent today.
+        day = datetime(2026, 9, 24, tzinfo=timezone.utc)
+        budget = ReasoningBudget(1, 3600.0, clock=lambda: day)
+        budget.charge(1.0)
+
+        reasoner = LLMReasoner(budget=budget)
         judge = QualityJudge(reasoner)
 
         proc = _make_procedure()
@@ -151,12 +154,16 @@ class TestQualityJudge:
 
     def test_agent_ready_blocked_when_over_budget(self) -> None:
         """Promotion to agent_ready is BLOCKED when LLM is over budget."""
-        from unittest.mock import MagicMock
+        from datetime import datetime, timezone
 
-        mock_queue = MagicMock()
-        mock_queue.can_dispatch.return_value = False
+        from agenthandover_worker.scheduler import ReasoningBudget
 
-        reasoner = LLMReasoner(vlm_queue=mock_queue)
+        # A reasoning budget already spent today.
+        day = datetime(2026, 9, 24, tzinfo=timezone.utc)
+        budget = ReasoningBudget(1, 3600.0, clock=lambda: day)
+        budget.charge(1.0)
+
+        reasoner = LLMReasoner(budget=budget)
         judge = QualityJudge(reasoner)
 
         proc = _make_procedure()
@@ -206,12 +213,16 @@ class TestQualityJudge:
 
     def test_low_stakes_passes_when_over_budget(self) -> None:
         """Promotion to 'reviewed' still passes when LLM is over budget."""
-        from unittest.mock import MagicMock
+        from datetime import datetime, timezone
 
-        mock_queue = MagicMock()
-        mock_queue.can_dispatch.return_value = False
+        from agenthandover_worker.scheduler import ReasoningBudget
 
-        reasoner = LLMReasoner(vlm_queue=mock_queue)
+        # A reasoning budget already spent today.
+        day = datetime(2026, 9, 24, tzinfo=timezone.utc)
+        budget = ReasoningBudget(1, 3600.0, clock=lambda: day)
+        budget.charge(1.0)
+
+        reasoner = LLMReasoner(budget=budget)
         judge = QualityJudge(reasoner)
 
         proc = _make_procedure()

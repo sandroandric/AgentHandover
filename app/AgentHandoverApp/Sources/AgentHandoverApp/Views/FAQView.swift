@@ -137,7 +137,7 @@ enum FAQContent {
     static func cloudModeNote(provider: String?, model: String?) -> String {
         let name = providerName(provider)
         let modelText = (model?.isEmpty == false) ? "model \(model!)" : "its default model"
-        return "Cloud mode is on: AgentHandover also sends \(name) (\(modelText)) the window title and details of events it cannot classify on its own. Screen annotation, Skill writing and questions still run on your Mac through Ollama, and screenshots stay on your Mac. The \(name) API key you entered is kept in the macOS Keychain (service com.agenthandover.app), not in a file."
+        return "Cloud mode is on: with scene annotation turned off, AgentHandover sends \(name) (\(modelText)) the steps of a Skill it wrote from a recording, to add a task description and overview. Screen annotation, Skill writing and questions run on your Mac through Ollama, and screenshots stay on your Mac. The \(name) API key you entered is kept in the macOS Keychain (service com.agenthandover.app), not in a file."
     }
 
     static func sections(vlmMode: String, provider: String?, model: String?) -> [FAQSection] {

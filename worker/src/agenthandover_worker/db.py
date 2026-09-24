@@ -720,33 +720,6 @@ class WorkerDB:
         return self._rows_to_dicts(cur.fetchall())
 
     # ------------------------------------------------------------------
-    # VLM queue
-    # ------------------------------------------------------------------
-
-    def get_pending_vlm_jobs(self, limit: int = 10) -> list[dict]:
-        """Return up to *limit* VLM queue jobs with ``status = 'pending'``,
-        ordered by priority descending (highest priority first).
-        """
-        cur = self._conn.execute(
-            "SELECT * FROM vlm_queue WHERE status = 'pending' "
-            "ORDER BY priority DESC LIMIT ?",
-            (limit,),
-        )
-        return self._rows_to_dicts(cur.fetchall())
-
-    def count_pending_vlm_jobs(self) -> int:
-        """Return the count of pending VLM jobs in the database.
-
-        This is authoritative (unlike in-memory queue stats) and should
-        be used for status reporting after DB-side processing.
-        """
-        cur = self._conn.execute(
-            "SELECT COUNT(*) AS cnt FROM vlm_queue WHERE status = 'pending'"
-        )
-        row = cur.fetchone()
-        return row["cnt"] if row else 0
-
-    # ------------------------------------------------------------------
     # Write operations (via separate writable connection)
     # ------------------------------------------------------------------
 
@@ -754,88 +727,6 @@ class WorkerDB:
         """Extract the file path from the read-only connection."""
         resolved = self._conn.execute("PRAGMA database_list").fetchone()
         return resolved["file"] if resolved else None
-
-    def enqueue_vlm_job(
-        self,
-        job_id: str,
-        event_id: str,
-        priority: float,
-        ttl_expires_at: str,
-    ) -> bool:
-        """Insert a VLM job into the persistent queue.
-
-        Returns True on success, False on failure.
-        """
-        db_path = self._get_writable_path()
-        if not db_path:
-            logger.error("Cannot determine DB path for VLM enqueue")
-            return False
-
-        write_conn = sqlite3.connect(db_path)
-        try:
-            write_conn.execute("PRAGMA busy_timeout = 5000;")
-            write_conn.execute(
-                "INSERT OR IGNORE INTO vlm_queue (id, event_id, priority, status, ttl_expires_at) "
-                "VALUES (?, ?, ?, 'pending', ?)",
-                (job_id, event_id, priority, ttl_expires_at),
-            )
-            write_conn.commit()
-            return True
-        except sqlite3.Error as exc:
-            logger.error("Failed to enqueue VLM job: %s", exc)
-            return False
-        finally:
-            write_conn.close()
-
-    def mark_vlm_job_completed(
-        self,
-        job_id: str,
-        result_json: str | None = None,
-    ) -> bool:
-        """Mark a VLM job as completed (or failed)."""
-        db_path = self._get_writable_path()
-        if not db_path:
-            return False
-
-        write_conn = sqlite3.connect(db_path)
-        try:
-            write_conn.execute("PRAGMA busy_timeout = 5000;")
-            write_conn.execute(
-                "UPDATE vlm_queue SET status = 'completed', "
-                "processed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), "
-                "result_json = ? WHERE id = ?",
-                (result_json, job_id),
-            )
-            write_conn.commit()
-            return True
-        except sqlite3.Error as exc:
-            logger.error("Failed to mark VLM job completed: %s", exc)
-            return False
-        finally:
-            write_conn.close()
-
-    def mark_vlm_job_failed(self, job_id: str) -> bool:
-        """Mark a VLM job as failed."""
-        db_path = self._get_writable_path()
-        if not db_path:
-            return False
-
-        write_conn = sqlite3.connect(db_path)
-        try:
-            write_conn.execute("PRAGMA busy_timeout = 5000;")
-            write_conn.execute(
-                "UPDATE vlm_queue SET status = 'failed', "
-                "processed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
-                "WHERE id = ?",
-                (job_id,),
-            )
-            write_conn.commit()
-            return True
-        except sqlite3.Error as exc:
-            logger.error("Failed to mark VLM job failed: %s", exc)
-            return False
-        finally:
-            write_conn.close()
 
     # ``events.processed`` values.  Anything non-zero is out of the
     # unprocessed queue; the daemon's retention purges every non-zero row.
@@ -888,52 +779,11 @@ class WorkerDB:
         """Mark the given events as processed (``processed = 1``)."""
         return self._set_processed(event_ids, self.PROCESSED, "Marked processed:")
 
-    def mark_events_unprocessed(self, event_ids: list[str]) -> int:
-        """Reset events to unprocessed so the pipeline re-evaluates them.
-
-        Used after VLM job completion to re-score translations with the
-        VLM confidence boost applied.
-        """
-        return self._set_processed(
-            event_ids, self.UNPROCESSED, "Reset to unprocessed (VLM reconciliation):"
-        )
-
     def quarantine_events(self, event_ids: list[str]) -> int:
         """Take events the pipeline keeps failing on out of the queue
         (``processed = -1``) so one poison row cannot stall the worker.
         """
         return self._set_processed(event_ids, self.QUARANTINED, "Quarantined")
-
-    def get_completed_vlm_boost(self, event_id: str) -> float:
-        """Return the VLM confidence boost for a completed VLM job on this event.
-
-        Returns 0.0 if no completed VLM job exists for the event.
-        """
-        try:
-            cursor = self._conn.execute(
-                "SELECT result_json FROM vlm_queue "
-                "WHERE event_id = ? AND status = 'completed' "
-                "LIMIT 1",
-                (event_id,),
-            )
-            row = cursor.fetchone()
-            if row and row[0]:
-                import json as _json
-                result = _json.loads(row[0])
-                return float(result.get("confidence_boost", 0.0))
-        except Exception:
-            pass
-        return 0.0
-
-    def has_completed_vlm_job(self, event_id: str) -> bool:
-        """Check if there is a completed VLM job for this event."""
-        cursor = self._conn.execute(
-            "SELECT 1 FROM vlm_queue "
-            "WHERE event_id = ? AND status = 'completed' "
-            "LIMIT 1",
-            (event_id,),
-        )
-        return cursor.fetchone() is not None
 
     # ------------------------------------------------------------------
     # Passive discovery (v2 task segmentation)
