@@ -6,10 +6,15 @@ from __future__ import annotations
 import gzip
 import json
 from collections import Counter
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+from agenthandover_worker.daily_digest import DigestGenerator
+from agenthandover_worker.knowledge_base import KnowledgeBase
+from daemon_db import kb_db
 from journeys.cassette import CASSETTE_DIR
 from journeys.fixture_loader import (
     ANNOTATIONS_FILE,
@@ -21,7 +26,7 @@ from journeys.fixture_loader import (
     read_manifest,
     read_rows,
 )
-from journeys.replay import Candidate, replay, score
+from journeys.replay import Candidate, _daily_batch, replay, score
 
 NAME = "passive_3weeks"
 
@@ -145,3 +150,42 @@ def test_replay_on_passive_3weeks() -> None:
         vlm={"tier": "recommended"},
     )
     assert report.failures(min_recall=1.0, min_precision=0.9, max_chimeras=0) == []
+
+
+class _Day:
+    """``_daily_batch``'s collaborators for one day: its events, and its
+    summary with one task per entry of *minutes*."""
+
+    def __init__(self, kb, minutes: list[int]) -> None:
+        self.kb = kb
+        self.minutes = minutes
+
+    def get_annotated_events_for_date(self, date: str) -> list[dict]:
+        return [{"id": "e1"}]
+
+    def process_day(self, date: str, events: list[dict]) -> SimpleNamespace:
+        tasks = [
+            {"intent": f"Task {n}", "duration_minutes": m, "apps": ["Slack"]}
+            for n, m in enumerate(self.minutes)
+        ]
+        self.kb.save_daily_summary(date, {"tasks": tasks})
+        return SimpleNamespace(active_hours=sum(self.minutes) / 60, tasks=tasks)
+
+
+@pytest.mark.parametrize(("minutes", "failures"), [
+    ([32], []),
+    ([2], []),  # a two-minute day has recorded work, and a highlight
+    ([0], ["digest active_hours is 0", "task durations sum to 0 minutes"]),
+])
+def test_the_digest_check_asks_what_the_digest_promises(
+    tmp_path: Path, minutes: list[int], failures: list[str],
+) -> None:
+    """The replay's "digest has no highlights" check and the production
+    digest agree: a highlight on every day with recorded work, and a day
+    without it is not reported for its missing highlight."""
+    kb = KnowledgeBase(root=tmp_path / "knowledge", db_path=kb_db(tmp_path / "knowledge"))
+    kb.ensure_structure()
+    day = _Day(kb, minutes)
+    (check,) = _daily_batch(day, day, DigestGenerator(kb), date(2026, 8, 31))
+    assert check.failures == failures
+    assert (check.highlights > 0) == (sum(minutes) > 0)

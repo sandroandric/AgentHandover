@@ -140,6 +140,8 @@ class QueueStats:
     jobs_today: int
     compute_minutes_today: float
     dropped_count: int
+    # Jobs turned away today by the daily limit or the compute budget.
+    rejected_today: int = 0
 
 
 class VLMFallbackQueue:
@@ -161,6 +163,8 @@ class VLMFallbackQueue:
         self._jobs_dispatched_today: int = 0
         self._compute_minutes_today: float = 0.0
         self._dropped_count: int = 0
+        # Jobs ``enqueue`` turned away today (daily limit or compute budget).
+        self._rejected_today: int = 0
         self._today: datetime = datetime.now(timezone.utc).date()
         self._daily_lock = threading.Lock()
 
@@ -228,24 +232,30 @@ class VLMFallbackQueue:
         """
         self._reset_daily_counters_if_needed()
 
-        # Check daily job dispatch limit
+        # Check daily job dispatch limit.  The limit is logged once a day
+        # (on the first rejection) and the day's rejections counted in the
+        # daily reset's log line, not one warning per rejected job.
         if self._jobs_dispatched_today >= self.budget.max_jobs_per_day:
-            logger.warning(
-                "VLM queue daily limit reached (%d/%d), rejecting job %s",
-                self._jobs_dispatched_today,
-                self.budget.max_jobs_per_day,
-                job.job_id,
-            )
+            if not self._rejected_today:
+                logger.warning(
+                    "VLM queue daily limit reached (%d/%d): further jobs are "
+                    "rejected until the daily reset, which logs how many",
+                    self._jobs_dispatched_today,
+                    self.budget.max_jobs_per_day,
+                )
+            self._rejected_today += 1
             return False
 
         # Check compute minutes budget
         if self._compute_minutes_today >= self.budget.max_compute_minutes_per_day:
-            logger.warning(
-                "VLM queue compute budget exhausted (%.1f/%.1f min), rejecting job %s",
-                self._compute_minutes_today,
-                self.budget.max_compute_minutes_per_day,
-                job.job_id,
-            )
+            if not self._rejected_today:
+                logger.warning(
+                    "VLM queue compute budget exhausted (%.1f/%.1f min): further "
+                    "jobs are rejected until the daily reset, which logs how many",
+                    self._compute_minutes_today,
+                    self.budget.max_compute_minutes_per_day,
+                )
+            self._rejected_today += 1
             return False
 
         # Set TTL if not already set
@@ -439,6 +449,7 @@ class VLMFallbackQueue:
             jobs_today=self._jobs_dispatched_today,
             compute_minutes_today=self._compute_minutes_today,
             dropped_count=self._dropped_count,
+            rejected_today=self._rejected_today,
         )
 
     # ------------------------------------------------------------------
@@ -457,13 +468,16 @@ class VLMFallbackQueue:
                 # Double-check after acquiring lock
                 if today != self._today:
                     logger.info(
-                        "VLM queue daily reset: %s -> %s (dispatched=%d, compute=%.1f min)",
+                        "VLM queue daily reset: %s -> %s (dispatched=%d, "
+                        "rejected over budget=%d, compute=%.1f min)",
                         self._today,
                         today,
                         self._jobs_dispatched_today,
+                        self._rejected_today,
                         self._compute_minutes_today,
                     )
                     self._jobs_dispatched_today = 0
                     self._compute_minutes_today = 0.0
                     self._dropped_count = 0
+                    self._rejected_today = 0
                     self._today = today
