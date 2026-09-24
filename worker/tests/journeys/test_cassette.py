@@ -633,11 +633,13 @@ def test_a_journey_run_logs_each_outcome_and_skip_reason(tmp_path, monkeypatch):
 
 
 def test_prune_drops_only_what_no_passing_journey_asked_for(tmp_path):
-    """Unused entries go; a cassette a skip marker waits on, one a test
-    that did not pass opened, one with a miss, one nobody opened and the
-    self-test cassette are left alone."""
+    """Unused entries go unless a journey's source names their key; a
+    cassette a skip marker waits on, one a test that did not pass opened,
+    one with a miss, one nobody opened and the self-test cassette are left
+    alone."""
     names = ("clean", "waited_on", "flaky", "missed", "unopened", "cassette_selftest")
-    entries = {name: _write_cassette(tmp_path, name, ["a", "b", "c"]) for name in names}
+    entries = {name: _write_cassette(tmp_path, name, ["a", "b", "c", "d"]) for name in names}
+    named = {entries["clean"][3]["key"]}
     original = {name: (tmp_path / f"{name}.jsonl").read_bytes() for name in names}
 
     def opened(name, test, served, misses=()):
@@ -657,26 +659,35 @@ def test_prune_drops_only_what_no_passing_journey_asked_for(tmp_path):
         {"test": "j.py::later", "when": "setup", "outcome": "skipped",
          "reason": "cassettes/waited_on.jsonl lacks the SOP request; re-record"},
     ]
-    plan = prune(records, tmp_path, dry_run=True)
+    plan = prune(records, tmp_path, named, dry_run=True)
     assert {n: (p["before"], p["after"]) for n, p in plan.items()} == {
-        "clean": (3, 2), **{n: (3, 3) for n in names if n != "clean"}}
+        "clean": (4, 3), **{n: (4, 4) for n in names if n != "clean"}}
     assert plan["waited_on"]["why"].startswith("a skipped")
     assert "j.py::bad" in plan["flaky"]["why"]
     assert plan["missed"]["why"] == "a request missed it"
     assert plan["unopened"]["why"] == "no test opened it"
     assert all((tmp_path / f"{n}.jsonl").read_bytes() == original[n] for n in names)
 
-    prune(records, tmp_path)
+    prune(records, tmp_path, named)
+    kept = [entries["clean"][i]["key"] for i in (0, 2, 3)]
     lines = (tmp_path / "clean.jsonl").read_text().splitlines()
-    assert [json.loads(line)["key"] for line in lines] == [
-        entries["clean"][0]["key"], entries["clean"][2]["key"]]
-    assert set(load_entries(tmp_path / "clean.jsonl")) == {
-        entries["clean"][0]["key"], entries["clean"][2]["key"]}
+    assert [json.loads(line)["key"] for line in lines] == kept
+    assert list(load_entries(tmp_path / "clean.jsonl")) == kept
     assert all((tmp_path / f"{n}.jsonl").read_bytes() == original[n]
                for n in names if n != "clean")
     # A longer cassette name that merely starts with another's is not it.
     records[-1]["reason"] = "cassettes/clean_performance.jsonl is not recorded yet"
-    assert plan_prune(records, tmp_path)["clean"]["why"] == ""
+    assert plan_prune(records, tmp_path, named)["clean"]["why"] == ""
+
+
+def test_the_journeys_skip_markers_keys_are_named():
+    """The keys the skip markers check for are found in the sources, so a
+    prune never turns a running journey into a skipped one."""
+    from journeys.focus_run import FOCUS_SOP_MISSING_KEYS
+    from journeys.test_j_compute import COLD_CLASSIFIER_KEY, F6_MISSING_KEYS
+
+    named = cassette_module.keys_named_in_journeys()
+    assert {*FOCUS_SOP_MISSING_KEYS, *F6_MISSING_KEYS, COLD_CLASSIFIER_KEY} <= named
 
 
 def test_prune_refuses_a_log_without_a_journey_run(tmp_path, capsys):

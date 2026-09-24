@@ -38,11 +38,13 @@ nobody asks for any more): run every journey in replay with
 ``AH_CASSETTE_LOG=<file>``, which logs the keys each cassette served and
 missed and every test's outcome, then
 ``python -m journeys.cassette prune --used-keys <file>`` (from
-``worker/tests``) drops the entries no journey requested.  It leaves a
-cassette alone when a test that opened it did not pass (failed, errored,
-xfailed), when a skipped test's reason names it (a skip marker waiting on
-a recording), when it missed a request, when no test opened it, and
-always for the self-test cassette, whose entries are hand-written.
+``worker/tests``) drops the entries no journey requested.  It keeps an
+entry whose key a journey's source names (a skip marker checking for a
+recording), and leaves a cassette alone when a test that opened it did
+not pass (failed, errored, xfailed), when a skipped test's reason names
+it (a skip marker waiting on a recording), when it missed a request,
+when no test opened it, and always for the self-test cassette, whose
+entries are hand-written.
 """
 
 from __future__ import annotations
@@ -489,9 +491,23 @@ def log_test_report(report) -> None:
              "outcome": "xfailed" if xfail else report.outcome, "reason": reason})
 
 
-def plan_prune(records: list[dict], cassette_dir: Path = CASSETTE_DIR) -> dict[str, dict]:
+_KEY_RE = re.compile(r"\b[0-9a-f]{64}\b")
+
+
+def keys_named_in_journeys(journeys_dir: Path = Path(__file__).parent) -> set[str]:
+    """Every cassette key the journeys' sources name: the skip markers'
+    ``*_MISSING_KEYS`` and the entries a test inspects."""
+    return {key for source in journeys_dir.glob("*.py")
+            for key in _KEY_RE.findall(source.read_text(encoding="utf-8"))}
+
+
+def plan_prune(records: list[dict], cassette_dir: Path = CASSETTE_DIR,
+               named_keys: set[str] | None = None) -> dict[str, dict]:
     """Per cassette in *cassette_dir* (by stem): ``before`` and ``keep``
-    (the keys to keep, None to leave the file untouched) and ``why``."""
+    (the keys to keep, None to leave the file untouched) and ``why``.
+    *named_keys* (default :func:`keys_named_in_journeys`) are always kept."""
+    if named_keys is None:
+        named_keys = keys_named_in_journeys()
     passed: dict[str, bool] = {}
     reasons: list[str] = []
     used: dict[Path, set[str]] = {}
@@ -531,17 +547,17 @@ def plan_prune(records: list[dict], cassette_dir: Path = CASSETTE_DIR) -> dict[s
             why = f"opened by a test that did not pass: {', '.join(not_passed)}"
         elif any(named.search(reason) for reason in reasons):
             why = "a skipped or xfailed test's reason names it"
-        plan[name] = {"before": before, "keep": None if why else used[resolved],
-                      "why": why}
+        plan[name] = {"before": before,
+                      "keep": None if why else used[resolved] | named_keys, "why": why}
     return plan
 
 
 def prune(records: list[dict], cassette_dir: Path = CASSETTE_DIR,
-          *, dry_run: bool = False) -> dict[str, dict]:
+          named_keys: set[str] | None = None, *, dry_run: bool = False) -> dict[str, dict]:
     """Apply :func:`plan_prune`: rewrite each prunable cassette with only
-    its used entries, lines kept byte for byte in their order.  Returns
-    the plan with ``after`` set."""
-    plan = plan_prune(records, cassette_dir)
+    its used (and named) entries, lines kept byte for byte in their order.
+    Returns the plan with ``after`` set."""
+    plan = plan_prune(records, cassette_dir, named_keys)
     for name, item in plan.items():
         path = cassette_dir / f"{name}.jsonl"
         keep = item["keep"]
