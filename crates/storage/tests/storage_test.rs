@@ -61,7 +61,7 @@ fn test_schema_version() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join("test_ver.db");
     let store = EventStore::open(&db_path).unwrap();
-    assert_eq!(store.schema_version(), 5);
+    assert_eq!(store.schema_version(), 7);
 }
 
 #[test]
@@ -132,7 +132,7 @@ fn test_v004_drops_dom_trees_older_than_the_retention_window() {
     }
 
     let store = EventStore::open(&db_path).unwrap();
-    assert_eq!(store.schema_version(), 5);
+    assert_eq!(store.schema_version(), 7);
     let metadata = |id: &str| -> serde_json::Value {
         let text: String = store
             .connection()
@@ -217,7 +217,7 @@ fn test_v005_adds_the_column_to_a_v4_database() {
         conn.pragma_update(None, "user_version", 4).unwrap();
     }
     let store = EventStore::open(&db_path).unwrap();
-    assert_eq!(store.schema_version(), 5);
+    assert_eq!(store.schema_version(), 7);
     store.insert_event(&make_test_event()).unwrap();
 }
 

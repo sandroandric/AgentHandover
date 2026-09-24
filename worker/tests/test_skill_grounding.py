@@ -403,8 +403,9 @@ def test_the_session_query_returns_the_browsers_pastes(tmp_path: Path) -> None:
     ]
     with sqlite3.connect(db_path) as conn:
         conn.executemany(
-            "INSERT INTO events (id, timestamp, kind_json, window_json, metadata_json) "
-            "VALUES (?, ?, ?, '{}', ?)", rows,
+            "INSERT INTO events (id, timestamp, kind_json, window_json, metadata_json, "
+            "display_topology_json, primary_display_id) "
+            "VALUES (?, ?, ?, '{}', ?, '[]', 'main')", rows,
         )
     with WorkerDB(db_path) as db:
         ids = [e["id"] for e in db.get_focus_session_events("s1")]

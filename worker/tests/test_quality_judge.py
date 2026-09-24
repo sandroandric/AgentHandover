@@ -10,6 +10,7 @@ import pytest
 
 from agenthandover_worker.llm_reasoning import LLMReasoner, ReasoningConfig
 from agenthandover_worker.quality_judge import QualityAssessment, QualityJudge
+from daemon_db import kb_db
 
 
 # ---------------------------------------------------------------------------
@@ -234,7 +235,7 @@ class TestCuratorQualityGate:
         from agenthandover_worker.trust_advisor import TrustAdvisor
         from agenthandover_worker.procedure_schema import sop_to_procedure
 
-        kb = KnowledgeBase(root=tmp_path)
+        kb = KnowledgeBase(root=tmp_path, db_path=kb_db(tmp_path))
         kb.ensure_structure()
 
         # Create and save a procedure in "observed" state
@@ -293,7 +294,7 @@ class TestCuratorQualityGate:
         from agenthandover_worker.trust_advisor import TrustAdvisor
         from agenthandover_worker.procedure_schema import sop_to_procedure
 
-        kb = KnowledgeBase(root=tmp_path)
+        kb = KnowledgeBase(root=tmp_path, db_path=kb_db(tmp_path))
         kb.ensure_structure()
 
         template = {

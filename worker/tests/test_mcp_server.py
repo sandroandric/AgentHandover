@@ -12,6 +12,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+from daemon_db import create_daemon_db, kb_db
 
 
 # ---------------------------------------------------------------------------
@@ -182,14 +183,15 @@ class TestSearchSkillsMode:
         from agenthandover_worker.knowledge_base import KnowledgeBase
         from agenthandover_worker.mcp_server import build_mcp_server
 
-        kb = KnowledgeBase(root=tmp_path / "knowledge")
+        # The worker's database: the procedures and the vector store.
+        db = create_daemon_db(tmp_path / "events.db")
+        kb = KnowledgeBase(root=tmp_path / "knowledge", db_path=db)
         kb.ensure_structure()
         kb.save_procedure({
             "id": "reddit-marketing", "title": "Reddit Community Marketing",
             "description": "Daily engagement", "lifecycle_state": "agent_ready",
             "steps": [{"action": "Open Reddit"}],
         })
-        db = tmp_path / "events.db"
         with patch("agenthandover_worker.mcp_server._get_kb_root", return_value=tmp_path / "knowledge"), \
              patch("agenthandover_worker.mcp_server._get_db_path", return_value=db):
             srv = build_mcp_server()
@@ -206,14 +208,21 @@ class TestSearchSkillsMode:
         with patch.object(VectorKB, "compute_embeddings", _fake_embed), VectorKB(db) as vkb:
             vkb.upsert("procedure", "reddit-marketing", "Reddit Community Marketing")
 
-    def test_no_database_falls_back_and_warns(self, server, caplog):
-        search, _ = server
-        with caplog.at_level("WARNING", logger="agenthandover_worker.mcp_server"):
-            result = search("reddit")
+    def test_no_database_falls_back_and_warns(self, tmp_path, caplog):
+        """Before the daemon created the database there is no Skill to
+        find (procedures live in it) and no vector store."""
+        from agenthandover_worker.mcp_server import build_mcp_server
+
+        with patch("agenthandover_worker.mcp_server._get_kb_root", return_value=tmp_path / "knowledge"), \
+             patch("agenthandover_worker.mcp_server._get_db_path", return_value=tmp_path / "none.db"):
+            srv = build_mcp_server()
+            with caplog.at_level("WARNING", logger="agenthandover_worker.mcp_server"):
+                result = json.loads(srv._tool_manager.get_tool("search_skills").fn("reddit"))
         assert result["mode"] == "keyword_fallback"
         assert "no worker database" in result["reason"]
-        assert [r["slug"] for r in result["results"]] == ["reddit-marketing"]
+        assert result["results"] == []
         assert "Semantic search unavailable" in caplog.text
+        assert not (tmp_path / "none.db").exists()
 
     def test_no_embedded_skill_falls_back(self, server):
         from agenthandover_worker.vector_kb import VectorKB
@@ -291,7 +300,7 @@ class TestKeywordFallback:
         from agenthandover_worker.knowledge_base import KnowledgeBase
         from agenthandover_worker.mcp_server import build_mcp_server
 
-        kb = KnowledgeBase(root=tmp_path / "knowledge")
+        kb = KnowledgeBase(root=tmp_path / "knowledge", db_path=kb_db(tmp_path / "knowledge"))
         kb.ensure_structure()
         kb.save_procedure({
             "id": "x-replyu", "title": "x replyu", "short_title": "Reply to Health Thread",
@@ -303,8 +312,9 @@ class TestKeywordFallback:
             "id": "expense-report", "title": "Submit expense report",
             "description": "Monthly receipts", "steps": [{"action": "Open Expensify"}],
         })
+        # No Skill is embedded in the database: search falls back to keywords.
         with patch("agenthandover_worker.mcp_server._get_kb_root", return_value=tmp_path / "knowledge"), \
-             patch("agenthandover_worker.mcp_server._get_db_path", return_value=tmp_path / "none.db"):
+             patch("agenthandover_worker.mcp_server._get_db_path", return_value=kb.db_path):
             srv = build_mcp_server()
             yield lambda q: json.loads(srv._tool_manager.get_tool("search_skills").fn(q))["results"]
 

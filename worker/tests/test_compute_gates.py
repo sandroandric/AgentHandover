@@ -30,6 +30,7 @@ from agenthandover_worker.annotation_cache import (
     simhash64,
 )
 from agenthandover_worker.db import WorkerDB
+from agenthandover_worker import knowledge_base as kb_module
 from agenthandover_worker.knowledge_base import KnowledgeBase
 from agenthandover_worker.ollama import Response
 from agenthandover_worker.ops_telemetry import MODEL_USAGE
@@ -39,7 +40,7 @@ from agenthandover_worker.scene_annotator import (
     SceneAnnotator,
 )
 from agenthandover_worker.scheduler import AnnotationBudget, charged_to
-from daemon_db import create_daemon_db
+from daemon_db import create_daemon_db, kb_db
 
 
 def _iso(dt: datetime) -> str:
@@ -527,11 +528,11 @@ def _write_procedures(kb: KnowledgeBase, count: int) -> None:
 class TestNoRepeatedWork:
 
     def test_second_list_with_no_change_parses_nothing(self, tmp_path):
-        kb = KnowledgeBase(root=tmp_path / "kb")
+        kb = KnowledgeBase(root=tmp_path / "kb", db_path=kb_db(tmp_path / "kb"))
         kb.ensure_structure()
         _write_procedures(kb, 60)
-        loads = MagicMock(side_effect=json.load)
-        with patch("agenthandover_worker.knowledge_base.json.load", loads):
+        loads = MagicMock(side_effect=kb_module._parse_procedure)
+        with patch.object(kb_module, "_parse_procedure", loads):
             assert len(kb.list_procedures()) == 60
             assert loads.call_count == 60
             assert len(kb.list_procedures()) == 60
@@ -540,14 +541,14 @@ class TestNoRepeatedWork:
             procs = kb.list_procedures()
             assert loads.call_count == 61
             assert procs[7]["title"] == "Changed"
-            (tmp_path / "kb" / "procedures" / "proc-08.json").unlink()
+            kb.delete_procedure("proc-08")
             assert len(kb.list_procedures()) == 59
             assert loads.call_count == 61
 
     def test_second_sops_index_refresh_opens_nothing_and_parses_nothing(
         self, events_db, tmp_path,
     ):
-        kb = KnowledgeBase(root=tmp_path / "kb")
+        kb = KnowledgeBase(root=tmp_path / "kb", db_path=kb_db(tmp_path / "kb"))
         kb.ensure_structure()
         _write_procedures(kb, 60)
         with WorkerDB(events_db) as db:
@@ -559,9 +560,9 @@ class TestNoRepeatedWork:
                 )
             wm._write_sops_index(db, kb, force=True)
             connects = MagicMock(side_effect=sqlite3.connect)
-            loads = MagicMock(side_effect=json.load)
+            loads = MagicMock(side_effect=kb_module._parse_procedure)
             with patch("agenthandover_worker.db.sqlite3.connect", connects), \
-                    patch("agenthandover_worker.knowledge_base.json.load", loads):
+                    patch.object(kb_module, "_parse_procedure", loads):
                 wm._write_sops_index(db, kb, force=True)
             assert connects.call_count == 0
             assert loads.call_count == 0

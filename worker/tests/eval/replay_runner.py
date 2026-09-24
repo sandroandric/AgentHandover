@@ -16,6 +16,7 @@ from datetime import datetime, timedelta, timezone
 from itertools import combinations
 from pathlib import Path
 from typing import Any
+from daemon_db import kb_db
 
 logger = logging.getLogger(__name__)
 
@@ -185,7 +186,7 @@ class ReplayRunner:
         """
         from agenthandover_worker.knowledge_base import KnowledgeBase
 
-        kb = KnowledgeBase(root=tmp_path)
+        kb = KnowledgeBase(root=tmp_path, db_path=kb_db(tmp_path))
         kb.ensure_structure()
 
         # Load procedures
@@ -618,7 +619,7 @@ class ReplayRunner:
         seg_result = self.run_segmentation()
 
         # 2. Create a temp KB for the tracker
-        kb = KnowledgeBase(root=tmp_path)
+        kb = KnowledgeBase(root=tmp_path, db_path=kb_db(tmp_path))
         kb.ensure_structure()
 
         # 3. Build the continuity graph

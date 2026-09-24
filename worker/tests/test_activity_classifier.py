@@ -25,6 +25,7 @@ from agenthandover_worker.activity_classifier import (
 )
 from agenthandover_worker.knowledge_base import KnowledgeBase
 from agenthandover_worker.user_policy import PolicyAction, PolicyRule, UserPolicy
+from daemon_db import kb_db
 
 
 # ---------------------------------------------------------------------------
@@ -64,7 +65,7 @@ def classifier() -> ActivityClassifier:
 @pytest.fixture()
 def kb(tmp_path):
     """Temporary knowledge base for policy tests."""
-    kb = KnowledgeBase(root=tmp_path)
+    kb = KnowledgeBase(root=tmp_path, db_path=kb_db(tmp_path))
     kb.ensure_structure()
     return kb
 

@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from agenthandover_worker.llm_reasoning import ReasoningResult
+from daemon_db import kb_db
 
 PASSWORD = "Hunter2!xQ"
 TOKEN = "tok3nS3cretValue42"
@@ -65,7 +66,7 @@ def test_session_linker_semantic_check(tmp_path: Path, reasoner) -> None:
     from agenthandover_worker.knowledge_base import KnowledgeBase
     from agenthandover_worker.session_linker import SessionLinker
 
-    kb = KnowledgeBase(root=tmp_path / "kb")
+    kb = KnowledgeBase(root=tmp_path / "kb", db_path=kb_db(tmp_path / "kb"))
     kb.ensure_structure()
     linker = SessionLinker(kb, llm_reasoner=reasoner)
 
@@ -78,7 +79,7 @@ def test_correction_detector_guardrail_prompt(tmp_path: Path, reasoner) -> None:
     from agenthandover_worker.correction_detector import Correction, CorrectionDetector
     from agenthandover_worker.knowledge_base import KnowledgeBase
 
-    kb = KnowledgeBase(root=tmp_path / "kb")
+    kb = KnowledgeBase(root=tmp_path / "kb", db_path=kb_db(tmp_path / "kb"))
     kb.ensure_structure()
     detector = CorrectionDetector(kb, llm_reasoner=reasoner)
     for i in range(3):

@@ -24,6 +24,7 @@ from agenthandover_worker.main import run_pipeline
 from agenthandover_worker.negative_demo import NegativeDemoPruner
 from agenthandover_worker.translator import SemanticTranslator
 from agenthandover_worker.vlm_queue import VLMFallbackQueue
+from daemon_db import kb_db
 
 
 def _ts(dt: datetime) -> str:
@@ -569,7 +570,7 @@ class TestCheckExportTrigger:
         from agenthandover_worker.procedure_schema import sop_to_procedure
         from agenthandover_worker.procedure_writer import ProcedureWriter
 
-        kb = KnowledgeBase(root=tmp_path / "kb")
+        kb = KnowledgeBase(root=tmp_path / "kb", db_path=kb_db(tmp_path / "kb"))
         kb.ensure_structure()
         for slug in (*slugs, *draft):
             proc = sop_to_procedure({

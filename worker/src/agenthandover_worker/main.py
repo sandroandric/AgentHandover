@@ -4137,13 +4137,15 @@ def main(argv: list[str] | None = None) -> None:
     args = _parse_args(argv)
 
     if args.backfill_procedures:
-        # One-shot maintenance: no PID file, status file or DB, so it is
-        # safe to run while the worker service is running.
+        # One-shot maintenance: no PID file or status file, so it is safe
+        # to run while the worker service is running.
         from agenthandover_worker.knowledge_base import KnowledgeBase
 
         logging.basicConfig(level=getattr(logging, args.log_level))
-        count = KnowledgeBase(root=args.knowledge_dir).backfill_procedures()
-        print(f"Backfilled {count} procedure(s) in {args.knowledge_dir}")
+        count = KnowledgeBase(
+            root=args.knowledge_dir, db_path=args.db_path,
+        ).backfill_procedures()
+        print(f"Backfilled {count} procedure(s) in {args.db_path}")
         return
 
     if _platform.system() == "Darwin":
@@ -4216,6 +4218,28 @@ def main(argv: list[str] | None = None) -> None:
         _restore_signal_handlers()
         sys.exit(1)
 
+    # The daemon owns the schema: run only against the version this
+    # worker is written for (right after an upgrade, wait for the daemon
+    # to migrate).
+    from agenthandover_worker.db import SchemaVersionError, wait_for_schema_version
+
+    try:
+        wait_for_schema_version(
+            args.db_path,
+            timeout_s=_DB_RETRY_MAX_SECONDS,
+            poll_s=_DB_RETRY_POLL_SECONDS,
+            stop=lambda: shutdown_flag[0],
+        )
+    except SchemaVersionError as exc:
+        logger.error("%s", exc)
+        print(f"agenthandover-worker: {exc}", file=sys.stderr)
+        try:
+            pid_file.unlink(missing_ok=True)
+        except Exception:
+            pass
+        _restore_signal_handlers()
+        sys.exit(1)
+
     if shutdown_flag[0]:
         try:
             pid_file.unlink(missing_ok=True)
@@ -4250,8 +4274,12 @@ def main(argv: list[str] | None = None) -> None:
     from agenthandover_worker.config_validator import ConfigValidator
     from agenthandover_worker.ops_telemetry import OpsTelemetry, PipelineMetrics
 
-    knowledge_base = KnowledgeBase(root=args.knowledge_dir)
+    knowledge_base = KnowledgeBase(root=args.knowledge_dir, db_path=args.db_path)
     knowledge_base.ensure_structure()
+    # Procedures live in the database: a knowledge base from before
+    # (v0.4) has its files imported once; the files stay as the export.
+    knowledge_base.import_procedure_files()
+    knowledge_base.export_procedures()
 
     # A config still on a tier's earlier default models moves to the
     # tier's current ones (the installer does this too; this covers
@@ -5247,13 +5275,6 @@ def main(argv: list[str] | None = None) -> None:
             # --- Once-per-day jobs: the first tick of each local day,
             # keyed on the date persisted when they last ran. ---
             run_daily = gen_plan.allows("daily")
-
-            # The v1 miner's episode store is unused (WP-F5): drop it.
-            if run_daily:
-                try:
-                    db.drop_episode_store()
-                except Exception:
-                    logger.debug("Episode store drop failed", exc_info=True)
 
             # --- Phase 2+: Daily batch + staleness (once per day) ---
             # Process *yesterday* (the local calendar day) — today is

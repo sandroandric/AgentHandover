@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 import pytest
+from daemon_db import create_daemon_db, kb_db
 
 from agenthandover_worker.task_segmenter import (
     AnnotatedFrame,
@@ -541,29 +542,14 @@ class TestUpdateCentroid:
 # DB methods
 # ---------------------------------------------------------------------------
 
-def _make_test_db(with_v2_schema: bool = True) -> tuple[sqlite3.Connection, Path]:
-    """Create an in-memory SQLite DB with events table."""
+def _make_test_db() -> tuple[sqlite3.Connection, Path]:
+    """A new daemon database (every table the worker uses) in a temp file."""
     tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
     tmp.close()
+    Path(tmp.name).unlink()
+    create_daemon_db(Path(tmp.name))
     conn = sqlite3.connect(tmp.name)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=wal")
-    conn.execute(
-        "CREATE TABLE events ("
-        "  id TEXT PRIMARY KEY,"
-        "  timestamp TEXT NOT NULL,"
-        "  kind_json TEXT DEFAULT '{}',"
-        "  window_json TEXT DEFAULT '{}',"
-        "  metadata_json TEXT DEFAULT '{}',"
-        "  processed INTEGER DEFAULT 0,"
-        "  artifact_ids_json TEXT DEFAULT '[]'"
-        ")"
-    )
-    if with_v2_schema:
-        conn.execute("ALTER TABLE events ADD COLUMN scene_annotation_json TEXT")
-        conn.execute("ALTER TABLE events ADD COLUMN annotation_status TEXT DEFAULT 'pending'")
-        conn.execute("ALTER TABLE events ADD COLUMN frame_diff_json TEXT")
-    conn.commit()
     return conn, Path(tmp.name)
 
 
@@ -576,13 +562,13 @@ class TestDBPassiveDiscoveryMethods:
             # the strftime('%Y-%m-%dT%H:%M:%fZ') format used in queries.
             ann = json.dumps({"task_context": {"what_doing": "test", "is_workflow": True}})
             conn.execute(
-                "INSERT INTO events (id, timestamp, annotation_status, scene_annotation_json) "
-                "VALUES (?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 'completed', ?)",
+                "INSERT INTO events (id, timestamp, kind_json, display_topology_json, primary_display_id, annotation_status, scene_annotation_json) "
+                "VALUES (?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), '{}', '[]', 'main', 'completed', ?)",
                 ("e1", ann),
             )
             conn.execute(
-                "INSERT INTO events (id, timestamp, annotation_status) "
-                "VALUES (?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 'pending')",
+                "INSERT INTO events (id, timestamp, kind_json, display_topology_json, primary_display_id, annotation_status) "
+                "VALUES (?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), '{}', '[]', 'main', 'pending')",
                 ("e2",),
             )
             conn.commit()
@@ -621,39 +607,6 @@ class TestDBPassiveDiscoveryMethods:
             assert "embeddings_json" not in segments[0]
             columns = {r[1] for r in conn.execute("PRAGMA table_info(task_segments)")}
             assert "embeddings_json" not in columns
-            db.close()
-        finally:
-            conn.close()
-            db_path.unlink(missing_ok=True)
-
-    def test_old_table_loses_its_embeddings_column(self):
-        """A v0.4 task_segments table carried per-frame vectors; the
-        worker drops the column the first time it touches the table."""
-        conn, db_path = _make_test_db()
-        try:
-            conn.execute(
-                "CREATE TABLE task_segments (segment_id TEXT PRIMARY KEY, "
-                "cluster_id INTEGER NOT NULL, task_label TEXT NOT NULL DEFAULT '', "
-                "event_ids_json TEXT NOT NULL, frame_count INTEGER NOT NULL, "
-                "apps_json TEXT NOT NULL DEFAULT '[]', start_time TEXT, end_time TEXT, "
-                "sop_generated INTEGER NOT NULL DEFAULT 0, embeddings_json TEXT, "
-                "created_at TEXT NOT NULL DEFAULT '')"
-            )
-            conn.execute(
-                "INSERT INTO task_segments (segment_id, cluster_id, event_ids_json, "
-                "frame_count, embeddings_json) VALUES ('old', 0, '[]', 0, ?)",
-                (json.dumps([[0.1] * 768] * 20),),
-            )
-            conn.commit()
-            from agenthandover_worker.db import WorkerDB
-            db = WorkerDB(db_path)
-            db.save_task_segment(
-                segment_id="new", cluster_id=1, task_label="", event_ids=["e1"],
-                apps=[], start_time="", end_time="",
-            )
-            columns = {r[1] for r in conn.execute("PRAGMA table_info(task_segments)")}
-            assert "embeddings_json" not in columns
-            assert {s["segment_id"] for s in db.get_task_segments()} == {"old", "new"}
             db.close()
         finally:
             conn.close()
@@ -717,8 +670,8 @@ class TestProcessPassiveDiscovery:
                     dt = _now - timedelta(hours=hours_ago, minutes=-i)
                     conn.execute(
                         "INSERT INTO events "
-                        "(id, timestamp, annotation_status, scene_annotation_json) "
-                        "VALUES (?, ?, 'completed', ?)",
+                        "(id, timestamp, kind_json, display_topology_json, primary_display_id, annotation_status, scene_annotation_json) "
+                        "VALUES (?, ?, '{}', '[]', 'main', 'completed', ?)",
                         (f"e{session}{i}", dt.strftime("%Y-%m-%dT%H:%M:%SZ"), ann),
                     )
             conn.commit()
@@ -750,7 +703,7 @@ class TestProcessPassiveDiscovery:
             # evidence extracted from earlier observations.
             from agenthandover_worker.knowledge_base import KnowledgeBase
             from agenthandover_worker.procedure_schema import sop_to_procedure
-            kb = KnowledgeBase(root=Path(tempfile.mkdtemp()) / "knowledge")
+            kb = KnowledgeBase(root=Path(tempfile.mkdtemp()) / "knowledge", db_path=kb_db(Path(tempfile.mkdtemp()) / "knowledge"))
             kb.ensure_structure()
             prior = sop_to_procedure(generated_sop_template(
                 "check_domain_availability", mode="passive",
@@ -834,8 +787,8 @@ class TestProcessPassiveDiscovery:
                     dt = _now - timedelta(hours=hours_ago, minutes=-i)
                     conn.execute(
                         "INSERT INTO events "
-                        "(id, timestamp, annotation_status, scene_annotation_json) "
-                        "VALUES (?, ?, 'completed', ?)",
+                        "(id, timestamp, kind_json, display_topology_json, primary_display_id, annotation_status, scene_annotation_json) "
+                        "VALUES (?, ?, '{}', '[]', 'main', 'completed', ?)",
                         (f"e{session}{i}", dt.strftime("%Y-%m-%dT%H:%M:%SZ"), ann),
                     )
             conn.commit()
@@ -845,7 +798,7 @@ class TestProcessPassiveDiscovery:
                 sop={}, success=False, deferred=True,
                 error="VLM connection failed: timed out waiting for llama-server to start",
             )
-            kb = KnowledgeBase(root=Path(tempfile.mkdtemp()) / "knowledge")
+            kb = KnowledgeBase(root=Path(tempfile.mkdtemp()) / "knowledge", db_path=kb_db(Path(tempfile.mkdtemp()) / "knowledge"))
             kb.ensure_structure()
             mock_writer = MagicMock()
 
@@ -902,8 +855,8 @@ class TestProcessPassiveDiscovery:
                 ts = dt.strftime("%Y-%m-%dT%H:%M:%SZ")
                 conn.execute(
                     "INSERT INTO events "
-                    "(id, timestamp, annotation_status, scene_annotation_json) "
-                    "VALUES (?, ?, 'completed', ?)",
+                    "(id, timestamp, kind_json, display_topology_json, primary_display_id, annotation_status, scene_annotation_json) "
+                    "VALUES (?, ?, '{}', '[]', 'main', 'completed', ?)",
                     (f"e{i}", ts, ann),
                 )
             conn.commit()
@@ -920,7 +873,7 @@ class TestProcessPassiveDiscovery:
             mock_index = MagicMock()
 
             from agenthandover_worker.knowledge_base import KnowledgeBase
-            kb = KnowledgeBase(root=Path(tempfile.mkdtemp()) / "knowledge")
+            kb = KnowledgeBase(root=Path(tempfile.mkdtemp()) / "knowledge", db_path=kb_db(Path(tempfile.mkdtemp()) / "knowledge"))
             kb.ensure_structure()
 
             sops = _process_passive_discovery(
@@ -1152,8 +1105,8 @@ class TestPassiveWindowAndVectorReuse:
                 ("future", "2026-09-02T08:00:01.000000+00:00"),
             ]:
                 conn.execute(
-                    "INSERT INTO events (id, timestamp, annotation_status, scene_annotation_json) "
-                    "VALUES (?, ?, 'completed', ?)", (eid, ts, ann),
+                    "INSERT INTO events (id, timestamp, kind_json, display_topology_json, primary_display_id, annotation_status, scene_annotation_json) "
+                    "VALUES (?, ?, '{}', '[]', 'main', 'completed', ?)", (eid, ts, ann),
                 )
             conn.commit()
             with WorkerDB(db_path) as db:
@@ -1177,7 +1130,7 @@ class TestPassiveWindowAndVectorReuse:
         both = first + [
             _make_event("e2", "2026-03-04T10:01:00Z", what_doing="Submitting expense form"),
         ]
-        with VectorKB(tmp_path / "v.db") as vkb, patch(
+        with VectorKB(create_daemon_db(tmp_path / "v.db")) as vkb, patch(
             "agenthandover_worker.task_segmenter._compute_embeddings", side_effect=embed,
         ):
             seg = TaskSegmenter(vector_kb=vkb)

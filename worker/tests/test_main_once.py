@@ -192,3 +192,94 @@ def test_startup_migrates_a_config_on_an_earlier_tier_default(
     backups = list(config.parent.glob("config.toml.*.bak"))
     assert len(backups) == 1
     assert backups[0].read_text(encoding="utf-8") == old
+
+
+def _run_once(db_path: Path, tmp_path: Path) -> None:
+    worker_main.main([
+        "--once",
+        "--db-path", str(db_path),
+        "--sops-dir", str(tmp_path / "sops"),
+        "--knowledge-dir", str(tmp_path / "knowledge"),
+        "--adapter", "generic",
+        "--log-level", "ERROR",
+    ])
+
+
+@pytest.mark.parametrize("found", [5, 99])
+def test_a_database_at_another_schema_version_stops_the_worker_loudly(
+    once_home: Path, tmp_db_path: Path, tmp_path: Path,
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, found: int,
+) -> None:
+    """The daemon owns the schema: a database it has not migrated (an
+    older daemon) or migrated past this worker (a newer daemon) stops the
+    worker with the reason and the fix, before anything is written."""
+    import sqlite3
+
+    from agenthandover_worker.db import SCHEMA_VERSION
+
+    monkeypatch.setattr(worker_main, "_DB_RETRY_MAX_SECONDS", 0)
+    conn = sqlite3.connect(tmp_db_path)
+    conn.execute(f"PRAGMA user_version = {found}")
+    conn.close()
+
+    with pytest.raises(SystemExit) as exit_info:
+        _run_once(tmp_db_path, tmp_path)
+
+    assert exit_info.value.code == 1
+    err = capsys.readouterr().err
+    assert f"schema version {found}" in err
+    assert f"version {SCHEMA_VERSION}" in err
+    assert ("agenthandover restart" if found < SCHEMA_VERSION else "reinstall") in err
+    assert not (tmp_path / "knowledge").exists()
+    assert not (worker_main._status_dir() / "worker.pid").exists()
+
+
+def test_first_start_imports_a_v040_knowledge_base_once(
+    once_home: Path, tmp_db_path: Path, tmp_path: Path,
+) -> None:
+    """Upgrading from v0.4.0: the procedure files the old worker wrote go
+    into the procedures table on the first start (verbatim: pinned in
+    ``test_knowledge_base.py``), the files stay the table's export byte for
+    byte whatever the run then saves, and later starts import nothing (a
+    procedure deleted since stays deleted)."""
+    import sqlite3
+
+    from agenthandover_worker.knowledge_base import KnowledgeBase
+    from agenthandover_worker.procedure_schema import sop_to_procedure
+
+    proc_dir = tmp_path / "knowledge" / "procedures"
+    proc_dir.mkdir(parents=True)
+    files = {}
+    for slug, state in (("file-expenses", "agent_ready"), ("weekly-report", "draft")):
+        proc = sop_to_procedure({
+            "slug": slug, "title": slug.replace("-", " ").title(),
+            "steps": [{"step": "Open the app", "confidence": 0.9}],
+            "confidence_avg": 0.9,
+        })
+        proc["lifecycle_state"] = state
+        path = proc_dir / f"{slug}.json"
+        # v0.4.0's KnowledgeBase.atomic_write_json format.
+        with open(path, "w") as f:
+            json.dump(proc, f, indent=2, default=str)
+        files[slug] = path.read_bytes()
+    (proc_dir / "broken.json").write_text("{not json", encoding="utf-8")
+
+    _run_once(tmp_db_path, tmp_path)
+
+    conn = sqlite3.connect(tmp_db_path)
+    rows = dict(conn.execute("SELECT slug, procedure_json FROM procedures"))
+    states = dict(conn.execute("SELECT slug, lifecycle_state FROM procedures"))
+    conn.close()
+    assert states == {"file-expenses": "agent_ready", "weekly-report": "draft"}
+    for slug, text in rows.items():
+        assert (proc_dir / f"{slug}.json").read_text(encoding="utf-8") == text
+        assert json.loads(text)["title"] == json.loads(files[slug])["title"]
+    assert (proc_dir / "broken.json").read_text(encoding="utf-8") == "{not json"
+
+    kb = KnowledgeBase(root=tmp_path / "knowledge", db_path=tmp_db_path)
+    assert kb.delete_procedure("weekly-report")
+    (proc_dir / "weekly-report.json").write_bytes(files["weekly-report"])
+
+    _run_once(tmp_db_path, tmp_path)
+
+    assert [p["id"] for p in kb.list_procedures()] == ["file-expenses"]

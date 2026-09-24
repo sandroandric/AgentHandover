@@ -15,6 +15,7 @@ from agenthandover_worker import workflow_mining as wm
 from agenthandover_worker.db import WorkerDB, _local_day_bounds
 from agenthandover_worker.pattern_detector import PatternDetector
 from agenthandover_worker.task_segmenter import AnnotatedFrame
+from daemon_db import kb_db
 
 
 def _ann(location: str, *, app: str = "Google Chrome", typed: str = "", chosen: str = "",
@@ -535,7 +536,7 @@ DETOUR = [
 def _kb(tmp_path: Path, *procs: dict):
     from agenthandover_worker.knowledge_base import KnowledgeBase
 
-    kb = KnowledgeBase(root=tmp_path / "kb")
+    kb = KnowledgeBase(root=tmp_path / "kb", db_path=kb_db(tmp_path / "kb"))
     kb.ensure_structure()
     for proc in procs:
         kb.save_procedure(json.loads(json.dumps(proc)))

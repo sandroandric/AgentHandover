@@ -33,6 +33,7 @@ from agenthandover_worker.db import WorkerDB
 from agenthandover_worker.knowledge_base import KnowledgeBase
 from agenthandover_worker.procedure_schema import sop_to_procedure
 from journeys.fixture_loader import load_fixture, parse_timestamp, read_labels, read_manifest
+from daemon_db import kb_db
 
 NAME = "passive_3weeks"
 TICK = timedelta(hours=2)
@@ -201,7 +202,7 @@ def test_local_time_los_angeles(tmp_path: Path, local_tz) -> None:
         )
         assert (obs["started_local_date"], obs["started_local_minute"] // 60) == (local_day, 21)
 
-        kb = KnowledgeBase(root=tmp_path / "knowledge")
+        kb = KnowledgeBase(root=tmp_path / "knowledge", db_path=kb_db(tmp_path / "knowledge"))
         kb.ensure_structure()
         highlights = DigestGenerator(kb, db=db)._workflow_highlights(local_day)
         assert any("a month" in h.detail for h in highlights)
@@ -218,7 +219,7 @@ def test_local_time_los_angeles(tmp_path: Path, local_tz) -> None:
 def test_the_digest_says_how_long_a_workflow_takes(mined, tmp_path: Path) -> None:
     db, labels, end = mined
     stripe_day = datetime.fromisoformat(labels["routines"][0]["instances"][-1]["start"]).date().isoformat()
-    kb = KnowledgeBase(root=tmp_path / "knowledge")
+    kb = KnowledgeBase(root=tmp_path / "knowledge", db_path=kb_db(tmp_path / "knowledge"))
     kb.ensure_structure()
     highlights = DigestGenerator(kb, db=db)._workflow_highlights(stripe_day)
     (payout,) = [h for h in highlights if "(daily)" in h.detail]
@@ -266,7 +267,7 @@ def test_the_weekly_routine_is_triggered_by_its_monday_clock(tmp_path: Path, loc
         candidates = wm.review_candidates(db, now=end)
     unit_of = _unit_of(labels)
     by_routine = {next(iter(_routine_of(c, unit_of))): c for c in candidates}
-    kb = KnowledgeBase(root=tmp_path / "knowledge")
+    kb = KnowledgeBase(root=tmp_path / "knowledge", db_path=kb_db(tmp_path / "knowledge"))
     kb.ensure_structure()
     procs = {}
     for slug, cand in by_routine.items():
@@ -354,7 +355,7 @@ def test_labelling_cards_are_the_ground_truth_replay_scores_against(mined, tmp_p
 
     db, labels, end = mined
     unit_of = _unit_of(labels)
-    kb = KnowledgeBase(root=tmp_path / "kb")
+    kb = KnowledgeBase(root=tmp_path / "kb", db_path=kb_db(tmp_path / "kb"))
     kb.ensure_structure()
     state = tmp_path / "state"
 

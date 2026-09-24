@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import threading
 from pathlib import Path
 
 import pytest
 
 from agenthandover_worker.knowledge_base import KnowledgeBase
+from daemon_db import kb_db
 from agenthandover_worker.procedure_schema import (
     PROCEDURE_SCHEMA_VERSION,
     sop_to_procedure,
@@ -23,7 +25,7 @@ from agenthandover_worker.procedure_schema import (
 @pytest.fixture()
 def kb(tmp_path: Path) -> KnowledgeBase:
     """Create a KnowledgeBase rooted in a temp directory."""
-    kb = KnowledgeBase(root=tmp_path / "knowledge")
+    kb = KnowledgeBase(root=tmp_path / "knowledge", db_path=kb_db(tmp_path / "knowledge"))
     kb.ensure_structure()
     return kb
 
@@ -98,7 +100,7 @@ def sample_procedure(sample_sop_template: dict) -> dict:
 class TestKnowledgeBaseStructure:
 
     def test_ensure_structure_creates_dirs(self, tmp_path: Path) -> None:
-        kb = KnowledgeBase(root=tmp_path / "kb")
+        kb = KnowledgeBase(root=tmp_path / "kb", db_path=kb_db(tmp_path / "kb"))
         kb.ensure_structure()
         assert (tmp_path / "kb").is_dir()
         assert (tmp_path / "kb" / "procedures").is_dir()
@@ -112,7 +114,7 @@ class TestKnowledgeBaseStructure:
         assert kb.root.is_dir()
 
     def test_root_property(self, tmp_path: Path) -> None:
-        kb = KnowledgeBase(root=tmp_path / "myroot")
+        kb = KnowledgeBase(root=tmp_path / "myroot", db_path=kb_db(tmp_path / "myroot"))
         assert kb.root == tmp_path / "myroot"
 
 
@@ -176,6 +178,172 @@ class TestKnowledgeBaseProcedures:
 
     def test_delete_nonexistent(self, kb: KnowledgeBase) -> None:
         assert kb.delete_procedure("nonexistent") is False
+
+
+# ---------------------------------------------------------------------------
+# Knowledge Base — procedures live in the database, the files are the export
+# ---------------------------------------------------------------------------
+
+
+def _rows(kb: KnowledgeBase) -> dict[str, tuple[str, str, str]]:
+    conn = sqlite3.connect(kb.db_path)
+    try:
+        return {
+            slug: (title, state, text)
+            for slug, title, state, text in conn.execute(
+                "SELECT slug, title, lifecycle_state, procedure_json FROM procedures"
+            )
+        }
+    finally:
+        conn.close()
+
+
+def _v040_file(kb: KnowledgeBase, name: str, data: object) -> bytes:
+    """A procedure file as v0.4.0's KnowledgeBase wrote it."""
+    path = kb.root / "procedures" / name
+    with open(path, "w") as f:
+        json.dump(data, f, indent=2, default=str)
+    return path.read_bytes()
+
+
+class TestProcedureStore:
+
+    def test_save_writes_the_row_and_its_export_byte_for_byte(
+        self, kb: KnowledgeBase, sample_procedure: dict,
+    ) -> None:
+        sample_procedure["lifecycle_state"] = "draft"
+        path = kb.save_procedure(sample_procedure)
+        title, state, text = _rows(kb)["check-expired-domains"]
+        assert (title, state) == ("Check Expired Domains on GoDaddy Auctions", "draft")
+        assert path == kb.root / "procedures" / "check-expired-domains.json"
+        # The export is what the file readers (app, agents) always got:
+        # the procedure as json.dump(indent=2, default=str) writes it.
+        assert path.read_text(encoding="utf-8") == text
+        assert text == json.dumps(sample_procedure, indent=2, default=str)
+
+    def test_reads_come_from_the_table_not_the_files(
+        self, kb: KnowledgeBase, sample_procedure: dict,
+    ) -> None:
+        path = kb.save_procedure(sample_procedure)
+        path.unlink()
+        _v040_file(kb, "stray.json", {"id": "stray", "title": "Not saved"})
+        assert kb.get_procedure("check-expired-domains")["id"] == "check-expired-domains"
+        assert [p["id"] for p in kb.list_procedures()] == ["check-expired-domains"]
+        assert kb.get_procedure("stray") is None
+
+    def test_delete_removes_the_row_and_the_export(
+        self, kb: KnowledgeBase, sample_procedure: dict,
+    ) -> None:
+        path = kb.save_procedure(sample_procedure)
+        assert kb.delete_procedure("check-expired-domains") is True
+        assert _rows(kb) == {}
+        assert not path.exists()
+
+    def test_list_keeps_the_file_name_order(self, kb: KnowledgeBase) -> None:
+        # "a-b.json" sorts before "a.json" ('-' < '.'), though "a" < "a-b".
+        for slug in ("a", "a-b", "b"):
+            kb.save_procedure({"id": slug, "title": slug, "steps": []})
+        assert [p["id"] for p in kb.list_procedures()] == ["a-b", "a", "b"]
+
+    def test_list_parses_only_what_changed(self, kb: KnowledgeBase) -> None:
+        kb.save_procedure({"id": "one", "title": "One", "steps": []})
+        kb.save_procedure({"id": "two", "title": "Two", "steps": []})
+        first = {p["id"]: p for p in kb.list_procedures()}
+        kb.save_procedure({"id": "two", "title": "Two again", "steps": []})
+        second = {p["id"]: p for p in kb.list_procedures()}
+        assert second["one"] is first["one"]
+        assert second["two"]["title"] == "Two again"
+
+    def test_a_second_instance_sees_the_same_store(
+        self, kb: KnowledgeBase, sample_procedure: dict,
+    ) -> None:
+        kb.save_procedure(sample_procedure)
+        other = KnowledgeBase(root=kb.root, db_path=kb.db_path)
+        assert other.get_procedure("check-expired-domains") is not None
+
+    def test_without_the_daemon_database_nothing_is_read_or_saved(
+        self, tmp_path: Path, sample_procedure: dict,
+    ) -> None:
+        kb = KnowledgeBase(root=tmp_path / "kb", db_path=tmp_path / "missing.db")
+        assert kb.list_procedures() == []
+        assert kb.get_procedure("check-expired-domains") is None
+        with pytest.raises(FileNotFoundError, match="daemon"):
+            kb.save_procedure(sample_procedure)
+        assert not (tmp_path / "missing.db").exists()
+
+    def test_export_rewrites_missing_and_diverged_files(
+        self, kb: KnowledgeBase, sample_procedure: dict,
+    ) -> None:
+        path = kb.save_procedure(sample_procedure)
+        kb.save_procedure({"id": "other", "title": "Other", "steps": []})
+        text = path.read_text(encoding="utf-8")
+        path.write_text("{}", encoding="utf-8")
+        (kb.root / "procedures" / "other.json").unlink()
+        stray = _v040_file(kb, "stray.json", {"id": "stray"})
+
+        assert kb.export_procedures() == 2
+        assert path.read_text(encoding="utf-8") == text
+        assert (kb.root / "procedures" / "other.json").is_file()
+        assert (kb.root / "procedures" / "stray.json").read_bytes() == stray
+        assert kb.export_procedures() == 0
+
+
+class TestImportProcedureFiles:
+    """The upgrade from v0.4.0, whose knowledge base kept procedures only
+    as ``procedures/<slug>.json``."""
+
+    def test_imports_each_file_verbatim_and_leaves_it_as_the_export(
+        self, kb: KnowledgeBase, sample_procedure: dict,
+    ) -> None:
+        sample_procedure["lifecycle_state"] = "agent_ready"
+        a = _v040_file(kb, "check-expired-domains.json", sample_procedure)
+        b = _v040_file(kb, "b.json", {"id": "b", "title": "B"})
+        _v040_file(kb, "list.json", [1, 2])
+        (kb.root / "procedures" / "broken.json").write_text("{nope", encoding="utf-8")
+        _v040_file(kb, ".hidden.json", {"id": "hidden"})
+
+        assert kb.import_procedure_files() == 2
+
+        rows = _rows(kb)
+        assert set(rows) == {"check-expired-domains", "b"}
+        assert rows["check-expired-domains"] == (
+            "Check Expired Domains on GoDaddy Auctions", "agent_ready", a.decode(),
+        )
+        assert rows["b"][2] == b.decode()
+        assert (kb.root / "procedures" / "check-expired-domains.json").read_bytes() == a
+        assert (kb.root / "procedures" / "broken.json").is_file()
+        assert kb.get_procedure("check-expired-domains") == json.loads(a)
+
+    def test_runs_once(self, kb: KnowledgeBase, sample_procedure: dict) -> None:
+        _v040_file(kb, "check-expired-domains.json", sample_procedure)
+        assert kb.import_procedure_files() == 1
+        assert kb.import_procedure_files() == 0
+
+        # A procedure deleted after the import is not brought back by a
+        # file that reappears (or was left behind).
+        kb.delete_procedure("check-expired-domains")
+        _v040_file(kb, "check-expired-domains.json", sample_procedure)
+        assert kb.import_procedure_files() == 0
+        assert kb.list_procedures() == []
+
+    def test_a_row_already_saved_is_kept(
+        self, kb: KnowledgeBase, sample_procedure: dict,
+    ) -> None:
+        kb.save_procedure(dict(sample_procedure, title="Newer"))
+        stored = _rows(kb)["check-expired-domains"]
+        _v040_file(kb, "check-expired-domains.json", sample_procedure)
+        assert kb.import_procedure_files() == 0
+        assert _rows(kb)["check-expired-domains"] == stored
+
+    def test_an_empty_knowledge_base_imports_nothing_and_is_marked(
+        self, tmp_path: Path,
+    ) -> None:
+        root = tmp_path / "fresh"
+        kb = KnowledgeBase(root=root, db_path=kb_db(root))
+        assert kb.import_procedure_files() == 0
+        (root / "procedures").mkdir(parents=True)
+        _v040_file(kb, "late.json", {"id": "late"})
+        assert kb.import_procedure_files() == 0
 
 
 # ---------------------------------------------------------------------------
@@ -570,12 +738,14 @@ class TestBackfillProcedures:
         self, kb: KnowledgeBase,
     ) -> None:
         path = kb.save_procedure(_legacy_procedure())
-        (kb.root / "procedures" / "complete.json").write_text(json.dumps({
+        kb.save_procedure({
             "id": "complete", "title": "C", "description": "Has one.",
             "steps": [],
-        }))
+        })
         assert kb.backfill_procedures() == 1
-        data = json.loads(path.read_text())
+        data = kb.get_procedure("legacy-flow")
+        # The export follows the row.
+        assert json.loads(path.read_text()) == data
         assert data["description"] == "Do the legacy flow end to end."
         step = data["steps"][0]
         assert step["app"] == "Safari"
@@ -586,7 +756,7 @@ class TestBackfillProcedures:
         assert kb.backfill_procedures() == 0
 
     def test_backfill_empty_kb(self, tmp_path: Path) -> None:
-        assert KnowledgeBase(root=tmp_path / "none").backfill_procedures() == 0
+        assert KnowledgeBase(root=tmp_path / "none", db_path=kb_db(tmp_path / "none")).backfill_procedures() == 0
 
     def test_cli_flag_backfills_and_exits(
         self, kb: KnowledgeBase, capsys: pytest.CaptureFixture[str],
@@ -598,6 +768,7 @@ class TestBackfillProcedures:
         kb.save_procedure(_legacy_procedure())
         worker_main.main([
             "--backfill-procedures", "--knowledge-dir", str(kb.root),
+            "--db-path", str(kb.db_path),
         ])
         assert "Backfilled 1 procedure(s)" in capsys.readouterr().out
         assert kb.get_procedure("legacy-flow")["description"]

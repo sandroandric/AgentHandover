@@ -12,6 +12,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from daemon_db import create_daemon_db
 from agenthandover_worker.vector_kb import (
     CLUSTERING_PREFIX,
     DOCUMENT_PREFIX,
@@ -33,7 +34,8 @@ from agenthandover_worker.vector_kb import (
 
 @pytest.fixture
 def tmp_db(tmp_path: Path) -> Path:
-    return tmp_path / "test.db"
+    """A database the daemon created (it owns ``vector_store``)."""
+    return create_daemon_db(tmp_path / "test.db")
 
 
 @pytest.fixture
@@ -117,22 +119,11 @@ class TestBlobHelpers:
 
 class TestSchema:
 
-    def test_table_creation(self, tmp_db: Path, config: VectorKBConfig):
-        vkb = VectorKB(tmp_db, config)
-        conn = sqlite3.connect(str(tmp_db))
-        tables = [r[0] for r in conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table'"
-        ).fetchall()]
-        assert "vector_store" in tables
-        vkb.close()
-        conn.close()
-
-    def test_table_creation_idempotent(self, tmp_db: Path, config: VectorKBConfig):
-        vkb1 = VectorKB(tmp_db, config)
-        vkb1.close()
-        vkb2 = VectorKB(tmp_db, config)
-        assert vkb2.count() == 0
-        vkb2.close()
+    def test_opens_the_daemons_table(self, tmp_db: Path, config: VectorKBConfig):
+        with VectorKB(tmp_db, config) as vkb:
+            assert vkb.count() == 0
+        with VectorKB(tmp_db, config) as vkb:
+            assert vkb.count() == 0
 
 
 # ---------------------------------------------------------------------------
@@ -434,13 +425,7 @@ class TestUnitVectorsAndCap:
 
     def test_old_rows_are_normalised_on_open(self, tmp_db: Path, config: VectorKBConfig):
         conn = sqlite3.connect(tmp_db)
-        conn.execute(
-            "CREATE TABLE vector_store (id TEXT PRIMARY KEY, source_type TEXT NOT NULL,"
-            " source_id TEXT NOT NULL, embedding BLOB NOT NULL, model TEXT NOT NULL,"
-            " dim INTEGER NOT NULL, text_hash TEXT NOT NULL,"
-            " created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),"
-            " updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')))"
-        )
+        # Rows as the daemon's migration leaves v0.4's: qvec NULL, prefix ''.
         conn.execute(
             "INSERT INTO vector_store (id, source_type, source_id, embedding, model, dim, text_hash)"
             " VALUES ('v', 'procedure', 'p', ?, 'test-model', 4, 'h')",
@@ -578,12 +563,7 @@ class TestModelAndPrefix:
         self, tmp_db: Path, config: VectorKBConfig,
     ):
         conn = sqlite3.connect(tmp_db)
-        conn.execute(
-            "CREATE TABLE vector_store (id TEXT PRIMARY KEY, source_type TEXT NOT NULL,"
-            " source_id TEXT NOT NULL, embedding BLOB NOT NULL, model TEXT NOT NULL,"
-            " dim INTEGER NOT NULL, text_hash TEXT NOT NULL,"
-            " created_at TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT '')"
-        )
+        # Rows as the daemon's migration leaves v0.4's: qvec NULL, prefix ''.
         conn.execute(
             "INSERT INTO vector_store (id, source_type, source_id, embedding, model,"
             " dim, text_hash) VALUES (?, 'procedure', 'p1', ?, ?, 4, ?)",
@@ -628,13 +608,7 @@ class TestModelAndPrefix:
         neither a plain row nor a segmenter row whose hashed text carried
         the ``clustering:`` prefix inline (the pre-WP-C6 format)."""
         conn = sqlite3.connect(tmp_db)
-        conn.execute(
-            "CREATE TABLE vector_store (id TEXT PRIMARY KEY, source_type TEXT NOT NULL,"
-            " source_id TEXT NOT NULL, embedding BLOB NOT NULL, model TEXT NOT NULL,"
-            " dim INTEGER NOT NULL, text_hash TEXT NOT NULL,"
-            " created_at TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT '',"
-            " qvec BLOB, qscale REAL)"
-        )
+        # Rows as the daemon's migration leaves v0.4's: qvec NULL, prefix ''.
         for sid, hashed in (
             ("plain", "reading hacker news"),
             ("inline", CLUSTERING_PREFIX + "reading hacker news"),

@@ -35,12 +35,13 @@ from agenthandover_worker.knowledge_base import KnowledgeBase
 from agenthandover_worker.procedure_schema import sop_to_procedure
 from agenthandover_worker.vector_kb import VectorKB, VectorKBConfig
 from fixtures.vlm_answers import generated_sop_template
+from daemon_db import kb_db
 
 SLUG = "check-domain-availability"
 QUERY = "find out whether a web domain name can still be registered"
 
 
-def _approved_skill(kb_root: Path) -> dict:
+def _approved_skill(kb_root: Path, db_path: Path) -> dict:
     proc = sop_to_procedure(generated_sop_template("check_domain_availability"))
     # Approved for agents: what the approval leaves (trust "suggest") and a
     # goal, so the hand-off gate (ledger.handoff_gate) lets it through.
@@ -50,7 +51,7 @@ def _approved_skill(kb_root: Path) -> dict:
         "lifecycle_state": "agent_ready",
         "constraints": {"trust_level": "suggest", "guardrails": []},
     })
-    kb = KnowledgeBase(root=kb_root)
+    kb = KnowledgeBase(root=kb_root, db_path=db_path)
     kb.ensure_structure()
     kb.save_procedure(proc)
     return kb.get_procedure(SLUG)
@@ -110,11 +111,12 @@ def test_an_agent_pairs_and_finds_the_skill_by_meaning(
     temp_home, kb_root, events_db, cassette, tmp_path: Path,
 ) -> None:
     tape = cassette("mcp")
-    proc = _approved_skill(kb_root)
 
-    # The worker's database, with the Skill embedded the way the worker does it.
+    # The worker's database: the Skill saved and embedded the way the
+    # worker does it.
     loaded = events_db("focus_dailynews")
     assert loaded.db_path == paths.db_path()
+    proc = _approved_skill(kb_root, loaded.db_path)
     with VectorKB(loaded.db_path, VectorKBConfig(ollama_host=tape.host)) as vkb:
         worker_main._embed_procedure(vkb, proc)
         assert vkb.count("procedure") == 1
@@ -160,7 +162,11 @@ def test_an_agent_pairs_and_finds_the_skill_by_meaning(
 def test_without_the_worker_database_search_says_it_fell_back(
     temp_home, kb_root, tmp_path: Path,
 ) -> None:
-    _approved_skill(kb_root)
+    """Procedures live in the worker's database: before the daemon created
+    it the server finds no Skill (an export file on disk is not a Skill
+    until the worker has imported it) and says why."""
+    _approved_skill(kb_root, kb_db(tmp_path / "elsewhere"))
+    assert (kb_root / "procedures" / f"{SLUG}.json").is_file()
     env = {**os.environ, "HOME": str(temp_home.path)}
     params_env = env
 
@@ -178,4 +184,5 @@ def test_without_the_worker_database_search_says_it_fell_back(
     search = asyncio.run(ask())
     assert search["mode"] == "keyword_fallback"
     assert "no worker database" in search["reason"]
-    assert [r["slug"] for r in search["results"]] == [SLUG]
+    assert search["results"] == []
+    assert not paths.db_path().exists()

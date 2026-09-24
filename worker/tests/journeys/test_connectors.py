@@ -19,6 +19,7 @@ from agenthandover_worker.agent_connect import CODEX_BEGIN, CODEX_END, HERMES_MA
 from agenthandover_worker.knowledge_base import KnowledgeBase
 from agenthandover_worker.procedure_schema import sop_to_procedure
 from fixtures.vlm_answers import generated_sop_template
+from daemon_db import kb_db
 
 SLUG = "check-domain-availability"
 PROSE = "# House rules\n\nNever push to main without review.\n"
@@ -41,7 +42,7 @@ def test_codex_and_hermes_keep_the_users_files(temp_home, kb_root, tmp_path: Pat
         "lifecycle_state": "agent_ready",
         "constraints": {"trust_level": "suggest", "guardrails": []},
     })
-    kb = KnowledgeBase(root=kb_root)
+    kb = KnowledgeBase(root=kb_root, db_path=kb_db(kb_root))
     kb.ensure_structure()
     kb.save_procedure(proc)
 

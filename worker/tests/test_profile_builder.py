@@ -12,6 +12,7 @@ import pytest
 
 from agenthandover_worker.knowledge_base import KnowledgeBase
 from agenthandover_worker.profile_builder import ProfileBuilder
+from daemon_db import kb_db
 
 
 # ---------------------------------------------------------------------------
@@ -21,7 +22,7 @@ from agenthandover_worker.profile_builder import ProfileBuilder
 @pytest.fixture()
 def kb(tmp_path: Path) -> KnowledgeBase:
     """Create a KnowledgeBase rooted in a temp directory."""
-    kb = KnowledgeBase(root=tmp_path / "knowledge")
+    kb = KnowledgeBase(root=tmp_path / "knowledge", db_path=kb_db(tmp_path / "knowledge"))
     kb.ensure_structure()
     return kb
 

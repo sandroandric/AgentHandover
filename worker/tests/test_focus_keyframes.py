@@ -107,8 +107,9 @@ def _insert(db_path: Path, frames: list[dict], screenshots: Path) -> None:
         meta = json.loads(f["metadata_json"])
         meta["screenshot_path"] = str(img)
         conn.execute(
-            "INSERT INTO events (id, timestamp, kind_json, window_json, metadata_json) "
-            "VALUES (?, ?, '{\"type\":\"DwellSnapshot\"}', ?, ?)",
+            "INSERT INTO events (id, timestamp, kind_json, window_json, metadata_json, "
+            "display_topology_json, primary_display_id) "
+            "VALUES (?, ?, '{\"type\":\"DwellSnapshot\"}', ?, ?, '[]', 'main')",
             (f["id"], f["timestamp"], f["window_json"], json.dumps(meta)),
         )
     conn.commit()

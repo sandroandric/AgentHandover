@@ -15,6 +15,7 @@ from agenthandover_worker.continuity_tracker import (
 )
 from agenthandover_worker.knowledge_base import KnowledgeBase
 from agenthandover_worker.task_segmenter import AnnotatedFrame, TaskSegment
+from daemon_db import kb_db
 
 
 # ---------------------------------------------------------------------------
@@ -36,7 +37,7 @@ EMB_DESIGN_MODERATE = [0.3, 0.3, 0.55, 0.3]       # cosine ~0.79 with DESIGN (mo
 
 @pytest.fixture
 def kb(tmp_path):
-    kb = KnowledgeBase(root=tmp_path)
+    kb = KnowledgeBase(root=tmp_path, db_path=kb_db(tmp_path))
     kb.ensure_structure()
     return kb
 

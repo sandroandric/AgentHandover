@@ -18,6 +18,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
+from daemon_db import create_daemon_db
 
 from agenthandover_worker import behavioral_synthesizer, model_profiles
 from agenthandover_worker import scene_annotator, sop_generator, task_segmenter
@@ -51,7 +52,10 @@ def call_sites(host: str, tmp_path: Path) -> dict:
     The hand-written ``cassette_selftest.jsonl`` holds exactly these requests.
     """
     reasoner = LLMReasoner(ReasoningConfig(model="qwen3.5:4b", ollama_host=host))
-    kb = VectorKB(tmp_path / "vectors.db", VectorKBConfig(ollama_host=host))
+    db = tmp_path / "vectors.db"
+    if not db.exists():  # one database for every call of the test
+        create_daemon_db(db)
+    kb = VectorKB(db, VectorKBConfig(ollama_host=host))
     return {
         "annotate": lambda: scene_annotator._call_ollama_vlm(
             model="gemma4:e2b",

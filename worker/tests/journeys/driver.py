@@ -179,8 +179,10 @@ class JourneyWorker:
         features = cfg.features
         host = vlm_cfg.ollama_host
 
-        kb = KnowledgeBase(root=Path(knowledge_dir))
+        kb = KnowledgeBase(root=Path(knowledge_dir), db_path=self.db_path)
         kb.ensure_structure()
+        kb.import_procedure_files()
+        kb.export_procedures()
         self.knowledge_base = kb
 
         self.vlm_queue = wm.VLMFallbackQueue()

@@ -13,7 +13,9 @@ command is written any more.
 
 from __future__ import annotations
 
+import sqlite3
 import time
+from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -60,6 +62,15 @@ def test_approve_for_agents_walks_to_agent_ready_and_writes_the_skill(
         p.name for p in (run.worker.knowledge_base.root / "procedures").glob("*.json")
     )
     assert procedure_files == [f"{slug}.json"]
+    # The approval read and wrote the procedures table (WP-S2); the file
+    # is the row's export, byte for byte.
+    with closing(sqlite3.connect(run.worker.db_path)) as conn:
+        rows = conn.execute(
+            "SELECT slug, lifecycle_state, procedure_json FROM procedures"
+        ).fetchall()
+    assert [row[:2] for row in rows] == [(slug, "agent_ready")]
+    export = run.worker.knowledge_base.root / "procedures" / f"{slug}.json"
+    assert export.read_text(encoding="utf-8") == rows[0][2]
 
     # Claude Code's /<slug> is the packet; the index lists it with its description.
     assert skill.read_text(encoding="utf-8") == render_packet(proc, target="claude-skill")

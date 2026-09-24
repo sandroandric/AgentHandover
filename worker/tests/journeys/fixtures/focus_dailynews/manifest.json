@@ -6,7 +6,7 @@
     "by": "worker/tests/journeys/record/generate_focus_dailynews.py",
     "note": "Replace with a real session via record/record_focus_session.py."
   },
-  "schema_version": 5,
+  "schema_version": 7,
   "recorded_start": "2026-09-15T08:30:00.900802+00:00",
   "recorded_end": "2026-09-15T08:39:59.300075+00:00",
   "focus_session": {

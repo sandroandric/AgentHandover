@@ -23,6 +23,7 @@ from agenthandover_worker.procedure_curator import (
 )
 from agenthandover_worker.staleness_detector import StalenessDetector
 from agenthandover_worker.trust_advisor import TrustAdvisor
+from daemon_db import kb_db
 
 
 # ---- Fixtures ----
@@ -31,7 +32,7 @@ from agenthandover_worker.trust_advisor import TrustAdvisor
 @pytest.fixture
 def kb(tmp_path):
     """Create a KnowledgeBase with a temp root."""
-    kb = KnowledgeBase(root=tmp_path)
+    kb = KnowledgeBase(root=tmp_path, db_path=kb_db(tmp_path))
     kb.ensure_structure()
     return kb
 

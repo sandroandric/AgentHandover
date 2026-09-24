@@ -24,7 +24,7 @@ from agenthandover_worker.activity_search import (
     _iso_to_epoch,
     _parse_annotation,
 )
-from daemon_db import insert_event
+from daemon_db import insert_event, kb_db
 
 
 # ---------------------------------------------------------------------------
@@ -325,18 +325,16 @@ class TestFTSIndexCreation:
             s.session_recall(date="2026-03-10")
             assert s._fts_ready
 
-    def test_fts_table_not_created_before_first_use(
-        self, tmp_db_path: Path,
+    def test_nothing_is_indexed_before_first_use(
+        self, tmp_db_path: Path, write_conn: sqlite3.Connection,
     ) -> None:
+        _insert_annotated_event(write_conn)
         with ActivitySearcher(tmp_db_path) as s:
             assert not s._fts_ready
 
-        # Table should not exist.
+        # The daemon created the (empty) index; opening fills nothing.
         conn = sqlite3.connect(str(tmp_db_path))
-        cur = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='events_fts'"
-        )
-        assert cur.fetchone() is None
+        assert conn.execute("SELECT COUNT(*) FROM events_fts").fetchone()[0] == 0
         conn.close()
 
 
@@ -1207,7 +1205,7 @@ class TestQueryApiThread:
         searcher.refresh_index()  # main thread uses the connection first
 
         srv = QueryAPIServer(
-            KnowledgeBase(root=tmp_path / "kb"), port=0,
+            KnowledgeBase(root=tmp_path / "kb", db_path=kb_db(tmp_path / "kb")), port=0,
             activity_searcher=searcher,
         )
         srv.start()
@@ -1276,19 +1274,3 @@ class TestIndexShadowTable:
             assert len(s.search("renewed")) == 1
             assert s.prune_index() == 0
             assert s.refresh_index() == 0
-
-    def test_an_index_from_before_the_shadow_table_is_adopted(
-        self, tmp_db_path: Path, write_conn: sqlite3.Connection,
-    ) -> None:
-        eid = _insert_annotated_event(write_conn)
-        write_conn.execute(
-            "CREATE VIRTUAL TABLE events_fts USING fts5(event_id, what_doing, app, location)"
-        )
-        write_conn.execute(
-            "INSERT INTO events_fts VALUES (?, 'Browsing the web', 'Chrome', '')", (eid,),
-        )
-        write_conn.commit()
-        with ActivitySearcher(tmp_db_path) as s:
-            assert s.refresh_index() == 0
-            count = s._conn.execute("SELECT COUNT(*) FROM events_fts").fetchone()[0]
-            assert count == 1

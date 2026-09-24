@@ -10,11 +10,12 @@ import pytest
 from agenthandover_worker.knowledge_base import KnowledgeBase
 from agenthandover_worker.procedure_schema import sop_to_procedure
 from agenthandover_worker.staleness_detector import StalenessDetector
+from daemon_db import kb_db
 
 
 @pytest.fixture()
 def kb(tmp_path: Path) -> KnowledgeBase:
-    kb = KnowledgeBase(root=tmp_path / "knowledge")
+    kb = KnowledgeBase(root=tmp_path / "knowledge", db_path=kb_db(tmp_path / "knowledge"))
     kb.ensure_structure()
     return kb
 

@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -21,6 +22,81 @@ from typing import Self
 from agenthandover_worker.redaction import redact
 
 logger = logging.getLogger(__name__)
+
+
+# The daemon's schema this worker reads and writes: ``CURRENT_SCHEMA_VERSION``
+# in ``crates/storage/src/schema.rs``.  The daemon creates and migrates
+# every table (``crates/storage/src/migrations``); the worker never does.
+SCHEMA_VERSION = 7
+
+
+class SchemaVersionError(RuntimeError):
+    """The database's ``user_version`` is not :data:`SCHEMA_VERSION`."""
+
+
+def database_schema_version(db_path: str | Path) -> int:
+    """The ``user_version`` the daemon recorded in *db_path*."""
+    conn = sqlite3.connect(f"{Path(db_path).resolve().as_uri()}?mode=ro", uri=True)
+    try:
+        return int(conn.execute("PRAGMA user_version").fetchone()[0])
+    finally:
+        conn.close()
+
+
+def check_schema_version(db_path: str | Path) -> None:
+    """Raise :class:`SchemaVersionError`, saying what to do, unless the
+    daemon has brought *db_path* to exactly :data:`SCHEMA_VERSION`."""
+    found = database_schema_version(db_path)
+    if found == SCHEMA_VERSION:
+        return
+    if found < SCHEMA_VERSION:
+        raise SchemaVersionError(
+            f"The database {db_path} is at schema version {found}; this worker "
+            f"needs version {SCHEMA_VERSION}, which the daemon creates when it "
+            "starts.  The daemon running is older than the worker or has not "
+            "restarted since the upgrade.  Fix: run `agenthandover restart`; "
+            "if the error stays, reinstall the latest AgentHandover release "
+            "so the daemon and the worker match."
+        )
+    raise SchemaVersionError(
+        f"The database {db_path} is at schema version {found}, newer than the "
+        f"version {SCHEMA_VERSION} this worker understands: a newer daemon "
+        "migrated it.  Fix: reinstall the latest AgentHandover release so the "
+        "worker matches the daemon (downgrading the daemon alone does not "
+        "undo the migration)."
+    )
+
+
+def wait_for_schema_version(
+    db_path: str | Path,
+    *,
+    timeout_s: float,
+    poll_s: float,
+    stop: Callable[[], bool] = lambda: False,
+) -> None:
+    """Return once *db_path* is at :data:`SCHEMA_VERSION`.
+
+    Right after an upgrade the worker can start before the daemon has
+    migrated the database, so an older version is polled for up to
+    *timeout_s* (or until *stop* returns True, which returns early); a
+    newer one fails at once.  Raises :class:`SchemaVersionError`.
+    """
+    waited = 0.0
+    while True:
+        try:
+            check_schema_version(db_path)
+            return
+        except SchemaVersionError:
+            if database_schema_version(db_path) > SCHEMA_VERSION or waited >= timeout_s:
+                raise
+        if stop():
+            return
+        logger.info(
+            "Waiting for the daemon to migrate %s to schema %d (%.0fs/%.0fs)",
+            db_path, SCHEMA_VERSION, waited, timeout_s,
+        )
+        time.sleep(poll_s)
+        waited += poll_s
 
 
 def _sqlite_utc(moment: datetime) -> str:
@@ -73,8 +149,6 @@ class WorkerDB:
         # Used by the control and the inference thread, one at a time
         # (inference_runner.STATE_LOCK); SQLite itself is serialized.
         self._conn = sqlite3.connect(uri, uri=True, check_same_thread=False)
-        # Worker-owned tables already created through this instance.
-        self._ensured: set[str] = set()
         self._conn.row_factory = sqlite3.Row
 
         # Enable WAL reads — even though we are read-only, setting the
@@ -94,30 +168,6 @@ class WorkerDB:
     # ------------------------------------------------------------------
     # Query helpers
     # ------------------------------------------------------------------
-
-    def _ensure_once(self, ensure: "Callable[[sqlite3.Connection], None]") -> None:
-        """Run a ``CREATE TABLE IF NOT EXISTS`` helper once per instance.
-
-        Readers call this before querying a worker-owned table; after the
-        first success they go straight to the held read connection instead
-        of opening a writable connection per call.
-        """
-        name = ensure.__name__
-        if name in self._ensured:
-            return
-        db_path = self._get_writable_path()
-        if not db_path:
-            return
-        conn = sqlite3.connect(db_path)
-        try:
-            conn.execute("PRAGMA busy_timeout = 5000;")
-            ensure(conn)
-            conn.commit()
-            self._ensured.add(name)
-        except sqlite3.Error:
-            pass
-        finally:
-            conn.close()
 
     def _refresh_read_snapshot(self) -> None:
         """End any implicit read transaction so the next SELECT sees fresh data.
@@ -315,18 +365,8 @@ class WorkerDB:
     # Worker state (small persisted values: dates, counters)
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _ensure_worker_state_table(write_conn: sqlite3.Connection) -> None:
-        write_conn.execute(
-            "CREATE TABLE IF NOT EXISTS worker_state ("
-            "  key TEXT PRIMARY KEY,"
-            "  value TEXT NOT NULL"
-            ")"
-        )
-
     def get_state(self, key: str) -> str | None:
         """A value the worker persisted with :meth:`set_state`, or None."""
-        self._ensure_once(self._ensure_worker_state_table)
         try:
             row = self._conn.execute(
                 "SELECT value FROM worker_state WHERE key = ?", (key,),
@@ -342,7 +382,6 @@ class WorkerDB:
         write_conn = sqlite3.connect(db_path)
         try:
             write_conn.execute("PRAGMA busy_timeout = 5000;")
-            self._ensure_worker_state_table(write_conn)
             write_conn.execute(
                 "INSERT OR REPLACE INTO worker_state (key, value) VALUES (?, ?)",
                 (key, value),
@@ -894,28 +933,6 @@ class WorkerDB:
         return cursor.fetchone() is not None
 
     # ------------------------------------------------------------------
-    # Legacy episode store
-    # ------------------------------------------------------------------
-
-    def drop_episode_store(self) -> None:
-        """Drop ``translated_episodes``, the episode store the removed v1
-        PrefixSpan miner read (WP-F5).  Nothing writes it any more; this
-        frees the rows older installs left behind.
-        """
-        db_path = self._get_writable_path()
-        if not db_path:
-            return
-        write_conn = sqlite3.connect(db_path)
-        try:
-            write_conn.execute("PRAGMA busy_timeout = 5000;")
-            write_conn.execute("DROP TABLE IF EXISTS translated_episodes")
-            write_conn.commit()
-        except sqlite3.Error as exc:
-            logger.error("Failed to drop the legacy episode store: %s", exc)
-        finally:
-            write_conn.close()
-
-    # ------------------------------------------------------------------
     # Passive discovery (v2 task segmentation)
     # ------------------------------------------------------------------
 
@@ -1019,37 +1036,6 @@ class WorkerDB:
         )
         return self._rows_to_dicts(cur.fetchall())
 
-    @staticmethod
-    def _ensure_task_segments_table(write_conn: "sqlite3.Connection") -> None:
-        """Create the task_segments table if it doesn't exist.
-
-        Segments are the segmenter's output, kept for 14 days
-        (:meth:`purge_task_segments`); passive discovery groups
-        ``workflow_observations``, not segments.  Tables from before v0.5
-        carried per-frame vectors in ``embeddings_json``; the column is
-        dropped (the vectors live in the vector KB).
-        """
-        write_conn.execute(
-            "CREATE TABLE IF NOT EXISTS task_segments ("
-            "  segment_id TEXT PRIMARY KEY,"
-            "  cluster_id INTEGER NOT NULL,"
-            "  task_label TEXT NOT NULL DEFAULT '',"
-            "  event_ids_json TEXT NOT NULL,"
-            "  frame_count INTEGER NOT NULL,"
-            "  apps_json TEXT NOT NULL DEFAULT '[]',"
-            "  start_time TEXT,"
-            "  end_time TEXT,"
-            "  created_at TEXT NOT NULL DEFAULT "
-            "    (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))"
-            ")"
-        )
-        columns = {row[1] for row in write_conn.execute("PRAGMA table_info(task_segments)")}
-        if "embeddings_json" in columns:
-            try:
-                write_conn.execute("ALTER TABLE task_segments DROP COLUMN embeddings_json")
-            except sqlite3.OperationalError:  # SQLite < 3.35: clear it instead
-                write_conn.execute("UPDATE task_segments SET embeddings_json = NULL")
-
     def save_task_segment(
         self,
         segment_id: str,
@@ -1068,7 +1054,6 @@ class WorkerDB:
         write_conn = sqlite3.connect(db_path)
         try:
             write_conn.execute("PRAGMA busy_timeout = 5000;")
-            self._ensure_task_segments_table(write_conn)
             write_conn.execute(
                 "INSERT INTO task_segments "
                 "(segment_id, cluster_id, task_label, event_ids_json, "
@@ -1103,7 +1088,6 @@ class WorkerDB:
 
     def get_task_segments(self) -> list[dict]:
         """All kept task segments, oldest first."""
-        self._ensure_once(self._ensure_task_segments_table)
         self._refresh_read_snapshot()
         try:
             cur = self._conn.execute(
@@ -1121,26 +1105,19 @@ class WorkerDB:
         """Delete segments that ended more than *max_age_days* before *now*
         (default: the wall clock).  Returns the number deleted."""
         return self._delete_older_than(
-            self._ensure_task_segments_table,
             "DELETE FROM task_segments WHERE datetime(end_time) < datetime(?)",
             (now or datetime.now(timezone.utc)) - timedelta(days=max_age_days),
         )
 
-    def _delete_older_than(
-        self,
-        ensure: "Callable[[sqlite3.Connection], None]",
-        sql: str,
-        cutoff: datetime,
-    ) -> int:
+    def _delete_older_than(self, sql: str, cutoff: datetime) -> int:
         """Run the one-parameter DELETE *sql* with *cutoff* (UTC, in the
-        text ``datetime()`` returns) after *ensure* created its table."""
+        text ``datetime()`` returns)."""
         db_path = self._get_writable_path()
         if not db_path:
             return 0
         write_conn = sqlite3.connect(db_path)
         try:
             write_conn.execute("PRAGMA busy_timeout = 5000;")
-            ensure(write_conn)
             deleted = write_conn.execute(
                 sql, (cutoff.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),),
             ).rowcount
@@ -1170,48 +1147,6 @@ class WorkerDB:
         "promoted_slug", "promoted_at", "user_label", "user_is_routine", "labelled_at",
     )
 
-    @staticmethod
-    def _ensure_workflow_observations_table(write_conn: sqlite3.Connection) -> None:
-        write_conn.execute(
-            "CREATE TABLE IF NOT EXISTS workflow_observations ("
-            "  obs_id TEXT PRIMARY KEY,"
-            "  workflow_key TEXT NOT NULL,"
-            "  started_utc TEXT NOT NULL,"
-            "  started_local_date TEXT NOT NULL,"
-            "  started_local_weekday INTEGER NOT NULL,"
-            "  started_local_minute INTEGER NOT NULL,"
-            "  duration_s REAL NOT NULL,"
-            "  apps_json TEXT NOT NULL DEFAULT '[]',"
-            "  hosts_json TEXT NOT NULL DEFAULT '[]',"
-            "  step_sig_json TEXT NOT NULL DEFAULT '[]',"
-            "  evidence_json TEXT NOT NULL DEFAULT '{}',"
-            "  source TEXT NOT NULL DEFAULT 'passive',"
-            "  task_label TEXT NOT NULL DEFAULT '',"
-            "  event_ids_json TEXT NOT NULL DEFAULT '[]',"
-            "  promoted_slug TEXT,"
-            "  promoted_at TEXT,"
-            "  user_label TEXT,"
-            "  user_is_routine INTEGER,"
-            "  labelled_at TEXT"
-            ")"
-        )
-        # The user's answer to a labelling card (``questions``): the name
-        # they gave the workflow and whether it is a routine they would
-        # hand off (1 yes, 0 no, NULL not sure or never asked).  Tables
-        # from before WP-L4 gain the columns.
-        columns = {
-            row[1] for row in write_conn.execute("PRAGMA table_info(workflow_observations)")
-        }
-        for column, kind in (
-            ("user_label", "TEXT"), ("user_is_routine", "INTEGER"), ("labelled_at", "TEXT"),
-        ):
-            if column not in columns:
-                write_conn.execute(f"ALTER TABLE workflow_observations ADD COLUMN {column} {kind}")
-        write_conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_workflow_observations_started "
-            "ON workflow_observations(started_utc)"
-        )
-
     def save_workflow_observation(self, obs: dict) -> bool:
         """Upsert one observation (keyed on ``obs_id``).  A re-recorded
         session updates its fields but keeps its promotion."""
@@ -1222,7 +1157,6 @@ class WorkerDB:
         write_conn = sqlite3.connect(db_path)
         try:
             write_conn.execute("PRAGMA busy_timeout = 5000;")
-            self._ensure_workflow_observations_table(write_conn)
             write_conn.execute(
                 f"INSERT INTO workflow_observations ({', '.join(cols)}) "
                 f"VALUES ({', '.join('?' for _ in cols)}) "
@@ -1247,7 +1181,6 @@ class WorkerDB:
     ) -> list[dict]:
         """Observations started in ``[since, until)`` (or those in
         *obs_ids*), oldest first."""
-        self._ensure_once(self._ensure_workflow_observations_table)
         self._refresh_read_snapshot()
         where: list[str] = []
         params: list[str] = []
@@ -1281,7 +1214,6 @@ class WorkerDB:
         write_conn = sqlite3.connect(db_path)
         try:
             write_conn.execute("PRAGMA busy_timeout = 5000;")
-            self._ensure_workflow_observations_table(write_conn)
             updated = write_conn.execute(
                 "UPDATE workflow_observations SET promoted_slug = ?, "
                 "  promoted_at = COALESCE(?, promoted_at) "
@@ -1315,7 +1247,6 @@ class WorkerDB:
         write_conn = sqlite3.connect(db_path)
         try:
             write_conn.execute("PRAGMA busy_timeout = 5000;")
-            self._ensure_workflow_observations_table(write_conn)
             updated = write_conn.execute(
                 "UPDATE workflow_observations SET "
                 "  user_label = COALESCE(NULLIF(?, ''), user_label), "
@@ -1346,23 +1277,6 @@ class WorkerDB:
         "status", "answer", "asked_at", "answered_at",
     )
 
-    @staticmethod
-    def _ensure_micro_questions_table(write_conn: sqlite3.Connection) -> None:
-        write_conn.execute(
-            "CREATE TABLE IF NOT EXISTS micro_questions ("
-            "  question_id TEXT PRIMARY KEY,"
-            "  kind TEXT NOT NULL,"
-            "  subject TEXT NOT NULL,"
-            "  slot TEXT,"
-            "  channel TEXT NOT NULL,"
-            "  question_json TEXT NOT NULL,"
-            "  status TEXT NOT NULL DEFAULT 'open',"
-            "  answer TEXT,"
-            "  asked_at TEXT NOT NULL,"
-            "  answered_at TEXT"
-            ")"
-        )
-
     def save_micro_questions(self, rows: list[dict]) -> int:
         """Record newly asked questions (``question_id`` already present:
         left as it is).  Returns how many were new."""
@@ -1373,7 +1287,6 @@ class WorkerDB:
         write_conn = sqlite3.connect(db_path)
         try:
             write_conn.execute("PRAGMA busy_timeout = 5000;")
-            self._ensure_micro_questions_table(write_conn)
             added = 0
             for row in rows:
                 added += write_conn.execute(
@@ -1394,7 +1307,6 @@ class WorkerDB:
     ) -> list[dict]:
         """Asked questions (optionally only those with *status* and on
         *channel*), oldest first."""
-        self._ensure_once(self._ensure_micro_questions_table)
         self._refresh_read_snapshot()
         where, params = [], []
         if status is not None:
@@ -1414,7 +1326,6 @@ class WorkerDB:
 
     def count_micro_questions_since(self, since: datetime) -> int:
         """Questions asked at or after *since* (the weekly budget)."""
-        self._ensure_once(self._ensure_micro_questions_table)
         self._refresh_read_snapshot()
         try:
             row = self._conn.execute(
@@ -1436,7 +1347,6 @@ class WorkerDB:
         write_conn = sqlite3.connect(db_path)
         try:
             write_conn.execute("PRAGMA busy_timeout = 5000;")
-            self._ensure_micro_questions_table(write_conn)
             updated = write_conn.execute(
                 "UPDATE micro_questions SET status = ?, answer = ?, answered_at = ? "
                 "WHERE question_id = ? AND status = 'open'",
@@ -1452,7 +1362,6 @@ class WorkerDB:
 
     def count_promotions_since(self, since: datetime) -> int:
         """Workflows promoted to a draft at or after *since*."""
-        self._ensure_once(self._ensure_workflow_observations_table)
         self._refresh_read_snapshot()
         try:
             row = self._conn.execute(
@@ -1470,7 +1379,6 @@ class WorkerDB:
         """Delete observations older than *max_age_days* that never became
         part of a Skill.  Promoted ones are the Skill's evidence and stay."""
         return self._delete_older_than(
-            self._ensure_workflow_observations_table,
             "DELETE FROM workflow_observations "
             "WHERE promoted_slug IS NULL AND datetime(started_utc) < datetime(?)",
             (now or datetime.now(timezone.utc)) - timedelta(days=max_age_days),
@@ -1479,25 +1387,6 @@ class WorkerDB:
     # ------------------------------------------------------------------
     # Generated SOPs — track all generated SOPs with review status
     # ------------------------------------------------------------------
-
-    def _ensure_generated_sops_table(
-        self, write_conn: sqlite3.Connection,
-    ) -> None:
-        """Create the generated_sops table if it doesn't exist."""
-        write_conn.execute(
-            "CREATE TABLE IF NOT EXISTS generated_sops ("
-            "  sop_id TEXT PRIMARY KEY,"
-            "  slug TEXT NOT NULL,"
-            "  title TEXT NOT NULL DEFAULT 'Untitled',"
-            "  source TEXT NOT NULL,"
-            "  status TEXT NOT NULL DEFAULT 'draft',"
-            "  sop_json TEXT NOT NULL,"
-            "  confidence REAL DEFAULT 0.0,"
-            "  source_id TEXT DEFAULT '',"
-            "  created_at TEXT NOT NULL,"
-            "  reviewed_at TEXT DEFAULT NULL"
-            ")"
-        )
 
     def save_generated_sop(
         self,
@@ -1525,7 +1414,6 @@ class WorkerDB:
         write_conn = sqlite3.connect(db_path)
         try:
             write_conn.execute("PRAGMA busy_timeout = 5000;")
-            self._ensure_generated_sops_table(write_conn)
             if auto_approve:
                 write_conn.execute(
                     "INSERT INTO generated_sops "
@@ -1560,8 +1448,6 @@ class WorkerDB:
 
         Does NOT include ``sop_json`` in the result (too large for list views).
         """
-        self._ensure_once(self._ensure_generated_sops_table)
-
         self._refresh_read_snapshot()
         try:
             if status is not None:
@@ -1584,8 +1470,6 @@ class WorkerDB:
 
     def get_generated_sop(self, sop_id: str) -> dict | None:
         """Return a single SOP by ID, including ``sop_json`` parsed back to dict."""
-        self._ensure_once(self._ensure_generated_sops_table)
-
         self._refresh_read_snapshot()
         try:
             cur = self._conn.execute(
@@ -1606,8 +1490,6 @@ class WorkerDB:
 
     def get_generated_sop_by_slug(self, slug: str) -> dict | None:
         """Return the most recent SOP matching *slug*, including parsed ``sop_json``."""
-        self._ensure_once(self._ensure_generated_sops_table)
-
         self._refresh_read_snapshot()
         try:
             cur = self._conn.execute(
@@ -1636,7 +1518,6 @@ class WorkerDB:
         write_conn = sqlite3.connect(db_path)
         try:
             write_conn.execute("PRAGMA busy_timeout = 5000;")
-            self._ensure_generated_sops_table(write_conn)
             cursor = write_conn.execute(
                 "UPDATE generated_sops SET status = ?, "
                 "reviewed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
@@ -1665,7 +1546,6 @@ class WorkerDB:
         write_conn = sqlite3.connect(db_path)
         try:
             write_conn.execute("PRAGMA busy_timeout = 5000;")
-            self._ensure_generated_sops_table(write_conn)
             cursor = write_conn.execute(
                 "UPDATE generated_sops SET sop_json = ? WHERE sop_id = ("
                 "  SELECT sop_id FROM generated_sops WHERE slug = ? "
@@ -1683,8 +1563,6 @@ class WorkerDB:
 
     def get_approved_sops(self) -> list[dict]:
         """Return all approved SOPs, including parsed ``sop_json``."""
-        self._ensure_once(self._ensure_generated_sops_table)
-
         self._refresh_read_snapshot()
         try:
             cur = self._conn.execute(
@@ -1707,23 +1585,6 @@ class WorkerDB:
     # Failed generations — track failures for retry
     # ------------------------------------------------------------------
 
-    def _ensure_failed_generations_table(
-        self, write_conn: sqlite3.Connection,
-    ) -> None:
-        """Create the failed_generations table if it doesn't exist."""
-        write_conn.execute(
-            "CREATE TABLE IF NOT EXISTS failed_generations ("
-            "  failure_id TEXT PRIMARY KEY,"
-            "  source TEXT NOT NULL,"
-            "  source_id TEXT NOT NULL,"
-            "  title TEXT DEFAULT '',"
-            "  error TEXT NOT NULL,"
-            "  context_json TEXT DEFAULT '{}',"
-            "  created_at TEXT NOT NULL,"
-            "  retried INTEGER DEFAULT 0"
-            ")"
-        )
-
     def record_failed_generation(
         self,
         source: str,
@@ -1742,7 +1603,6 @@ class WorkerDB:
         write_conn = sqlite3.connect(db_path)
         try:
             write_conn.execute("PRAGMA busy_timeout = 5000;")
-            self._ensure_failed_generations_table(write_conn)
             write_conn.execute(
                 "INSERT INTO failed_generations "
                 "(failure_id, source, source_id, title, error, context_json, created_at) "
@@ -1763,8 +1623,6 @@ class WorkerDB:
 
         Sorted by created_at DESC (newest first).
         """
-        self._ensure_once(self._ensure_failed_generations_table)
-
         self._refresh_read_snapshot()
         try:
             if include_retried:
@@ -1783,8 +1641,6 @@ class WorkerDB:
 
     def get_failed_generation(self, failure_id: str) -> dict | None:
         """Return a single failure with parsed context_json."""
-        self._ensure_once(self._ensure_failed_generations_table)
-
         self._refresh_read_snapshot()
         try:
             cur = self._conn.execute(
@@ -1812,7 +1668,6 @@ class WorkerDB:
         write_conn = sqlite3.connect(db_path)
         try:
             write_conn.execute("PRAGMA busy_timeout = 5000;")
-            self._ensure_failed_generations_table(write_conn)
             cursor = write_conn.execute(
                 "UPDATE failed_generations SET retried = 1 "
                 "WHERE failure_id = ?",
@@ -1829,31 +1684,6 @@ class WorkerDB:
     # ------------------------------------------------------------------
     # OCR text preservation (pre-expiry extraction)
     # ------------------------------------------------------------------
-
-    def _ensure_preserved_text_table(
-        self, write_conn: "sqlite3.Connection",
-    ) -> None:
-        """Create the preserved_text table for long-term text storage.
-
-        Uses a composite PK (event_id, source) so one event can have
-        both 'ocr' and 'visual_proxy' entries without key collision.
-        """
-        write_conn.execute(
-            "CREATE TABLE IF NOT EXISTS preserved_text ("
-            "  event_id TEXT NOT NULL,"
-            "  source TEXT NOT NULL,"  # 'ocr', 'visual_proxy'
-            "  timestamp TEXT NOT NULL,"
-            "  text_content TEXT NOT NULL,"
-            "  app TEXT DEFAULT '',"
-            "  created_at TEXT NOT NULL DEFAULT "
-            "    (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),"
-            "  PRIMARY KEY (event_id, source)"
-            ")"
-        )
-        write_conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_preserved_text_ts "
-            "ON preserved_text(timestamp)"
-        )
 
     def preserve_ocr_text(
         self, retention_days: int = 14,
@@ -1878,7 +1708,6 @@ class WorkerDB:
         preserved_items: list[tuple[str, str, str]] = []
         try:
             write_conn.execute("PRAGMA busy_timeout = 5000;")
-            self._ensure_preserved_text_table(write_conn)
 
             # Find processed events nearing expiry that haven't been
             # preserved yet.  Uses the write connection for both read and

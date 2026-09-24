@@ -1,10 +1,11 @@
 from agenthandover_worker.ops_telemetry import OpsTelemetry, PipelineMetrics
 from agenthandover_worker.knowledge_base import KnowledgeBase
 import pytest
+from daemon_db import kb_db
 
 @pytest.fixture
 def kb(tmp_path):
-    kb = KnowledgeBase(root=tmp_path)
+    kb = KnowledgeBase(root=tmp_path, db_path=kb_db(tmp_path))
     kb.ensure_structure()
     return kb
 

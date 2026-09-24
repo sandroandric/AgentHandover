@@ -21,6 +21,7 @@ from agenthandover_worker.ledger import (
     validate_knowledge,
 )
 from agenthandover_worker.lifecycle_manager import LifecycleManager, ProcedureLifecycle
+from daemon_db import kb_db
 from agenthandover_worker.procedure_schema import (
     backfill_procedure_fields,
     sop_to_procedure,
@@ -229,7 +230,7 @@ class TestReadinessAndGate:
 
 class TestStorage:
     def test_every_save_stores_the_ledger(self, tmp_path) -> None:
-        kb = KnowledgeBase(root=tmp_path)
+        kb = KnowledgeBase(root=tmp_path, db_path=kb_db(tmp_path))
         kb.ensure_structure()
         kb.save_procedure(_recorded())
         stored = kb.get_procedure("daily-digest")
@@ -248,7 +249,7 @@ class TestStorage:
 
 class TestApprovalTrust:
     def test_approval_grants_suggest_and_never_lowers(self, tmp_path) -> None:
-        kb = KnowledgeBase(root=tmp_path)
+        kb = KnowledgeBase(root=tmp_path, db_path=kb_db(tmp_path))
         kb.ensure_structure()
         kb.save_procedure(_recorded(lifecycle_state="draft"))
         lm = LifecycleManager(kb)
@@ -262,7 +263,7 @@ class TestApprovalTrust:
         assert kb.get_procedure("daily-digest")["constraints"]["trust_level"] == "autonomous"
 
     def test_a_system_transition_grants_nothing(self, tmp_path) -> None:
-        kb = KnowledgeBase(root=tmp_path)
+        kb = KnowledgeBase(root=tmp_path, db_path=kb_db(tmp_path))
         kb.ensure_structure()
         kb.save_procedure(_recorded(lifecycle_state="verified"))
         LifecycleManager(kb).transition(

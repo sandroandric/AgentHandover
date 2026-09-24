@@ -27,7 +27,7 @@ from agenthandover_worker.focus_questioner import (
 )
 from agenthandover_worker.knowledge_base import KnowledgeBase
 from agenthandover_worker.ledger import derive_knowledge
-from daemon_db import create_daemon_db
+from daemon_db import create_daemon_db, kb_db
 
 NOW = datetime(2026, 9, 21, 9, 0, tzinfo=timezone.utc)
 
@@ -149,7 +149,7 @@ def db(tmp_path: Path):
 
 @pytest.fixture()
 def kb(tmp_path: Path) -> KnowledgeBase:
-    base = KnowledgeBase(root=tmp_path / "knowledge")
+    base = KnowledgeBase(root=tmp_path / "knowledge", db_path=kb_db(tmp_path / "knowledge"))
     base.ensure_structure()
     return base
 
@@ -381,21 +381,10 @@ def test_the_digest_lists_open_cards_and_the_days_sessions(db, kb, tmp_path: Pat
     ]
 
 
-def test_old_observation_tables_gain_the_label_columns(tmp_path: Path) -> None:
+def test_a_re_recorded_session_keeps_its_label(tmp_path: Path) -> None:
+    # Tables from before the label columns gain them in the daemon's
+    # migration v006 (crates/storage/tests/migration_test.rs).
     path = create_daemon_db(tmp_path / "events.db")
-    conn = sqlite3.connect(str(path))
-    conn.execute(
-        "CREATE TABLE workflow_observations (obs_id TEXT PRIMARY KEY, workflow_key TEXT NOT NULL,"
-        " started_utc TEXT NOT NULL, started_local_date TEXT NOT NULL,"
-        " started_local_weekday INTEGER NOT NULL, started_local_minute INTEGER NOT NULL,"
-        " duration_s REAL NOT NULL, apps_json TEXT NOT NULL DEFAULT '[]',"
-        " hosts_json TEXT NOT NULL DEFAULT '[]', step_sig_json TEXT NOT NULL DEFAULT '[]',"
-        " evidence_json TEXT NOT NULL DEFAULT '{}', source TEXT NOT NULL DEFAULT 'passive',"
-        " task_label TEXT NOT NULL DEFAULT '', event_ids_json TEXT NOT NULL DEFAULT '[]',"
-        " promoted_slug TEXT, promoted_at TEXT)"
-    )
-    conn.commit()
-    conn.close()
     with WorkerDB(path) as db:
         assert db.save_workflow_observation(_observation("o0", "k1", NOW))
         assert db.label_workflow(["k1"], label="X", is_routine=True, labelled_at=NOW) == 1

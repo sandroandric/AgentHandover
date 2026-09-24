@@ -2,9 +2,9 @@
 
 An agent reports a run through the MCP server (``report_execution_start``,
 ``report_step_result``, ``report_execution_complete``); this module keeps
-each run as one row of the ``runs`` table in::
-
-    {kb_root}/observations/runs.db
+each run as one row of the ``runs`` table of the daemon's database (the
+knowledge base's ``db_path``; the daemon creates the table, migration
+v006).
 
 A run is written when it starts and after every step, so the MCP server
 (one process per agent session) and the worker (which reads the table
@@ -71,25 +71,10 @@ class ExecutionRecord:
 # A step the procedure did not list (the agent reported an unknown id).
 DYNAMIC_ACTION = "(dynamic)"
 
-RUNS_DB = "runs.db"
+# Where runs were kept before they moved into the daemon's database
+# (development builds of v0.5), relative to the knowledge base root.
+_OLD_RUNS_DB = Path("observations") / "runs.db"
 _LEGACY_JSON = "executions.json"
-
-_SCHEMA = """
-CREATE TABLE IF NOT EXISTS runs (
-    execution_id    TEXT PRIMARY KEY,
-    procedure_slug  TEXT NOT NULL,
-    agent_id        TEXT NOT NULL,
-    status          TEXT NOT NULL,
-    started_at      TEXT NOT NULL,
-    completed_at    TEXT,
-    error           TEXT,
-    steps_json      TEXT NOT NULL,
-    deviations_json TEXT NOT NULL,
-    outcomes_json   TEXT NOT NULL,
-    metadata_json   TEXT
-);
-CREATE INDEX IF NOT EXISTS runs_by_slug ON runs (procedure_slug, started_at);
-"""
 
 # Two actions are the same when their normalised token sets overlap by at
 # least this Jaccard index ("Open Chrome and go to example.com" ==
@@ -164,10 +149,8 @@ class ExecutionMonitor:
 
     def __init__(self, knowledge_base) -> None:
         self._kb = knowledge_base
-        self._path = Path(knowledge_base.root) / "observations" / RUNS_DB
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        with closing(self._connect()) as conn, conn:
-            conn.executescript(_SCHEMA)
+        self._path = Path(knowledge_base.db_path)
+        self._import_old_runs_db()
         self._import_legacy_json()
 
     @property
@@ -448,9 +431,11 @@ class ExecutionMonitor:
         return record
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(str(self._path), timeout=10)
+        # mode=rw: never create the database; the daemon owns it.
+        conn = sqlite3.connect(
+            f"{self._path.resolve().as_uri()}?mode=rw", uri=True, timeout=10,
+        )
         conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
         return conn
 
     def _save(self, record: ExecutionRecord) -> None:
@@ -491,13 +476,36 @@ class ExecutionMonitor:
             metadata=json.loads(row["metadata_json"]) if row["metadata_json"] else None,
         )
 
+    def _import_old_runs_db(self) -> None:
+        """Move runs from ``observations/runs.db`` (where development
+        builds of v0.5 kept them) into the database, once: the file is
+        renamed to ``runs.db.imported`` afterwards.  A run already in the
+        table keeps its row."""
+        old = Path(self._kb.root) / _OLD_RUNS_DB
+        if not old.is_file():
+            return
+        try:
+            with closing(self._connect()) as conn, conn:
+                conn.execute("ATTACH DATABASE ? AS old", (f"{old.resolve().as_uri()}?mode=ro",))
+                imported = conn.execute(
+                    "INSERT OR IGNORE INTO runs SELECT execution_id, procedure_slug, "
+                    "agent_id, status, started_at, completed_at, error, steps_json, "
+                    "deviations_json, outcomes_json, metadata_json FROM old.runs"
+                ).rowcount
+            # The connection is closed (DETACH is implicit), so the file can move.
+        except sqlite3.Error as exc:
+            logger.warning("Could not import %s: %s", old, exc)
+            return
+        old.rename(old.with_name(old.name + ".imported"))
+        logger.info("Imported %d run(s) from %s", imported, old)
+
     def _import_legacy_json(self) -> None:
         """Move runs from v0.4's ``executions.json`` into the table, once.
 
         The file is renamed to ``executions.json.imported`` afterwards so
         the import never repeats and nothing is deleted.
         """
-        legacy = self._path.parent / _LEGACY_JSON
+        legacy = Path(self._kb.root) / "observations" / _LEGACY_JSON
         if not legacy.is_file():
             return
         try:

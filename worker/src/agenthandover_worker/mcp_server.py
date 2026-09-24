@@ -75,7 +75,7 @@ def build_mcp_server():
     def _kb():
         if "kb" not in _state:
             from agenthandover_worker.knowledge_base import KnowledgeBase
-            _state["kb"] = KnowledgeBase(root=_get_kb_root())
+            _state["kb"] = KnowledgeBase(root=_get_kb_root(), db_path=_get_db_path())
         return _state["kb"]
 
     def _vector_kb():

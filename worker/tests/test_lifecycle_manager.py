@@ -23,6 +23,7 @@ from agenthandover_worker.lifecycle_manager import (
     ProcedureLifecycle,
 )
 from agenthandover_worker.procedure_schema import sop_to_procedure
+from daemon_db import kb_db
 
 
 # ---------------------------------------------------------------------------
@@ -31,7 +32,7 @@ from agenthandover_worker.procedure_schema import sop_to_procedure
 
 @pytest.fixture
 def kb(tmp_path):
-    kb = KnowledgeBase(root=tmp_path)
+    kb = KnowledgeBase(root=tmp_path, db_path=kb_db(tmp_path))
     kb.ensure_structure()
     return kb
 
