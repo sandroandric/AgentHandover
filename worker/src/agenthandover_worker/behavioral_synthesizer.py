@@ -614,7 +614,14 @@ class BehavioralSynthesizer:
             constraints["guardrails"] = merged
             proc["constraints"] = constraints
         if insights.decision_branches:
-            proc["branches"] = insights.decision_branches
+            # The branches the divergence miner promoted rest on agreeing
+            # runs (``branch_mining``, ``source: "divergence"``) and stay;
+            # the synthesis's branches replace only an earlier synthesis's.
+            mined = [
+                b for b in proc.get("branches") or []
+                if isinstance(b, dict) and b.get("source") == "divergence"
+            ]
+            proc["branches"] = mined + list(insights.decision_branches)
         if insights.timing:
             proc["workflow_rhythm"] = insights.timing
         if insights.confidence > 0:

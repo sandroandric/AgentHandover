@@ -518,6 +518,24 @@ class TestMergeInsights:
         assert "last_synthesized" not in updated
         assert "_obs_at_last_synthesis" not in updated
 
+    def test_a_synthesis_keeps_the_branches_agreeing_runs_made(self):
+        """The synthesis ran after the divergence miner promoted the
+        paywall branch and replaced it with its own (J-ledger's recorded
+        runs): its branches now replace only an earlier synthesis's."""
+        synth = BehavioralSynthesizer()
+        mined = {"source": "divergence", "kind": "detour", "step_index": 1,
+                 "condition": 'the screen shows "Subscribe to continue reading"'}
+        before = {"id": "hn", "steps": [],
+                  "branches": [{"condition": "an earlier synthesis's"}, mined]}
+        insights = BehavioralInsights(goal="Share the news",
+                                      decision_branches=[{"condition": "a new one"}])
+        proc = synth.merge_insights_into_procedure(before, insights)
+        assert proc["branches"] == [mined, {"condition": "a new one"}]
+        assert before["branches"][1] is mined  # the input is not mutated
+        # No branches from the synthesis: the procedure's stay as they are.
+        kept = synth.merge_insights_into_procedure(before, BehavioralInsights(goal="g"))
+        assert kept["branches"] == before["branches"]
+
     def test_merge_sets_last_synthesized_on_goal_only(self):
         """A goal alone is enough to consider synthesis successful."""
         synth = BehavioralSynthesizer()
