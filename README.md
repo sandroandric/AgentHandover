@@ -154,7 +154,7 @@ An approved Skill that fails a check is listed by `list_ready_skills` as held ba
 
 Everything AgentHandover learns lives in a local knowledge base on your machine. It's not a flat list of files -- it's an active intelligence layer that gets smarter the more you work.
 
-**Knowledge ledger** -- Every Skill tracks what it knows: each slot (goal, steps, done criteria, trigger, decisions, verification, inputs, exceptions, guardrails, voice, context) is *known*, a *hypothesis*, or *unknown*, with pointers to the frames, answers or agent runs behind it. Questions come from the unknowns, within a budget of 5 a week (`weekly_question_budget`), and no model writes them.
+**Knowledge ledger** -- Every Skill tracks what it knows: each slot (goal, steps, done criteria, trigger, decisions, verification, inputs, exceptions, guardrails, voice, context) is *known*, a *hypothesis*, or *unknown*, with pointers to the frames, answers or agent runs behind it. Questions come from the gaps (unknown or guessed slots, and steps the recording didn't settle), within a budget of 5 a week (`weekly_question_budget`), and no model writes them.
 
 **Vector store** -- Every observation is embedded (nomic-embed-text, 768d) so the system finds similar workflows by meaning, deduplicates Skills that describe the same task differently, and links activity across sessions. Optional image embeddings (SigLIP, 1152d) capture what your screen looked like.
 
