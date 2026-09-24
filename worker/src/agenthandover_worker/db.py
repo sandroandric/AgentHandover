@@ -595,6 +595,19 @@ class WorkerDB:
             })
         return clicks
 
+    def get_events_between(self, start: datetime, end: datetime) -> list[dict]:
+        """Every event row of any kind from *start* to *end* (inclusive),
+        in time order: what happened around one observed run (its lead-in,
+        its commit, the checks after it).  Compared as stored text, so the
+        timestamp index serves the range."""
+        self._refresh_read_snapshot()
+        cur = self._conn.execute(
+            "SELECT * FROM events WHERE timestamp >= ? AND timestamp <= ? "
+            "ORDER BY timestamp ASC",
+            (_sqlite_utc(start), _sqlite_utc(end)),
+        )
+        return self._rows_to_dicts(cur.fetchall())
+
     def get_shell_commands(self, start: str, end: str) -> list[dict]:
         """Commands the opt-in shell hook recorded between *start* and *end*
         (inclusive), in time order: dicts with event_id, timestamp, cwd and

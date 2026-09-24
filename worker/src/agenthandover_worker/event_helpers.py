@@ -151,6 +151,17 @@ def parse_json_field(event: dict, key: str) -> dict:
     return value if isinstance(value, dict) else {}
 
 
+def is_own_event(event: dict) -> bool:
+    """Whether *event* comes from AgentHandover's own UI (its app, setup or
+    review windows): its ``window_json`` app id (``pid:<pid>:<owner>`` or a
+    bundle id) or window title names AgentHandover.  Never part of a user's
+    task."""
+    window = parse_json_field(event, "window_json")
+    return any(
+        "agenthandover" in str(window.get(key, "")).lower() for key in ("app_id", "title")
+    )
+
+
 # Bundle id -> display name.  The first block mirrors the daemon's
 # AppleScript-queryable apps (``KNOWN_APPS`` in
 # ``crates/daemon/src/platform/applescript_bridge.rs``); the rest are common

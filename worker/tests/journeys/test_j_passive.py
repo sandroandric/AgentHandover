@@ -43,6 +43,10 @@ def test_three_weeks_discover_exactly_the_two_planted_routines(
     proc = journey.knowledge_base.get_procedure(weekly["slug"])
     assert proc["recurrence"]["pattern"] == "weekly"
     assert proc["recurrence"]["weekday"] == weekly["local_weekday"]
+    # WP-L3: its lead-in varies, so its trigger is the local clock the runs
+    # share (model-free pin: test_workflow_observations.py).
+    assert proc["knowledge"]["trigger"]["status"] == "hypothesis"
+    assert proc["learned"]["trigger"]["weekday"] == weekly["local_weekday"]
     for p in candidates:
         assert p["evidence"]["total_observations"] >= 3
         assert any(s.get("location", "").startswith("http") for s in p["steps"])

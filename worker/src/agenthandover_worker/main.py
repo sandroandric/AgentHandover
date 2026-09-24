@@ -22,6 +22,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from agenthandover_worker import run_signals
 from agenthandover_worker import trigger_spool
 from agenthandover_worker import workflow_mining
 from agenthandover_worker.clipboard_linker import ClipboardLinker
@@ -1804,10 +1805,12 @@ def _process_focus_sessions_v2(
                     procedure_dict, existing_proc, keep_lifecycle=False,
                 )
         # This recording is one instance of the procedure: the ledger's
-        # evidence for what was learned from it.
+        # evidence for what was learned from it, with what its surrounding
+        # events showed (lead-in, commit, checks, corrections).
         append_observation(procedure_dict, ObservationEvidence(
             date=str(focus_events[0].get("timestamp") or "")[:10], type="focus",
             duration_minutes=0, session_id=session_id, event_count=len(focus_events),
+            signals=run_signals.run_signals_from_db(db, focus_events),
         ), once_per_session=True)
         # Save the draft now: synthesis and Q&A only enrich it, and a
         # restart before they finish must not lose the generated SOP.
@@ -4388,13 +4391,7 @@ def main(argv: list[str] | None = None) -> None:
     try:
         _pz_raw = cfg.privacy_zones
         if _pz_raw:
-            _pz_cfg = PrivacyZoneConfig(
-                full_observation=_pz_raw.get("full_observation", []),
-                metadata_only=_pz_raw.get("metadata_only", []),
-                blocked=_pz_raw.get("blocked", []),
-                blocked_urls=_pz_raw.get("blocked_urls", []),
-                auto_pause=_pz_raw.get("auto_pause", []),
-            )
+            _pz_cfg = PrivacyZoneConfig.from_zones(_pz_raw)
             logger.info(
                 "Privacy zones loaded: %d blocked, %d metadata_only, %d blocked_urls",
                 len(_pz_cfg.blocked), len(_pz_cfg.metadata_only), len(_pz_cfg.blocked_urls),

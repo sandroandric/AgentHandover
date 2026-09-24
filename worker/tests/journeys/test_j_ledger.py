@@ -47,6 +47,11 @@ def test_three_runs_fill_the_ledger_with_evidence(
     # The diverging run adds a branch (WP-L3).
     [branch] = proc["branches"]
     assert branch["condition"]
+    # What starts the routine and how the user checks it recur across the
+    # three runs (WP-L3; unit pins in test_run_signals.py).
+    for slot in ("trigger", "verification"):
+        assert knowledge[slot]["status"] == "hypothesis"
+        assert len({e["id"] for e in knowledge[slot]["evidence"] if e["kind"] == "instance"}) == 3
     # The micro-question was skipped (WP-L4): no slot claims a user answer.
     assert not any(
         e["kind"] == "answer" for entry in knowledge.values() for e in entry["evidence"]

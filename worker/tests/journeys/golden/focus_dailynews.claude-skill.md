@@ -144,6 +144,7 @@ Steps refer to inputs as `{{name}}`.
 
 ## Success criteria
 
+- Done when "Send now" is clicked on app.slack.com/client/T0EXAMPLE/C0DAILYNEWS (observed in 1 of 1 runs)
 - The note in the Notes app contains all three articles with their summaries.
 - The message in the Slack channel contains the same content as the note.
 - The user successfully navigated from Hacker News to Notes to Slack without errors.

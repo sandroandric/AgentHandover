@@ -40,10 +40,17 @@ Who writes what:
   user typed makes its slot ``known`` and wins over everything else; the
   model's guess submitted unchanged (``source: "accepted_guess"``) makes
   it a ``hypothesis`` unless the slot is already known.
+- ``trigger``, ``done_criteria`` and ``verification`` are also derived
+  from what the runs' own events showed: :func:`refresh_knowledge` first
+  recomputes ``proc["learned"]`` (``run_signals.learn``: a recurring
+  lead-in or start time, the commit that ends the runs, the checks after
+  it and the fields the user corrected), and each learned item becomes a
+  ``hypothesis`` (``source="observation"``) whose evidence is the
+  ``instance`` pointers of the runs it was seen in.
 - ``contrast`` / ``divergence`` / ``agent`` entries are written by the
-  learners that produce them (chosen-versus-visible contrast, lead-in and
-  divergence analysis, agent runs) through :func:`set_slot`.  The
-  derivation keeps them as they are until their writer changes them.
+  learners that produce them (chosen-versus-visible contrast, divergence
+  analysis, agent runs) through :func:`set_slot`.  The derivation keeps
+  them as they are until their writer changes them.
 
 Rules the derivation follows (see :func:`_observed`):
 
@@ -63,6 +70,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+
+from agenthandover_worker.run_signals import learn
 
 # ---------------------------------------------------------------------------
 # Schema
@@ -218,13 +227,34 @@ def _observed(proc: dict, slot: str) -> dict:
         if isinstance(goal, str) and goal.strip().lower().startswith("unclear"):
             return _unknown()
         return hypothesis(_first_filled(proc, ("goal", "task_description")))
+    # What the runs' own events showed (``run_signals.learn``): read, not
+    # inferred, but seen in some runs only, so a hypothesis until the user
+    # confirms it.  It rests on the runs it was seen in.
+    learned = proc.get("learned") if isinstance(proc.get("learned"), dict) else {}
+
+    def from_runs(name: str, ref: str, frames: list[str]) -> dict | None:
+        item = learned.get(name)
+        if not isinstance(item, dict) or not item.get("instances"):
+            return None
+        evidence = [{"kind": "instance", "id": str(i)} for i in item["instances"]]
+        evidence += [{"kind": "frame", "id": str(f)} for f in frames if f]
+        return _entry("hypothesis", ref, _dedup(evidence), "observation")
+
     if slot == "done_criteria":
-        return hypothesis(_first_filled(proc, (
-            "outcome", "expected_outcomes", "execution_overview.success_criteria",
-            "postconditions", "outputs",
-        )))
+        done = learned.get("done") if isinstance(learned.get("done"), dict) else {}
+        return from_runs("done", "learned.done", done.get("event_ids") or []) or hypothesis(
+            _first_filled(proc, (
+                "outcome", "expected_outcomes", "execution_overview.success_criteria",
+                "postconditions", "outputs",
+            ))
+        )
     if slot == "trigger":
-        return hypothesis(_first_filled(proc, ("recurrence.pattern",)))
+        trigger = learned.get("trigger") if isinstance(learned.get("trigger"), dict) else {}
+        # A calendar event seen before the runs is the trigger's value.
+        ref = "learned.trigger.calendar_event" if trigger.get("calendar_event") else "learned.trigger"
+        return from_runs("trigger", ref, []) or hypothesis(
+            _first_filled(proc, ("recurrence.pattern",))
+        )
     if slot == "inputs":
         ref = _first_filled(proc, ("inputs",))
         if ref and len(instances) >= 2:
@@ -239,6 +269,14 @@ def _observed(proc: dict, slot: str) -> dict:
     if slot == "guardrails":
         return hypothesis(_first_filled(proc, ("constraints.guardrails",)))
     if slot == "verification":
+        checks = learned.get("verification") if isinstance(learned.get("verification"), dict) else {}
+        corrected = [
+            f for c in checks.get("corrections") or [] if isinstance(c, dict)
+            for f in c.get("event_ids") or []
+        ]
+        entry = from_runs("verification", "learned.verification", corrected)
+        if entry is not None:
+            return entry
         outcomes = proc.get("expected_outcomes") or []
         for i, outcome in enumerate(outcomes):
             if isinstance(outcome, dict) and outcome.get("verification"):
@@ -325,7 +363,10 @@ def derive_knowledge(proc: dict) -> dict[str, dict]:
 
 
 def refresh_knowledge(proc: dict) -> dict[str, dict]:
-    """Recompute ``proc["knowledge"]`` in place and return it."""
+    """Recompute what the runs taught (``proc["learned"]``,
+    :func:`run_signals.learn`) and ``proc["knowledge"]`` in place, and
+    return the ledger."""
+    learn(proc)
     proc["knowledge"] = derive_knowledge(proc)
     return proc["knowledge"]
 

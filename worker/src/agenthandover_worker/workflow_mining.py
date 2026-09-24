@@ -30,13 +30,14 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import re
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
+from agenthandover_worker import run_signals
+from agenthandover_worker.dom import host_or_doc, template_path  # noqa: F401 (re-exported)
 from agenthandover_worker.evidence_extractor import EvidenceExtractor
 from agenthandover_worker.pattern_detector import OBSERVATION_WINDOW_DAYS, PatternDetector
 from agenthandover_worker.scene_annotator import as_compact
@@ -74,50 +75,9 @@ UNPROMOTED_TTL_DAYS = 2 * OBSERVATION_WINDOW_DAYS
 # worker_state key: UTC time up to which every finished session is recorded.
 DISTILLED_STATE_KEY = "observations_distilled_through"
 
-# A path segment that names one record rather than a place: numbers,
-# UUIDs, hex ids, prefixed object ids (``po_1Q...``, ``cus_9...``) and short
-# prefixed numbers (``R0012345``, ``INV-2044``).  Long opaque keys without
-# such a shape (a Google Doc id, a Slack channel id) name the document or
-# channel itself and stay: editing two different documents is two tasks.
-_ID_SEGMENT = re.compile(
-    r"""^(?:
-        \d+
-      | [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}
-      | (?=[0-9a-f]*\d)[0-9a-f]{8,}
-      | [a-z]{2,6}_(?=[a-z0-9]*\d)[a-z0-9]{8,}
-      | [a-z]{0,3}[-_]?\d{3,}
-    )$""",
-    re.X | re.I,
-)
-# An issue key (Jira ``PROJ-101``, Linear ``ENG-42``): an upper-case project
-# key of any length, a dash, a number.  Case-sensitive, so a slug such as
-# ``release-2024`` still names its page.
-_ISSUE_KEY = re.compile(r"^[A-Z][A-Z0-9]{1,9}-\d+$")
-
-
 # ---------------------------------------------------------------------------
 # Step signatures and keys
 # ---------------------------------------------------------------------------
-
-
-def template_path(path: str) -> str:
-    """*path* with record ids replaced by ``{id}``."""
-    return "/".join(
-        "{id}" if seg and (_ID_SEGMENT.match(seg) or _ISSUE_KEY.match(seg)) else seg
-        for seg in path.split("/")
-    )
-
-
-def host_or_doc(location: str) -> str:
-    """Where a step happened: ``host/templated/path`` for a URL (no scheme,
-    query or fragment, no ``www.``), else the templated location itself
-    (a file path, an app's document)."""
-    location = (location or "").strip()
-    if location.startswith(("http://", "https://")):
-        parts = urlsplit(location)
-        host = (parts.hostname or "").lower().removeprefix("www.")
-        return (host + template_path(parts.path.rstrip("/")))[:200]
-    return template_path(location)[:200]
 
 
 def action_verb(annotation: dict) -> str:
@@ -228,9 +188,12 @@ def observation_id(session: list[AnnotatedFrame]) -> str:
 
 def build_observation(
     session: list[AnnotatedFrame], events: list[dict], task_label: str = "",
+    signals: dict | None = None,
 ) -> dict:
     """The ``workflow_observations`` row of a finished *session* (its raw
-    *events* feed the evidence extracted into ``evidence_json``)."""
+    *events* feed the evidence extracted into ``evidence_json``, with the
+    run's *signals*: lead-in, commit, checks, corrections, from
+    ``run_signals``)."""
     steps = collapse([step_signature(f) for f in session])
     started = _parse(session[0].timestamp)
     local = started.astimezone()
@@ -247,6 +210,9 @@ def build_observation(
     if not task_label:
         labels = Counter(f.what_doing for f in session if f.what_doing)
         task_label = labels.most_common(1)[0][0] if labels else ""
+    evidence = EvidenceExtractor.extract_evidence(events)
+    if signals is not None:
+        evidence["signals"] = signals
     return {
         "obs_id": observation_id(session),
         "workflow_key": workflow_key(steps),
@@ -258,7 +224,7 @@ def build_observation(
         "apps_json": json.dumps(apps),
         "hosts_json": json.dumps(hosts),
         "step_sig_json": json.dumps([list(s) for s in steps]),
-        "evidence_json": json.dumps(EvidenceExtractor.extract_evidence(events), default=str),
+        "evidence_json": json.dumps(evidence, default=str),
         "source": "passive",
         "task_label": task_label,
         "event_ids_json": json.dumps([f.event_id for f in session]),
@@ -306,7 +272,10 @@ def record_observations(
             continue  # part of an observation already recorded
         seg_labels = Counter(labels[f.event_id] for f in session if labels.get(f.event_id))
         label = seg_labels.most_common(1)[0][0] if seg_labels else ""
-        obs = build_observation(session, [by_id[f.event_id] for f in session], label)
+        signals = run_signals.signals_from_db(
+            db, _parse(session[0].timestamp), _parse(session[-1].timestamp),
+        )
+        obs = build_observation(session, [by_id[f.event_id] for f in session], label, signals)
         if db.save_workflow_observation(obs):
             recorded += 1
     db.set_state(
@@ -427,13 +396,23 @@ class Candidate:
 
 
 def observation_pointers(observations: list[dict]) -> list[dict]:
-    """A draft's evidence pointers into the observation log."""
-    return [
-        {"obs_id": o["obs_id"], "timestamp": o["started_utc"],
-         "date": o["started_local_date"], "duration_s": o["duration_s"],
-         "source": "passive"}
-        for o in observations
-    ]
+    """A draft's evidence pointers into the observation log, each with the
+    run's signals (``run_signals``) when the row carries them."""
+    pointers = []
+    for o in observations:
+        pointer = {
+            "obs_id": o["obs_id"], "timestamp": o["started_utc"],
+            "date": o["started_local_date"], "duration_s": o["duration_s"],
+            "source": "passive",
+        }
+        try:
+            signals = json.loads(o.get("evidence_json") or "{}").get("signals")
+        except (TypeError, ValueError, AttributeError):
+            signals = None
+        if isinstance(signals, dict):
+            pointer["signals"] = signals
+        pointers.append(pointer)
+    return pointers
 
 
 @dataclass
