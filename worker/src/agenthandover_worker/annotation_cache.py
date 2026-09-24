@@ -106,21 +106,6 @@ class AnnotationCache:
         # (inference_runner).
         self._conn = sqlite3.connect(str(db_path), check_same_thread=False)
         self._conn.execute("PRAGMA busy_timeout = 5000;")
-        self._conn.execute(
-            "CREATE TABLE IF NOT EXISTS annotation_cache ("
-            "  app             TEXT NOT NULL,"
-            "  title_hash      TEXT NOT NULL,"
-            "  ocr_simhash     INTEGER NOT NULL,"
-            "  annotation_json TEXT NOT NULL,"
-            "  used_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),"
-            "  PRIMARY KEY (app, title_hash, ocr_simhash)"
-            ")"
-        )
-        self._conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_annotation_cache_used "
-            "ON annotation_cache(used_at)"
-        )
-        self._conn.commit()
 
     def lookup(self, key: CacheKey) -> dict | None:
         """The cached annotation for *key*, or None (also when the database

@@ -185,57 +185,21 @@ class VectorKB:
         self._conn = sqlite3.connect(self._db_path, check_same_thread=False)
         self._conn.execute("PRAGMA busy_timeout = 5000;")
         self._conn.execute("PRAGMA journal_mode = WAL;")
-        self._ensure_table()
+        self._quantize_old_rows()
         self._cycle_embed_count = 0
         # Search index: vector id -> _Row, and the newest updated_at read.
         self._index: dict[str, _Row] | None = None
         self._index_mark = ""
 
     # ------------------------------------------------------------------
-    # Schema
+    # Rows from v0.4
     # ------------------------------------------------------------------
 
-    def _ensure_table(self) -> None:
-        self._conn.execute(
-            "CREATE TABLE IF NOT EXISTS vector_store ("
-            "  id          TEXT PRIMARY KEY,"
-            "  source_type TEXT NOT NULL,"
-            "  source_id   TEXT NOT NULL,"
-            "  embedding   BLOB NOT NULL,"
-            "  model       TEXT NOT NULL,"
-            "  dim         INTEGER NOT NULL,"
-            "  text_hash   TEXT NOT NULL,"
-            "  prefix      TEXT NOT NULL DEFAULT '',"
-            "  created_at  TEXT NOT NULL DEFAULT "
-            "    (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),"
-            "  updated_at  TEXT NOT NULL DEFAULT "
-            "    (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),"
-            "  qvec        BLOB,"
-            "  qscale      REAL"
-            ")"
-        )
-        columns = {
-            row[1] for row in self._conn.execute("PRAGMA table_info(vector_store)")
-        }
-        for name, decl in (
-            ("qvec", "BLOB"),
-            ("qscale", "REAL"),
-            # Rows written before prefixes were recorded were embedded
-            # without one; '' makes them stale for every current prefix,
-            # so they re-embed on their next upsert.
-            ("prefix", "TEXT NOT NULL DEFAULT ''"),
-        ):
-            if name not in columns:
-                self._conn.execute(f"ALTER TABLE vector_store ADD COLUMN {name} {decl}")
-        self._conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_vs_source "
-            "ON vector_store(source_type, source_id)"
-        )
-        self._conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_vs_updated ON vector_store(updated_at)"
-        )
-        # Rows written before vectors were stored normalised with their
-        # 8-bit copy: convert them once.
+    def _quantize_old_rows(self) -> None:
+        """Rows written before vectors were stored normalised with their
+        8-bit copy (``qvec`` NULL, as v0.4 left them): convert them once.
+        The table itself is the daemon's (``vector_store``, migration v006).
+        """
         stale = self._conn.execute(
             "SELECT id, embedding, dim FROM vector_store WHERE qvec IS NULL"
         ).fetchall()

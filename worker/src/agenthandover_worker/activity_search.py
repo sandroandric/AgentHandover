@@ -434,40 +434,17 @@ class ActivitySearcher:
     # ------------------------------------------------------------------
 
     def _ensure_fts_index(self) -> None:
-        """Create the FTS5 table and its ``events_fts_ids`` shadow if missing.
+        """Index the annotated events not in ``events_fts`` yet, once per
+        instance (later calls index incrementally where they need to).
 
-        ``events_fts_ids`` maps each indexed event id to its FTS rowid, so
-        finding unindexed events is a primary-key lookup per event rather
-        than a scan of the FTS table, and pruning deletes by rowid.
-        Called lazily on the first ``search()`` or ``session_recall()``
-        invocation.
+        ``events_fts`` and its ``events_fts_ids`` shadow (each indexed
+        event id -> its FTS rowid, so finding unindexed events is a
+        primary-key lookup per event and pruning deletes by rowid) are
+        the daemon's tables (migration v006).  Called lazily on the first
+        ``search()`` or ``session_recall()`` invocation.
         """
         if self._fts_ready:
             return
-
-        try:
-            self._conn.execute(
-                "CREATE VIRTUAL TABLE IF NOT EXISTS events_fts "
-                "USING fts5(event_id, what_doing, app, location)"
-            )
-            self._conn.execute(
-                "CREATE TABLE IF NOT EXISTS events_fts_ids ("
-                "  event_id TEXT PRIMARY KEY,"
-                "  fts_rowid INTEGER NOT NULL"
-                ")"
-            )
-            # An index built before the shadow table existed: record its rows.
-            self._conn.execute(
-                "INSERT OR IGNORE INTO events_fts_ids (event_id, fts_rowid) "
-                "SELECT event_id, rowid FROM events_fts "
-                "WHERE NOT EXISTS (SELECT 1 FROM events_fts_ids LIMIT 1)"
-            )
-            self._conn.commit()
-        except sqlite3.OperationalError as exc:
-            logger.error("Failed to create FTS5 table: %s", exc)
-            self._fts_ready = True  # Don't retry on every call.
-            return
-
         self._populate_fts_index()
         self._fts_ready = True
 
