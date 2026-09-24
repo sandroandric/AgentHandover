@@ -184,16 +184,19 @@ class TestMergeWithEvidence:
         assert "Download file" in all_actions
 
     def test_partial_match(self):
-        """Some steps match, some are new — both handled correctly."""
+        """A step done differently at the same position is recorded as an
+        alternative of that step, not appended as a new step."""
         normalizer = EvidenceNormalizer(variant_detector=VariantDetector())
         proc = self._base_proc()
         new_obs = [_step("Open browser"), _step("Upload document")]
 
         merged = normalizer.merge_with_evidence(proc, new_obs)
 
-        all_actions = [s.get("action", "") for s in merged["steps"]]
-        assert "Open browser" in all_actions
-        assert "Upload document" in all_actions
+        steps = merged["steps"]
+        assert [s["action"] for s in steps] == ["Open browser", "Click search"]
+        assert [s["observation_count"] for s in steps] == [3, 2]
+        assert [s["support"] for s in steps] == [1.0, 2 / 3]
+        assert [a["action"] for a in steps[1]["alternatives"]] == ["Upload document"]
         assert merged["evidence"]["total_observations"] == 3
 
     def test_backward_compat(self):
@@ -208,8 +211,10 @@ class TestMergeWithEvidence:
 
         merged = normalizer.merge_with_evidence(proc, new_obs)
 
+        # The legacy procedure's steps are one observation; the new one
+        # makes two.
         assert "evidence" in merged
-        assert merged["evidence"]["total_observations"] == 1
+        assert merged["evidence"]["total_observations"] == 2
 
     def test_preserves_evidence(self):
         """Existing evidence section is not overwritten, only extended."""
@@ -570,3 +575,82 @@ class TestRealDetectorAlignment:
         normalizer = EvidenceNormalizer(variant_detector=_Broken())  # type: ignore[arg-type]
         with pytest.raises(AttributeError):
             normalizer.normalize("broken", [[_step("a")], [_step("a")]])
+
+
+class TestMergeSupport:
+    """Three instances of the focus_dailynews Skill (v3 steps as
+    ``sop_to_procedure`` writes them, worded as in the golden Skill) merged
+    one at a time: every step carries ``support = seen_in / instances`` and
+    the step one instance did differently carries that instance's step as
+    its one alternative."""
+
+    NOTES = {"step": "Open the Notes app and create a new note",
+             "parameters": {"app": "Notes"}}
+    TEXTEDIT = {"step": "Open TextEdit and create a new document",
+                "parameters": {"app": "TextEdit", "input": "{{summary_text}}"}}
+
+    @staticmethod
+    def _instance(notes_step: dict) -> list[dict]:
+        sop = {
+            "slug": "daily-news-digest",
+            "steps": [
+                {"step": "Navigate to the Hacker News homepage",
+                 "parameters": {"app": "Google Chrome",
+                                "location": "https://news.ycombinator.com/"}},
+                {"step": "Copy the article title and URL",
+                 "parameters": {"app": "Google Chrome",
+                                "location": "https://blog.example.org/sqlite-wal-explained"}},
+                notes_step,
+                {"step": "Paste the digest into the #daily-news message box",
+                 "parameters": {"app": "Slack"}},
+            ],
+        }
+        return sop_to_procedure(sop)["steps"]
+
+    def test_three_instances_give_support_and_one_alternative(self):
+        detector = _SpyDetector()
+        normalizer = EvidenceNormalizer(variant_detector=detector)
+        first = {"id": "daily-news-digest", "schema_version": "3.0.0",
+                 "steps": self._instance(self.NOTES)}
+
+        merged = normalizer.merge_with_evidence(first, self._instance(self.NOTES))
+        merged = normalizer.merge_with_evidence(merged, self._instance(self.TEXTEDIT))
+
+        assert detector.calls == 2
+        assert merged["evidence"]["total_observations"] == 3
+        steps = merged["steps"]
+        # Order and ids are the procedure's: nothing appended at the end.
+        assert [s["step_id"] for s in steps] == ["step_1", "step_2", "step_3", "step_4"]
+        assert [s["support"] for s in steps] == [1.0, 1.0, 2 / 3, 1.0]
+        notes = steps[2]
+        assert notes["action"] == "Open the Notes app and create a new note"
+        assert notes["alternatives"] == [{
+            "action": "Open TextEdit and create a new document",
+            "app": "TextEdit",
+            "target": "",
+            "location": "",
+            "observed_count": 1,
+            "parameters": {"app": "TextEdit", "input": "{{summary_text}}"},
+        }]
+        assert all("alternatives" not in s for i, s in enumerate(steps) if i != 2)
+        # The input procedure is not mutated.
+        assert "support" not in first["steps"][0]
+
+    def test_inserted_step_gets_a_free_step_id(self):
+        """A step only the new instance has is appended with an id no other
+        step uses (the instance's own ``step_2`` would collide)."""
+        normalizer = EvidenceNormalizer(variant_detector=VariantDetector())
+        first = {"id": "daily-news-digest", "steps": self._instance(self.NOTES)}
+        extra = self._instance(self.NOTES)
+        extra.insert(1, {"step_id": "step_2", "action": "Log in to Hacker News",
+                         "app": "Safari", "location": "https://example.com/login"})
+
+        merged = normalizer.merge_with_evidence(first, extra)
+
+        ids = [s["step_id"] for s in merged["steps"]]
+        assert len(ids) == len(set(ids)) == 5
+        inserted = merged["steps"][-1]
+        assert inserted["action"] == "Log in to Hacker News"
+        assert inserted["step_id"] == "step_5"
+        assert inserted["_variant"] is True
+        assert inserted["support"] == 1 / 2

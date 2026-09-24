@@ -456,8 +456,13 @@ def _merge_steps_with_evidence(
     evidence_normalizer,
     existing_steps: list[dict],
     new_steps: list[dict],
+    existing_observations: int,
 ) -> list[dict]:
     """Merge two template step lists through ``merge_with_evidence``.
+
+    *existing_observations* is how many instances the existing steps were
+    built from (the template's ``episode_count``), so each merged step's
+    ``support`` is its count over all instances including the new one.
 
     The normalizer aligns steps by their ``action``, ``app`` and
     ``location`` keys (the v3 procedure shape).  Template steps carry the
@@ -482,7 +487,10 @@ def _merge_steps_with_evidence(
         return view
 
     merged_view = evidence_normalizer.merge_with_evidence(
-        {"steps": [as_procedure_step(s) for s in existing_steps]},
+        {
+            "steps": [as_procedure_step(s) for s in existing_steps],
+            "evidence": {"total_observations": existing_observations},
+        },
         [as_procedure_step(s) for s in new_steps],
     )
 
@@ -595,6 +603,7 @@ def merge_sops(
         try:
             evidence_steps = _merge_steps_with_evidence(
                 evidence_normalizer, existing_steps, new_steps,
+                existing.get("episode_count") or 1,
             )
         except Exception:
             logger.debug("Evidence-based merge failed, using default", exc_info=True)
