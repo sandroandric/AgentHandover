@@ -3,8 +3,8 @@
 The runs are the daily-news fixtures (``record/generate_focus_dailynews.py``):
 J-focus's recording, a morning that leaves a story out (a video with no
 transcript), and two mornings that take the same detour (a paywalled story
-read through an archive).  A micro-question is skipped through the app's
-answer file.  The ledger's schema (``proc["knowledge"]``, see
+read through an archive).  WP-L4's micro-question is to be skipped
+through the app's answer file.  The ledger's schema (``proc["knowledge"]``, see
 ``agenthandover_worker/ledger.py``) landed with WP-L1, the learners with
 WP-L2 (contrast), WP-L3 (run signals) and WP-M5 (divergence branches).
 
