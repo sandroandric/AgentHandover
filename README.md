@@ -1,7 +1,7 @@
 <p align="center">
   <sub>Created by Sandro Andric</sub>
   <br/>
-  <a href="https://www.sandric.co/"><img src="resources/sandric-wordmark.png" width="120" alt="sandric — Product Studio by Sandro Andric" /></a>
+  <a href="https://bysandro.com/"><img src="resources/bysandro-logo.svg" width="64" alt="BySandro — Sandro Andrić" /></a>
 </p>
 
 <p align="center">
@@ -576,12 +576,6 @@ The Discord is where the community actually talks in real time:
 
 GitHub [Discussions](https://github.com/sandroandric/AgentHandover/discussions) and [Issues](https://github.com/sandroandric/AgentHandover/issues) are still the right home for anything that should be public and searchable long-term — bug reports with reproductions, feature proposals, design discussions. Discord is for the ephemeral stuff in between.
 
-## Sponsor
-
-[![MyClaw.ai — Your OpenClaw Agent, Always On.](https://raw.githubusercontent.com/LeoYeAI/myclaw-sponsor-preview/main/banner.svg)](https://myclaw.ai?utm_source=github&utm_campaign=awesome-openclaw-skills)
-
-**[MyClaw.ai](https://myclaw.ai?utm_source=github&utm_campaign=awesome-openclaw-skills)** · Run all these skills without managing a server. Get a full cloud-hosted OpenClaw instance with one-click setup, 24/7 uptime, and complete data ownership. [Get started now →](https://myclaw.ai?utm_source=github&utm_campaign=awesome-openclaw-skills)
-
 ## Contact
 
 [sandro@sandric.co](mailto:sandro@sandric.co)
@@ -590,20 +584,23 @@ GitHub [Discussions](https://github.com/sandroandric/AgentHandover/discussions) 
 
 ### v0.5.0
 
-The release where the product does what this README says. Numbers are single measurements on a 16 GB test Mac (Ollama 0.34.2) unless stated.
+The biggest release since the first one, and the one where the product does what this README says. Skills are built from what was actually recorded, a recording turns into a Skill and its questions in minutes instead of most of an hour, everything runs on your Mac, and it stays light enough to leave on all day. Numbers are single measurements on a 16 GB test Mac (Ollama 0.34.2) unless stated.
 
 - **Right-sized models.** The 16 GB tier runs Qwen 3.5 4B for everything, and 8 GB Macs annotate with Qwen 3.5 2B (see [AI Models](#ai-models) for the head-to-head). On the same kind of focus session, Stop to questions went from 50 minutes with Gemma 4 12B (v0.4.0's 16 GB default) to ~2.5 minutes (later sessions took 3.5 and 5); the Skill was written in 60 s instead of 549 s.
 - **Memory-aware scheduling.** Where a tier has two models the worker loads one at a time, checks memory, swap and disk first, and defers instead of pushing the Mac into swap. Model work runs on one inference thread in priority order, so the app stays responsive during long calls.
 - **Event-driven capture.** Frames when something happens, of the focused window at one pixel per point (a 1324×940 pt Safari window is captured at 1324×940 px). Unchanged screens skip OCR and the model.
 - **Text-first annotation.** A small model reads OCR and page elements (~2.2 s a frame) and looks at the image only when needed; a cache answers screens already seen. On a recorded busy hour: 1,190 cache hits and 10 model calls instead of 896 and 304, and 422 model-seconds within the 600 s hourly budget.
 - **Privacy where the data flows.** Redaction before storage and before every prompt, URL query strings dropped, macOS password, Touch ID and permission prompts blocked, privacy zones checked before and after the shutter, clipboard text off by default, reading app state opt-in.
-- **Grounded Skill steps.** Every step is checked against the recording: a copy or paste needs clipboard evidence, a scroll or save needs screen evidence, typed lines are quoted exactly, clicks carry DOM anchors, steps keep the recorded order and cite their frames.
+- **Grounded Skill steps.** Every step is checked against the recording: a copy or paste needs clipboard evidence, a scroll or save needs screen evidence, typed lines are quoted exactly and need key presses behind them (text the model read off a toolbar no longer becomes a "type" step), clicks carry DOM anchors, steps keep the recorded order and cite their frames. Passively discovered Skills get element anchors too.
 - **Knowledge ledger and budgeted questions.** Each Skill tracks what it knows, guesses and doesn't know, with evidence. The four-check hand-off gate replaces the six gates. Questions come from the gaps (up to 3 after a recording, 5 a week) and no model writes them.
-- **Recognition of repeated workflows.** Passive mining measures recurrence and drafts at most 3 new Skills a week; doing a task you already have a Skill for becomes a run of it (a branch where you did it differently), not a duplicate.
+- **Recognition of repeated workflows.** Passive mining measures recurrence and drafts at most 3 new Skills a week; doing a task you already have a Skill for becomes a run of it (a branch where you did it differently), not a duplicate. Drafts keep learning from later runs until you approve them, and a run interrupted by a call stays one run.
 - **Agent runs feed Skills.** Three runs that follow the steps confirm them; a deviation on a guessed decision reopens it as a question.
 - **Doctor checks the machine.** The serving Ollama's version and install, duplicate installs, and memory, swap and disk headroom; an old Ollama fails only when a Gemma 4 model is configured.
 - **Upgrades keep observation on.** Setup reopens only at a missing permission, stale grants from a changed signature are reset, and model configs written for an earlier default move to the tier's current models.
 - **Agents.** `search_skills` answered in 17.5 s instead of 255 s while Ollama was busy (an 8 s embedding timeout and a keyword fallback). Claude Code pairs through `claude mcp add` with a real Connected check; Codex gets a marked `AGENTS.md` block.
+- **Light enough to leave on.** Idle with capture on, the menu bar app uses about 0.3 s of CPU a minute and the capture daemon 0.09 s; models unload when there is nothing to do, and model time is capped per hour and per day. The daily pass that compared every pair of tasks with its own model requests (35,983 requests on the three-week journey) now makes 422.
+- **The daily pass works again.** Since v0.4.0 it stopped on every day with work, so the daily digest, profile, patterns and the day's questions never ran from it.
+- **Capture starts reliably.** With a Chromium browser open, the app took the extension's helper for the capture daemon and never started it, after upgrades and at login. A second recording no longer erases the first one's unanswered questions, and upgrades remove the files a release dropped.
 - **Cluster labels and synthesis run every day.** The LLM reasoner and the behavioral synthesizer used to share their daily budget with the VLM fallback queue, so after 50 unclassified events a day every later cluster label and synthesis was skipped without a word. They now have their own budget (`[vlm] reasoning_max_calls_per_day`, `reasoning_max_compute_minutes_per_day`), and when it is spent `worker-status.json` and `agenthandover status --compute` say so.
 - **Removed.** Cloud mode: it never did the main work (screen annotation and Skill writing always ran on Ollama), and by 0.5.0 it only sent the older focus path's Skill steps to a provider for a description, while reading its API key from an environment variable the app never set. The upgrade turns an old cloud config local (with a backup) and deletes the stored API key. Also the MLX and llama.cpp backends (they only ever served the fallback queue), the fallback queue itself (its answers fed nothing but its own re-scoring), the legacy pattern miner, the six gates, and config keys that nothing read.
 - **Corrections to v0.4.0's notes.** Homebrew's `ollama` 0.34.2 runs the QAT tags on the test Mac, and the Gemma tiers need Ollama 0.34.0+, not 0.30.6.

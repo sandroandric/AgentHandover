@@ -7,13 +7,15 @@ and the project follows [Semantic Versioning](https://semver.org/) within the 0.
 (minor bumps may include breaking changes; the README's Changelog section has the
 prose version of every release).
 
-## [0.5.0]
+## [0.5.0] — 2026-09-25
 
 The release where the product does what the README says. Every claim below
 names the journey test that proves it (`worker/tests/journeys/`, replayed
 from recorded model output) or the measurement behind it (single runs on a
-16 GB test Mac with Ollama 0.34.2). Journeys still waiting on a recording
-are marked *(not yet recorded)*.
+16 GB test Mac with Ollama 0.34.2). One journey still waits on a recording
+(the 24 GB Gemma path) and is marked *(not yet recorded)*; the build was
+also checked live on that Mac: signed-package upgrades, focus recordings in
+Comet and TextEdit, and the questions that follow them.
 
 ### Changed
 - **Models.** 16 GB: `qwen3.5:4b` annotates and writes Skills (was Gemma 4
@@ -26,7 +28,7 @@ are marked *(not yet recorded)*.
 - **Memory-aware scheduling.** One model at a time on two-model tiers, a
   memory/swap/disk check before loading, early deferral for a model that
   does not load, one inference thread in priority order. Proof: J-phases
-  *(not yet recorded)*, J-ollama-down, `test_inference_runner.py`.
+  *(the 24 GB Gemma path: not yet recorded)*, J-ollama-down, `test_inference_runner.py`.
 - **Event-driven capture** of the focused window at one pixel per point,
   with change detection before OCR. Proof: J-compute, `event_loop_test.rs`.
 - **Text-first annotation** with a cache and hourly/daily compute caps: on
@@ -38,8 +40,7 @@ are marked *(not yet recorded)*.
 - **Knowledge ledger, hand-off gate and budgeted questions** (up to 3 after
   a recording, 5 a week; step questions quote the recording). The four-check
   hand-off gate replaces the six readiness gates. Proof: J-approve, J-mcp,
-  J-focus-typed (step questions and answer revision), J-ledger (its
-  skip/diverge leg is *still skipped*).
+  J-focus-typed (step questions and answer revision), J-ledger.
 - **Recognition of repeated workflows**: recurrence mining with at most 3
   new drafts a week; a session or recording of an existing Skill becomes a
   run and a branch. Proof: `test_workflow_observations.py`, J-ledger; the
@@ -112,8 +113,28 @@ are marked *(not yet recorded)*.
 - **Capture starts while a browser is open.** With Chrome or Comet
   running, the app took the extension's native-messaging bridge (the same
   binary) for the daemon and never started capture: after an upgrade, and
-  at login if the browser opened first. Proof: `DaemonDetectionTests`; a
-  live relaunch.
+  at login if the browser opened first. The fix then exposed a hang: the
+  app waited for `ps` before reading its output, and a full pipe (64 KB)
+  blocked it, so one start in three never happened. Every child process's
+  output is now read before waiting. Proof: `DaemonDetectionTests`; 8 of 8
+  upgrades on the test Mac started capture, 6 with the browser open.
+- **The daily pass no longer floods Ollama.** The session linker compared
+  every pair of the day's tasks with its own model requests: on the
+  three-week journey, 35,983 requests (5,811 distinct embeddings). It now
+  embeds each new task once, in batches, and asks the model about at most
+  10 new pairs a day: 422 requests. Proof: `test_session_linker.py`,
+  J-passive.
+- **Drafts keep learning.** Runs of a workflow seen after its draft was
+  written join the draft as evidence (branches, recurrence, value); it
+  stays a draft until you approve it. Proof: `test_workflow_observations.py`.
+- **Passive Skills carry element anchors**, matched from the recorded
+  clicks without a model call, as focus recordings do. Proof: J-passive.
+- **An interrupted run stays one run** (a call in between, back to the
+  same page within an hour). Proof: `test_workflow_mining.py`.
+- **Lighter in the background.** The idle menu bar app used 0.73 s of CPU
+  a minute with capture on: it re-verified the daemon's code signature on
+  every connection and re-read both permissions every 2 s. Now 0.28 s. The
+  daemon uses 0.09 s and models unload when idle.
 - **Upgrades remove the files a release dropped.** The installer never
   deletes files, and the worker is installed from its folder, so 0.5.0
   over 0.4.x still carried the removed cloud backends. Proof: the install
