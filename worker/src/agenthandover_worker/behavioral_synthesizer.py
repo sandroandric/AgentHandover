@@ -23,7 +23,9 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable
 
+from agenthandover_worker.contrast import criteria_hypotheses
 from agenthandover_worker.json_extract import extract_json
+from agenthandover_worker.ledger import set_slot
 from agenthandover_worker.model_profiles import STANDARD_TIER
 from agenthandover_worker.model_scheduler import before_generation_call
 from agenthandover_worker.ollama import OllamaClient
@@ -96,7 +98,7 @@ The mechanical steps have already been identified:
 {daily_context}
 {session_context}
 {continuity_context}
-{evidence_context}
+{evidence_context}{criteria_context}
 
 Now analyze the STRATEGY behind these steps.  Respond with a JSON object:
 
@@ -190,6 +192,72 @@ inference in their actual stack and working patterns.
 {voice_guidance}
 
 Respond with ONLY the JSON object."""
+
+
+# Shown only when contrast learning found criteria (a prompt without any is
+# unchanged): the model words them and adds none of its own.
+CRITERIA_TEMPLATE = """
+
+SELECTION CRITERIA HYPOTHESES (computed by comparing the list entries the \
+user chose with the entries they skipped, across the sessions):
+{lines}
+For "selection_criteria", word ONLY these hypotheses: one entry each, with \
+"id" set to its id and "criterion" saying it in plain words for this \
+workflow.  Do not add criteria that are not listed here."""
+
+
+def _criteria_context(hypotheses: list[dict]) -> str:
+    if not hypotheses:
+        return ""
+    lines = []
+    for i, h in enumerate(hypotheses, 1):
+        examples = "; ".join(f'"{e}"' for e in h.get("examples") or [])
+        lines.append(
+            f"  C{i}: chosen entries {h['criterion']} (in {h['support']} choices; "
+            f"{h['counter']} skipped entries also matched)"
+            + (f"; chosen: {examples}" if examples else "")
+        )
+    return CRITERIA_TEMPLATE.format(lines="\n".join(lines))
+
+
+def phrase_criteria(hypotheses: list[dict], worded: list[dict]) -> list[dict]:
+    """The selection criteria to store: exactly *hypotheses* (from
+    :func:`contrast.criteria_hypotheses`), each ``criterion`` replaced by
+    the model's wording for its id (``C1``...) when it gave one.  Criteria
+    the model added without a listed id are dropped: it words, never
+    invents."""
+    by_id = {
+        str(w.get("id") or "").strip().upper(): str(w.get("criterion") or "").strip()
+        for w in worded if isinstance(w, dict)
+    }
+    out = []
+    for i, h in enumerate(hypotheses, 1):
+        text = by_id.get(f"C{i}") or ""
+        out.append({
+            **h,
+            "criterion": text[:200] if text else f"entries that {h['criterion']}",
+            "basis": h["criterion"],
+            "confidence": round(h["support"] / (h["support"] + h["counter"]), 2),
+        })
+    return out
+
+
+def contrast_instances(
+    observations: list[list[dict]], instance_ids: list[str] | None,
+) -> list[dict]:
+    """The observations as :func:`contrast.criteria_hypotheses` instances:
+    each timeline's frames that hold a pick (``list_choice``, see
+    ``FocusProcessor._build_pre_analysis_obs``), under its id from
+    *instance_ids* (parallel to *observations*)."""
+    ids = list(instance_ids or [])
+    return [
+        {
+            "id": ids[i] if i < len(ids) else "",
+            "lists": [f["list_choice"] for f in timeline or []
+                      if isinstance(f, dict) and f.get("list_choice")],
+        }
+        for i, timeline in enumerate(observations)
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -293,6 +361,7 @@ class BehavioralSynthesizer:
         linked_tasks: list[dict] | None = None,
         continuity_spans: list[dict] | None = None,
         force: bool = False,
+        instance_ids: list[str] | None = None,
         _retry_count: int = 0,
     ) -> BehavioralInsights:
         """Run behavioral synthesis for a procedure.
@@ -307,6 +376,13 @@ class BehavioralSynthesizer:
             force: If True, bypass the min_observations check. Used for
                 focus recordings where a single demonstration should still
                 get behavioral analysis. Does NOT bypass the budget check.
+            instance_ids: The session or observation id of each timeline
+                in *observations* (same order): the evidence the selection
+                criteria cite.  Timelines without an id add no criteria.
+
+        The selection criteria are computed, not asked for: the chosen
+        versus skipped list entries of the observations
+        (:func:`contrast.criteria_hypotheses`); the model only words them.
 
         Returns:
             BehavioralInsights with extracted patterns.
@@ -325,12 +401,15 @@ class BehavioralSynthesizer:
             )
             return BehavioralInsights()
 
+        hypotheses = criteria_hypotheses(contrast_instances(observations, instance_ids))
+
         # Build the synthesis prompt
         prompt = self._build_prompt(
             procedure, observations,
             daily_summaries=daily_summaries,
             linked_tasks=linked_tasks,
             continuity_spans=continuity_spans,
+            hypotheses=hypotheses,
         )
 
         # Call VLM with model-specific profile
@@ -392,6 +471,7 @@ class BehavioralSynthesizer:
                     linked_tasks=linked_tasks,
                     continuity_spans=continuity_spans,
                     force=force,
+                    instance_ids=instance_ids,
                     _retry_count=_retry_count + 1,
                 )
             return BehavioralInsights()
@@ -414,9 +494,11 @@ class BehavioralSynthesizer:
                     linked_tasks=linked_tasks,
                     continuity_spans=continuity_spans,
                     force=force,
+                    instance_ids=instance_ids,
                     _retry_count=_retry_count + 1,
                 )
             return BehavioralInsights()
+        insights.selection_criteria = phrase_criteria(hypotheses, insights.selection_criteria)
 
         logger.info(
             "Behavioral synthesis for '%s': goal=%s, strategy=%s, "
@@ -494,6 +576,18 @@ class BehavioralSynthesizer:
             proc["strategy"] = insights.strategy
         if insights.selection_criteria:
             proc["selection_criteria"] = insights.selection_criteria
+            # Contrast-learned criteria are hypotheses citing the runs
+            # they were seen in (the ledger's ``decisions`` slot).
+            evidence = list({
+                (e["kind"], e["id"]): e
+                for sc in insights.selection_criteria if isinstance(sc, dict)
+                for e in sc.get("evidence") or []
+                if isinstance(e, dict) and e.get("kind") and e.get("id")
+            }.values())
+            if evidence:
+                proc["knowledge"] = dict(proc.get("knowledge") or {})
+                set_slot(proc, "decisions", status="hypothesis", source="contrast",
+                         evidence=evidence, value_ref="selection_criteria")
         if insights.content_templates:
             proc["content_templates"] = insights.content_templates
         if insights.guardrails:
@@ -609,6 +703,7 @@ class BehavioralSynthesizer:
         daily_summaries: list[dict] | None = None,
         linked_tasks: list[dict] | None = None,
         continuity_spans: list[dict] | None = None,
+        hypotheses: list[dict] | None = None,
     ) -> str:
         """Build the behavioral synthesis VLM prompt."""
         title = procedure.get("title", "Unknown Workflow")
@@ -774,6 +869,7 @@ class BehavioralSynthesizer:
             session_context=redact(session_context) or "(no cross-day context available)",
             continuity_context=redact(continuity_context) or "(no continuity context available)",
             evidence_context=redact(evidence_context) or "(no extracted evidence available)",
+            criteria_context=redact(_criteria_context(hypotheses or [])),
             voice_guidance=voice_guidance,
         )
 

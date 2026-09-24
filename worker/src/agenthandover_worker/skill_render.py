@@ -542,7 +542,15 @@ def body_sections(proc: dict) -> list[str]:
     for sc in proc.get("selection_criteria") or []:
         if isinstance(sc, dict) and sc.get("criterion"):
             line = f"- Choose by: {sc['criterion']}"
-            if sc.get("confidence") is not None:
+            if sc.get("status") == "hypothesis":
+                # Learned by contrasting picks with skipped entries: not
+                # confirmed by the user.
+                line += (
+                    f" (unconfirmed: seen in {sc.get('support', 0)} choices, "
+                    f"{sc.get('counter', 0)} skipped entries also matched; "
+                    "confirm with the user before relying on it)"
+                )
+            elif sc.get("confidence") is not None:
                 line += f" (confidence {float(sc['confidence']):.0%})"
             decisions.append(line)
             decisions += [f"  - Example: {ex}" for ex in (sc.get("examples") or [])[:2]]

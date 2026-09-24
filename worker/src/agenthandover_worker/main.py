@@ -33,7 +33,7 @@ from agenthandover_worker.db import WorkerDB
 from agenthandover_worker.episode_builder import EpisodeBuilder
 from agenthandover_worker.evidence_tracker import ObservationEvidence, append_observation
 from agenthandover_worker.exporter import IndexGenerator
-from agenthandover_worker.focus_processor import FocusProcessor
+from agenthandover_worker.focus_processor import FocusProcessor, recorded_observations
 from agenthandover_worker.frame_differ import DiffConfig, FrameDiffer
 from agenthandover_worker.negative_demo import NegativeDemoPruner
 from agenthandover_worker.model_profiles import migrate_vlm_file
@@ -1827,13 +1827,22 @@ def _process_focus_sessions_v2(
                 # Fall back to abstract SOP steps only if rich data is
                 # unavailable.
                 rich_obs = getattr(focus_processor, "_last_rich_observations", None)
+                instance_ids: list[str] = []
                 if rich_obs and rich_obs[0]:
-                    obs_for_synthesis = rich_obs
+                    # Earlier recordings of the same procedure join this
+                    # one, so selection criteria contrast every run.
+                    earlier = [
+                        (obs, iid) for obs, iid in zip(*recorded_observations(db, procedure_dict))
+                        if iid and iid != session_id
+                    ]
+                    obs_for_synthesis = [obs for obs, _ in earlier] + rich_obs
+                    instance_ids = [iid for _, iid in earlier] + [session_id]
                 else:
                     obs_for_synthesis = [result.sop.get("steps", [])]
                 insights = behavioral_synthesizer.synthesize(
                     slug, procedure_dict, obs_for_synthesis,
                     force=True,  # bypass min_observations for focus
+                    instance_ids=instance_ids,
                 )
                 if insights.goal or insights.strategy or insights.guardrails:
                     procedure_dict = behavioral_synthesizer.merge_insights_into_procedure(
@@ -5540,72 +5549,16 @@ def main(argv: list[str] | None = None) -> None:
                                         if not behavioral_synthesizer.should_synthesize(proc):
                                             continue
 
-                                        # Build observations for the synthesizer.
-                                        #
-                                        # For each observation record with a
-                                        # session_id (focus-derived), look up
-                                        # the actual events from the DB and
-                                        # build rich per-frame dicts with
-                                        # verbatim text (email_addresses,
-                                        # urls, typed_text, screen_text,
-                                        # active_element) via
-                                        # FocusProcessor._build_pre_analysis_obs.
-                                        # This surfaces the same verbatim
-                                        # grounding to the synthesizer prompt's
-                                        # TIMELINE EVIDENCE section that focus
-                                        # recordings already get.
-                                        #
-                                        # For observations without a session_id
-                                        # or where event lookup fails, fall
-                                        # back to the abstracted SOP step list
-                                        # so nothing gets worse.
-                                        #
-                                        # NOTE: FocusProcessor is imported at
-                                        # module level (line 29) — DO NOT add a
-                                        # late `from ... import FocusProcessor`
-                                        # here. A redundant inner import shadows
-                                        # the module-level binding and makes
-                                        # Python treat FocusProcessor as local
-                                        # to main() for the ENTIRE function,
-                                        # which causes earlier uses at lines
-                                        # 4842/4905 to raise UnboundLocalError.
-                                        # Regression caught by hikoae in v0.2.2
-                                        # (issue #1 follow-up comment).
-                                        _synth_obs: list[list[dict]] = []
-                                        evidence = proc.get("evidence", {})
-                                        obs_records = evidence.get("observations", [])
-                                        proc_steps = proc.get("steps", [])
-
-                                        for _rec in obs_records:
-                                            rich_frames: list[dict] = []
-                                            _sid = _rec.get("session_id") if isinstance(_rec, dict) else None
-                                            if _sid:
-                                                try:
-                                                    _events = db.get_focus_session_events(_sid)
-                                                except Exception:
-                                                    _events = []
-                                                for _ev in _events:
-                                                    _ann_raw = _ev.get("scene_annotation_json")
-                                                    if not _ann_raw:
-                                                        continue
-                                                    try:
-                                                        _ann = json.loads(_ann_raw) if isinstance(_ann_raw, str) else _ann_raw
-                                                    except (json.JSONDecodeError, TypeError):
-                                                        continue
-                                                    rich_frames.append(
-                                                        FocusProcessor._build_pre_analysis_obs({
-                                                            "annotation": _ann,
-                                                        })
-                                                    )
-                                            if rich_frames:
-                                                _synth_obs.append(rich_frames)
-                                            elif proc_steps:
-                                                # Fallback: abstracted step dicts
-                                                _synth_obs.append(proc_steps)
+                                        # The recorded instances as rich per-frame
+                                        # dicts (verbatim text and list picks), with
+                                        # the session ids the selection criteria cite
+                                        # (focus_processor.recorded_observations).
+                                        _synth_obs, _synth_ids = recorded_observations(db, proc)
 
                                         insights = behavioral_synthesizer.synthesize(
                                             p_slug, proc, _synth_obs,
                                             daily_summaries=_synth_daily,
+                                            instance_ids=_synth_ids,
                                         )
                                         if insights.strategy or insights.guardrails:
                                             updated = behavioral_synthesizer.merge_insights_into_procedure(

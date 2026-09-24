@@ -368,6 +368,15 @@ class FocusProcessor:
         ]
         if items:
             obs["visible_items"] = items
+        # The list with its pick and each entry's attributes, for the
+        # synthesizer's chosen-versus-skipped contrast (not shown to the
+        # model as such).
+        if any(isinstance(i, dict) and i.get("chosen") for i in ann.get("visible_items") or []):
+            obs["list_choice"] = [
+                {"label": str(i.get("label")), "attrs": dict(i.get("attrs") or {}),
+                 "chosen": bool(i.get("chosen"))}
+                for i in ann["visible_items"] if isinstance(i, dict) and i.get("label")
+            ]
 
         # The screen's own text (the salient OCR lines the annotation
         # prompt carried), where subject lines, message bodies and
@@ -970,3 +979,44 @@ class FocusProcessor:
                 continue
             owner = next((frame for t, frame in timed if t >= when), page)
             owner["click_targets"].append({**click, "page_dom_nodes": page.get("dom_nodes")})
+
+
+def recorded_observations(db, proc: dict) -> tuple[list[list[dict]], list[str]]:
+    """The behavioral synthesizer's observations for *proc*, one timeline
+    per observation record, and the instance id of each.
+
+    A record with a focus ``session_id`` becomes that session's annotated
+    events as rich per-frame dicts
+    (:meth:`FocusProcessor._build_pre_analysis_obs`: verbatim emails, URLs,
+    typed text, screen text, the list picks), under the session id.  A
+    record without one, or whose events are gone, falls back to the
+    procedure's abstract steps under the id "" (it cites nothing, so it
+    adds no selection criteria).
+    """
+    observations: list[list[dict]] = []
+    ids: list[str] = []
+    steps = proc.get("steps", [])
+    for record in (proc.get("evidence") or {}).get("observations", []):
+        session_id = record.get("session_id") if isinstance(record, dict) else None
+        frames: list[dict] = []
+        if session_id:
+            try:
+                events = db.get_focus_session_events(session_id)
+            except Exception:
+                events = []
+            for event in events:
+                raw = event.get("scene_annotation_json")
+                if not raw:
+                    continue
+                try:
+                    annotation = json.loads(raw) if isinstance(raw, str) else raw
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                frames.append(FocusProcessor._build_pre_analysis_obs({"annotation": annotation}))
+        if frames:
+            observations.append(frames)
+            ids.append(str(session_id))
+        elif steps:
+            observations.append(steps)
+            ids.append("")
+    return observations, ids

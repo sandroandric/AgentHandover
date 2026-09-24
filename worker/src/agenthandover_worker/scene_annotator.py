@@ -37,6 +37,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from agenthandover_worker.annotation_cache import AnnotationCache, cache_key
+from agenthandover_worker.contrast import ground_visible_items
 from agenthandover_worker.dom import accessible_name, flatten_dom, implicit_role, url_host
 from agenthandover_worker.event_helpers import display_name, is_bundle_id, parse_json_field
 from agenthandover_worker.json_extract import extract_json
@@ -616,8 +617,8 @@ def page_elements(nodes: list | None, ocr_text: str = "",
 
 
 def page_for_event(db, event: dict, tolerance_sec: float = PAGE_TOLERANCE_SEC) -> dict | None:
-    """The browser page on screen in *event*: ``{"url", "nodes"}`` from the
-    Chrome extension's DOM snapshot closest in time, or None.
+    """The browser page on screen in *event*: ``{"url", "nodes", "digest"}``
+    from the Chrome extension's DOM snapshot closest in time, or None.
 
     Only for frames of a Chromium browser (the extension's home).  When the
     frame already knows its URL (``metadata.app_state`` or ``metadata.url``)
@@ -635,7 +636,11 @@ def page_for_event(db, event: dict, tolerance_sec: float = PAGE_TOLERANCE_SEC) -
     )
     if not isinstance(snaps, list) or not snaps:
         return None
-    return {"url": str(snaps[0].get("url") or ""), "nodes": snaps[0].get("nodes") or []}
+    return {
+        "url": str(snaps[0].get("url") or ""),
+        "nodes": snaps[0].get("nodes") or [],
+        "digest": str(snaps[0].get("digest") or ""),
+    }
 
 
 def vision_reason(app: str, url: str, screen_chars: int) -> str | None:
@@ -1103,10 +1108,14 @@ class SceneAnnotator:
         header, window_injection = guard_screen_text(redact(window_header(
             window, metadata.get("app_state"), page_url,
         )))
+        # The page's list rows (the digest) are not in the prompt; they
+        # become the stored visible_items when the user clicked one.
+        digest, digest_injection = guard_screen_text(redact(str(page.get("digest") or "")))
         injection_record = {
             source: hit
             for source, hit in (
                 ("ocr", ocr_injection), ("window", window_injection), ("page", page_injection),
+                ("digest", digest_injection),
             )
             if hit
         }
@@ -1213,6 +1222,14 @@ class SceneAnnotator:
             # synthesis) quote it from here.
             if ocr_text:
                 annotation["_screen_text"] = ocr_text
+            # The list the user picked from: the DOM's rows when the
+            # snapshot shows which was clicked, else the model's entries,
+            # each with the numbers its text states (contrast learning).
+            annotation["visible_items"] = ground_visible_items(
+                annotation.get("visible_items"),
+                {"nodes": page.get("nodes"), "digest": digest},
+                ocr_text,
+            )
             if ocr_record:
                 # The prompt carried only part of the OCR; the full text
                 # stays in the event's metadata_json for later readers.
