@@ -600,6 +600,16 @@ check "no prebuilt daemon: names the missing binary" \
     contains "${WORK}/build-norust.log" "FATAL: ${T}/target/universal-release/agenthandover-daemon is missing."
 check "no prebuilt daemon: says how to build it" contains "${WORK}/build-norust.log" "just package-pkg"
 
+T="$(make_build_tree stale-binary 'exit 0')"
+mkdir -p "${T}/crates/daemon/src"
+touch -t 202001010000 "${T}/target/universal-release/agenthandover" \
+    "${T}/target/universal-release/agenthandover-daemon" "${T}/Cargo.toml" "${T}/Cargo.lock"
+echo "// changed after the binaries were built" > "${T}/crates/daemon/src/main.rs"
+run_build "${T}" "${WORK}/build-stale.log"
+check "binaries older than the Rust sources: build-pkg exits non-zero" test $? -ne 0
+check "binaries older than the Rust sources: names the newer source" \
+    contains "${WORK}/build-stale.log" "is older than crates/daemon/src/main.rs"
+
 T="$(make_build_tree nobinary 'exit 0')"
 run_build "${T}" "${WORK}/build-nobinary.log"
 check "no app binary: build-pkg exits non-zero" test $? -ne 0

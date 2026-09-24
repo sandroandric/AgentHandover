@@ -47,6 +47,16 @@ for bin in agenthandover agenthandover-daemon; do
         echo "  everything, then packages) or 'just build-daemon build-cli' first." >&2
         exit 1
     fi
+    # A binary older than the Rust sources would ship code the tree no
+    # longer has (seen: a 0.5.0 package built with a pre-WP-F14 daemon).
+    NEWER_SOURCE="$(find "${REPO_ROOT}/crates" "${REPO_ROOT}/Cargo.toml" "${REPO_ROOT}/Cargo.lock" \
+        \( -name '*.rs' -o -name 'Cargo.toml' -o -name 'Cargo.lock' \) \
+        -newer "${REPO_ROOT}/target/universal-release/${bin}" 2>/dev/null | head -1 || true)"
+    if [ -n "${NEWER_SOURCE}" ]; then
+        echo "FATAL: target/universal-release/${bin} is older than ${NEWER_SOURCE#"${REPO_ROOT}/"}." >&2
+        echo "  Rebuild the Rust binaries ('just build-daemon build-cli') before packaging." >&2
+        exit 1
+    fi
 done
 cp "${REPO_ROOT}/target/universal-release/agenthandover" "${PKG_ROOT}/usr/local/bin/"
 # Cargo produces agenthandover-daemon; install as ah-observer to avoid
