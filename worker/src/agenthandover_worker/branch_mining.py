@@ -52,7 +52,7 @@ import logging
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
-from agenthandover_worker.dom import host_or_doc
+from agenthandover_worker.dom import host_or_doc, site_of
 from agenthandover_worker.scene_annotator import as_compact
 from agenthandover_worker.sop_dedup import _normalize_app
 from agenthandover_worker.task_segmenter import AnnotatedFrame
@@ -103,10 +103,7 @@ def condition_state(frame: AnnotatedFrame) -> dict:
 
 
 def _site(place: tuple[str, str]) -> tuple[str, str]:
-    """A place's app and site: the host of a web place (``host/path``),
-    the place itself otherwise (a document, an app)."""
-    host, slash, _ = place[1].partition("/")
-    return (place[0], host) if slash and "." in host and " " not in host else place
+    return (place[0], site_of(place[1]))
 
 
 def find_divergences(proc: dict, frames: list[AnnotatedFrame]) -> list[dict]:
