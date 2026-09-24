@@ -9,8 +9,9 @@
     The v1 pipeline remains functional for backward compatibility but
     will not receive new features.
 
-Uses a VLM/LLM backend (text-only mode) to generate high-level
-``task_description`` and ``execution_overview`` for SOP templates.
+Uses the local SOP model through Ollama (text only) to generate
+high-level ``task_description`` and ``execution_overview`` for SOP
+templates.
 This gives agents reading the SOPs understanding of *why* a workflow
 exists and what it accomplishes, beyond the raw step sequence.
 """
@@ -18,13 +19,13 @@ exists and what it accomplishes, beyond the raw step sequence.
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
+import time
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any
+from typing import Any, Protocol
 
-if TYPE_CHECKING:
-    from agenthandover_worker.vlm_worker import VLMConfig, VLMInferenceBackend
+from agenthandover_worker.json_extract import extract_json
+from agenthandover_worker.ollama import DEFAULT_HOST, OllamaClient
 
 logger = logging.getLogger(__name__)
 
@@ -39,17 +40,27 @@ _OVERVIEW_KEYS = frozenset((
 ))
 
 
+class TextBackend(Protocol):
+    """What the enhancer needs from a model: :class:`OllamaTextBackend`."""
+
+    def infer(
+        self, prompt: str, image_base64: str | None = None,
+        system_prompt: str | None = None,
+    ) -> dict[str, Any]: ...
+
+    def is_available(self) -> bool: ...
+
+
 class SOPEnhancer:
     """Add LLM-generated task descriptions and execution overviews to SOPs.
 
-    Reuses any VLM backend in text-only mode (no images). Budget-aware
-    with per-day limits and hash-based caching to avoid re-enhancing
-    unchanged SOPs.
+    Budget-aware with per-day limits and hash-based caching to avoid
+    re-enhancing unchanged SOPs.
     """
 
     def __init__(
         self,
-        backend: VLMInferenceBackend,
+        backend: TextBackend,
         max_enhancements_per_day: int = 20,
     ) -> None:
         self._backend = backend
@@ -266,95 +277,69 @@ class SOPEnhancer:
         }
 
 
-def create_llm_backend(
-    llm_config: dict,
-    vlm_config: dict | None = None,
-) -> VLMInferenceBackend | None:
-    """Factory: create a VLM backend configured for text-only LLM use.
+class OllamaTextBackend:
+    """A local Ollama model answering one JSON object per prompt, through
+    the worker's one Ollama client (:class:`~agenthandover_worker.ollama.OllamaClient`)."""
 
-    Inherits provider/key settings from VLM config when LLM-specific
-    config is not set. For Ollama, uses ``llama3.2:3b`` (lighter text
-    model) instead of ``llava:7b`` (vision model).
+    # Seconds is_available() trusts its last answer.
+    _AVAILABILITY_TTL = 60.0
 
-    Args:
-        llm_config: Dict with keys from [llm] config section.
-        vlm_config: Dict with keys from [vlm] config section (optional).
+    def __init__(
+        self, model: str, *, host: str = DEFAULT_HOST, timeout_seconds: float = 60.0,
+        temperature: float = 0.3, max_tokens: int = 800,
+    ) -> None:
+        self.model = model
+        self.host = host
+        self.timeout_seconds = timeout_seconds
+        self.temperature = temperature
+        self.max_tokens = max_tokens
+        self._available: bool | None = None
+        self._checked_at = 0.0
 
-    Returns:
-        A VLMInferenceBackend configured for text-only use, or None if
-        no backend is available.
-    """
-    from agenthandover_worker.vlm_worker import VLMBackend, VLMConfig
-
-    vlm_config = vlm_config or {}
-    mode = vlm_config.get("mode", "local")
-    provider = vlm_config.get("provider", "")
-
-    # Determine model name — LLM config overrides VLM config
-    llm_model = llm_config.get("model", "")
-    timeout = float(llm_config.get("timeout_seconds", 60))
-    temperature = float(llm_config.get("temperature", 0.3))
-    # 2000 tokens is enough for task_description + execution_overview JSON.
-    # Previous default of 800 was too low (especially if thinking was on).
-    max_tokens = int(llm_config.get("max_tokens", 2000))
-
-    if mode == "remote" and provider:
-        # Use the same remote provider as VLM but possibly different model
-        _provider_to_backend = {
-            "openai": VLMBackend.OPENAI_COMPAT,
-            "anthropic": VLMBackend.ANTHROPIC,
-            "google": VLMBackend.GOOGLE_GENAI,
-        }
-        backend_type = _provider_to_backend.get(provider)
-        if backend_type is None:
-            logger.warning("Unknown LLM provider: %s", provider)
-            return None
-
-        config = VLMConfig(
-            backend=backend_type,
-            mode="remote",
-            provider=provider,
-            remote_model=llm_model or vlm_config.get("model") or None,
-            api_key=None,  # Resolved by backend from env
-            api_key_env=vlm_config.get("api_key_env"),
-            timeout_seconds=timeout,
-            temperature=temperature,
-            max_tokens=max_tokens,
+    def infer(
+        self, prompt: str, image_base64: str | None = None,
+        system_prompt: str | None = None,
+    ) -> dict[str, Any]:
+        response = OllamaClient(self.host).generate(
+            self.model, prompt,
+            system=system_prompt,
+            images=[image_base64] if image_base64 else None,
+            options={"temperature": self.temperature, "num_predict": self.max_tokens},
+            format="json",
+            # Thinking would spend num_predict before the answer.
+            think=False,
+            timeout=self.timeout_seconds,
+            call_type="sop",
         )
-    else:
-        # Local mode: try Ollama first with a lighter text model.
-        # Pick the first available model if no override is specified.
-        try:
-            import ollama as _ollama_mod
-            _client = _ollama_mod.Client()
-            _models = _client.list()
-            if not llm_model:
-                # Auto-detect: use provided model, or first available
-                _model_names = [m.model for m in _models.models] if hasattr(_models, "models") else []
-                llm_model = _model_names[0] if _model_names else "llama3.2:3b"
-                logger.info("LLM auto-detected model: %s", llm_model)
-            config = VLMConfig(
-                backend=VLMBackend.OLLAMA,
-                model_name=llm_model,
-                timeout_seconds=timeout,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                # Disable Qwen thinking mode for text-only SOP enhancement.
-                # Without this, thinking consumes all num_predict tokens
-                # leaving empty content → "Empty input text" error.
-                think=False,
-            )
-        except Exception:
-            logger.info("Ollama not available for LLM — SOP enhancement disabled")
-            return None
+        return extract_json(response.text)
 
-    try:
-        from agenthandover_worker.vlm_worker import create_backend
-        backend = create_backend(config)
-        if backend.is_available():
-            return backend
-        logger.info("LLM backend not available — SOP enhancement disabled")
+    def is_available(self) -> bool:
+        """Ollama answers and has the model pulled (cached for a minute)."""
+        now = time.monotonic()
+        if self._available is None or now - self._checked_at >= self._AVAILABILITY_TTL:
+            self._available = OllamaClient(self.host).has_model(self.model)
+            self._checked_at = now
+        return self._available
+
+
+def create_llm_backend(
+    llm_config: dict, *, ollama_host: str = DEFAULT_HOST, sop_model: str = "",
+) -> OllamaTextBackend | None:
+    """The enhancer's model: ``[llm] model``, else the tier's SOP model,
+    at ``[vlm] ollama_host``.  None when neither names a model.
+
+    Whether Ollama answers is checked before each enhancement
+    (:meth:`OllamaTextBackend.is_available`), not here: a worker that
+    starts before Ollama still enhances once Ollama is up.
+    """
+    model = llm_config.get("model") or sop_model
+    if not model:
+        logger.info("No model for SOP enhancement ([llm] model and [vlm] sop_model are empty)")
         return None
-    except Exception:
-        logger.warning("Failed to create LLM backend", exc_info=True)
-        return None
+    return OllamaTextBackend(
+        model,
+        host=ollama_host,
+        timeout_seconds=float(llm_config.get("timeout_seconds", 60)),
+        temperature=float(llm_config.get("temperature", 0.3)),
+        max_tokens=int(llm_config.get("max_tokens", 800)),
+    )

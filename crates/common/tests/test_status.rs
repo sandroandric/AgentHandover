@@ -41,8 +41,6 @@ fn sample_worker_status() -> WorkerStatus {
         last_pipeline_duration_ms: Some(250),
         consecutive_errors: 0,
         vlm_available: true,
-        vlm_mode: None,
-        vlm_provider: None,
         inference: None,
     }
 }
@@ -393,42 +391,6 @@ fn read_extension_heartbeat_missing_file_returns_none() {
     assert!(result.is_none(), "missing file should return None");
 }
 
-// =============================================================================
-// WorkerStatus vlm_mode / vlm_provider tests
-// =============================================================================
-
-#[test]
-fn worker_status_with_vlm_mode_roundtrip() {
-    let mut status = sample_worker_status();
-    status.vlm_mode = Some("remote".to_string());
-    status.vlm_provider = Some("openai".to_string());
-
-    let json = serde_json::to_string_pretty(&status).expect("serialize");
-    assert!(json.contains("vlm_mode"));
-    assert!(json.contains("vlm_provider"));
-
-    let deserialized: WorkerStatus = serde_json::from_str(&json).expect("deserialize");
-    assert_eq!(deserialized.vlm_mode, Some("remote".to_string()));
-    assert_eq!(deserialized.vlm_provider, Some("openai".to_string()));
-}
-
-#[test]
-fn worker_status_without_vlm_mode_omits_field() {
-    let status = sample_worker_status();
-    assert!(status.vlm_mode.is_none());
-    assert!(status.vlm_provider.is_none());
-
-    let json = serde_json::to_string(&status).expect("serialize");
-    // Fields should be omitted when None (skip_serializing_if)
-    assert!(!json.contains("vlm_mode"));
-    assert!(!json.contains("vlm_provider"));
-
-    // Should still deserialize back
-    let deserialized: WorkerStatus = serde_json::from_str(&json).expect("deserialize");
-    assert_eq!(deserialized.vlm_mode, None);
-    assert_eq!(deserialized.vlm_provider, None);
-}
-
 /// The worker's `inference` block as `main.py` writes it (WP-C7), with
 /// fields the daemon does not read.
 fn worker_status_json(heartbeat: &str, lower: bool) -> String {
@@ -497,9 +459,9 @@ fn read_worker_status_reads_the_file_in_a_directory() {
 
 #[test]
 fn worker_status_deserialize_with_extra_vlm_fields() {
-    // Simulate a worker-status.json with vlm_mode/vlm_provider, from a
-    // worker old enough to still write the removed sop_inducer_available
-    // and the removed VLM fallback queue counts.
+    // A worker-status.json from a worker old enough to still write the
+    // removed sop_inducer_available, the removed VLM fallback queue counts
+    // and cloud mode's vlm_mode/vlm_provider (removed in 0.5.0).
     let json = r#"{
         "pid": 12345,
         "version": "0.1.0",
@@ -519,27 +481,25 @@ fn worker_status_deserialize_with_extra_vlm_fields() {
     }"#;
 
     let status: WorkerStatus = serde_json::from_str(json).expect("deserialize");
-    assert_eq!(status.vlm_mode, Some("remote".to_string()));
-    assert_eq!(status.vlm_provider, Some("anthropic".to_string()));
     assert!(status.vlm_available);
+    let written = serde_json::to_string(&status).expect("serialize");
+    assert!(!written.contains("vlm_mode") && !written.contains("vlm_provider"));
 }
 
 // =============================================================================
-// Config parsing tests (VlmConfig remote fields)
+// Config parsing: cloud mode's [vlm] keys (removed in 0.5.0)
 // =============================================================================
 
 #[test]
 fn vlm_config_defaults() {
     let config = agenthandover_common::config::AppConfig::default();
-    assert_eq!(config.vlm.mode, "local");
-    assert!(config.vlm.provider.is_none());
-    assert!(config.vlm.model.is_none());
-    assert!(config.vlm.api_key_env.is_none());
     assert!(config.vlm.enabled);
 }
 
+/// A config the migration could not rewrite still loads: the removed
+/// keys are ignored (the worker runs the local models; doctor warns).
 #[test]
-fn vlm_config_remote_mode_parsing() {
+fn an_old_remote_vlm_block_still_parses() {
     let toml_str = r#"
 [vlm]
 enabled = true
@@ -551,13 +511,11 @@ max_jobs_per_day = 50
 max_queue_size = 500
 job_ttl_days = 7
 max_compute_minutes_per_day = 20
+tier = "standard"
 "#;
     let config = agenthandover_common::config::AppConfig::from_toml_str(toml_str)
         .expect("parse config");
-    assert_eq!(config.vlm.mode, "remote");
-    assert_eq!(config.vlm.provider, Some("openai".to_string()));
-    assert_eq!(config.vlm.model, Some("gpt-4o-mini".to_string()));
-    assert_eq!(config.vlm.api_key_env, Some("OPENAI_API_KEY".to_string()));
+    assert_eq!(config.vlm.tier.as_deref(), Some("standard"));
 }
 
 #[test]

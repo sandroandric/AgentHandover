@@ -270,6 +270,11 @@ pub fn run() -> Result<()> {
     // and the worker run at startup did not happen or failed.
     print_findings(&mut counts, &tier_migration_findings(&config_str));
 
+    // Check 15d: a config still selecting cloud mode, which 0.5.0 removed:
+    // the upgrade's migration (the installer and the worker at startup)
+    // could not rewrite it.
+    print_findings(&mut counts, &cloud_mode_findings(&config_str));
+
     // Check 16: Required models pulled
     //
     // The models depend on the RAM tier (tiers.json), so a hard-coded
@@ -279,53 +284,39 @@ pub fn run() -> Result<()> {
     // ACTUALLY configured annotation_model + sop_model + embedding
     // model, then check Ollama for those specific names. Gracefully
     // fall back if config.toml is missing or fields aren't set.
-    //
-    // Also: if config has `vlm.mode = "remote"`, skip the local model
-    // check entirely — they're using a cloud provider.
     if ollama_ok {
-        let vlm_mode = read_config_string_field(&config_str, "vlm", "mode")
-            .unwrap_or_else(|| "local".to_string());
+        // Missing model keys come from the config's tier, else the
+        // RAM tier, exactly as the worker resolves them.
+        let machine::ConfiguredModels {
+            annotation: annotation_model,
+            sop: sop_model,
+            ..
+        } = configured_models(&config_str);
+        let embedding_model = read_config_string_field(&config_str, "embedding", "model")
+            .unwrap_or_else(|| tiers::table().embedding_model.clone());
 
-        if vlm_mode == "remote" {
-            check_skip(
-                &mut counts,
-                "Local models",
-                "vlm.mode = remote (using cloud API)",
-            );
-        } else {
-            // Missing model keys come from the config's tier, else the
-            // RAM tier, exactly as the worker resolves them.
-            let machine::ConfiguredModels {
-                annotation: annotation_model,
-                sop: sop_model,
-                ..
-            } = configured_models(&config_str);
-            let embedding_model = read_config_string_field(&config_str, "embedding", "model")
-                .unwrap_or_else(|| tiers::table().embedding_model.clone());
+        // Over HTTP, as `setup` asks (see crate::ollama for why).
+        let installed = ollama::installed_models(&report.host.url).unwrap_or_default();
 
-            // Over HTTP, as `setup` asks (see crate::ollama for why).
-            let installed = ollama::installed_models(&report.host.url).unwrap_or_default();
+        // The recommended tier runs one model for both jobs; deduplicate
+        // so we don't report the same model twice.
+        let mut models_to_check: Vec<(String, &str)> = Vec::new();
+        if !annotation_model.is_empty() {
+            models_to_check.push((annotation_model.clone(), "scene annotation"));
+        }
+        if !sop_model.is_empty() && sop_model != annotation_model {
+            models_to_check.push((sop_model.clone(), "SOP generation"));
+        }
+        if !embedding_model.is_empty() {
+            models_to_check.push((embedding_model, "semantic search"));
+        }
 
-            // The recommended tier runs one model for both jobs; deduplicate
-            // so we don't report the same model twice.
-            let mut models_to_check: Vec<(String, &str)> = Vec::new();
-            if !annotation_model.is_empty() {
-                models_to_check.push((annotation_model.clone(), "scene annotation"));
-            }
-            if !sop_model.is_empty() && sop_model != annotation_model {
-                models_to_check.push((sop_model.clone(), "SOP generation"));
-            }
-            if !embedding_model.is_empty() {
-                models_to_check.push((embedding_model, "semantic search"));
-            }
-
-            for (model, purpose) in &models_to_check {
-                if ollama::model_installed(&installed, model) {
-                    check_pass(&mut counts, &format!("Model {} ({})", model, purpose));
-                } else {
-                    check_fail(&mut counts, &format!("Model {} ({})", model, purpose));
-                    eprintln!("  Fix: ollama pull {}", model);
-                }
+        for (model, purpose) in &models_to_check {
+            if ollama::model_installed(&installed, model) {
+                check_pass(&mut counts, &format!("Model {} ({})", model, purpose));
+            } else {
+                check_fail(&mut counts, &format!("Model {} ({})", model, purpose));
+                eprintln!("  Fix: ollama pull {}", model);
             }
         }
     }
@@ -402,7 +393,6 @@ fn configured_models(config_str: &str) -> machine::ConfiguredModels {
         tier_label: tier.label.clone(),
         annotation,
         sop,
-        local: read_config_string_field(config_str, "vlm", "mode").as_deref() != Some("remote"),
     }
 }
 
@@ -458,6 +448,31 @@ fn app_state_findings(
         level: Level::Warn,
         title: format!("Reading open documents: {} app(s) not granted", lines.len()),
         lines,
+    }]
+}
+
+/// A warning when `[vlm]` still says `mode = "remote"`: cloud mode was
+/// removed in 0.5.0 and the upgrade's migration
+/// (`model_profiles.migrate_vlm_block`) did not rewrite the block.  The
+/// worker runs the local models either way.  Nothing otherwise.
+fn cloud_mode_findings(config_str: &str) -> Vec<machine::Finding> {
+    let Some(mode) = read_config_string_field(config_str, "vlm", "mode") else {
+        return vec![];
+    };
+    if mode == "local" {
+        return vec![];
+    }
+    vec![machine::Finding {
+        level: machine::Level::Warn,
+        title: format!("Config still selects cloud mode ([vlm] mode = \"{mode}\")"),
+        lines: vec![
+            "Cloud mode was removed in 0.5.0: every model runs locally through Ollama, \
+             whatever this key says. The upgrade could not rewrite config.toml (edited by hand?)."
+                .into(),
+            "Fix: under [vlm] in config.toml set mode = \"local\" and delete provider, model \
+             and api_key_env, or run: agenthandover setup --vlm"
+                .into(),
+        ],
     }]
 }
 
@@ -1057,6 +1072,27 @@ mod tests {
             String::new(),
         ] {
             assert!(tier_migration_findings(&config).is_empty(), "{config}");
+        }
+    }
+
+    /// WP-F13: a `[vlm]` block the upgrade could not move off cloud mode
+    /// warns with the fix; a local block or none says nothing.
+    #[test]
+    fn a_config_still_in_cloud_mode_warns_with_the_fix() {
+        let remote = "[vlm]\nmode = \"remote\"\nprovider = \"openai\"\nmodel = \"gpt-4.1-mini\"\n\
+                      api_key_env = \"OPENAI_API_KEY\"\n";
+        let findings = cloud_mode_findings(remote);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].level, machine::Level::Warn);
+        assert_eq!(findings[0].title, "Config still selects cloud mode ([vlm] mode = \"remote\")");
+        assert!(findings[0].lines[1].starts_with("Fix: under [vlm] in config.toml set mode = \"local\""));
+        for config in [
+            "[vlm]\nmode = \"local\"\ntier = \"standard\"\n",
+            "[vlm]\ntier = \"standard\"\n",
+            "[embedding]\nmode = \"remote\"\n",
+            "",
+        ] {
+            assert!(cloud_mode_findings(config).is_empty(), "{config}");
         }
     }
 
