@@ -794,7 +794,11 @@ def settle_typed_text(db: object, event: dict, annotation: dict) -> None:
     keys = evidence["keys"]
     if keys >= min(len(grown), _KEYS_FOR_ANY_TEXT):
         return
-    if (keys or evidence["pastes"]) and copied(
+    # The browser saw a paste: its content is not recorded, the event is
+    # the evidence.  A Cmd-V (one key press) needs a copy that holds it.
+    if evidence["pastes"]:
+        return
+    if keys and copied(
         grown, db.get_copies_before(str(event.get("timestamp") or "")),  # type: ignore[union-attr]
     ):
         return

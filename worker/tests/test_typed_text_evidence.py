@@ -349,3 +349,40 @@ def test_passive_frames_are_settled_too(tmp_path: Path) -> None:
         }
     assert stats["annotated"] == 3
     assert typed == {"p1": "", "p2": "", "p3": "Notes"}
+
+
+def test_a_paste_is_known_by_the_copys_size_when_previews_are_off(tmp_path: Path) -> None:
+    """Previews are off by default, and the model's reading of pasted text
+    rarely hashes like the copied bytes (here the copy ends in a newline
+    and a period the reading lacks).  A copy of about its size stands for
+    it; "# 10" after one key press is not a paste of a 60-byte copy."""
+    db_path = create_daemon_db(tmp_path / "events.db")
+    conn = sqlite3.connect(db_path)
+    _insert(conn, "s1", "2026-09-24T11:00:00.000Z", _COMET, _document("Example domains"), 0)
+    _insert_copy(conn, "2026-09-24T11:00:01.000Z", LINE + ".\n")
+    _insert(conn, "s2", "2026-09-24T11:00:05.000Z", _TEXTEDIT, _document(LINE), 1)
+    _insert(conn, "s3", "2026-09-24T11:00:09.000Z", {**_TEXTEDIT, "title": "Untitled 2"},
+            _toolbar("# 10"), 1)
+    conn.commit()
+    conn.close()
+    typed = _annotate_session(db_path, tmp_path, {"s2": LINE, "s3": "# 10"})
+    assert typed == {"s1": "", "s2": LINE, "s3": ""}
+
+
+def test_a_browser_paste_event_is_evidence_on_its_own(tmp_path: Path) -> None:
+    """The extension's paste event records no content: it proves a paste
+    whatever the copy's size or preview."""
+    db_path = create_daemon_db(tmp_path / "events.db")
+    conn = sqlite3.connect(db_path)
+    _insert(conn, "b1", "2026-09-24T12:00:00.000Z", _COMET, _document("Compose"), 0)
+    conn.execute(
+        "INSERT INTO events (id, timestamp, kind_json, display_topology_json, "
+        " primary_display_id, metadata_json, annotation_status) "
+        "VALUES ('paste-1', '2026-09-24T12:00:02.000Z', ?, '[]', '1', '{}', 'skipped')",
+        (json.dumps({"type": "PasteDetected", "matched_copy_hash": None}),),
+    )
+    _insert(conn, "b2", "2026-09-24T12:00:04.000Z", _COMET, _document(LINE), 0)
+    conn.commit()
+    conn.close()
+    typed = _annotate_session(db_path, tmp_path, {"b2": LINE})
+    assert typed["b2"] == LINE

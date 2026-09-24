@@ -124,16 +124,26 @@ def copied(text: str, copies: list[dict]) -> bool:
     """Whether *text* is (part of) one of *copies* (``ClipboardChange``
     records): the copied bytes' hash, or the copy's preview when the user
     turned previews on (a preview may be cut short, so either may hold
-    the other)."""
+    the other).  Without a preview (the default) only the copy's size is
+    known: *text* is the model's reading of the pasted text, so it rarely
+    hashes like the copied bytes, and a copy of about its size stands for
+    it (within a quarter, at least 8 bytes)."""
     squashed = " ".join(text.split()).lower()
     if not squashed:
         return False
     hashes = {hashlib.sha256(t.encode()).hexdigest() for t in (text, text.strip())}
+    size = len(text.strip().encode())
     for copy in copies:
         if str(copy.get("content_hash") or "") in hashes:
             return True
         preview = " ".join(str(copy.get("content_preview") or "").split()).lower()
-        if preview and (squashed in preview or preview in squashed):
+        if preview:
+            if squashed in preview or preview in squashed:
+                return True
+            continue
+        copied_size = copy.get("byte_size")
+        if isinstance(copied_size, int) and copied_size > 0 \
+                and abs(size - copied_size) <= max(8, copied_size // 4):
             return True
     return False
 
