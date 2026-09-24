@@ -23,6 +23,8 @@ from agenthandover_worker.frame_differ import (
     content_lines,
     ground_text_changes,
     is_chrome_line,
+    is_numeric_line,
+    is_ruler_line,
 )
 from agenthandover_worker.focus_questioner import (
     ANSWER_ACCEPTED_GUESS,
@@ -419,10 +421,14 @@ _DISPLAY = [{"display_id": "1", "bounds_global_px": [0, 0, 1512, 982],
 _DOC_LINES = ["IANA-managed Reserved Domains", "example.com is reserved per RFC 2606"]
 
 
-def _textedit_frame(event_id: str, second: int, font_popup: str, extra: str = "") -> dict:
+def _textedit_frame(
+    event_id: str, second: int, font_popup: str, extra: str = "",
+    toolbar: tuple[tuple[float, float, str], ...] = (),
+) -> dict:
     """A TextEdit frame: the menu bar above the window, the format bar's
-    font popup (OCR'd as *font_popup*) inside its toolbar band, the
-    document below."""
+    font popup (OCR'd as *font_popup*) inside its toolbar band, more
+    *toolbar* text as ``(y, x, text)`` in points (the format bar's size and
+    spacing popups, the ruler's ticks), the document below."""
     def box(y_points: float, text: str, x: float = 120, w: float = 300) -> dict:
         return {"text": text, "confidence": 1.0,
                 "bbox_normalized": [x / 1512, y_points / 982, w / 1512, 14 / 982]}
@@ -431,6 +437,7 @@ def _textedit_frame(event_id: str, second: int, font_popup: str, extra: str = ""
     elements = [
         box(4, "TextEdit File Edit Format View Window Help", x=30, w=500),
         box(135, font_popup, x=160, w=120),
+        *(box(y, text, x=x, w=10 * len(text)) for y, x, text in toolbar),
         *(box(250 + 30 * i, line) for i, line in enumerate(doc)),
     ]
     annotation = {
@@ -511,6 +518,107 @@ def test_a_font_popup_edit_is_not_kept() -> None:
     assert diff["inputs"] == [{"field": "Document", "value": "Reserved for documentation"}]
     assert diff["step_description"] == diff["actions"][0]
     assert any("Halvetica Ragular" in d for d in diff["ungrounded"])
+
+
+# The live run of session ec05f823 (qwen3.5:4b): "The user edited the
+# metadata fields in a TextEdit document, changing the font size from 12 to
+# 10 and the line ...": the format bar's size and spacing popups and the
+# ruler's ticks, OCR'd differently in each frame.  The window's toolbar
+# band ends at y = 160 points, the ruler below it; the document starts at
+# y = 250.
+_TOOLBAR_A = ((135, 300, "12"), (135, 360, "1.0"), (168, 110, "0 2 4 6 8 10 12 14"))
+_TOOLBAR_B = ((135, 300, "10"), (135, 360, "1.5"), (168, 110, "2 4 6 8 10 12 14 16"),
+              (168, 800, "18"))
+
+
+def test_toolbar_and_ruler_numbers_are_chrome() -> None:
+    for toolbar in (_TOOLBAR_A, _TOOLBAR_B):
+        frame = _textedit_frame("t1", 0, "Helvetica Regular", toolbar=toolbar)
+        annotation = json.loads(frame["scene_annotation_json"])
+        for geometry in (True, False):
+            content, chrome = content_lines(frame, annotation, geometry=geometry)
+            assert content == _DOC_LINES
+            assert all(text in chrome for _, _, text in toolbar)
+        # Without the geometry at all (a row without OCR boxes).
+        assert content_lines(None, annotation)[0] == _DOC_LINES
+    assert is_numeric_line("12") and is_numeric_line("1.0") and is_numeric_line("100%")
+    assert is_numeric_line("0 2 4 6 8 10 12 14")
+    assert not is_numeric_line("Invoice 4471") and not is_numeric_line("3 items")
+    assert not is_numeric_line("") and not is_numeric_line("-")
+    assert is_ruler_line("0 2 4 6 8 10 12 14") and is_ruler_line("2 4 6 8 1 12 14")
+    assert not is_ruler_line("555 123 4567") and not is_ruler_line("2026 09 24")
+    assert not is_ruler_line("12") and not is_ruler_line("Page 1 2 3")
+
+
+def test_toolbar_numbers_read_differently_are_no_change() -> None:
+    """Frames that differ only in how OCR read the size popup, the
+    spacing popup and the ruler are not sent to the model."""
+    prev = _textedit_frame("t1", 0, "Helvetica Regular", toolbar=_TOOLBAR_A)
+    curr = _textedit_frame("t2", 10, "Helvetica Regular", toolbar=_TOOLBAR_B)
+    with patch("agenthandover_worker.scene_annotator._call_ollama_vlm") as call:
+        result = FrameDiffer().diff_pair(prev, curr)
+    assert result.diff["diff_type"] == "no_change"
+    call.assert_not_called()
+
+
+def test_toolbar_numbers_never_reach_the_diff_and_a_size_edit_is_not_kept() -> None:
+    """A real edit beside the flickering toolbar: the model sees the
+    document's new line and no toolbar number, and an input read off the
+    size popup is dropped."""
+    prev = _textedit_frame("t1", 0, "Helvetica Regular", toolbar=_TOOLBAR_A)
+    curr = _textedit_frame("t2", 10, "Helvetica Regular", extra="Reserved for documentation",
+                           toolbar=_TOOLBAR_B)
+    prompts: list[str] = []
+    answer = {
+        "diff_type": "action",
+        "actions": ["The user typed 'Reserved for documentation' below the heading"],
+        "inputs": [{"field": "Font size", "value": "10"},
+                   {"field": "Document", "value": "Reserved for documentation"}],
+        "navigation": "none",
+        "step_description": "Typed a line below the heading",
+    }
+
+    def model(**kwargs):
+        prompts.append(kwargs["prompt"])
+        return json.dumps(answer), 1.0
+
+    with patch("agenthandover_worker.scene_annotator._call_ollama_vlm", side_effect=model):
+        diff = FrameDiffer().diff_pair(prev, curr).diff
+    screen_lines = [line for line in prompts[0].splitlines() if line.startswith("Screen text:")]
+    assert len(screen_lines) == 2
+    for line in screen_lines:
+        parts = line.removeprefix("Screen text: ").split(" | ")
+        assert not any(is_numeric_line(part) for part in parts), line
+    assert "Reserved for documentation" in prompts[0]
+    assert diff["inputs"] == [{"field": "Document", "value": "Reserved for documentation"}]
+    assert diff["ungrounded"] == ["input Font size: 10"]
+
+
+def test_a_typed_number_line_in_the_document_is_content() -> None:
+    """A number the user typed on its own line (placed in the document by
+    the geometry) is content for the diff, the no-change check and the
+    step checks; without the geometry it cannot be told from a toolbar's."""
+    prev = _textedit_frame("t1", 0, "Helvetica Regular", toolbar=_TOOLBAR_A)
+    curr = _textedit_frame("t2", 10, "Helvetica Regular", extra="4471", toolbar=_TOOLBAR_A)
+    annotation = json.loads(curr["scene_annotation_json"])
+    for geometry in (True, False):
+        assert content_lines(curr, annotation, geometry=geometry)[0] == [*_DOC_LINES, "4471"]
+    assert content_lines(None, annotation)[0] == _DOC_LINES
+    prompts: list[str] = []
+
+    def model(**kwargs):
+        prompts.append(kwargs["prompt"])
+        return json.dumps({"diff_type": "action", "actions": ["The user typed '4471'"],
+                           "inputs": [{"field": "Document", "value": "4471"}],
+                           "step_description": "Typed '4471'"}), 1.0
+
+    with patch("agenthandover_worker.scene_annotator._call_ollama_vlm", side_effect=model):
+        diff = FrameDiffer().diff_pair(prev, curr).diff
+    assert len(prompts) == 1 and "| 4471" in prompts[0]
+    assert diff["actions"] == ["The user typed '4471'"] and "ungrounded" not in diff
+    # A number within a line stays content without any geometry.
+    annotation = {"app": "TextEdit", "_screen_text": "Invoice 4471\n3 items\n12"}
+    assert content_lines(None, annotation)[0] == ["Invoice 4471", "3 items"]
 
 
 def test_grounding_keeps_edits_the_document_shows() -> None:

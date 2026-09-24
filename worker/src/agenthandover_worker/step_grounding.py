@@ -43,7 +43,7 @@ import re
 
 from agenthandover_worker.clipboard_grounding import COPY
 from agenthandover_worker.dom import accessible_name, flatten_dom, implicit_role
-from agenthandover_worker.frame_differ import is_chrome_line
+from agenthandover_worker.frame_differ import content_lines
 
 logger = logging.getLogger(__name__)
 
@@ -109,15 +109,12 @@ def frame_content(frame: dict) -> list[str]:
     """The frame's document lines without the window chrome: the
     ``content_text`` the focus processor attaches (``frame_differ.
     content_lines``, with the frame's geometry), else the annotation's
-    screen text without menu, font and format lines."""
+    screen text without menu, font and format lines and toolbar numbers
+    (``content_lines`` without the geometry)."""
     if isinstance(frame.get("content_text"), list):
         return [str(line) for line in frame["content_text"]]
     annotation = frame.get("annotation") if isinstance(frame.get("annotation"), dict) else {}
-    app = str(annotation.get("app") or "")
-    return [
-        line.strip() for line in str(annotation.get("_screen_text") or "").splitlines()
-        if line.strip() and not is_chrome_line(line, app)
-    ]
+    return content_lines(None, annotation)[0]
 
 
 def _click_names(frame: dict) -> list[str]:
