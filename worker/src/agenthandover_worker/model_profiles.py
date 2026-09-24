@@ -907,7 +907,8 @@ def migrate_vlm_block(
         elif missing := missing_models(models, served):
             reason += (
                 f"; the switch waits until {', '.join(missing)} "
-                f"({download_label(missing)}) is downloaded (the app offers it; "
+                f"({download_label(missing)}) {'is' if len(missing) == 1 else 'are'} "
+                "downloaded (the app offers it; "
                 f"or: agenthandover setup --tier {tier.id})"
             )
         else:
