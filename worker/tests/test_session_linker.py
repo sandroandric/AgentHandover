@@ -644,3 +644,121 @@ class TestLLMBand:
         for a, b in (("x", "y"), ("x", "z"), ("y", "z"), ("x", "y")):
             linker._intent_similarity(a, b)
         assert sorted(vkb.embedded) == ["x", "y", "z"]
+
+
+class _PromptReasoner(_CountingReasoner):
+    """A counting reasoner that keeps every prompt it was asked."""
+
+    def __init__(self, answer: bool) -> None:
+        super().__init__(answer)
+        self.prompts: list[str] = []
+
+    def reason_yesno(self, prompt: str, caller: str = ""):
+        self.prompts.append(prompt)
+        return super().reason_yesno(prompt, caller)
+
+
+class _DownVectorKB:
+    """An embedder whose model is unreachable."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def compute_embeddings(self, texts, *, prefix=""):
+        self.calls += 1
+        raise ConnectionError("Ollama unreachable")
+
+
+def _band_days(kb: KnowledgeBase, n: int) -> None:
+    """*n* days, one task each; every pair of intents shares 3 of 9 tokens
+    (Jaccard 0.33): the LLM band below the Jaccard threshold."""
+    for d in range(n):
+        _save_daily(kb, f"2025-03-{d + 1:02d}", [{
+            "intent": f"reconcile ledger payouts x{d}a x{d}b x{d}c",
+            "duration_minutes": 5, "apps": [],
+        }])
+
+
+class TestDailyPassCost:
+    """The daily pass is bounded: WP-F12 found the linker re-checking every
+    pair of intents on every pass (5,864 embedding requests in J-passive
+    at a closed port)."""
+
+    def test_band_checks_are_capped_per_pass_and_never_repeated(self, kb: KnowledgeBase) -> None:
+        from agenthandover_worker.session_linker import _MAX_LLM_CHECKS_PER_PASS
+
+        _band_days(kb, 12)  # 66 pairs in the band
+        reasoner = _PromptReasoner(answer=False)
+        linker = SessionLinker(kb, llm_reasoner=reasoner)
+        linker.analyze_daily_summaries()
+        assert reasoner.calls == _MAX_LLM_CHECKS_PER_PASS
+        linker.analyze_daily_summaries()
+        assert reasoner.calls == 2 * _MAX_LLM_CHECKS_PER_PASS
+
+        # The judgements survive a restart: a new linker asks new pairs only.
+        restarted = SessionLinker(kb, llm_reasoner=reasoner)
+        assert restarted.analyze_daily_summaries() == []
+        assert reasoner.calls == 3 * _MAX_LLM_CHECKS_PER_PASS
+        assert len(set(reasoner.prompts)) == len(reasoner.prompts)
+
+    def test_a_remembered_yes_links_without_a_model_call(self, kb: KnowledgeBase) -> None:
+        _band_days(kb, 2)
+        SessionLinker(kb, llm_reasoner=_CountingReasoner(answer=True)).analyze_daily_summaries()
+        # Drop the link; the judgement of the pair stays.
+        path = kb.root / "observations" / "session_links.json"
+        data = json.loads(path.read_text())
+        assert len(data["links"]) == 1 and list(data["judgements"].values()) == [True]
+        data["links"] = []
+        path.write_text(json.dumps(data))
+
+        reasoner = _CountingReasoner(answer=False)
+        links = SessionLinker(kb, llm_reasoner=reasoner).analyze_daily_summaries()
+        assert reasoner.calls == 0
+        assert len(links) == 1
+
+    def test_a_failed_check_is_not_remembered(self, kb: KnowledgeBase) -> None:
+        from agenthandover_worker.llm_reasoning import ReasoningResult
+
+        _band_days(kb, 2)
+        reasoner = _CountingReasoner(answer=True)
+        reasoner.reason_yesno = lambda prompt, caller="": ReasoningResult(
+            value=None, success=False, error="down")
+        assert SessionLinker(kb, llm_reasoner=reasoner).analyze_daily_summaries() == []
+        path = kb.root / "observations" / "session_links.json"
+        assert json.loads(path.read_text())["judgements"] == {}
+
+    def test_linked_tasks_are_not_compared_again(self, kb: KnowledgeBase) -> None:
+        for day in ("2025-03-01", "2025-03-02"):
+            _save_daily(kb, day, [{"intent": "Deploy API server", "duration_minutes": 5, "apps": []}])
+        linker = SessionLinker(kb, llm_reasoner=_CountingReasoner(answer=True))
+        assert len(linker.analyze_daily_summaries()) == 1
+        with patch.object(SessionLinker, "_intents_match", autospec=True) as match:
+            links = linker.analyze_daily_summaries()
+        assert match.call_count == 0
+        assert len(links) == 1 and len(links[0].sessions) == 2
+
+    def test_a_pass_embeds_its_new_intents_in_one_call(self, kb: KnowledgeBase) -> None:
+        vectors = {"x": [1.0, 0.0], "y": [0.0, 1.0], "z": [1.0, 1.0]}
+        for d, text in enumerate(vectors):
+            _save_daily(kb, f"2025-03-0{d + 1}", [{"intent": text, "duration_minutes": 5, "apps": []}])
+        calls: list[list[str]] = []
+
+        class _Recording(_FakeVectorKB):
+            def compute_embeddings(self, texts, *, prefix=""):
+                calls.append(sorted(texts))
+                return super().compute_embeddings(texts, prefix=prefix)
+
+        linker = SessionLinker(kb, vector_kb=_Recording(vectors))
+        linker.analyze_daily_summaries()
+        assert calls == [["x", "y", "z"]]
+        linker.analyze_daily_summaries()
+        assert len(calls) == 1  # nothing new to embed
+
+    def test_an_unreachable_embedder_is_tried_once_per_pass(self, kb: KnowledgeBase) -> None:
+        _band_days(kb, 6)
+        vkb = _DownVectorKB()
+        linker = SessionLinker(kb, vector_kb=vkb)
+        linker.analyze_daily_summaries()
+        assert vkb.calls == 1
+        linker.analyze_daily_summaries()
+        assert vkb.calls == 2
