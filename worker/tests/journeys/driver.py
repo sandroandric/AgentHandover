@@ -10,7 +10,8 @@ the loop body's processors in the loop's order:
 1. ``trigger_spool.drain`` over main()'s trigger handlers (retry, approve,
    failed query, search, recall, trust accept / dismiss, staleness
    reviewed, lifecycle promote, merge, drift reviewed, lifecycle dismiss,
-   export) and, when a trigger was consumed, the curation queue refresh;
+   export, micro-answer) and, when a trigger was consumed, the curation
+   queue refresh;
 2. the stale focus-session sweep;
 3. ``run_pipeline`` over one ``EventRetryGuard`` batch of unprocessed
    events, marking them processed and persisting VLM jobs;
@@ -132,7 +133,6 @@ class JourneyWorker:
         from agenthandover_worker.continuity_tracker import ContinuityTracker
         from agenthandover_worker.evidence_normalizer import EvidenceNormalizer
         from agenthandover_worker.evidence_tracker import EvidenceTracker
-        from agenthandover_worker.focus_questioner import FocusQuestioner
         from agenthandover_worker.knowledge_base import KnowledgeBase
         from agenthandover_worker.knowledge_export_adapter import KnowledgeBaseExportAdapter
         from agenthandover_worker.lifecycle_manager import LifecycleManager
@@ -248,7 +248,6 @@ class JourneyWorker:
             config=SynthesizerConfig(model=vlm_cfg.sop_model, ollama_host=host),
             vlm_queue=self.vlm_queue, knowledge_base=kb,
         )
-        self.focus_questioner = FocusQuestioner(llm_reasoner=llm_reasoner)
         self.procedure_curator = None
         if features.curation:
             self.procedure_curator = ProcedureCurator(
@@ -426,6 +425,9 @@ class JourneyWorker:
                 sops_dir=self.sops_dir,
                 procedure_writer=self.procedure_writer,
             ),
+            "micro-answer": lambda t: wm._process_micro_answer_trigger(
+                t, db, self.knowledge_base, now=self.clock.now(),
+            ),
         }
 
     def _merge_job(self, trigger: dict) -> None:
@@ -555,11 +557,10 @@ class JourneyWorker:
                 screenshots_dir=self.screenshots_dir,
                 sop_auto_approve=self.sop_auto_approve,
                 behavioral_synthesizer=self.behavioral_synthesizer,
-                focus_questioner=self.focus_questioner,
                 knowledge_base=self.knowledge_base,
                 vector_kb=self.vector_kb,
-                ollama_host=self.cfg.vlm.ollama_host,
-                qna_model=scheduler.generation_model,
+                weekly_question_budget=self.cfg.knowledge.weekly_question_budget,
+                now=self.clock.now(),
                 **self._export_kwargs(),
             )
         else:
@@ -641,6 +642,7 @@ class JourneyWorker:
                     variant_detector=self.variant_detector,
                     evidence_normalizer=self.evidence_normalizer,
                     now=self.clock.now(),
+                    weekly_question_budget=self.cfg.knowledge.weekly_question_budget,
                     **self._export_kwargs(),
                 )
             result["passive_sops"] = passive_sops

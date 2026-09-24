@@ -158,9 +158,9 @@ Steps refer to inputs as `{{name}}`.
 ## Decisions
 
 - If User has collected exactly three distinct articles covering different tech domains.: User stops collecting, copies the entire note content, and proceeds to post to Slack.
-- Open question the user did not answer: "Are the specific article titles 'SQLite's WAL mode, explained with diagrams', the on-device vision guide, and the HTTP cassette recorder project guaranteed to exist at the URLs provided or are they dynamic links that might require searching?" Ask the user; do not guess.
-- Open question the user did not answer: "What specific format should the summary sentences follow (e.g., bullet points, paragraph style, word count limit) to ensure consistency in the final Slack post?" Ask the user; do not guess.
-- Open question the user did not answer: "Does the Notes app require any specific organization or folder structure before creating new notes, or should they be created in the default location?" Ask the user; do not guess.
+- Open question the user did not answer: "What starts this task?" Ask the user; do not guess.
+- Open question the user did not answer: "How do you check that this task worked?" Ask the user; do not guess.
+- Open question the user did not answer: "What is this task for?" Ask the user; do not guess.
 
 ## Guardrails
 

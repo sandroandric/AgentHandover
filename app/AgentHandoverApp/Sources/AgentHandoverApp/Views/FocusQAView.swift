@@ -6,10 +6,10 @@ import SwiftUI
 /// recording, this view displays them and writes answers back to
 /// `focus-questions.json` for the worker to consume.
 ///
-/// Each answer field starts with the model's guess as editable text.
+/// Each answer field starts with AgentHandover's guess as editable text.
 /// Submitted unchanged it is an accepted guess (the worker keeps it a
-/// hypothesis); edited it is the user's answer; cleared, the question stays
-/// open.
+/// hypothesis); edited, or picked from the question's choices, it is the
+/// user's answer; cleared, the question stays open.
 struct FocusQAView: View {
     @EnvironmentObject var appState: AppState
     /// Closes the window (the app delegate hosts it).
@@ -17,6 +17,9 @@ struct FocusQAView: View {
 
     @State private var questionsFile: FocusQuestionsFile?
     @State private var answers: [Int: String] = [:]
+    /// Question index -> the choice the user picked (the user's answer
+    /// even when it equals the guess).
+    @State private var picked: [Int: String] = [:]
     @State private var writeError: String?
     @State private var didSubmit = false
     @State private var offerNotifications = false
@@ -102,7 +105,7 @@ struct FocusQAView: View {
                     .font(.system(size: 18, weight: .bold, design: .rounded))
                     .foregroundColor(darkNavy)
 
-                Text("Each answer starts with AgentHandover's guess. Keep it, change it, or clear it to leave the question open.")
+                Text("Each answer starts with AgentHandover's guess. Keep it, pick a choice, change it, or clear it to leave the question open.")
                     .font(.system(size: 13))
                     .foregroundColor(darkNavy.opacity(0.5))
                     .multilineTextAlignment(.center)
@@ -172,6 +175,33 @@ struct FocusQAView: View {
                     .padding(.leading, 4)
             }
 
+            if !Self.choices(for: question).isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(Self.choices(for: question), id: \.self) { choice in
+                        Button {
+                            answers[question.index] = choice
+                            picked[question.index] = choice
+                        } label: {
+                            Text(choice)
+                                .font(.system(size: 12))
+                                .multilineTextAlignment(.leading)
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 5)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 8)
+                                        .fill(picked[question.index] == choice
+                                              ? warmOrange.opacity(0.2) : Color.clear)
+                                )
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 8)
+                                        .stroke(warmOrange.opacity(0.4), lineWidth: 1)
+                                )
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+
             TextField("Your answer", text: answerBinding(for: question.index), axis: .vertical)
                 .textFieldStyle(.plain)
                 .font(.system(size: 13))
@@ -184,7 +214,7 @@ struct FocusQAView: View {
                         .stroke(darkNavy.opacity(0.15), lineWidth: contraBorder)
                 )
 
-            if let note = Self.answerNote(for: question, answers: answers) {
+            if let note = Self.answerNote(for: question, answers: answers, picked: picked) {
                 Text(note)
                     .font(.system(size: 11))
                     .foregroundColor(darkNavy.opacity(0.5))
@@ -352,14 +382,22 @@ struct FocusQAView: View {
         answers[index] ?? ""
     }
 
+    /// The answers the question offers (the worker's choices, drawn from
+    /// what the recorded runs showed), in its order.
+    static func choices(for question: FocusQuestion) -> [String] {
+        (question.choices ?? []).filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    }
+
     /// The line under a field: what submitting it will record.
-    static func answerNote(for question: FocusQuestion, answers: [Int: String]) -> String? {
+    static func answerNote(
+        for question: FocusQuestion, answers: [Int: String], picked: [Int: String] = [:]
+    ) -> String? {
         let text = answerText(for: question.index, in: answers)
             .trimmingCharacters(in: .whitespacesAndNewlines)
         if text.isEmpty {
             return "Left open: your agent will ask."
         }
-        if text == guess(of: question) {
+        if text == guess(of: question) && picked[question.index] != text {
             return "AgentHandover's guess: submitted as is, it stays a guess."
         }
         return nil
@@ -367,11 +405,13 @@ struct FocusQAView: View {
 
     /// The answers written back to the worker, keyed by question index, and
     /// where each came from: the guess submitted unchanged is
-    /// `accepted_guess`, anything else non-blank is `typed`.  A cleared
-    /// field is left out, and the worker records its question unanswered.
+    /// `accepted_guess`, anything else non-blank (a choice the user picked
+    /// included, even the guess) is `typed`.  A cleared field is left out,
+    /// and the worker records its question unanswered.
     static func submission(
         for questions: [FocusQuestion],
-        answers: [Int: String]
+        answers: [Int: String],
+        picked: [Int: String] = [:]
     ) -> (answers: [String: String], sources: [String: String]) {
         var texts: [String: String] = [:]
         var sources: [String: String] = [:]
@@ -381,15 +421,18 @@ struct FocusQAView: View {
             guard !text.isEmpty else { continue }
             let key = String(question.index)
             texts[key] = text
-            sources[key] = text == guess(of: question) ? acceptedGuess : typed
+            let pickedIt = picked[question.index] == text
+            sources[key] = text == guess(of: question) && !pickedIt ? acceptedGuess : typed
         }
         return (texts, sources)
     }
 
     /// The file Submit writes: *file* answered with *answers*.
-    static func answeredFile(_ file: FocusQuestionsFile, answers: [Int: String]) -> FocusQuestionsFile {
+    static func answeredFile(
+        _ file: FocusQuestionsFile, answers: [Int: String], picked: [Int: String] = [:]
+    ) -> FocusQuestionsFile {
         var answered = file
-        let submitted = submission(for: file.questions, answers: answers)
+        let submitted = submission(for: file.questions, answers: answers, picked: picked)
         answered.status = "answered"
         answered.answers = submitted.answers
         answered.answer_sources = submitted.sources
@@ -399,7 +442,11 @@ struct FocusQAView: View {
     private func answerBinding(for index: Int) -> Binding<String> {
         Binding(
             get: { Self.answerText(for: index, in: answers) },
-            set: { answers[index] = $0 }
+            set: {
+                answers[index] = $0
+                // Typing over a picked choice makes it the user's own text.
+                if picked[index] != $0 { picked[index] = nil }
+            }
         )
     }
 
@@ -409,7 +456,7 @@ struct FocusQAView: View {
         guard let file = questionsFile else { return }
         writeError = nil
 
-        if writeFile(Self.answeredFile(file, answers: answers)) {
+        if writeFile(Self.answeredFile(file, answers: answers, picked: picked)) {
             didSubmit = true
             appState.focusQuestionsAvailable = false
             appState.focusQuestionsSlug = ""

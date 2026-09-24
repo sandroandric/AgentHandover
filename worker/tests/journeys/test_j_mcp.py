@@ -199,21 +199,31 @@ def test_mcp_deviation_asks_the_user_in_the_next_digest(
     assert decisions["status"] == "unknown" and decisions["source"] == "agent"
     assert decisions["evidence"] == [{"kind": "run", "id": execution_id}]
 
-    # The daily batch's digest, as the worker writes it and the app reads it.
+    # The daily batch asks what the run raised, as a review card within the
+    # weekly budget the focus recording's questions share, then writes the
+    # digest, as the worker writes it and the app reads it.
+    from agenthandover_worker import questions
     from agenthandover_worker.daily_digest import DigestGenerator
 
+    questions.refresh(
+        run.worker.db, kb, temp_home.data_dir, now=clock.now(),
+        weekly_budget=run.worker.cfg.knowledge.weekly_question_budget,
+    )
+    step_id = parse_packet(session.skill["packet"]).steps()[0].step_id
+    run_question = f"run:{slug}:{execution_id}:{step_id}"
+    cards = json.loads((temp_home.data_dir / questions.MICRO_QUESTIONS_FILE).read_text())
+    assert run_question in [card["id"] for card in cards["questions"]]
     day = clock.now().strftime("%Y-%m-%d")
     generator = DigestGenerator(kb, db=run.worker.db)
     generator.save_digest(generator.generate(day))
     saved = json.loads((kb.root / "observations" / "digests" / f"{day}.json").read_text())
     [section] = [s for s in saved["sections"] if s["title"] == "Questions for you"]
-    [question] = section["items"]
-    step_id = parse_packet(session.skill["packet"]).steps()[0].step_id
-    assert (question["slug"], question["execution_id"], question["step_id"]) == (
-        slug, execution_id, step_id,
-    )
+    [question] = [item for item in section["items"] if item["question_id"] == run_question]
     assert "Opened the digest from Drafts instead" in question["title"]
-    assert question["category"] == "decision"
+    # It is the Skill's decisions question: the general one is not asked.
+    assert f"slot:{slug}:decisions" not in [
+        row["question_id"] for row in run.worker.db.get_micro_questions()
+    ]
 
     # The next agent gets the question in its packet, and the decision as
     # not yet known.

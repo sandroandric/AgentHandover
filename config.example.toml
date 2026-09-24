@@ -135,6 +135,9 @@ pattern_detection_min_days = 3
 # Enable the local HTTP query API for agents (default: true)
 query_api_enabled = true
 query_api_port = 9477
+# Questions AgentHandover may ask you in any seven days (after a focus
+# recording, and as review cards about what it could not learn); 0 = none.
+weekly_question_budget = 5
 # Enable knowledge base sync (Phase 5)
 sync_enabled = false
 # sync_remote = ""             # rsync-style remote path or URL

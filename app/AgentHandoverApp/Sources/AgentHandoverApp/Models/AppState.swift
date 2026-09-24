@@ -115,8 +115,19 @@ struct FocusQuestion: Codable, Identifiable {
     /// The steps (0-based) the question is about; kept so the worker reads
     /// them back from the answered file.
     var step_indexes: [Int]? = nil
+    /// The worker's id for the question (its row in `micro_questions`);
+    /// kept so the worker closes it when the answers come back.
+    var questionID: String? = nil
+    /// Answers the recorded runs suggest; the window offers them as
+    /// buttons next to the text field.
+    var choices: [String]? = nil
 
     var id: Int { index }
+
+    enum CodingKeys: String, CodingKey {
+        case index, question, category, context, `default`, step_indexes, choices
+        case questionID = "id"
+    }
 }
 
 /// Decoded focus-questions.json (written by the worker's
@@ -197,6 +208,8 @@ final class AppState: ObservableObject {
     // Focus Q&A
     @Published var focusQuestionsAvailable = false
     @Published var focusQuestionsSlug: String = ""
+    /// Open review-card questions (micro-questions.json).
+    @Published var microQuestionCount = 0
 
     // MARK: - Computed
 
@@ -245,6 +258,7 @@ final class AppState: ObservableObject {
     private var quickTimer: Timer?
     private var focusQuestionsStamp = FileStamp()
     private var focusResultStamp = FileStamp()
+    private var microQuestionsStamp = FileStamp()
     /// Called when both grants are present after one of them was missing
     /// (set by the app delegate; see `OnboardingProgress.regrantAction`).
     var onPermissionsGranted: (() -> Void)?
@@ -318,6 +332,14 @@ final class AppState: ObservableObject {
         }
         if focusResultStamp.changed(statusDir.appendingPathComponent(FocusResult.fileName)) {
             readFocusSession()
+        }
+        // The worker's review-card questions show within seconds of the
+        // evidence that raised them.
+        if microQuestionsStamp.changed(statusDir.appendingPathComponent(MicroQuestions.fileName)) {
+            let questions = MicroQuestions.load(from: statusDir)
+            microQuestionCount = questions.count
+            NotificationCenter.default.post(name: MicroQuestions.changed, object: nil)
+            FocusQuestionsNotifier.shared.microQuestionsReady(questions)
         }
         checkPermissions()
     }

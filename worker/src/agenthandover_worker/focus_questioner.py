@@ -1,21 +1,14 @@
-"""Focus session questioner — gap analysis and targeted questions.
+"""The focus recording's questions: the Q&A files, merging the answers,
+and the typed answers' revision of the steps.
 
-After a focus recording generates a SOP, this module analyzes the
-procedure + behavioral insights for gaps and generates 1-3 targeted
-questions.  User answers are merged back into the procedure before
-final export.
-
-Question categories:
-- ``credentials``: workflow requires login but no auth step recorded
-- ``strategy``: the overall goal/approach is unclear
-- ``decision``: branch conditions detected but logic unclear
-- ``verification``: no success criteria defined
-- ``scope``: timing/recurrence patterns suggest scheduling
-
-The question delivery uses JSON file IPC: the worker writes
-``focus-questions.json`` to the status directory; the CLI reads it,
-presents questions to the user, writes answers back, and the worker
-merges answers on the next poll cycle.
+The questions themselves are the ledger's (:mod:`questions`): after a
+focus recording's SOP is generated, the worker asks about the slots it
+does not know yet, writes them to ``focus-questions.json`` in the status
+directory (with the choices the runs suggest) and pauses the export; the
+app's Q&A window shows them and writes the answers back, and on the next
+poll the worker merges them into the procedure (:func:`merge_answers`,
+then :func:`answer_revision_prompt` / :func:`apply_answer_revisions` for
+the typed answers that change steps).
 """
 
 from __future__ import annotations
@@ -23,15 +16,11 @@ from __future__ import annotations
 import json
 import re
 import logging
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, TYPE_CHECKING
+from typing import Any
 
-from agenthandover_worker.clipboard_grounding import COPIED, COPY, PASTE, claims, rewrite
 from agenthandover_worker.redaction import redact
-
-if TYPE_CHECKING:
-    from agenthandover_worker.llm_reasoning import LLMReasoner
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +46,10 @@ class FocusQuestion:
     # merge_answers() rewrites these specific steps' text.  Empty list means
     # the answer applies to the procedure as a whole, not a particular step.
     step_indexes: list[int] = field(default_factory=list)
+    # The micro-question's id (``questions``): its row in ``micro_questions``.
+    id: str = ""
+    # Answers the runs suggest: the app offers them next to the text field.
+    choices: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -106,453 +99,183 @@ ANSWER_TYPED = "typed"
 ANSWER_ACCEPTED_GUESS = "accepted_guess"
 FOCUS_PENDING_FILE = "focus-pending.json"
 
-_LEGACY_MERGE_CATEGORIES = frozenset({
-    "credentials", "strategy", "decision", "verification", "scope",
-})
-
-_MAX_QUESTIONS = 3
-
-_NO_CLIPBOARD_NOTE = (
-    "\n\nCLIPBOARD: no copy, cut or paste was recorded during this session: "
-    "the user typed the text. Do not ask about copying or pasting."
-)
-
 
 # ---------------------------------------------------------------------------
-# LLM prompt for question generation
-# ---------------------------------------------------------------------------
-
-_QUESTIONER_SYSTEM = """\
-You are an AI agent that has been given a workflow to execute autonomously. \
-Before you can execute it, you need to identify what's missing or unclear. \
-Think practically: what would YOU need to know to do this task reliably \
-on your own, without the human watching? \
-Respond with ONLY valid JSON. No markdown fences, no commentary."""
-
-
-_QUESTIONER_PROMPT = """\
-You are an AI agent about to execute this workflow autonomously. \
-A human just recorded themselves doing it. Here is what was captured:
-
-TITLE: {title}
-DESCRIPTION: {description}
-STRATEGY: {strategy}
-
-STEPS:
-{steps_text}
-
-APPS INVOLVED: {apps}
-URLS DETECTED: {urls}
-INPUTS/VARIABLES: {variables}{clipboard_note}
-
-Put yourself in the agent's position. Think step by step:
-- Could you actually execute each step with the information given?
-- Do you know WHERE to do things (which app, which URL, which page)?
-- Do you know HOW to make decisions the human made implicitly?
-- Do you know WHEN you're done and whether you succeeded?
-- Do you have ACCESS to everything you'd need (logins, permissions, data)?
-
-Identify 1-3 questions that would be MOST practically useful for you \
-as the executing agent. Do not ask generic questions. Ask specific, \
-practical questions grounded in what you see in the steps above.
-
-Return a JSON object:
-{{
-  "questions": [
-    {{
-      "question": "<specific, practical question you need answered>",
-      "category": "<short label: e.g. access, data_source, decision_logic, output_format, error_handling, verification, scheduling, permissions, or any other relevant label>",
-      "context": "<why you need this to execute reliably>",
-      "default": "<your best guess if the human doesn't answer>",
-      "step_numbers": [<list of 1-based step numbers this question is about>]
-    }}
-  ]
-}}
-
-Rules:
-- Ask 1-3 questions MAXIMUM. Only what truly blocks reliable execution.
-- If you could execute this workflow as-is, return {{"questions": []}}
-- Every question must reference specific steps or details from above.
-- Defaults should be your most conservative practical assumption.
-- step_numbers is REQUIRED when the question is about a specific step or
-  steps in the list above. Use [] when the question is general (e.g. about
-  scheduling or overall strategy) and not tied to a single step.
-
-Respond with ONLY the JSON object."""
-
-
-# ---------------------------------------------------------------------------
-# FocusQuestioner
+# Merging the answers
 # ---------------------------------------------------------------------------
 
 
-class FocusQuestioner:
-    """Analyze a generated procedure for gaps and produce targeted questions.
+def merge_answers(
+    procedure: dict,
+    qa_result: FocusQAResult,
+) -> dict:
+    """Merge user answers into the procedure dict.
 
-    Uses ``LLMReasoner.reason_json()`` for question generation and
-    deterministic logic for answer merging.
+    Does NOT mutate the input.  Returns a new dict.
+
+    Q&A answers always land in ``agent_clarifications[]``.  They do NOT
+    auto-create ``environment.accounts[]`` or ``branches[]`` entries from
+    free text — earlier behavior corrupted those structured fields with
+    narrative answers like "Assume credentials are provided via a logged
+    in browser" appearing as ``accounts[0].service`` and "Select the top
+    3 trending topics" appearing as ``branches[0].condition``.  Both made
+    downstream Skills harder to execute, not easier.
+
+    Where the answer is a concrete value the user is correcting (e.g.
+    "the subreddit is r/ClaudeAI") AND the question has ``step_indexes``
+    pointing at the affected steps, ``_rewrite_steps_for_clarifications``
+    applies a targeted in-place text substitution so the step body stays
+    self-consistent with the clarification.
+
+    Two narrow categories still update procedure-level fields directly
+    because they are non-corrupting and the field shape matches free text:
+
+    - ``strategy``: only writes if the procedure has no synthesised
+      strategy yet (avoid clobbering behavioral_synthesizer output).
+    - ``scope`` (recurrence): writes the recurrence string verbatim.
     """
+    proc = json.loads(json.dumps(procedure))  # deep copy
+    clarifications = proc.setdefault("agent_clarifications", [])
 
-    def __init__(self, llm_reasoner: "LLMReasoner") -> None:
-        self._reasoner = llm_reasoner
-
-    def generate_questions(
-        self,
-        procedure: dict,
-        sop_template: dict | None = None,
-    ) -> list[FocusQuestion]:
-        """Analyze procedure for gaps and generate 1-3 targeted questions.
-
-        Args:
-            procedure: The v3 procedure dict from focus processing.
-            sop_template: Optional SOP template with additional context.
-
-        Returns:
-            List of 0-3 FocusQuestion objects.  Empty if no gaps found
-            or if the LLM call fails (graceful degradation).
-        """
-        # Build the prompt from procedure data
-        title = procedure.get("title", "Untitled")
-        description = procedure.get("description", "")
-        strategy = procedure.get("strategy", "")
-
-        steps = procedure.get("steps", [])
-        steps_lines = []
-        for s in steps:
-            action = s.get("action", s.get("step", ""))
-            app = s.get("app", s.get("parameters", {}).get("app", ""))
-            line = f"  - {action}"
-            if app:
-                line += f" (in {app})"
-            steps_lines.append(line)
-        steps_text = "\n".join(steps_lines) if steps_lines else "(no steps)"
-
-        apps = ", ".join(procedure.get("apps_involved", [])) or "(none)"
-
-        # Extract URLs from steps and SOP template
-        urls_set: set[str] = set()
-        for s in steps:
-            for key in ("location", "target", "url"):
-                val = s.get(key, "") or s.get("parameters", {}).get(key, "")
-                if val and ("http://" in val or "https://" in val):
-                    urls_set.add(val)
-        if sop_template:
-            for s in sop_template.get("steps", []):
-                for key in ("location", "target", "url"):
-                    val = s.get(key, "") or s.get("parameters", {}).get(key, "")
-                    if val and ("http://" in val or "https://" in val):
-                        urls_set.add(val)
-        urls = ", ".join(sorted(urls_set)) or "(none)"
-
-        # Extract variables / inputs
-        variables_list = procedure.get("variables", procedure.get("inputs", []))
-        if isinstance(variables_list, list):
-            variables = ", ".join(
-                v.get("name", str(v)) if isinstance(v, dict) else str(v)
-                for v in variables_list
-            ) or "(none)"
-        else:
-            variables = "(none)"
-
-        # What the clipboard recorded in the session (None: no record).  A
-        # session that copied nothing is told so, as the SOP prompt is, and
-        # the synthesized text's copy wording is not handed on as a fact.
-        # The steps are the Skill's, already grounded (clipboard_grounding,
-        # step_grounding).
-        recorded = _session_clipboard(sop_template)
-        note = ""
-        if recorded == set():
-            note = _NO_CLIPBOARD_NOTE
-            description, strategy = rewrite(description or ""), rewrite(strategy or "")
-
-        # The procedure's text quotes the screen: redacted before the
-        # model sees it.
-        prompt = _QUESTIONER_PROMPT.format(
-            title=redact(title),
-            description=redact(description),
-            strategy=redact(strategy) or "(not yet determined)",
-            steps_text=redact(steps_text),
-            apps=redact(apps),
-            urls=redact(urls),
-            variables=redact(variables),
-            clipboard_note=note,
-        )
-
-        result = self._reasoner.reason_json(
-            prompt=prompt,
-            system=_QUESTIONER_SYSTEM,
-            caller="focus_questioner",
-        )
-
-        if not result.success or result.abstained or not isinstance(result.value, dict):
-            logger.debug(
-                "Focus questioner LLM call failed or abstained: %s",
-                result.error or "abstained",
-            )
-            return []
-
-        return drop_unrecorded_clipboard_questions(
-            self._parse_questions(result.value), recorded,
-        )
-
-    @staticmethod
-    def _parse_questions(data: dict) -> list[FocusQuestion]:
-        """Parse LLM response into validated FocusQuestion objects."""
-        raw_questions = data.get("questions", [])
-        if not isinstance(raw_questions, list):
-            return []
-
-        questions: list[FocusQuestion] = []
-        for raw in raw_questions:
-            if not isinstance(raw, dict):
-                continue
-
-            question_text = raw.get("question", "").strip()
-            category = raw.get("category", "").strip().lower()
-            context = raw.get("context", "").strip()
-            default = raw.get("default", "").strip()
-
-            if not question_text:
-                continue
-            if not category:
-                category = "general"
-
-            # step_indexes lets the LLM tag a question to specific steps so
-            # merge_answers can rewrite those steps in place.  Accept both
-            # 1-based "step_numbers" (LLM-friendly) and 0-based indexes;
-            # normalise to 0-based here.
-            raw_step_idx = raw.get("step_indexes") or raw.get("step_numbers") or []
-            step_indexes: list[int] = []
-            if isinstance(raw_step_idx, list):
-                for v in raw_step_idx:
-                    try:
-                        i = int(v)
-                    except (TypeError, ValueError):
-                        continue
-                    # If the LLM gave 1-based numbers (>= 1), shift to 0-based.
-                    # 0 stays as 0 (already 0-based).  We can't perfectly tell
-                    # the difference; assume LLM uses 1-based when any value
-                    # >= 1 appears.
-                    step_indexes.append(i - 1 if i >= 1 else i)
-
-            questions.append(FocusQuestion(
-                question=question_text,
-                category=category,
-                context=context,
-                default=default,
-                step_indexes=step_indexes,
-            ))
-
-            if len(questions) >= _MAX_QUESTIONS:
-                break
-
-        return questions
-
-    def merge_answers(
-        self,
-        procedure: dict,
-        qa_result: FocusQAResult,
-    ) -> dict:
-        """Merge user answers into the procedure dict.
-
-        Does NOT mutate the input.  Returns a new dict.
-
-        Q&A answers always land in ``agent_clarifications[]``.  They do NOT
-        auto-create ``environment.accounts[]`` or ``branches[]`` entries from
-        free text — earlier behavior corrupted those structured fields with
-        narrative answers like "Assume credentials are provided via a logged
-        in browser" appearing as ``accounts[0].service`` and "Select the top
-        3 trending topics" appearing as ``branches[0].condition``.  Both made
-        downstream Skills harder to execute, not easier.
-
-        Where the answer is a concrete value the user is correcting (e.g.
-        "the subreddit is r/ClaudeAI") AND the question has ``step_indexes``
-        pointing at the affected steps, ``_rewrite_steps_for_clarifications``
-        applies a targeted in-place text substitution so the step body stays
-        self-consistent with the clarification.
-
-        Two narrow categories still update procedure-level fields directly
-        because they are non-corrupting and the field shape matches free text:
-
-        - ``strategy``: only writes if the procedure has no synthesised
-          strategy yet (avoid clobbering behavioral_synthesizer output).
-        - ``scope`` (recurrence): writes the recurrence string verbatim.
-        """
-        proc = json.loads(json.dumps(procedure))  # deep copy
-        clarifications = proc.setdefault("agent_clarifications", [])
-
-        for idx, q in enumerate(qa_result.questions):
-            answer = str(qa_result.answers.get(idx) or "").strip()
-            if not answer:
-                # Skipped, or the field was cleared: the question stays
-                # open.
-                clarifications.append({
-                    "category": q.category,
-                    "question": q.question,
-                    "answer": "",
-                    "status": "unanswered",
-                    "context": q.context,
-                })
-                continue
-
-            cat = q.category.lower().replace(" ", "_")
-
-            # Every answer is recorded in agent_clarifications. This is the
-            # canonical home for Q&A — UI reads from here, audit reads from
-            # here, downstream consumers read from here.
-            # An accepted guess is recorded as such: the ledger keeps it a
-            # hypothesis, where a typed answer is known.
-            source = qa_result.source(idx)
+    for idx, q in enumerate(qa_result.questions):
+        answer = str(qa_result.answers.get(idx) or "").strip()
+        if not answer:
+            # Skipped, or the field was cleared: the question stays
+            # open.
             clarifications.append({
                 "category": q.category,
                 "question": q.question,
-                "answer": answer,
-                "status": "answered",
-                "source": source,
+                "answer": "",
+                "status": "unanswered",
                 "context": q.context,
+                **({"question_id": q.id} if q.id else {}),
             })
-            if source == ANSWER_ACCEPTED_GUESS:
-                # The model's own guess confirms nothing: it fills no
-                # procedure field and rewrites no step.
-                continue
-
-            # Strategy: free text, but only fill if we don't already have one
-            # from behavioral synthesis (which is structurally richer).
-            if cat in ("strategy", "goal", "purpose", "approach"):
-                self._merge_strategy(proc, answer)
-            # Scope/recurrence: the answer maps directly to a single field.
-            elif cat in ("scope", "scheduling", "recurrence", "frequency"):
-                self._merge_scope(proc, answer)
-            # All other categories (credentials, decision, verification, etc.)
-            # are recorded in agent_clarifications only.  No structural-field
-            # auto-population from free text.
-
-        # After all answers are recorded, sweep the steps for in-place
-        # text substitutions when the user's answer corrects a specific
-        # value referenced by a step (e.g. "the subreddit is r/ClaudeAI").
-        self._rewrite_steps_for_clarifications(proc, qa_result)
-
-        return proc
-
-    @staticmethod
-    def _merge_strategy(proc: dict, answer: str) -> None:
-        """Merge strategy answer into procedure.
-
-        Only fills ``strategy`` when behavioral_synthesizer hasn't already
-        produced one — Q&A clarifications are coarser than synthesised
-        strategy and shouldn't clobber it.
-        """
-        existing = (proc.get("strategy") or "").strip()
-        if not existing:
-            proc["strategy"] = answer
-
-    @staticmethod
-    def _merge_scope(proc: dict, answer: str) -> None:
-        """Merge scope/recurrence answer into procedure."""
-        lower = answer.lower()
-        if lower in ("one-off", "once", "no", "n/a"):
-            proc["recurrence"] = None
-        else:
-            proc["recurrence"] = answer
-
-    @staticmethod
-    def _rewrite_steps_for_clarifications(
-        proc: dict,
-        qa_result: FocusQAResult,
-    ) -> None:
-        """In-place rewrite of step text based on user clarifications.
-
-        When a question carries ``step_indexes`` and the answer is a concrete
-        replacement value (e.g. "r/ClaudeAI" correcting an observed
-        "r/midclaw"), substitute the answer into the relevant step's
-        ``action``, ``target``, ``location``, and ``parameters`` fields.
-
-        Strategy is conservative — substitute only when:
-        1. The question explicitly names step indexes
-        2. The answer is short enough to plausibly be a value (≤ 80 chars)
-        3. The category is one where corrections are expected (decision,
-           data, verification, scope) — not for free-text strategy answers
-
-        Falls back to no-op when none of the above hold.  This avoids
-        false-positive substitutions on long narrative answers.
-        """
-        steps = proc.get("steps", [])
-        if not isinstance(steps, list) or not steps:
-            return
-
-        rewrite_categories = {
-            "decision", "decision_logic", "branching", "condition",
-            "data", "data_source", "input", "parameter",
-            "verification", "success", "done", "outcome", "output_format",
-            "scope", "target", "destination",
-        }
-
-        for idx, answer in qa_result.answers.items():
-            if idx < 0 or idx >= len(qa_result.questions):
-                continue
-            if qa_result.source(idx) == ANSWER_ACCEPTED_GUESS:
-                continue
-            q = qa_result.questions[idx]
-            ans = str(answer or "").strip()
-            if not ans or len(ans) > 80:
-                continue
-            cat = q.category.lower().replace(" ", "_")
-            if cat not in rewrite_categories:
-                continue
-            if not q.step_indexes:
-                continue
-
-            for step_idx in q.step_indexes:
-                if not isinstance(step_idx, int) or step_idx < 0 or step_idx >= len(steps):
-                    continue
-                step = steps[step_idx]
-                if not isinstance(step, dict):
-                    continue
-                # Replace the most-specific reference field first.
-                # If the answer looks like a URL fragment (starts with /,
-                # http, or r/) we treat it as a target/location override.
-                if ans.startswith(("r/", "/r/", "http://", "https://", "/")):
-                    if "target" in step:
-                        step["target"] = ans
-                    if isinstance(step.get("parameters"), dict):
-                        step["parameters"]["target"] = ans
-                        if "location" in step["parameters"]:
-                            step["parameters"]["location"] = ans
-                # Otherwise leave the answer in agent_clarifications only —
-                # we don't have enough information to know what specific
-                # field the answer should overwrite.
-
-
-def _session_clipboard(sop_template: dict | None) -> set[str] | None:
-    """The clipboard kinds the session recorded (``copy``, ``paste``), from
-    the SOP template's ``session_clipboard``; None without a record."""
-    kinds = (sop_template or {}).get("session_clipboard")
-    return None if kinds is None else {str(k) for k in kinds}
-
-
-def drop_unrecorded_clipboard_questions(
-    questions: list[FocusQuestion], recorded: set[str] | None,
-) -> list[FocusQuestion]:
-    """*questions* without those that assume a copy or paste the clipboard
-    did not record (*recorded*: the session's clipboard kinds; None keeps
-    every question).  The live run asked "Should I copy the exact text
-    ..." of a session that only typed.  A copy needs a recorded copy, a
-    paste a recorded paste or copy (the rule of ``clipboard_grounding``)."""
-    if recorded is None:
-        return questions
-    supported = {COPY: COPY in recorded, COPIED: COPY in recorded,
-                 PASTE: PASTE in recorded or COPY in recorded}
-    kept = []
-    for q in questions:
-        claimed = claims([q.question, q.context, q.default])
-        if any(not supported[c] for c in claimed):
-            logger.info(
-                "Focus questioner: dropped a question that assumes an unrecorded "
-                "copy or paste: %r", q.question,
-            )
             continue
-        kept.append(q)
-    return kept
+
+        cat = q.category.lower().replace(" ", "_")
+
+        # Every answer is recorded in agent_clarifications. This is the
+        # canonical home for Q&A — UI reads from here, audit reads from
+        # here, downstream consumers read from here.
+        # An accepted guess is recorded as such: the ledger keeps it a
+        # hypothesis, where a typed answer is known.
+        source = qa_result.source(idx)
+        clarifications.append({
+            "category": q.category,
+            "question": q.question,
+            "answer": answer,
+            "status": "answered",
+            "source": source,
+            "context": q.context,
+            **({"question_id": q.id} if q.id else {}),
+        })
+        if source == ANSWER_ACCEPTED_GUESS:
+            # The model's own guess confirms nothing: it fills no
+            # procedure field and rewrites no step.
+            continue
+
+        # Strategy: free text, but only fill if we don't already have one
+        # from behavioral synthesis (which is structurally richer).
+        if cat in ("strategy", "goal", "purpose", "approach"):
+            _merge_strategy(proc, answer)
+        # Scope/recurrence: the answer maps directly to a single field.
+        elif cat in ("scope", "scheduling", "recurrence", "frequency"):
+            _merge_scope(proc, answer)
+        # All other categories (credentials, decision, verification, etc.)
+        # are recorded in agent_clarifications only.  No structural-field
+        # auto-population from free text.
+
+    # After all answers are recorded, sweep the steps for in-place
+    # text substitutions when the user's answer corrects a specific
+    # value referenced by a step (e.g. "the subreddit is r/ClaudeAI").
+    _rewrite_steps_for_clarifications(proc, qa_result)
+
+    return proc
+
+def _merge_strategy(proc: dict, answer: str) -> None:
+    """Merge strategy answer into procedure.
+
+    Only fills ``strategy`` when behavioral_synthesizer hasn't already
+    produced one — Q&A clarifications are coarser than synthesised
+    strategy and shouldn't clobber it.
+    """
+    existing = (proc.get("strategy") or "").strip()
+    if not existing:
+        proc["strategy"] = answer
+
+def _merge_scope(proc: dict, answer: str) -> None:
+    """Merge scope/recurrence answer into procedure."""
+    lower = answer.lower()
+    if lower in ("one-off", "once", "no", "n/a"):
+        proc["recurrence"] = None
+    else:
+        proc["recurrence"] = answer
+
+def _rewrite_steps_for_clarifications(
+    proc: dict,
+    qa_result: FocusQAResult,
+) -> None:
+    """In-place rewrite of step text based on user clarifications.
+
+    When a question carries ``step_indexes`` and the answer is a concrete
+    replacement value (e.g. "r/ClaudeAI" correcting an observed
+    "r/midclaw"), substitute the answer into the relevant step's
+    ``action``, ``target``, ``location``, and ``parameters`` fields.
+
+    Strategy is conservative — substitute only when:
+    1. The question explicitly names step indexes
+    2. The answer is short enough to plausibly be a value (≤ 80 chars)
+    3. The category is one where corrections are expected (decision,
+       data, verification, scope) — not for free-text strategy answers
+
+    Falls back to no-op when none of the above hold.  This avoids
+    false-positive substitutions on long narrative answers.
+    """
+    steps = proc.get("steps", [])
+    if not isinstance(steps, list) or not steps:
+        return
+
+    rewrite_categories = {
+        "decision", "decision_logic", "branching", "condition",
+        "data", "data_source", "input", "parameter",
+        "verification", "success", "done", "outcome", "output_format",
+        "scope", "target", "destination",
+    }
+
+    for idx, answer in qa_result.answers.items():
+        if idx < 0 or idx >= len(qa_result.questions):
+            continue
+        if qa_result.source(idx) == ANSWER_ACCEPTED_GUESS:
+            continue
+        q = qa_result.questions[idx]
+        ans = str(answer or "").strip()
+        if not ans or len(ans) > 80:
+            continue
+        cat = q.category.lower().replace(" ", "_")
+        if cat not in rewrite_categories:
+            continue
+        if not q.step_indexes:
+            continue
+
+        for step_idx in q.step_indexes:
+            if not isinstance(step_idx, int) or step_idx < 0 or step_idx >= len(steps):
+                continue
+            step = steps[step_idx]
+            if not isinstance(step, dict):
+                continue
+            # Replace the most-specific reference field first.
+            # If the answer looks like a URL fragment (starts with /,
+            # http, or r/) we treat it as a target/location override.
+            if ans.startswith(("r/", "/r/", "http://", "https://", "/")):
+                if "target" in step:
+                    step["target"] = ans
+                if isinstance(step.get("parameters"), dict):
+                    step["parameters"]["target"] = ans
+                    if "location" in step["parameters"]:
+                        step["parameters"]["location"] = ans
+            # Otherwise leave the answer in agent_clarifications only —
+            # we don't have enough information to know what specific
+            # field the answer should overwrite.
 
 
 # ---------------------------------------------------------------------------
@@ -833,20 +556,20 @@ def write_focus_questions(
         "questions": [
             {
                 "index": i,
-                "question": q.question if hasattr(q, "question") else q.get("question", ""),
-                "category": q.category if hasattr(q, "category") else q.get("category", ""),
-                "context": q.context if hasattr(q, "context") else q.get("context", ""),
-                "default": q.default if hasattr(q, "default") else q.get("default", ""),
-                "step_indexes": list(
-                    q.step_indexes if hasattr(q, "step_indexes") else q.get("step_indexes") or []
-                ),
+                "id": q.id,
+                "question": q.question,
+                "category": q.category,
+                "context": q.context,
+                "default": q.default,
+                "step_indexes": list(q.step_indexes),
+                "choices": list(q.choices),
             }
             for i, q in enumerate(questions)
         ],
         "status": "pending",
     }
 
-    _atomic_write_json(path, payload)
+    write_json_atomic(path, payload)
     logger.info(
         "Wrote %d focus question(s) to %s (session=%s, slug=%s)",
         len(questions), path, session_id, slug,
@@ -875,7 +598,7 @@ def write_focus_pending(
         "procedure": procedure,
     }
 
-    _atomic_write_json(path, payload)
+    write_json_atomic(path, payload)
     logger.debug("Saved focus pending state to %s", path)
     return path
 
@@ -941,6 +664,8 @@ def parse_qa_result_from_file(
             context=raw.get("context", ""),
             default=raw.get("default", ""),
             step_indexes=[i for i in raw.get("step_indexes") or [] if isinstance(i, int)],
+            id=str(raw.get("id") or ""),
+            choices=[str(c) for c in raw.get("choices") or []],
         ))
 
     answers: dict[int, str] = {}
@@ -967,7 +692,7 @@ def parse_qa_result_from_file(
 # ---------------------------------------------------------------------------
 
 
-def _atomic_write_json(path: Path, data: Any) -> None:
+def write_json_atomic(path: Path, data: Any) -> None:
     """Atomically write JSON (tmp + fsync + rename)."""
     import os
     import tempfile

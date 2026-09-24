@@ -400,8 +400,30 @@ class TestSections:
 
 
 class TestRunQuestions:
-    """A question an agent run raised (``skill_improver.feed_ledger``)
-    stays in every digest until the user answers it."""
+    """A question an agent run raised (``skill_improver.feed_ledger``) is
+    the Skill's decisions question: once asked as a review card
+    (``questions.refresh``, which the daily batch runs before the digest),
+    it stays in every digest until the user answers it."""
+
+    NOW = datetime(2025, 3, 2, 8, 0, tzinfo=timezone.utc)
+    RUN_ID = "run:export-report:run-1:step_1"
+
+    @pytest.fixture()
+    def db(self, tmp_db_path: Path):
+        from agenthandover_worker.db import WorkerDB
+
+        with WorkerDB(tmp_db_path) as worker_db:
+            yield worker_db
+
+    def _digest(self, kb: KnowledgeBase, db, tmp_path: Path) -> tuple[DailyDigest, list[dict]]:
+        from agenthandover_worker import questions
+
+        questions.refresh(db, kb, tmp_path, now=self.NOW)
+        digest = DigestGenerator(kb, db=db).generate("2025-03-02")
+        return digest, [
+            item for s in digest.sections if s.title == "Questions for you"
+            for item in s.items if item["question_id"].startswith("run:")
+        ]
 
     def _proc(self, kb: KnowledgeBase, answer: str = "") -> None:
         kb.save_procedure({
@@ -420,24 +442,32 @@ class TestRunQuestions:
             ],
         })
 
-    def test_an_open_run_question_is_listed(self, kb: KnowledgeBase) -> None:
+    def test_an_open_run_question_is_listed(self, kb: KnowledgeBase, db, tmp_path: Path) -> None:
         self._proc(kb)
-        digest = DigestGenerator(kb).generate("2025-03-02")
-        [section] = [s for s in digest.sections if s.title == "Questions for you"]
-        assert section.items == [{
+        digest, items = self._digest(kb, db, tmp_path)
+        assert items == [{
             "title": "An agent running this Skill did not follow step step_1.",
             "detail": "Export the report: asked after an agent run",
-            "slug": "export-report", "clarification": 1, "category": "decision",
-            "execution_id": "run-1", "step_id": "step_1",
-            "asked_at": "2025-03-01T10:00:00+00:00",
+            "question_id": self.RUN_ID, "choices": "",
         }]
+        # One questions section; the general decisions question is not in it.
+        [section] = [s for s in digest.sections if "question" in s.title.lower()]
+        assert "slot:export-report:decisions" not in [i["question_id"] for i in section.items]
         # And it survives the round trip the app reads.
-        gen = DigestGenerator(kb)
+        gen = DigestGenerator(kb, db=db)
         gen.save_digest(digest)
         loaded = gen.get_digest("2025-03-02")
-        assert loaded.sections[-1].items == section.items
+        [loaded_section] = [s for s in loaded.sections if s.title == "Questions for you"]
+        assert loaded_section.items == section.items
 
-    def test_an_answered_question_is_not_listed(self, kb: KnowledgeBase) -> None:
+    def test_an_answered_question_is_not_listed(
+        self, kb: KnowledgeBase, db, tmp_path: Path,
+    ) -> None:
         self._proc(kb, answer="Retry once, then stop")
+        _digest, items = self._digest(kb, db, tmp_path)
+        assert items == []
+
+    def test_without_the_worker_db_no_questions_are_listed(self, kb: KnowledgeBase) -> None:
+        self._proc(kb)
         digest = DigestGenerator(kb).generate("2025-03-02")
         assert [s for s in digest.sections if s.title == "Questions for you"] == []

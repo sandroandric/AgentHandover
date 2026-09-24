@@ -3,7 +3,8 @@ import SwiftUI
 /// Card-based micro-review UX for quick procedure approval.
 ///
 /// Each card shows a procedure summary with one-tap approve/reject/detail
-/// actions - designed for 5-second reviews.
+/// actions - designed for 5-second reviews.  The worker's micro-questions
+/// (`micro-questions.json`) come first: one tap on a choice answers them.
 struct MicroReviewView: View {
     @StateObject private var viewModel = MicroReviewViewModel()
 
@@ -32,6 +33,10 @@ struct MicroReviewView: View {
         .padding(28)
         .frame(minWidth: 580, minHeight: 500)
         .onAppear { viewModel.load() }
+        // New questions while the window is open (AppState's quick check).
+        .onReceive(NotificationCenter.default.publisher(for: MicroQuestions.changed)) { _ in
+            viewModel.load()
+        }
     }
 
     // MARK: - Header
@@ -122,6 +127,9 @@ struct ReviewCard: View {
     let onAction: (ReviewAction) -> Void
 
     @State private var showingDetail = false
+    /// A question card's text field: a labelling card's name, or a slot
+    /// question's own answer.
+    @State private var typed = ""
 
     // Contra design tokens (system-adaptive)
     private let darkNavy = Color.primary
@@ -161,6 +169,93 @@ struct ReviewCard: View {
                     )
             }
 
+            if card.type == .question {
+                questionControls
+            } else {
+                reviewBody
+            }
+        }
+        .padding(14)
+        .background(lightGray)
+        .cornerRadius(cardRadius)
+        .overlay(
+            RoundedRectangle(cornerRadius: cardRadius)
+                .stroke(darkNavy.opacity(0.12), lineWidth: contraBorder)
+        )
+        .onAppear { typed = card.defaultName }
+    }
+
+    /// The buttons a question card shows, in order: its choices.
+    static func answerButtons(for card: ReviewCardData) -> [String] {
+        card.choices.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    }
+
+    /// The field under a question card's choices.
+    static func fieldPrompt(for card: ReviewCardData) -> String {
+        card.asksName ? "What do you call it? (optional)" : "Or type your answer"
+    }
+
+    private var questionControls: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(card.question?.question ?? "")
+                .font(.system(size: 13, weight: .bold))
+                .foregroundColor(darkNavy)
+                .fixedSize(horizontal: false, vertical: true)
+            if !card.evidenceText.isEmpty {
+                Text(card.evidenceText)
+                    .font(.system(size: 11))
+                    .foregroundColor(darkNavy.opacity(0.6))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if card.asksName {
+                TextField(Self.fieldPrompt(for: card), text: $typed)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 12))
+            }
+            VStack(alignment: .leading, spacing: 6) {
+                ForEach(Self.answerButtons(for: card), id: \.self) { choice in
+                    Button(action: { onAction(.answer(choice, name: card.asksName ? typed : "")) }) {
+                        Text(choice)
+                            .font(.system(size: 11, weight: .medium))
+                            .multilineTextAlignment(.leading)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 5)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 8)
+                                    .stroke(warmOrange.opacity(0.5), lineWidth: contraBorder)
+                            )
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            HStack(spacing: 8) {
+                if !card.asksName {
+                    TextField(Self.fieldPrompt(for: card), text: $typed)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(size: 12))
+                    Button("Answer") { onAction(.answer(typed, name: "")) }
+                        .disabled(typed.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        .font(.system(size: 11, weight: .bold))
+                }
+                Spacer()
+                Button(action: { onAction(.dismiss) }) {
+                    Text("Skip")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(darkNavy.opacity(0.4))
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8)
+                                .stroke(darkNavy.opacity(0.12), lineWidth: contraBorder)
+                        )
+                }
+                .buttonStyle(.plain)
+            }
+        }
+    }
+
+    private var reviewBody: some View {
+        VStack(alignment: .leading, spacing: 10) {
             // Metadata row
             HStack(spacing: 12) {
                 metadataItem(icon: "calendar", text: card.recurrence)
@@ -334,13 +429,6 @@ struct ReviewCard: View {
                 .padding(.top, 4)
             }
         }
-        .padding(14)
-        .background(lightGray)
-        .cornerRadius(cardRadius)
-        .overlay(
-            RoundedRectangle(cornerRadius: cardRadius)
-                .stroke(darkNavy.opacity(0.12), lineWidth: contraBorder)
-        )
     }
 
     private func metadataItem(icon: String, text: String) -> some View {
@@ -361,12 +449,16 @@ enum ReviewCardType: Sendable {
     case lifecycleUpgrade  // "Ready to promote to next lifecycle stage"
     case mergeCandidate    // "These procedures may be duplicates"
     case driftAlert        // "Procedure behavior has changed"
+    case question          // A micro-question from the worker
 }
 
-enum ReviewAction: Sendable {
+enum ReviewAction: Sendable, Equatable {
     case approve
     case reject
     case dismiss
+    /// A question card answered: the choice (or typed text), and a
+    /// labelling card's name.
+    case answer(String, name: String)
 }
 
 struct ReviewCardData: Identifiable, Sendable {
@@ -383,6 +475,12 @@ struct ReviewCardData: Identifiable, Sendable {
     let stepsPreview: [String]
     let slug: String
     let metadata: [String: String]
+    /// Question cards: the worker's question.
+    let question: MicroQuestion?
+
+    var choices: [String] { question?.choices ?? [] }
+    var asksName: Bool { question?.asks_name ?? false }
+    var defaultName: String { asksName ? question?.default ?? "" : "" }
 
     /// Backward-compatible initializer without metadata.
     init(
@@ -390,14 +488,14 @@ struct ReviewCardData: Identifiable, Sendable {
         recurrence: String, duration: String, observations: Int,
         confidence: Double, variables: [String], outcome: String?,
         evidenceText: String, stepsPreview: [String], slug: String,
-        metadata: [String: String] = [:]
+        metadata: [String: String] = [:], question: MicroQuestion? = nil
     ) {
         self.id = id; self.type = type; self.title = title
         self.recurrence = recurrence; self.duration = duration
         self.observations = observations; self.confidence = confidence
         self.variables = variables; self.outcome = outcome
         self.evidenceText = evidenceText; self.stepsPreview = stepsPreview
-        self.slug = slug; self.metadata = metadata
+        self.slug = slug; self.metadata = metadata; self.question = question
     }
 
     var typeLabel: String {
@@ -408,6 +506,7 @@ struct ReviewCardData: Identifiable, Sendable {
         case .lifecycleUpgrade: return "Upgrade"
         case .mergeCandidate: return "Merge"
         case .driftAlert: return "Drift"
+        case .question: return "Question"
         }
     }
 
@@ -419,6 +518,7 @@ struct ReviewCardData: Identifiable, Sendable {
         case .lifecycleUpgrade: return "arrow.up.square"
         case .mergeCandidate: return "arrow.triangle.merge"
         case .driftAlert: return "waveform.path.ecg"
+        case .question: return "questionmark.bubble"
         }
     }
 
@@ -430,6 +530,7 @@ struct ReviewCardData: Identifiable, Sendable {
         case .lifecycleUpgrade: return .cyan
         case .mergeCandidate: return .purple
         case .driftAlert: return .red
+        case .question: return .orange
         }
     }
 }
@@ -598,6 +699,11 @@ final class MicroReviewViewModel: ObservableObject {
                 ]
             )
 
+        // Question cards -> micro-answer trigger (Skip sends a blank answer)
+        case (.question, _):
+            guard let payload = Self.questionPayload(card: card, action: action) else { return }
+            success = writeTrigger(kind: MicroQuestions.triggerKind, payload: payload)
+
         // Dismiss only applies to trust suggestions; ignore for other types
         default:
             return
@@ -614,10 +720,41 @@ final class MicroReviewViewModel: ObservableObject {
         TriggerSpool.write(kind: kind, payload: payload) != nil
     }
 
+    /// The `micro-answer` payload for a question card's *action*: the
+    /// choice (or typed text) and a labelling card's name; Skip is a blank
+    /// answer.  Nil for any other card or action.
+    nonisolated static func questionPayload(
+        card: ReviewCardData, action: ReviewAction
+    ) -> [String: String]? {
+        guard card.type == .question, let question = card.question else { return nil }
+        switch action {
+        case .answer(let answer, let name):
+            guard !answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+            return MicroQuestions.answerPayload(for: question, answer: answer, name: name)
+        case .dismiss:
+            return MicroQuestions.answerPayload(for: question, answer: "")
+        case .approve, .reject:
+            return nil
+        }
+    }
+
+    /// One card per open micro-question, in the worker's order.
+    nonisolated static func questionCards(_ questions: [MicroQuestion]) -> [ReviewCardData] {
+        questions.map { q in
+            ReviewCardData(
+                id: "question-\(q.id)", type: .question, title: q.title,
+                recurrence: "-", duration: "-", observations: 0, confidence: 0,
+                variables: [], outcome: nil, evidenceText: q.context,
+                stepsPreview: [], slug: q.subject, question: q
+            )
+        }
+    }
+
     private nonisolated static func loadReviewItems() -> [ReviewCardData] {
         let home = FileManager.default.homeDirectoryForCurrentUser
         let kbDir = home.appendingPathComponent(".agenthandover/knowledge")
-        var cards: [ReviewCardData] = []
+        // The worker's questions first: one tap each.
+        var cards = questionCards(MicroQuestions.load(from: TriggerSpool.defaultStateDir))
 
         // Load draft procedures from sops-index
         let indexPath = home.appendingPathComponent(

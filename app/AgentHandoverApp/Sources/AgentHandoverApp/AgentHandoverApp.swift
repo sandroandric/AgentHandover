@@ -105,6 +105,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Obse
         // Focus questions: a notification opens them (FocusQuestionsNotifier).
         MainActor.assumeIsolated {
             FocusQuestionsNotifier.shared.openQuestions = { [weak self] in self?.showFocusQA() }
+            FocusQuestionsNotifier.shared.openReviewQueue = { [weak self] in self?.showReviewQueue() }
             FocusQuestionsNotifier.shared.start()
         }
         // [privacy] read_app_state: macOS asks per app, from here, the
@@ -294,6 +295,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Obse
         window.isReleasedWhenClosed = false
         window.delegate = self
         focusQAWindow = window
+        window.makeKeyAndOrderFront(nil)
+        window.orderFrontRegardless()
+    }
+
+    /// The Review Queue, from a micro-question notification: the open one,
+    /// else a new window hosting it.
+    func showReviewQueue() {
+        NSApp.setActivationPolicy(.regular)
+        NSApp.activate(ignoringOtherApps: true)
+        if let window = NSApp.windows.first(where: { $0.title == "Review Queue" }) {
+            window.makeKeyAndOrderFront(nil)
+            return
+        }
+        let window = NSWindow(contentViewController: NSHostingController(rootView: MicroReviewView()))
+        window.title = "Review Queue"
+        window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
+        window.setContentSize(NSSize(width: 640, height: 680))
+        window.center()
+        window.isReleasedWhenClosed = false
         window.makeKeyAndOrderFront(nil)
         window.orderFrontRegardless()
     }

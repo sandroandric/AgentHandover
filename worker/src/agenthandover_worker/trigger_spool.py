@@ -41,6 +41,7 @@ KINDS: tuple[str, ...] = (
     "drift-reviewed",
     "lifecycle-dismiss",
     "export",
+    "micro-answer",
 )
 
 _FILENAME_RE = re.compile(

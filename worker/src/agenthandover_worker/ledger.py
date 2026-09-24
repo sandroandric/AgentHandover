@@ -102,9 +102,11 @@ STATUSES: tuple[str, ...] = ("known", "hypothesis", "unknown")
 SOURCES: tuple[str, ...] = ("observation", "contrast", "divergence", "user", "agent")
 EVIDENCE_KINDS: tuple[str, ...] = ("frame", "instance", "answer", "run")
 
-# Which slot a post-recording question's category informs (the questioner's
-# categories are free labels; unmapped ones inform no slot).
+# Which slot a question's category informs: a micro-question's category is
+# its slot (``questions``); the free labels of the questions of older
+# versions map as below, and unmapped ones inform no slot.
 _ANSWER_SLOTS: dict[str, str] = {
+    **{slot: slot for slot in SLOTS},
     **dict.fromkeys(("goal", "purpose", "strategy", "approach"), "goal"),
     **dict.fromkeys(
         ("success", "done", "outcome", "output_format", "success_criteria"),

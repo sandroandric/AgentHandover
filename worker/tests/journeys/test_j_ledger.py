@@ -3,14 +3,18 @@
 The runs are the daily-news fixtures (``record/generate_focus_dailynews.py``):
 J-focus's recording, a morning that leaves a story out (a video with no
 transcript), and two mornings that take the same detour (a paywalled story
-read through an archive).  WP-L4's micro-question is to be skipped
-through the app's answer file.  The ledger's schema (``proc["knowledge"]``, see
+read through an archive).  WP-L4's micro-questions are skipped through
+the app's answer files: each morning's in the Q&A window
+(``focus-questions.json``), any review card left open with the card's
+Skip (a blank ``micro-answer``); unit pin
+``test_questions.py::test_a_skipped_question_leaves_its_slot_as_it_was``.
+The ledger's schema (``proc["knowledge"]``, see
 ``agenthandover_worker/ledger.py``) landed with WP-L1, the learners with
 WP-L2 (contrast), WP-L3 (run signals) and WP-M5 (divergence branches).
 
 The whole journey needs the model's answers for the three extra runs
-(annotation, SOP, synthesis, questions), which are not recorded yet, and
-WP-L4's micro-questions.  The parts that call no model run now over the
+(annotation, SOP, synthesis), which are not recorded yet (the questions
+call no model since WP-L4).  The parts that call no model run now over the
 same fixtures, loaded into one events database the way the daemon keeps
 every morning: what the runs' events teach about the trigger, the done
 criterion and the check (``run_signals``), the selection criterion the
@@ -24,14 +28,14 @@ the recordings will supply.
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import os
 import re
 
 import pytest
 
-from agenthandover_worker import branch_mining, run_signals
+from agenthandover_worker import branch_mining, run_signals, trigger_spool
+from agenthandover_worker import questions as qs
 from agenthandover_worker.contrast import criteria_hypotheses, ground_visible_items
 from agenthandover_worker.db import WorkerDB
 from agenthandover_worker.event_helpers import display_name, parse_timestamp
@@ -60,8 +64,8 @@ ARCHIVE_HOST = "archive.example.net"
 
 # The first model request of each extra run (the annotation of its first
 # keyframe; a standalone run of the fixture on the focus_dailynews
-# cassette misses it).  The SOP, synthesis and question calls that follow
-# depend on these answers, so they cannot be named before the recording.
+# cassette misses it).  The SOP and synthesis calls that follow depend on
+# these answers, so they cannot be named before the recording.
 EXTRA_RUN_MISSING_KEYS: dict[str, str] = {
     "focus_dailynews_skip": "93414f3ff1c29740ef33e93342b84ab116e26245258d0a156141b0d57e72ca15",
     "focus_dailynews_diverge": "3f20f2202b8b75ccc6c40b2170af5a05737a407a66918dd0780c0b499a5791b0",
@@ -74,17 +78,12 @@ needs_extra_run_recordings = pytest.mark.skipif(
     reason=(
         f"cassettes/{FOCUS_CASSETTE}.jsonl lacks the model calls of the extra "
         "daily-news runs: " + ", ".join(_MISSING)
-        + " (and the SOP, synthesis and question calls each unblocks); "
+        + " (and the SOP and synthesis calls each unblocks); "
         "re-record J-ledger with AH_RECORD=1 on the test Mac"
     ),
 )
-needs_micro_questions = pytest.mark.skipif(
-    importlib.util.find_spec("agenthandover_worker.questions") is None,
-    reason="waits on WP-L4 (questions.next_questions: the micro-question this journey skips)",
-)
 
 
-@needs_micro_questions
 @needs_focus_sop_recording
 @needs_extra_run_recordings
 @pytest.mark.xfail(strict=True, reason=(
@@ -109,6 +108,7 @@ def test_runs_fill_the_ledger_with_evidence(
         extra.write_focus_signal(temp_home.data_dir)
         sessions.add(_session(extra))
         _tick_until_observed(run, clock, _session(extra))
+    _skip_micro_questions(run, clock, temp_home.data_dir)
 
     # Every run is an instance of the one Skill.
     [proc] = run.procedures()
@@ -127,11 +127,31 @@ def test_runs_fill_the_ledger_with_evidence(
     for slot in ("trigger", "verification"):
         assert knowledge[slot]["status"] == "hypothesis"
         assert {e["id"] for e in knowledge[slot]["evidence"] if e["kind"] == "instance"} == sessions
-    # The micro-question was skipped (WP-L4): no slot claims a user answer.
+    # The micro-questions were skipped (WP-L4): no slot claims a user answer.
     assert not any(
         e["kind"] == "answer" for entry in knowledge.values() for e in entry["evidence"]
     )
     assert readiness(proc).ready
+
+
+def _skip_micro_questions(run, clock, state_dir) -> None:
+    """Skip every micro-question the runs raised, as the app does: the Q&A
+    window's were skipped in ``focus-questions.json`` while ticking; each
+    review card still open in ``micro-questions.json`` gets the card's
+    Skip, a ``micro-answer`` with a blank answer.  One more tick reads
+    both, and every question asked is closed as skipped."""
+    path = state_dir / qs.MICRO_QUESTIONS_FILE
+    cards = json.loads(path.read_text(encoding="utf-8"))["questions"] if path.is_file() else []
+    for card in cards:
+        trigger_spool.write_trigger(
+            state_dir, "micro-answer", {"question_id": card["id"], "answer": ""},
+        )
+    clock.advance(seconds=TICK_SECONDS)
+    run.ticks.append(run.worker.run_tick())
+    assert run.ticks[-1]["triggers_consumed"] == len(cards)
+    asked = run.worker.db.get_micro_questions()
+    assert run.questions_skipped and asked
+    assert {row["status"] for row in asked} == {"skipped"}, asked
 
 
 def _tick_until_observed(run, clock, session_id: str, *, max_ticks: int = 6) -> None:

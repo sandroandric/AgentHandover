@@ -84,7 +84,7 @@ class DigestGenerator:
         tasks_completed = len(tasks)
         procedures_observed = self._count_procedures(summary_data)
         highlights = self._extract_highlights(date, summary_data)
-        sections = self._build_sections(tasks, summary_data)
+        sections = self._build_sections(tasks, summary_data) + self._question_sections(date)
         stats = self._compute_stats(summary_data, tasks, active_hours)
 
         summary_text = self._build_summary_text(
@@ -318,6 +318,27 @@ class DigestGenerator:
             ))
         return out
 
+    def _question_sections(self, date: str) -> list[DigestSection]:
+        """With the worker DB: the micro-questions still open (asked as
+        review cards, the questions agent runs raised among them, and not
+        answered yet) and the day's work sessions with
+        whether the user tagged them as a routine (``questions``)."""
+        if self._db is None:
+            return []
+        from agenthandover_worker.questions import digest_items
+
+        try:
+            open_questions, sessions = digest_items(self._db, date)
+        except Exception:
+            logger.debug("Micro-questions unavailable for the digest", exc_info=True)
+            return []
+        sections = []
+        if open_questions:
+            sections.append(DigestSection(title="Questions for you", items=open_questions))
+        if sessions:
+            sections.append(DigestSection(title="Tag the day", items=sessions))
+        return sections
+
     def _build_sections(
         self, tasks: list[dict], summary_data: dict | None
     ) -> list[DigestSection]:
@@ -353,40 +374,7 @@ class DigestGenerator:
                     DigestSection(title="Applications Used", items=app_items)
                 )
 
-        questions = self._open_run_questions()
-        if questions:
-            sections.append(DigestSection(title="Questions for you", items=questions))
-
         return sections
-
-    def _open_run_questions(self) -> list[dict]:
-        """The questions agent runs raised that the user has not answered
-        yet (``skill_improver.feed_ledger`` queues them), across Skills,
-        oldest first: they stay in every digest until answered."""
-        from agenthandover_worker.skill_improver import RUN_QUESTION
-
-        items = []
-        for proc in self._kb.list_procedures():
-            slug = proc.get("id") or proc.get("slug") or ""
-            clarifications = proc.get("agent_clarifications")
-            for i, item in enumerate(clarifications if isinstance(clarifications, list) else []):
-                if not isinstance(item, dict) or item.get("status") != "unanswered":
-                    continue
-                origin = item.get("origin") if isinstance(item.get("origin"), dict) else {}
-                if origin.get("kind") != RUN_QUESTION or str(item.get("answer") or "").strip():
-                    continue
-                items.append({
-                    "title": item.get("question", ""),
-                    "detail": f"{proc.get('title') or slug}: asked after an agent run",
-                    "slug": slug,
-                    "clarification": i,
-                    "category": item.get("category", ""),
-                    "execution_id": origin.get("id", ""),
-                    "step_id": origin.get("step_id", ""),
-                    "asked_at": item.get("asked_at", ""),
-                })
-        items.sort(key=lambda q: q["asked_at"])
-        return items
 
     def _compute_stats(
         self,

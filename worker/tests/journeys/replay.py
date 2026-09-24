@@ -33,6 +33,11 @@ Usage (from ``worker/tests``)::
 
     python -m journeys.replay --fixture passive_3weeks --cassette journeys/cassettes/passive_3weeks.jsonl
     python -m journeys.replay --db ~/events.db --labels labels.json --from 2026-08-31 --to 2026-09-21 --ollama http://localhost:11434
+    python -m journeys.replay --db ~/events.db --labels answers --ollama http://localhost:11434
+
+``--labels answers`` scores against the labels the user gave in the product
+(the labelling cards' answers stored in ``--db``, :func:`labels_from_answers`)
+instead of a ``labels.json``.
 
 Exit status 1 when a threshold (``--min-recall``, ``--min-precision``,
 ``--max-chimeras``) or a digest check fails.
@@ -67,6 +72,8 @@ ANNOTATOR_COLUMNS = ("annotation_status", "scene_annotation_json", "frame_diff_j
 # spans between frames.  Both measure the same day, so they must agree
 # within this fraction of the summary's value.
 ACTIVE_HOURS_TOLERANCE = 0.5
+# ``--labels answers``: the labels the user gave in the product.
+ANSWERS = "answers"
 
 
 # ---------------------------------------------------------------------------
@@ -153,6 +160,43 @@ def unit_index(labels: dict) -> tuple[dict[str, str], set[str]]:
         for eid in noise["event_ids"]:
             unit_of[eid] = f"noise:{n}"
     return unit_of, routines
+
+
+def labels_from_answers(db_path: Path) -> dict:
+    """Labels from the answers the user gave in the product: the labelling
+    cards (``questions``) wrote ``user_is_routine`` and ``user_label`` on
+    the observations of *db_path* (an ``events.db``).  A workflow answered
+    "yes" is a routine (named by its label, else its key) whose instances
+    are its observations; each observation of a "no" workflow is a one-off
+    task; "not sure" and unasked workflows are unlabelled (they decide
+    nothing).  Same shape as a fixture's ``labels.json``."""
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        rows = conn.execute(
+            "SELECT obs_id, workflow_key, user_label, user_is_routine, started_utc, "
+            "  event_ids_json FROM workflow_observations "
+            "WHERE labelled_at IS NOT NULL AND user_is_routine IS NOT NULL "
+            "ORDER BY started_utc"
+        ).fetchall()
+    except sqlite3.OperationalError:  # no observation log, or no label columns
+        rows = []
+    finally:
+        conn.close()
+    routines: dict[str, list[dict]] = {}
+    one_off: list[dict] = []
+    for obs_id, key, label, is_routine, started, event_ids in rows:
+        ids = json.loads(event_ids or "[]")
+        if is_routine:
+            routines.setdefault(label or key, []).append(
+                {"instance_id": obs_id, "start": _parse(started).isoformat(), "event_ids": ids}
+            )
+        else:
+            one_off.append({"event_ids": ids})
+    return {
+        "routines": [{"slug": slug, "instances": inst} for slug, inst in routines.items()],
+        "one_off_tasks": one_off,
+        "noise": [],
+    }
 
 
 def score(candidates: list[Candidate], labels: dict, clock_start: datetime) -> tuple[float, float, int, dict]:
@@ -474,7 +518,11 @@ def main(argv: list[str] | None = None) -> int:
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--db", type=Path, help="events.db to replay")
     source.add_argument("--fixture", help="a journey fixture (with its labels.json)")
-    parser.add_argument("--labels", type=Path, help="labels.json (default: the fixture's)")
+    parser.add_argument(
+        "--labels",
+        help="labels.json (default: the fixture's), or 'answers': the labelling "
+             "cards the user answered, stored in --db",
+    )
     parser.add_argument("--from", dest="start", type=_day,
                         help="first day, YYYY-MM-DD (UTC; default: the first row's day)")
     parser.add_argument("--to", dest="end", type=_day,
@@ -496,8 +544,12 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     logging.basicConfig(level=args.log_level.upper(), format="%(levelname)s %(name)s: %(message)s")
 
-    if args.labels is not None:
-        labels = json.loads(args.labels.read_text(encoding="utf-8"))
+    if args.labels == ANSWERS:
+        if args.db is None:
+            parser.error("--labels answers reads the answers stored in --db")
+        labels = labels_from_answers(args.db)
+    elif args.labels is not None:
+        labels = json.loads(Path(args.labels).read_text(encoding="utf-8"))
     elif args.fixture is not None:
         labels = read_labels(args.fixture)
     else:

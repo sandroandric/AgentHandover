@@ -29,8 +29,11 @@ How a run feeds the ledger (``source="agent"``, ``run`` evidence):
     ``decisions`` to ``unknown`` (the run's pointer is its evidence) and
     queues a question for the user: an unanswered entry in
     ``agent_clarifications`` (category ``decision``) naming the step and
-    what the agent did.  The packet shows it as an open question, the
-    daily digest lists it, and the user's answer makes the slot known.
+    what the agent did.  The packet shows it as an open question; the
+    user is asked it as the Skill's decisions question (a review card
+    within the weekly budget, listed in the digest while open:
+    :mod:`questions`), and the answer, written into that entry, makes the
+    slot known.
 
 A decision *applies at* the step a branch names (``step_index`` from
 divergence mining, ``position`` from variant detection).  Selection

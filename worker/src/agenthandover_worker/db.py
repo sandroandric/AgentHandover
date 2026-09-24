@@ -1163,7 +1163,11 @@ class WorkerDB:
         "started_local_weekday", "started_local_minute", "duration_s",
         "apps_json", "hosts_json", "step_sig_json", "evidence_json",
         "source", "task_label", "event_ids_json", "promoted_slug",
-        "promoted_at",
+        "promoted_at", "user_label", "user_is_routine", "labelled_at",
+    )
+    # Written by their own setters, never by an observation's upsert.
+    _OBSERVATION_KEPT_COLUMNS = (
+        "promoted_slug", "promoted_at", "user_label", "user_is_routine", "labelled_at",
     )
 
     @staticmethod
@@ -1185,9 +1189,24 @@ class WorkerDB:
             "  task_label TEXT NOT NULL DEFAULT '',"
             "  event_ids_json TEXT NOT NULL DEFAULT '[]',"
             "  promoted_slug TEXT,"
-            "  promoted_at TEXT"
+            "  promoted_at TEXT,"
+            "  user_label TEXT,"
+            "  user_is_routine INTEGER,"
+            "  labelled_at TEXT"
             ")"
         )
+        # The user's answer to a labelling card (``questions``): the name
+        # they gave the workflow and whether it is a routine they would
+        # hand off (1 yes, 0 no, NULL not sure or never asked).  Tables
+        # from before WP-L4 gain the columns.
+        columns = {
+            row[1] for row in write_conn.execute("PRAGMA table_info(workflow_observations)")
+        }
+        for column, kind in (
+            ("user_label", "TEXT"), ("user_is_routine", "INTEGER"), ("labelled_at", "TEXT"),
+        ):
+            if column not in columns:
+                write_conn.execute(f"ALTER TABLE workflow_observations ADD COLUMN {column} {kind}")
         write_conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_workflow_observations_started "
             "ON workflow_observations(started_utc)"
@@ -1199,7 +1218,7 @@ class WorkerDB:
         db_path = self._get_writable_path()
         if not db_path:
             return False
-        cols = [c for c in self._OBSERVATION_COLUMNS if c not in ("promoted_slug", "promoted_at")]
+        cols = [c for c in self._OBSERVATION_COLUMNS if c not in self._OBSERVATION_KEPT_COLUMNS]
         write_conn = sqlite3.connect(db_path)
         try:
             write_conn.execute("PRAGMA busy_timeout = 5000;")
@@ -1274,6 +1293,160 @@ class WorkerDB:
         except sqlite3.Error as exc:
             logger.error("Failed to mark observations promoted: %s", exc)
             return 0
+        finally:
+            write_conn.close()
+
+    def label_workflow(
+        self,
+        workflow_keys: list[str],
+        *,
+        label: str,
+        is_routine: bool | None,
+        labelled_at: datetime,
+    ) -> int:
+        """Record the user's answer to a labelling card on every
+        observation of *workflow_keys*: the name they gave the workflow
+        (an earlier name is kept when they gave none) and whether it is a
+        routine they would hand off (None: not sure).  Returns the number
+        of rows updated."""
+        db_path = self._get_writable_path()
+        if not db_path or not workflow_keys:
+            return 0
+        write_conn = sqlite3.connect(db_path)
+        try:
+            write_conn.execute("PRAGMA busy_timeout = 5000;")
+            self._ensure_workflow_observations_table(write_conn)
+            updated = write_conn.execute(
+                "UPDATE workflow_observations SET "
+                "  user_label = COALESCE(NULLIF(?, ''), user_label), "
+                "  user_is_routine = ?, labelled_at = ? "
+                f"WHERE workflow_key IN ({', '.join('?' for _ in workflow_keys)})",
+                (
+                    label.strip(),
+                    None if is_routine is None else int(is_routine),
+                    _sqlite_utc(labelled_at),
+                    *workflow_keys,
+                ),
+            ).rowcount
+            write_conn.commit()
+            return updated
+        except sqlite3.Error as exc:
+            logger.error("Failed to label workflow observations: %s", exc)
+            return 0
+        finally:
+            write_conn.close()
+
+    # ------------------------------------------------------------------
+    # Micro-questions (``questions``): every question asked, so each is
+    # asked once and the weekly budget counts what was asked.
+    # ------------------------------------------------------------------
+
+    _QUESTION_COLUMNS = (
+        "question_id", "kind", "subject", "slot", "channel", "question_json",
+        "status", "answer", "asked_at", "answered_at",
+    )
+
+    @staticmethod
+    def _ensure_micro_questions_table(write_conn: sqlite3.Connection) -> None:
+        write_conn.execute(
+            "CREATE TABLE IF NOT EXISTS micro_questions ("
+            "  question_id TEXT PRIMARY KEY,"
+            "  kind TEXT NOT NULL,"
+            "  subject TEXT NOT NULL,"
+            "  slot TEXT,"
+            "  channel TEXT NOT NULL,"
+            "  question_json TEXT NOT NULL,"
+            "  status TEXT NOT NULL DEFAULT 'open',"
+            "  answer TEXT,"
+            "  asked_at TEXT NOT NULL,"
+            "  answered_at TEXT"
+            ")"
+        )
+
+    def save_micro_questions(self, rows: list[dict]) -> int:
+        """Record newly asked questions (``question_id`` already present:
+        left as it is).  Returns how many were new."""
+        db_path = self._get_writable_path()
+        if not db_path or not rows:
+            return 0
+        cols = ("question_id", "kind", "subject", "slot", "channel", "question_json", "asked_at")
+        write_conn = sqlite3.connect(db_path)
+        try:
+            write_conn.execute("PRAGMA busy_timeout = 5000;")
+            self._ensure_micro_questions_table(write_conn)
+            added = 0
+            for row in rows:
+                added += write_conn.execute(
+                    f"INSERT OR IGNORE INTO micro_questions ({', '.join(cols)}) "
+                    f"VALUES ({', '.join('?' for _ in cols)})",
+                    tuple(row[c] for c in cols),
+                ).rowcount
+            write_conn.commit()
+            return added
+        except (sqlite3.Error, KeyError) as exc:
+            logger.error("Failed to save micro-questions: %s", exc)
+            return 0
+        finally:
+            write_conn.close()
+
+    def get_micro_questions(
+        self, *, status: str | None = None, channel: str | None = None,
+    ) -> list[dict]:
+        """Asked questions (optionally only those with *status* and on
+        *channel*), oldest first."""
+        self._ensure_once(self._ensure_micro_questions_table)
+        self._refresh_read_snapshot()
+        where, params = [], []
+        if status is not None:
+            where.append("status = ?")
+            params.append(status)
+        if channel is not None:
+            where.append("channel = ?")
+            params.append(channel)
+        sql = f"SELECT {', '.join(self._QUESTION_COLUMNS)} FROM micro_questions"
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        try:
+            cur = self._conn.execute(sql + " ORDER BY asked_at ASC, rowid ASC", params)
+            return self._rows_to_dicts(cur.fetchall())
+        except sqlite3.OperationalError:
+            return []
+
+    def count_micro_questions_since(self, since: datetime) -> int:
+        """Questions asked at or after *since* (the weekly budget)."""
+        self._ensure_once(self._ensure_micro_questions_table)
+        self._refresh_read_snapshot()
+        try:
+            row = self._conn.execute(
+                "SELECT COUNT(*) FROM micro_questions WHERE asked_at >= ?",
+                (_sqlite_utc(since),),
+            ).fetchone()
+            return int(row[0]) if row else 0
+        except sqlite3.OperationalError:
+            return 0
+
+    def close_micro_question(
+        self, question_id: str, *, status: str, answer: str, at: datetime,
+    ) -> bool:
+        """Mark an open question ``answered`` or ``skipped``.  False when it
+        was not open (unknown, or already closed)."""
+        db_path = self._get_writable_path()
+        if not db_path:
+            return False
+        write_conn = sqlite3.connect(db_path)
+        try:
+            write_conn.execute("PRAGMA busy_timeout = 5000;")
+            self._ensure_micro_questions_table(write_conn)
+            updated = write_conn.execute(
+                "UPDATE micro_questions SET status = ?, answer = ?, answered_at = ? "
+                "WHERE question_id = ? AND status = 'open'",
+                (status, answer, _sqlite_utc(at), question_id),
+            ).rowcount
+            write_conn.commit()
+            return updated == 1
+        except sqlite3.Error as exc:
+            logger.error("Failed to close micro-question %s: %s", question_id, exc)
+            return False
         finally:
             write_conn.close()
 
