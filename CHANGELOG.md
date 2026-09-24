@@ -54,6 +54,15 @@ Comet and TextEdit, and the questions that follow them.
 - **Upgrades keep observation on**, reset stale permission grants after a
   signature change, and migrate app-written model configs from earlier
   defaults. Proof: `UpgradeLaunchTests`, `test_tier_migration.py`, J-install.
+- **Upgrading from 0.4.x**: the app asks once, "0.5 uses a faster model
+  (…). Download now?", and switches the config (with a backup) when the
+  download finishes: 1.9 GB (`qwen3.5:2b-q4_K_M`) on 0.4.0's Standard
+  tier, 3.4 GB (`qwen3.5:4b`) on the others. Until then, and after "Not
+  now" (asked again on the next upgrade), the Mac keeps its 0.4 models;
+  doctor warns and `agenthandover setup --tier` switches. The installer
+  and the worker never switch to a model Ollama does not serve. Proof:
+  `test_model_upgrade.py` (the exact v0.4.0 config), `ModelUpgradeTests`,
+  J-install.
 - **Privacy**: redaction before storage and before every prompt, URL query
   strings dropped, system password/permission prompts blocked, privacy zones
   before and after the shutter, clipboard text off by default, app-state
