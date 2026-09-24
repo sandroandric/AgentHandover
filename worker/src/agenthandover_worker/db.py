@@ -53,10 +53,13 @@ def check_schema_version(db_path: str | Path) -> None:
         raise SchemaVersionError(
             f"The database {db_path} is at schema version {found}; this worker "
             f"needs version {SCHEMA_VERSION}, which the daemon creates when it "
-            "starts.  The daemon running is older than the worker or has not "
-            "restarted since the upgrade.  Fix: run `agenthandover restart`; "
-            "if the error stays, reinstall the latest AgentHandover release "
-            "so the daemon and the worker match."
+            "starts.  Either the daemon has not started since the upgrade "
+            "(AgentHandover.app starts it once it has Accessibility and "
+            "Screen Recording: open the app and grant them; `agenthandover "
+            "doctor` shows which is missing), or the daemon running is older "
+            "than the worker (run `agenthandover restart`; if the error "
+            "stays, reinstall the latest AgentHandover release so the daemon "
+            "and the worker match)."
         )
     raise SchemaVersionError(
         f"The database {db_path} is at schema version {found}, newer than the "
