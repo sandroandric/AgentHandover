@@ -1407,7 +1407,7 @@ class WorkerDB:
         if where:
             sql += " WHERE " + " AND ".join(where)
         try:
-            cur = self._conn.execute(sql + " ORDER BY asked_at ASC, question_id ASC", params)
+            cur = self._conn.execute(sql + " ORDER BY asked_at ASC, rowid ASC", params)
             return self._rows_to_dicts(cur.fetchall())
         except sqlite3.OperationalError:
             return []
