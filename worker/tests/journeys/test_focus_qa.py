@@ -191,3 +191,38 @@ def test_a_guess_submitted_as_is_stays_a_guess(
         "\"Is the user already logged in to Namecheap?\": " + GUESSES[0]
     ) in packet
     assert "- The user answered \"Which search result is the exact match?\": The first row" in packet
+
+
+def test_a_review_card_answered_in_the_app_reaches_the_ledger(
+    events_db, worker, clock, temp_home, kb_root,
+) -> None:
+    """WP-L4: a slot the Skill does not know is asked as a review card
+    (``micro-questions.json``); the app's tap on a choice is a
+    ``micro-answer`` trigger, and the next tick makes the slot known with
+    the answer as its evidence and takes the card off the file."""
+    from agenthandover_worker import questions as qs
+
+    fixture = events_db("focus_dailynews", rebase_to=clock.now())
+    journey = worker(fixture, adapter="claude-skill")
+    proc = sop_to_procedure(generated_sop_template("check_domain_availability"))
+    proc.update({"id": SLUG, "slug": SLUG, "title": TITLE, "source": "focus", "goal": GOAL})
+    journey.knowledge_base.save_procedure(proc)
+    assert journey.knowledge_base.get_procedure(SLUG)["knowledge"]["guardrails"]["status"] != "known"
+
+    qs.refresh(journey.db, journey.knowledge_base, temp_home.data_dir, now=clock.now())
+    cards = json.loads((temp_home.data_dir / qs.MICRO_QUESTIONS_FILE).read_text(encoding="utf-8"))
+    card = next(c for c in cards["questions"] if c["slot"] == "guardrails")
+    assert card["choices"] == ["No, nothing special"]
+
+    trigger_spool.write_trigger(
+        temp_home.data_dir, "micro-answer",
+        {"question_id": card["id"], "answer": card["choices"][0]},
+    )
+    assert journey.run_tick()["triggers_consumed"] == 1
+
+    stored = json.loads((kb_root / "procedures" / f"{SLUG}.json").read_text(encoding="utf-8"))
+    entry = stored["knowledge"]["guardrails"]
+    assert entry["status"] == "known" and entry["source"] == "user"
+    assert [e["kind"] for e in entry["evidence"]] == ["answer"]
+    left = json.loads((temp_home.data_dir / qs.MICRO_QUESTIONS_FILE).read_text(encoding="utf-8"))
+    assert card["id"] not in [c["id"] for c in left["questions"]]
