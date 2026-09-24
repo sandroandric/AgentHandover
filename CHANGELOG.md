@@ -58,15 +58,33 @@ are marked *(not yet recorded)*.
   before and after the shutter, clipboard text off by default, app-state
   reading opt-in. Proof: J-privacy, `privacy_zones_test.rs`,
   `storage_redaction_test.rs`.
-- **The in-app FAQ** answers for the configured model mode: the on-device
-  sentence only in local mode; cloud mode names the provider, model and
-  Keychain entry. Proof: `FAQContentTests`.
+- **The in-app FAQ** says where data goes: every model runs on the Mac
+  through Ollama. Proof: `FAQContentTests`.
 - **Docs are pinned to the code**: README's MCP, tier and CLI tables are
   generated, every `agenthandover` command the README and FAQ mention must
   exist, and `config.example.toml` lists only keys some code reads. Proof:
   `tests/integration/test_docs.py`, `crates/cli/src/docs_tests.rs`.
 
 ### Removed
+- **Cloud mode** (OpenAI, Anthropic, Google): AgentHandover is fully local.
+  Cloud mode never did the main work: screen annotation and Skill writing
+  always ran on the local Ollama models, even in 0.4.0. Once the fallback
+  queue was gone it only sent the older focus path's Skill steps (with
+  `[vlm] annotation_enabled = false`) for a task description, and that path
+  read the API key from an environment variable while the app kept it in
+  the Keychain, so choosing "Cloud" in onboarding did effectively nothing.
+  Gone: onboarding's Local/Cloud choice and API-key field, the cloud
+  backends, `agenthandover-setup-vlm` (its `--remote` setup; `agenthandover
+  setup --vlm` pulls the local models), `[vlm] mode = "remote"`, `provider`,
+  `model` and `api_key_env`, and `vlm_mode`/`vlm_provider` in
+  `worker-status.json`. The upgrade (installer and worker start) rewrites a
+  cloud `[vlm]` block to `mode = "local"` with a backup and one log line,
+  keeping its tier and models; `agenthandover doctor` warns about a block
+  it could not rewrite; the app deletes the stored API keys from the
+  Keychain once. A remote `[vlm] ollama_host` is still Ollama and still
+  supported. The older focus path's SOP text enhancer runs the tier's SOP
+  model (or `[llm] model`) on that Ollama. Proof: `test_cloud_mode_removed.py`,
+  `CloudModeRemovedTests`, J-privacy (zones survive the upgrade's rewrite).
 - The MLX and llama.cpp backends (they only served the fallback queue; the
   pipeline always used Ollama), the legacy PrefixSpan miner, the LLM-written
   focus questions, and config keys nothing read.
@@ -75,9 +93,7 @@ are marked *(not yet recorded)*.
   another job was queued; nothing else read it, in local or cloud mode. The
   queue, its jobs and their worker are gone, and so are `vlm_queue_pending`,
   `vlm_jobs_today` and `vlm_dropped_today` in `worker-status.json` (and the
-  menu bar's "Processing" count and health warning built on them). Cloud mode
-  now sends nothing unless `[vlm] annotation_enabled = false` (then the older
-  focus path's Skill steps, for a task description and overview).
+  menu bar's "Processing" count and health warning built on them).
 
 ### Fixed
 - **The daily pass runs to its end again.** It read the day's tasks
@@ -101,9 +117,8 @@ are marked *(not yet recorded)*.
   and the worker logs it at INFO once a day. Proof:
   `test_reasoning_budget.py`; the replay's new cluster labels are *not yet
   recorded*.
-- The app read `model = …` in `[vlm]` as the mode, so it never recognised
-  cloud mode. A review card's free-text answer to a step question now revises
-  the step, and the revision survives a worker restart.
+- A review card's free-text answer to a step question now revises the
+  step, and the revision survives a worker restart.
 
 ### Corrections to 0.4.0
 - The Homebrew `ollama` formula runs the QAT tags (0.34.2 on the test Mac),

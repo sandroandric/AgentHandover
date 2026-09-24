@@ -375,14 +375,9 @@ sudo installer -pkg target/AgentHandover-*.pkg -target /
 
 ### Choose your AI model
 
-AgentHandover runs its models locally through Ollama: free and private. Screen annotation, Skill writing, synthesis and questions always use Ollama.
+AgentHandover runs its models locally through Ollama: free and private. Screen annotation, Skill writing, synthesis, questions and embeddings all use Ollama, on your Mac or on another machine you point `[vlm] ollama_host` at. There is no cloud mode (it was removed in 0.5.0).
 
-| Backend | What it does |
-|---------|--------------|
-| **Ollama** (default, required) | Everything: annotation, Skills, questions, embeddings |
-| **OpenAI / Anthropic / Google** (remote, opt-in) | Only with `[vlm] annotation_enabled = false`: the steps of a Skill written from a recording are sent to the provider for a task description and overview (`[llm] enhance_sops`) |
-
-Switch via `config.toml` or `agenthandover setup --vlm`.
+Pick the tier's models via `config.toml` or `agenthandover setup --vlm`.
 
 ## The Menu Bar App
 
@@ -401,7 +396,7 @@ Review the strategy, steps, and guardrails. Click "Approve for Agents" when it l
 
 Everything runs on your machine:
 
-- **Local-first.** Models run through Ollama on your Mac. Cloud mode is opt-in, with explicit consent, and sends only the Skill steps described above; the API key you enter in the app stays in the macOS Keychain.
+- **Local-only models.** Every model runs through Ollama on your Mac (or the Ollama host you configure). No cloud model API is called and no API key is stored.
 - **Screenshots are temporary.** Each frame is a JPEG of the focused window at half its native pixel resolution (one pixel per point on a Retina display), deleted after annotation. Frames never annotated are deleted by the daily maintenance run once they are older than `job_ttl_days` (default 7). Only structured text survives. Image embeddings, when you turn them on, are computed before deletion.
 - **Redaction where the data flows.** API keys, tokens, passwords (including "password is …" phrasings) and card numbers are scrubbed by the daemon before anything is stored, and again by the worker before any text goes into a model prompt. URLs keep their origin and path; query strings are dropped except for a short allow-list of harmless keys.
 - **Blocked by default.** Password managers, macOS password and Touch ID prompts, permission dialogs, the login window, Apple's Passwords app, and banking, payroll and login pages are never captured. Add your own apps, URLs and quiet hours as privacy zones (`[privacy.zones]`): the daemon checks them before it takes a frame and again after, and the worker once more on stored events.
@@ -435,7 +430,7 @@ This is not a screen recorder with ChatGPT on top. AgentHandover runs a pipeline
 
 Model work runs on one inference thread in priority order (a stopped recording first, passive work last), so the app and your answers are never stuck behind a long model call; when the backlog grows, the daemon captures less often.
 
-Every stage runs locally on your Mac. No cloud APIs required.
+Every stage runs locally on your Mac. No cloud APIs.
 
 </details>
 
@@ -555,7 +550,7 @@ AgentHandover is early and unusually high-leverage for contributors. The prompt 
 ### Code contributions we'd love
 
 - **New agent connectors.** Follow the pattern in [`worker/src/agenthandover_worker/agent_connect.py`](worker/src/agenthandover_worker/agent_connect.py). Cline, Aider, RooCode, and any agent that reads Claude Code-format skills or MCP are straightforward — the Hermes and Codex connectors are short, and every connector hands over only what passes `ledger.handoff_gate`.
-- **Model runtimes.** The pipeline talks to Ollama through one client ([`worker/src/agenthandover_worker/ollama.py`](worker/src/agenthandover_worker/ollama.py)); the cloud backends in [`backends/`](worker/src/agenthandover_worker/backends/) serve only the older focus path's SOP text enhancer. A second local runtime for annotation and Skills (with structured output) would be a real addition.
+- **Model runtimes.** Every model call goes to Ollama through one client ([`worker/src/agenthandover_worker/ollama.py`](worker/src/agenthandover_worker/ollama.py)). A second local runtime for annotation and Skills (with structured output) would be a real addition.
 - **Prompt engineering.** The prompts in [`sop_generator.py`](worker/src/agenthandover_worker/sop_generator.py) and [`behavioral_synthesizer.py`](worker/src/agenthandover_worker/behavioral_synthesizer.py) drive the entire output quality. If you see a way to make them more precise, more robust, or better at handling your language, send a PR; `agenthandover bench` and the recorded journey cassettes let you measure the change.
 - **Browser extension ports.** Chrome / Chromium / Brave / Edge / Arc / Comet are supported. Firefox and Safari are wide open.
 - **Privacy review.** This is a local-first tool that handles sensitive data. Extra eyes on [`crates/common/src/redaction.rs`](crates/common/src/redaction.rs), the worker's prompt-side [`redaction.py`](worker/src/agenthandover_worker/redaction.py), the privacy zones and the screenshot retention path ([`crates/storage/src/maintenance.rs`](crates/storage/src/maintenance.rs)) are genuinely wanted.
@@ -609,7 +604,7 @@ The release where the product does what this README says. Numbers are single mea
 - **Upgrades keep observation on.** Setup reopens only at a missing permission, stale grants from a changed signature are reset, and model configs written for an earlier default move to the tier's current models.
 - **Agents.** `search_skills` answered in 17.5 s instead of 255 s while Ollama was busy (an 8 s embedding timeout and a keyword fallback). Claude Code pairs through `claude mcp add` with a real Connected check; Codex gets a marked `AGENTS.md` block.
 - **Cluster labels and synthesis run every day.** The LLM reasoner and the behavioral synthesizer used to share their daily budget with the VLM fallback queue, so after 50 unclassified events a day every later cluster label and synthesis was skipped without a word. They now have their own budget (`[vlm] reasoning_max_calls_per_day`, `reasoning_max_compute_minutes_per_day`), and when it is spent `worker-status.json` and `agenthandover status --compute` say so.
-- **Removed.** The MLX and llama.cpp backends (they only ever served the fallback queue), the fallback queue itself (its answers fed nothing but its own re-scoring; cloud mode now sends nothing unless scene annotation is off), the legacy pattern miner, the six gates, and config keys that nothing read.
+- **Removed.** Cloud mode: it never did the main work (screen annotation and Skill writing always ran on Ollama), and by 0.5.0 it only sent the older focus path's Skill steps to a provider for a description, while reading its API key from an environment variable the app never set. The upgrade turns an old cloud config local (with a backup) and deletes the stored API key. Also the MLX and llama.cpp backends (they only ever served the fallback queue), the fallback queue itself (its answers fed nothing but its own re-scoring), the legacy pattern miner, the six gates, and config keys that nothing read.
 - **Corrections to v0.4.0's notes.** Homebrew's `ollama` 0.34.2 runs the QAT tags on the test Mac, and the Gemma tiers need Ollama 0.34.0+, not 0.30.6.
 
 ### v0.4.0 (2026-06-09)
