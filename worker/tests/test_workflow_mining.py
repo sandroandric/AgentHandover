@@ -168,6 +168,54 @@ class TestSessions:
         assert [[f.event_id for f in s] for s in wm.split_sessions(events, slept)] == [["a", "b"], ["c"]]
 
 
+def _call_gap(t0: datetime, resume_location: str = "https://expensify.com/report",
+              call_minutes: int = 40, first_call_after_s: int = 60) -> list[dict]:
+    """Two routine frames, a Zoom call (a frame every ten minutes, as
+    passive_3weeks's interrupted Monday has), then the routine resumes."""
+    zoom = _ann("", app="zoom.us", workflow=False)
+    events = [
+        _event("a", t0, _ann("https://mail.google.com/mail/u/0/#search/receipt")),
+        _event("b", t0 + timedelta(minutes=2), _ann("https://expensify.com/report")),
+    ]
+    call_start = t0 + timedelta(minutes=2, seconds=first_call_after_s)
+    for n in range(call_minutes // 10):
+        events.append(_event(f"z{n}", call_start + timedelta(seconds=600.5 * n), zoom))
+    resume = call_start + timedelta(minutes=call_minutes - 10, seconds=9 * 60 + 55)
+    events.append(_event("c", resume, _ann(resume_location)))
+    return events
+
+
+class TestInterruptedSessions:
+    """WP-F12: a call in another app is activity, not idleness."""
+
+    T0 = datetime(2026, 9, 7, 10, 38, tzinfo=timezone.utc)
+
+    def _ids(self, events, slept=None) -> list[list[str]]:
+        return [[f.event_id for f in s] for s in wm.split_sessions(events, slept)]
+
+    def test_a_forty_minute_call_mid_routine_is_one_session(self) -> None:
+        assert self._ids(_call_gap(self.T0)) == [["a", "b", "c"]]
+
+    def test_the_same_gap_without_frames_is_idleness(self) -> None:
+        events = [e for e in _call_gap(self.T0) if not e["id"].startswith("z")]
+        assert self._ids(events) == [["a", "b"], ["c"]]
+
+    def test_work_resumed_elsewhere_is_another_session(self) -> None:
+        events = _call_gap(self.T0, resume_location="https://dashboard.stripe.com/payouts")
+        assert self._ids(events) == [["a", "b"], ["c"]]
+
+    def test_idle_before_the_call_splits(self) -> None:
+        assert self._ids(_call_gap(self.T0, first_call_after_s=11 * 60)) == [["a", "b"], ["c"]]
+
+    def test_an_interruption_over_an_hour_splits(self) -> None:
+        assert self._ids(_call_gap(self.T0, call_minutes=70)) == [["a", "b"], ["c"]]
+
+    def test_a_sleep_during_the_call_splits(self) -> None:
+        nap = self.T0 + timedelta(minutes=20)
+        slept = [(nap.isoformat(), (nap + timedelta(minutes=1)).isoformat())]
+        assert self._ids(_call_gap(self.T0), slept) == [["a", "b"], ["c"]]
+
+
 @pytest.fixture()
 def db(tmp_db_path: Path):
     with WorkerDB(tmp_db_path) as worker_db:

@@ -113,7 +113,7 @@ def test_three_weeks_yield_exactly_the_two_planted_workflows(mined) -> None:
     unit_of, instance_of = _unit_of(labels), _instance_of(labels)
     # Every finished work session is one observation.
     observations = db.get_workflow_observations()
-    assert len(observations) == 15 + 4 + len(labels["one_off_tasks"])
+    assert len(observations) == 15 + 3 + len(labels["one_off_tasks"])
 
     candidates = wm.review_candidates(db, now=end)
     by_routine = {}
@@ -127,9 +127,15 @@ def test_three_weeks_yield_exactly_the_two_planted_workflows(mined) -> None:
         planted = next(r for r in labels["routines"] if r["slug"] == slug)
         seen = {instance_of[eid] for o in cand.observations for eid in json.loads(o["event_ids_json"])}
         assert seen == {i["instance_id"] for i in planted["instances"]}  # every instance
-    # The interrupted Monday is two sessions (a 40-minute call between).
+    # The interrupted Monday is one session: the 40-minute Zoom call in
+    # its middle is activity, not idleness (WP-F12).
     assert len(by_routine[STRIPE].observations) == 15
-    assert len(by_routine[EXPENSES].observations) == 4
+    assert len(by_routine[EXPENSES].observations) == 3
+    expenses = next(r for r in labels["routines"] if r["slug"] == EXPENSES)
+    interrupted = next(i for i in expenses["instances"] if "interrupted_40min_call" in i["variant"])
+    [holding] = [o for o in by_routine[EXPENSES].observations
+                 if set(json.loads(o["event_ids_json"])) & set(interrupted["event_ids"])]
+    assert set(json.loads(holding["event_ids_json"])) == set(interrupted["event_ids"])
 
     assert by_routine[STRIPE].recurrence["pattern"] == "daily"
     weekly = by_routine[EXPENSES].recurrence
@@ -396,7 +402,7 @@ def test_labelling_cards_are_the_ground_truth_replay_scores_against(mined, tmp_p
     assert [(r["slug"], len(r["instances"])) for r in product["routines"]] == [
         ("Stripe payouts", 15),
     ]
-    assert len(product["one_off_tasks"]) == 4
+    assert len(product["one_off_tasks"]) == 3  # the three expense reports
 
     def candidate(observations: list[dict]) -> Candidate:
         return Candidate(

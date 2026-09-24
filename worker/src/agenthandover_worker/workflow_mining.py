@@ -3,7 +3,9 @@ recurrence, value and the review queue.
 
 Passive discovery turns the annotated frames of its window into *work
 sessions* (the non-noise frames, split wherever the user was idle for
-:data:`IDLE_GAP_SECONDS` or the Mac slept) and records each finished session
+:data:`IDLE_GAP_SECONDS` or the Mac slept; an interruption by other
+activity, after which the work resumes where it was, is not idleness)
+and records each finished session
 as one ``workflow_observations`` row.  A session's *step signature* is its
 frames' ``(app, host_or_doc, action_verb)`` triples, run-length collapsed;
 URL paths are templated (``/reports/123`` -> ``/reports/{id}``), queries and
@@ -86,6 +88,9 @@ logger = logging.getLogger(__name__)
 
 # A pause this long between two work frames ends a session.
 IDLE_GAP_SECONDS = 600
+# Other activity between two work frames (a call, a video) keeps the
+# session going for at most this long (``_interrupted``).
+MAX_INTERRUPTION_SECONDS = 3600
 # A session needs this many work frames to be an observation.
 MIN_SESSION_FRAMES = 2
 ALIGN_THRESHOLD = 0.6
@@ -198,20 +203,61 @@ def split_sessions(
 ) -> list[list[AnnotatedFrame]]:
     """The work frames of *events* (noise frames dropped), oldest first,
     split into sessions at every idle gap of :data:`IDLE_GAP_SECONDS` or
-    more and at every system sleep."""
-    frames = [f for f in map(AnnotatedFrame.from_event, events) if f and not _is_noise_frame(f)]
+    more and at every system sleep.  A gap filled by other activity is no
+    idle gap when the work resumes where it was (:func:`_interrupted`): a
+    call in another app in the middle of a routine is one session."""
+    frames = [f for f in map(AnnotatedFrame.from_event, events) if f]
     frames.sort(key=lambda f: f.timestamp)
     sleeps = _sleep_starts(sleep_boundaries)
     sessions: list[list[AnnotatedFrame]] = []
+    between: list[AnnotatedFrame] = []  # noise frames since the last work frame
     for frame in frames:
+        if _is_noise_frame(frame):
+            if sessions:
+                between.append(frame)
+            continue
         if sessions:
             prev = _timestamp_to_epoch(sessions[-1][-1].timestamp)
             cur = _timestamp_to_epoch(frame.timestamp)
-            if cur - prev < IDLE_GAP_SECONDS and not _sleep_between(prev, cur, sleeps):
+            if not _sleep_between(prev, cur, sleeps) and (
+                cur - prev < IDLE_GAP_SECONDS
+                or _interrupted(sessions[-1], between, frame)
+            ):
                 sessions[-1].append(frame)
+                between = []
                 continue
         sessions.append([frame])
+        between = []
     return sessions
+
+
+def _place(frame: AnnotatedFrame) -> tuple[str, str]:
+    """The app and page or document a frame is on."""
+    return frame.app, host_or_doc(frame.location)
+
+
+def _interrupted(
+    session: list[AnnotatedFrame], between: list[AnnotatedFrame],
+    resume: AnnotatedFrame,
+) -> bool:
+    """True when the gap between *session*'s last work frame and *resume*
+    was an interruption, not idleness: the user moved to other activity
+    (the noise frames *between*; the first within :data:`IDLE_GAP_SECONDS`
+    of the last work frame, so the routine's screen did not sit idle
+    first), that activity held the screen until the work resumed (a frame
+    is taken on a change, so a call's frames are sparse: the app of the
+    last frame is in front until the next), the work resumed on a page or
+    document the session was already on, and the whole gap is at most
+    :data:`MAX_INTERRUPTION_SECONDS`.  A gap with no frame at all is
+    idleness, and work resumed elsewhere is another session."""
+    if not between:
+        return False
+    last = _timestamp_to_epoch(session[-1].timestamp)
+    return (
+        _timestamp_to_epoch(between[0].timestamp) - last < IDLE_GAP_SECONDS
+        and _timestamp_to_epoch(resume.timestamp) - last <= MAX_INTERRUPTION_SECONDS
+        and _place(resume) in {_place(f) for f in session}
+    )
 
 
 def _parse(ts: str) -> datetime:
