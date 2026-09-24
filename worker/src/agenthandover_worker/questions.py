@@ -15,8 +15,9 @@ them.  Three kinds:
   [Pasted it from somewhere else]).  A choice decides the step in code
   (:func:`apply_step_answer`: restore what the model wrote, or keep the
   grounded step); any other answer is left to the focus answers'
-  one revision call (``focus_questioner.answer_revision_prompt``).  Either
-  way the step cites the answer (``evidence.user_answer``), so the
+  one revision call (``focus_questioner.answer_revision_prompt``), or, on
+  a review card (no model call from the review queue), kept on its step
+  for the packet to show.  Either way the step cites the answer (``evidence.user_answer``), so the
   ledger's ``steps`` slot carries an ``answer`` pointer next to its frames;
 - a **slot question** per ``unknown`` or ``hypothesis`` slot of a
   procedure (``What starts this task?``), its choices drawn from what the
