@@ -158,8 +158,8 @@ class KnowledgeBase:
         return self._root / _PROCEDURES_DIR / f"{slug}.json"
 
     def _store_procedure(self, slug: str, procedure: dict, text: str) -> Path:
-        """Write *text* (the JSON of *procedure*) as the row of *slug*,
-        then as its export file."""
+        """Write *text* (the JSON of *procedure*) as the row of *slug* and
+        as its export file."""
         with self._transaction() as conn:
             conn.execute(
                 "INSERT INTO procedures (slug, title, lifecycle_state, procedure_json, "
@@ -176,8 +176,12 @@ class KnowledgeBase:
                     text,
                 ),
             )
-        path = self._procedure_path(slug)
-        self._atomic_write_text(path, text)
+            # Inside the transaction and the lock: a failed export rolls
+            # the row back, and two saves of one slug cannot leave the
+            # file on the older text.  (A crash between the two is repaired
+            # by export_procedures at the next start.)
+            path = self._procedure_path(slug)
+            self._atomic_write_text(path, text)
         return path
 
     def save_procedure(self, procedure: dict) -> Path:
@@ -270,10 +274,10 @@ class KnowledgeBase:
                     deleted = conn.execute(
                         "DELETE FROM procedures WHERE slug = ?", (slug,),
                     ).rowcount > 0
-        path = self._procedure_path(slug)
-        if path.is_file():
-            path.unlink()
-            deleted = True
+            path = self._procedure_path(slug)
+            if path.is_file():
+                path.unlink()
+                deleted = True
         if deleted:
             logger.info("Deleted procedure: %s", slug)
         return deleted
@@ -334,17 +338,17 @@ class KnowledgeBase:
         """Rewrite each procedure's export file that is missing or differs
         from its row (a save interrupted between the two writes).  Files
         with no row are left alone.  Returns the number written."""
-        rows = self._read("SELECT slug, procedure_json FROM procedures")
         written = 0
-        for slug, text in rows:
-            path = self._procedure_path(slug)
-            try:
-                current = path.read_text(encoding="utf-8")
-            except (OSError, UnicodeDecodeError):
-                current = None
-            if current != text:
-                self._atomic_write_text(path, text)
-                written += 1
+        with self._lock:  # no save runs between a row's read and its file write
+            for slug, text in self._read("SELECT slug, procedure_json FROM procedures"):
+                path = self._procedure_path(slug)
+                try:
+                    current = path.read_text(encoding="utf-8")
+                except (OSError, UnicodeDecodeError):
+                    current = None
+                if current != text:
+                    self._atomic_write_text(path, text)
+                    written += 1
         if written:
             logger.info("Re-exported %d procedure file(s) to %s", written, self._root)
         return written
