@@ -23,6 +23,27 @@ The observation log outlives raw retention: the daemon purges events after
 ``retention_days_raw`` but never this table, and it holds off purging events
 newer than :data:`DISTILLED_STATE_KEY` (the point up to which every
 finished session has been recorded).
+
+Skills and their observations (``promoted_slug``):
+
+- a Skill mined here is attributed the observations that promoted it, and
+  every later observation grouped with them;
+- a focus recording is recorded as an observation of its own
+  (``source="focus"``) attributed to its Skill
+  (:func:`record_focus_observation`), so later passive sessions of the
+  same workflow group with it;
+- a Skill with no observation at all (recorded before the observation
+  log, or imported) is linked by its steps' places: a workflow group no
+  Skill holds is attributed to the Skill whose steps' ``(app,
+  host_or_doc)`` sequence it aligns with (:func:`link_recorded_skills`);
+- while a session is still in progress, :func:`recognize` matches its
+  prefix against the Skills' observed signatures every
+  :data:`RECOGNIZE_INTERVAL_SECONDS`; a match tags the session with the
+  Skill (``worker_state`` :data:`LIVE_SESSION_STATE_KEY`) and the session
+  is recorded as the Skill's observation as soon as it ends.
+
+Every observation attached to an existing Skill is aligned to its steps
+for divergence branches (:mod:`branch_mining`).
 """
 
 from __future__ import annotations
@@ -73,6 +94,14 @@ SEGMENT_TTL_DAYS = 14
 UNPROMOTED_TTL_DAYS = 2 * OBSERVATION_WINDOW_DAYS
 # worker_state key: UTC time up to which every finished session is recorded.
 DISTILLED_STATE_KEY = "observations_distilled_through"
+# Live recognition: how often the session in progress is matched, over
+# how many hours of frames, and how many collapsed steps it needs first.
+RECOGNIZE_INTERVAL_SECONDS = 120
+RECOGNIZE_WINDOW_HOURS = 4
+MIN_PREFIX_STEPS = 3
+# worker_state key: the session in progress tagged with a Skill,
+# ``{"first_event_id", "attached_slug", "matched_at"}`` (empty when none).
+LIVE_SESSION_STATE_KEY = "live_session"
 
 # A path segment that names one record rather than a place: numbers,
 # UUIDs, hex ids, prefixed object ids (``po_1Q...``, ``cus_9...``) and short
@@ -461,18 +490,25 @@ class WorkflowWindow:
         return workflow_value(self.window_observations(group), self.history_days)
 
 
+def _anchors(db: "WorkerDB", until: datetime) -> list[dict]:
+    """The three most recent observations before *until* of every Skill,
+    oldest first."""
+    anchors: dict[str, list[dict]] = {}
+    for obs in db.get_workflow_observations(until=until):
+        if obs.get("promoted_slug"):
+            anchors.setdefault(obs["promoted_slug"], []).append(obs)
+    older = [o for rows in anchors.values() for o in rows[-3:]]
+    older.sort(key=lambda o: o["started_utc"])
+    return older
+
+
 def load_window(db: "WorkerDB", now: datetime) -> WorkflowWindow:
     """Group the last :data:`OBSERVATION_WINDOW_DAYS` days of observations,
     plus the three most recent observations of every earlier promoted
     workflow (so a Skill's workflow is recognised after six weeks)."""
     since = now - timedelta(days=OBSERVATION_WINDOW_DAYS)
     window = db.get_workflow_observations(since=since, until=now)
-    anchors: dict[str, list[dict]] = {}
-    for obs in db.get_workflow_observations(until=since):
-        if obs.get("promoted_slug"):
-            anchors.setdefault(obs["promoted_slug"], []).append(obs)
-    older = [o for rows in anchors.values() for o in rows[-3:]]
-    older.sort(key=lambda o: o["started_utc"])
+    older = _anchors(db, since)
     first = _parse(window[0]["started_utc"]) if window else now
     return WorkflowWindow(
         now=now,
@@ -498,22 +534,200 @@ def _blocked(db: "WorkerDB", obs_ids: set[str]) -> bool:
     return False
 
 
-def review_candidates(db: "WorkerDB", *, now: datetime) -> list[Candidate]:
+# ---------------------------------------------------------------------------
+# Skills and their observations
+# ---------------------------------------------------------------------------
+
+
+def attach_observations(
+    db: "WorkerDB", kb: "KnowledgeBase | None", slug: str, observations: list[dict],
+) -> None:
+    """Attribute *observations* (new instances of an existing Skill) to
+    *slug* and, with a knowledge base, record where they diverge from its
+    steps (:func:`branch_mining.mine_observations`)."""
+    if not observations:
+        return
+    db.set_observations_promoted([o["obs_id"] for o in observations], slug)
+    for obs in observations:
+        obs["promoted_slug"] = slug
+    if kb is None:
+        return
+    from agenthandover_worker.branch_mining import mine_observations
+
+    try:
+        mine_observations(db, kb, slug, observations)
+    except Exception:
+        logger.warning("Branch mining failed for '%s'", slug, exc_info=True)
+
+
+def skill_signature(proc: dict) -> list[tuple[str, str, str]]:
+    """A Skill's steps as step signatures ``(app, host_or_doc, "")``,
+    collapsed; steps without an app or a location are left out (the verb
+    is not known from a written step, and :func:`align_score` does not
+    compare it)."""
+    return collapse([
+        (_normalize_app(str(s.get("app") or "")), host_or_doc(str(s.get("location") or "")), "")
+        for s in proc.get("steps") or []
+        if isinstance(s, dict) and (s.get("app") or s.get("location"))
+    ])
+
+
+def _skill_score(signature: list[tuple[str, str, str]], steps: list[tuple[str, str, str]]) -> float:
+    """How well a workflow's *steps* perform a Skill's *signature*: the
+    aligner's score, 0 when they share no app and no place."""
+    if not ({s[0] for s in signature} & {s[0] for s in steps}
+            or {s[1] for s in signature} & {s[1] for s in steps}):
+        return 0.0
+    return align_score(signature, steps)
+
+
+def link_recorded_skills(db: "WorkerDB", kb: "KnowledgeBase", win: WorkflowWindow) -> int:
+    """Attribute each workflow group no Skill holds to the Skill without
+    any observation whose steps' places it aligns with (at least
+    :data:`ALIGN_THRESHOLD`, the best such Skill).  Returns the number of
+    groups linked."""
+    held = {o["promoted_slug"] for g in win.groups for o in g.observations if o.get("promoted_slug")}
+    skills = []
+    for proc in kb.list_procedures():
+        slug = proc.get("id") or proc.get("slug")
+        signature = skill_signature(proc)
+        if slug and slug not in held and len(set(signature)) >= 2:
+            skills.append((slug, signature))
+    linked = 0
+    for group in win.groups:
+        if not skills or group.promoted_slug:
+            continue
+        score, slug = max((_skill_score(sig, group.steps), slug) for slug, sig in skills)
+        if score < ALIGN_THRESHOLD:
+            continue
+        logger.info(
+            "Workflow '%s' (%d observation(s)) is the Skill '%s'",
+            group.task_label[:60], len(group.observations), slug,
+        )
+        attach_observations(db, kb, slug, group.observations)
+        linked += 1
+    return linked
+
+
+def record_focus_observation(
+    db: "WorkerDB", events: list[dict], slug: str, title: str = "",
+) -> str | None:
+    """Record a focus recording's annotated frames as one observation
+    (``source="focus"``) of its Skill *slug*.  Returns its ``obs_id``, or
+    None when fewer than :data:`MIN_SESSION_FRAMES` frames are annotated."""
+    session = [f for f in map(AnnotatedFrame.from_event, events) if f and not _is_noise_frame(f)]
+    session.sort(key=lambda f: f.timestamp)
+    if len(session) < MIN_SESSION_FRAMES:
+        return None
+    by_id = {e.get("id", ""): e for e in events}
+    obs = build_observation(session, [by_id[f.event_id] for f in session], title)
+    obs["source"] = "focus"
+    if not db.save_workflow_observation(obs):
+        return None
+    db.set_observations_promoted([obs["obs_id"]], slug)
+    return obs["obs_id"]
+
+
+def _match_prefix(
+    steps: list[tuple[str, str, str]], known: list[dict],
+) -> str | None:
+    """The Skill whose observed signature *steps* begin: an exact prefix
+    first, else the first whose opening :func:`same_workflow` matches."""
+    fallback = None
+    for obs in known:
+        head = _steps(obs)[:len(steps)]
+        if head == steps:
+            return obs["promoted_slug"]
+        if fallback is None and same_workflow(steps, head):
+            fallback = obs["promoted_slug"]
+    return fallback
+
+
+def _live_state(db: "WorkerDB") -> dict:
+    try:
+        state = json.loads(db.get_state(LIVE_SESSION_STATE_KEY) or "{}")
+    except (TypeError, ValueError):
+        return {}
+    return state if isinstance(state, dict) and state.get("attached_slug") else {}
+
+
+def recognize(db: "WorkerDB", kb: "KnowledgeBase | None", *, now: datetime) -> str | None:
+    """Live recognition, model-free, every :data:`RECOGNIZE_INTERVAL_SECONDS`.
+
+    The work session in progress (the last :data:`RECOGNIZE_WINDOW_HOURS`
+    hours of annotated frames) is matched once it has
+    :data:`MIN_PREFIX_STEPS` collapsed steps: its steps so far against the
+    openings of every Skill's observations (the window's and each Skill's
+    most recent older ones).  A match tags the session with the Skill.
+    Once the tagged session ends (idle for :data:`IDLE_GAP_SECONDS`, the
+    Mac slept, or a new session began) it is recorded as an observation
+    attached to the Skill (:func:`attach_observations`).  Returns the slug
+    the session in progress is tagged with, if any.
+    """
+    events = db.get_annotated_events_in_window(hours=RECOGNIZE_WINDOW_HOURS, now=now)
+    sessions = split_sessions(events, db.get_sleep_boundaries())
+    cutoff = now.timestamp() - IDLE_GAP_SECONDS
+    live = sessions[-1] if sessions and _timestamp_to_epoch(sessions[-1][-1].timestamp) > cutoff else None
+
+    state = _live_state(db)
+    if state:
+        tagged = next(
+            (s for s in sessions if any(f.event_id == state["first_event_id"] for f in s)), None,
+        )
+        if tagged is not None and tagged is live:
+            return state["attached_slug"]
+        if tagged is not None and len(tagged) >= MIN_SESSION_FRAMES:
+            by_id = {e.get("id", ""): e for e in events}
+            obs = build_observation(tagged, [by_id[f.event_id] for f in tagged])
+            if db.save_workflow_observation(obs):
+                logger.info("Recognised session recorded for Skill '%s'", state["attached_slug"])
+                attach_observations(db, kb, state["attached_slug"], [obs])
+        db.set_state(LIVE_SESSION_STATE_KEY, "")
+
+    if live is None:
+        return None
+    steps = collapse([step_signature(f) for f in live])
+    if len(steps) < MIN_PREFIX_STEPS:
+        return None
+    since = now - timedelta(days=OBSERVATION_WINDOW_DAYS)
+    known = _anchors(db, since) + [
+        o for o in db.get_workflow_observations(since=since, until=now) if o.get("promoted_slug")
+    ]
+    slug = _match_prefix(steps, known)
+    if slug:
+        logger.info("Session in progress recognised as Skill '%s'", slug)
+        db.set_state(LIVE_SESSION_STATE_KEY, json.dumps({
+            "first_event_id": live[0].event_id,
+            "attached_slug": slug,
+            "matched_at": now.astimezone(timezone.utc).isoformat(),
+        }))
+    return slug
+
+
+def review_candidates(
+    db: "WorkerDB", *, now: datetime, kb: "KnowledgeBase | None" = None,
+) -> list[Candidate]:
     """The workflows the review queue admits at *now*, highest value first.
 
     Later observations of an already promoted workflow are attributed to
-    its Skill here and are never candidates again.  A candidate has at
-    least :data:`MIN_OBSERVATIONS` observations in the window and two
-    distinct steps; at most :data:`WEEKLY_REVIEW_CAP` drafts are promoted
-    per seven days.
+    its Skill here and are never candidates again; with *kb*, so is a
+    workflow that performs a Skill holding no observation yet
+    (:func:`link_recorded_skills`), and the attributed observations are
+    mined for divergence branches.  A candidate has at least
+    :data:`MIN_OBSERVATIONS` observations in the window and two distinct
+    steps; at most :data:`WEEKLY_REVIEW_CAP` drafts are promoted per seven
+    days.
     """
     win = load_window(db, now)
+    if kb is not None:
+        link_recorded_skills(db, kb, win)
     eligible: list[Candidate] = []
     for group in win.groups:
         slug = group.promoted_slug
         if slug:
-            fresh = [o["obs_id"] for o in group.observations if not o.get("promoted_slug")]
-            db.set_observations_promoted(fresh, slug)
+            attach_observations(
+                db, kb, slug, [o for o in group.observations if not o.get("promoted_slug")],
+            )
             continue
         observations = win.window_observations(group)
         if len(observations) < MIN_OBSERVATIONS or len(set(group.steps)) < 2:
@@ -537,11 +751,18 @@ def review_candidates(db: "WorkerDB", *, now: datetime) -> list[Candidate]:
     return eligible[:max(slots, 0)]
 
 
-def recurring_workflows(db: "WorkerDB", *, now: datetime, date: str | None = None) -> list[dict]:
+def recurring_workflows(
+    db: "WorkerDB", *, now: datetime, date: str | None = None,
+    kb: "KnowledgeBase | None" = None,
+) -> list[dict]:
     """Workflows seen at least :data:`MIN_OBSERVATIONS` times in the window
     (optionally only those observed on the local *date*), highest value
-    first: ``{label, slug, observations, recurrence, value}``."""
+    first: ``{label, slug, observations, recurrence, value}``.  With *kb*,
+    workflows that perform a Skill holding no observation are linked to it
+    first (:func:`link_recorded_skills`)."""
     win = load_window(db, now)
+    if kb is not None:
+        link_recorded_skills(db, kb, win)
     out = []
     for group in win.groups:
         observations = win.window_observations(group)
@@ -565,7 +786,7 @@ def refresh_skills(db: "WorkerDB", kb: "KnowledgeBase", *, now: datetime) -> int
     count onto its procedure in the knowledge base.  Returns the number of
     procedures updated."""
     updated = 0
-    for workflow in recurring_workflows(db, now=now):
+    for workflow in recurring_workflows(db, now=now, kb=kb):
         slug = workflow["slug"]
         proc = kb.get_procedure(slug) if slug else None
         if proc is None:

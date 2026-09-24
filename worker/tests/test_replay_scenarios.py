@@ -241,22 +241,11 @@ class TestExportParity:
 class TestRecurrence:
     """Recurrence detection finds daily patterns."""
 
-    @pytest.mark.xfail(strict=True, reason=(
-        "re-owned by WP-F5 (diagnosed 2026-09-23): the daily batch splits each "
-        "standup by app into a Zoom task and a Jira task, and ProcedureMatcher "
-        "scores each half against the whole recorded daily-standup Skill: 0.20 "
-        "(Zoom) and 0.44 (Jira, after WP-F5's gerund normalisation made "
-        "'Reviewing' meet 'Review') against the 0.50 threshold, so no day "
-        "observes the Skill.  WP-M3's observation log keeps each morning as "
-        "one session and, once WP-F5 templated Jira issue keys (PROJ-101 -> "
-        "{id}), groups the five mornings and detects the daily recurrence "
-        "(test_observation_log_sees_the_daily_standup), but it reaches only "
-        "Skills promoted from mining (promoted_slug); nothing links a "
-        "recorded Skill to its passive observation group.  Owner: the "
-        "follow-up that links workflow_observations groups to recorded "
-        "Skills (reported by WP-F5 to the lead)"
-    ))
     def test_daily_pattern_detected(self, tmp_path: Path) -> None:
+        """The recorded daily-standup Skill holds no observation; the five
+        mornings' workflow group performs its steps' places (Zoom meeting,
+        Jira board, Jira issue), so the daily batch links the group to it
+        and writes the daily recurrence onto the Skill (WP-M5)."""
         scenario = _load("multi_day_recurring_standup")
         runner = ReplayRunner(scenario)
         kb = runner.setup_kb(tmp_path)
