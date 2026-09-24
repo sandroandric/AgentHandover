@@ -97,6 +97,13 @@ FOCUS_QUESTIONS_FILE = "focus-questions.json"
 # pre-filled guess submitted unchanged.
 ANSWER_TYPED = "typed"
 ANSWER_ACCEPTED_GUESS = "accepted_guess"
+
+# Each session waiting for its answers has its pending state here,
+# ``<session_id>.json``.  The app sees one session's questions at a time
+# in ``focus-questions.json``, and the next queued session's once those
+# are processed.
+FOCUS_PENDING_DIR = "focus-pending"
+# The single pending file of 0.4.x/0.5.0, moved into the queue at startup.
 FOCUS_PENDING_FILE = "focus-pending.json"
 
 
@@ -567,6 +574,42 @@ def _drop_duplicated_neighbours(steps: list[dict], start: int, count: int, proc:
 # ---------------------------------------------------------------------------
 
 
+def _questions_payload(questions: list[FocusQuestion]) -> list[dict]:
+    """The questions as ``focus-questions.json`` lists them."""
+    return [
+        {
+            "index": i,
+            "id": q.id,
+            "question": q.question,
+            "category": q.category,
+            "context": q.context,
+            "default": q.default,
+            "step_indexes": list(q.step_indexes),
+            "choices": list(q.choices),
+        }
+        for i, q in enumerate(questions)
+    ]
+
+
+def _write_questions_file(
+    state_dir: Path, session_id: str, slug: str, title: str, questions: list[dict],
+) -> Path:
+    state_dir.mkdir(parents=True, exist_ok=True)
+    path = state_dir / FOCUS_QUESTIONS_FILE
+    write_json_atomic(path, {
+        "session_id": session_id,
+        "slug": slug,
+        "title": title,
+        "questions": questions,
+        "status": "pending",
+    })
+    logger.info(
+        "Wrote %d focus question(s) to %s (session=%s, slug=%s)",
+        len(questions), path, session_id, slug,
+    )
+    return path
+
+
 def write_focus_questions(
     state_dir: Path,
     session_id: str,
@@ -579,37 +622,39 @@ def write_focus_questions(
 
     *title* is the session's title as the user typed it: the app shows it
     as is (the slug loses its casing, "IANA" became "Iana").  Returns the
-    path to the written file.
+    path to the written file.  The worker asks through
+    :func:`ask_focus_questions`, which never replaces another session's
+    questions.
     """
-    state_dir.mkdir(parents=True, exist_ok=True)
-    path = state_dir / FOCUS_QUESTIONS_FILE
-
-    payload = {
-        "session_id": session_id,
-        "slug": slug,
-        "title": title,
-        "questions": [
-            {
-                "index": i,
-                "id": q.id,
-                "question": q.question,
-                "category": q.category,
-                "context": q.context,
-                "default": q.default,
-                "step_indexes": list(q.step_indexes),
-                "choices": list(q.choices),
-            }
-            for i, q in enumerate(questions)
-        ],
-        "status": "pending",
-    }
-
-    write_json_atomic(path, payload)
-    logger.info(
-        "Wrote %d focus question(s) to %s (session=%s, slug=%s)",
-        len(questions), path, session_id, slug,
+    return _write_questions_file(
+        state_dir, session_id, slug, title, _questions_payload(questions),
     )
-    return path
+
+
+def _pending_path(state_dir: Path, session_id: str) -> Path:
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", session_id)
+    return state_dir / FOCUS_PENDING_DIR / f"{safe}.json"
+
+
+def _pending_entries(state_dir: Path) -> list[dict]:
+    """The queued sessions, oldest first.  An unreadable entry, or one
+    without a session id, is logged and skipped."""
+    queue_dir = state_dir / FOCUS_PENDING_DIR
+    if not queue_dir.is_dir():
+        return []
+    entries: list[dict] = []
+    for path in sorted(queue_dir.glob("*.json")):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            data = None
+        if not isinstance(data, dict) or not isinstance(data.get("session_id"), str) \
+                or not data["session_id"]:
+            logger.warning("Skipping unreadable queued focus Q&A entry %s", path)
+            continue
+        entries.append(data)
+    entries.sort(key=lambda e: e["seq"] if isinstance(e.get("seq"), int) else 0)
+    return entries
 
 
 def write_focus_pending(
@@ -618,22 +663,35 @@ def write_focus_pending(
     slug: str,
     sop_template: dict,
     procedure: dict,
+    *,
+    title: str = "",
+    questions: list[dict] | None = None,
 ) -> Path:
-    """Save the pending SOP state so it can be resumed after Q&A.
+    """Queue a session's pending SOP state, with the questions the app is
+    to show for it, so the export resumes after its Q&A.
 
+    Each session has its own entry, ``focus-pending/<session_id>.json``:
+    a second session never replaces the first's state.  The queue is
+    oldest first (``seq``); a session queued again keeps its place.
     Returns the path to the written file.
     """
-    state_dir.mkdir(parents=True, exist_ok=True)
-    path = state_dir / FOCUS_PENDING_FILE
-
-    payload = {
+    path = _pending_path(state_dir, session_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    entries = _pending_entries(state_dir)
+    seq = next((e.get("seq") for e in entries if e["session_id"] == session_id), None)
+    if not isinstance(seq, int):
+        seq = 1 + max(
+            (e["seq"] for e in entries if isinstance(e.get("seq"), int)), default=0,
+        )
+    write_json_atomic(path, {
         "session_id": session_id,
         "slug": slug,
+        "title": title,
+        "seq": seq,
         "sop_template": sop_template,
         "procedure": procedure,
-    }
-
-    write_json_atomic(path, payload)
+        "questions": list(questions or []),
+    })
     logger.debug("Saved focus pending state to %s", path)
     return path
 
@@ -651,27 +709,128 @@ def read_focus_questions(state_dir: Path) -> dict | None:
         return None
 
 
-def read_focus_pending(state_dir: Path) -> dict | None:
-    """Read focus pending state file.  Returns None if missing."""
-    path = state_dir / FOCUS_PENDING_FILE
+def read_focus_pending(state_dir: Path, session_id: str | None = None) -> dict | None:
+    """The pending state queued for *session_id* (without one: the oldest
+    queued session's).  Returns None if there is none or it is unreadable."""
+    if session_id is None:
+        entries = _pending_entries(state_dir)
+        return entries[0] if entries else None
+    if not session_id:
+        return None
+    path = _pending_path(state_dir, session_id)
     if not path.is_file():
         return None
     try:
-        with open(path) as f:
-            return json.load(f)
-    except (json.JSONDecodeError, OSError):
-        logger.debug("Could not read %s", path, exc_info=True)
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        logger.warning("Could not read queued focus Q&A entry %s", path)
         return None
+    if not isinstance(data, dict) or data.get("session_id") != session_id:
+        logger.warning("Queued focus Q&A entry %s is not session %s", path, session_id)
+        return None
+    return data
 
 
-def clear_focus_qa_files(state_dir: Path) -> None:
-    """Remove both focus Q&A files after export completes."""
-    for filename in (FOCUS_QUESTIONS_FILE, FOCUS_PENDING_FILE):
-        path = state_dir / filename
+def clear_focus_qa_files(state_dir: Path, session_id: str) -> None:
+    """Remove the questions file and *session_id*'s queued state once its
+    answers are processed.  The other queued sessions stay."""
+    paths = [state_dir / FOCUS_QUESTIONS_FILE]
+    if session_id:
+        paths.append(_pending_path(state_dir, session_id))
+    for path in paths:
         try:
             path.unlink(missing_ok=True)
         except Exception:
             logger.debug("Failed to remove %s", path, exc_info=True)
+
+
+def publish_next_focus_questions(state_dir: Path) -> str | None:
+    """Show the oldest queued session's questions when the app has none.
+
+    ``focus-questions.json`` is written only when it is absent (or
+    unreadable): another session's pending or answered file is never
+    replaced.  An entry without questions cannot be shown and is passed
+    over.  Returns the session id now shown, or None when nothing was
+    written.
+    """
+    path = state_dir / FOCUS_QUESTIONS_FILE
+    if path.exists():
+        if isinstance(read_focus_questions(state_dir), dict):
+            return None
+        logger.warning("%s is unreadable; showing the next queued questions instead", path)
+    for entry in _pending_entries(state_dir):
+        questions = entry.get("questions")
+        if not isinstance(questions, list) or not questions:
+            continue
+        _write_questions_file(
+            state_dir, entry["session_id"], str(entry.get("slug") or ""),
+            str(entry.get("title") or ""), questions,
+        )
+        return entry["session_id"]
+    return None
+
+
+def ask_focus_questions(
+    state_dir: Path,
+    session_id: str,
+    slug: str,
+    questions: list[FocusQuestion],
+    *,
+    title: str,
+    sop_template: dict,
+    procedure: dict,
+) -> bool:
+    """Queue a session's questions with its pending state, and show them
+    unless another session's questions are still in the app (then they
+    are shown once those are processed).  Returns True when the app now
+    shows this session's questions."""
+    payload = _questions_payload(questions)
+    write_focus_pending(
+        state_dir, session_id, slug, sop_template, procedure,
+        title=title, questions=payload,
+    )
+    shown = read_focus_questions(state_dir)
+    if isinstance(shown, dict) and shown.get("session_id") == session_id \
+            and shown.get("status") == "pending":
+        # The same session asked again: its unanswered questions are
+        # replaced by the new ones.
+        _write_questions_file(state_dir, session_id, slug, title, payload)
+        return True
+    return publish_next_focus_questions(state_dir) == session_id
+
+
+def restore_focus_queue(state_dir: Path) -> str | None:
+    """At startup: move a 0.4.x/0.5.0 ``focus-pending.json`` into the
+    queue under its session id (idempotent: an entry already queued is
+    kept), then show the oldest queued questions if the app has none.
+    Returns the session id newly shown, or None."""
+    legacy = state_dir / FOCUS_PENDING_FILE
+    if legacy.is_file():
+        try:
+            data = json.loads(legacy.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            data = None
+        session_id = data.get("session_id") if isinstance(data, dict) else None
+        if not isinstance(session_id, str) or not session_id:
+            logger.warning("Leaving unreadable %s in place (no session id)", legacy)
+        else:
+            if read_focus_pending(state_dir, session_id) is None:
+                shown = read_focus_questions(state_dir)
+                if not (isinstance(shown, dict) and shown.get("session_id") == session_id):
+                    logger.warning(
+                        "%s (session %s) has no questions file: queued without questions",
+                        legacy, session_id,
+                    )
+                    shown = {}
+                write_focus_pending(
+                    state_dir, session_id, str(data.get("slug") or ""),
+                    data.get("sop_template") or {}, data.get("procedure") or {},
+                    title=str(shown.get("title") or ""),
+                    questions=list(shown.get("questions") or []),
+                )
+            legacy.unlink(missing_ok=True)
+            logger.info("Moved %s into the focus Q&A queue (session %s)", legacy, session_id)
+    return publish_next_focus_questions(state_dir)
 
 
 def parse_qa_result_from_file(
