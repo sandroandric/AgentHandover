@@ -14,14 +14,17 @@ from agenthandover_worker.db import WorkerDB
 from daemon_db import STORAGE_SRC, migration_files, schema_version
 from journeys.fixture_loader import (
     DAEMON_COLUMNS,
+    EVENTS_FILE,
     FIXTURES_DIR,
     read_manifest,
     shift_timestamp,
 )
+from journeys.record.generate_focus_dailynews import RUNS, write_fixture
 
 FIXTURE_NAMES = sorted(
     p.name for p in FIXTURES_DIR.iterdir() if (p / "manifest.json").is_file()
 )
+DAILY_NEWS = tuple(RUNS)
 DAEMON_TIMESTAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6}|\.\d{9})?\+00:00$")
 
 
@@ -73,7 +76,18 @@ def test_migrations_are_the_daemons() -> None:
 
 
 def test_every_fixture_is_listed() -> None:
-    assert "focus_dailynews" in FIXTURE_NAMES
+    assert set(DAILY_NEWS) <= set(FIXTURE_NAMES)
+
+
+@pytest.mark.parametrize("name", DAILY_NEWS)
+def test_daily_news_generator_is_deterministic(name: str, tmp_path: Path) -> None:
+    """Generating a run twice gives the same bytes, and those are the committed files."""
+    first = write_fixture(RUNS[name], tmp_path / "first")
+    second = write_fixture(RUNS[name], tmp_path / "second")
+    for file in (EVENTS_FILE, "manifest.json"):
+        committed = (FIXTURES_DIR / name / file).read_bytes()
+        assert (first / file).read_bytes() == committed, f"{name}/{file}: regenerate the fixture"
+        assert (second / file).read_bytes() == committed
 
 
 @pytest.mark.parametrize("name", FIXTURE_NAMES)
@@ -128,8 +142,9 @@ def test_rows_keep_the_daemons_text_formats(name: str, events_db) -> None:
             assert path.is_file() and path.read_bytes()[:2] == b"\xff\xd8"
 
 
-def test_focus_dailynews_is_read_by_the_worker(events_db) -> None:
-    fixture = events_db("focus_dailynews")
+@pytest.mark.parametrize("name", DAILY_NEWS)
+def test_focus_dailynews_is_read_by_the_worker(name: str, events_db) -> None:
+    fixture = events_db(name)
     manifest = fixture.manifest
     session_id = manifest["focus_session"]["session_id"]
     with WorkerDB(fixture.db_path) as db:
@@ -138,6 +153,26 @@ def test_focus_dailynews_is_read_by_the_worker(events_db) -> None:
     # Tagged native events plus the untagged clipboard rows inside the session.
     assert len(events) == manifest["row_counts"]["focus_tagged"] + kinds.count("ClipboardChange")
     assert kinds.count("ClipboardChange") == manifest["row_counts"]["by_kind"]["ClipboardChange"]
+
+
+def test_runs_share_one_events_db(events_db) -> None:
+    """Loading the daily-news runs into one data dir keeps every run, each
+    read back by its own focus session, as the daemon keeps every morning."""
+    fixtures = [events_db(name) for name in DAILY_NEWS]
+    assert len({f.db_path for f in fixtures}) == 1
+    assert _counts(fixtures[0].db_path)["events"] == sum(
+        f.manifest["row_counts"]["events"] for f in fixtures
+    )
+    with WorkerDB(fixtures[0].db_path) as db:
+        for fixture in fixtures:
+            session_id = fixture.manifest["focus_session"]["session_id"]
+            events = db.get_focus_session_events(session_id)
+            assert {json.loads(e["metadata_json"]).get("focus_session_id") for e in events} <= {
+                session_id, None,  # clipboard rows carry no session id
+            }
+            assert len(events) == fixture.manifest["row_counts"]["focus_tagged"] + (
+                fixture.manifest["row_counts"]["by_kind"]["ClipboardChange"]
+            )
 
 
 def test_rebase_moves_the_recording_and_keeps_formats(events_db, temp_home) -> None:

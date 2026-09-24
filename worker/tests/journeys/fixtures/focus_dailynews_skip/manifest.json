@@ -1,0 +1,36 @@
+{
+  "name": "focus_dailynews_skip",
+  "description": "8-minute focus recording of the same routine the next morning: the second story opened is a two-hour video with no transcript, so it is left out and the digest posted in Slack has two stories.",
+  "source": {
+    "kind": "generated",
+    "by": "worker/tests/journeys/record/generate_focus_dailynews.py",
+    "note": "Replace with a real session via record/record_focus_session.py."
+  },
+  "schema_version": 5,
+  "recorded_start": "2026-09-16T08:30:00.900392+00:00",
+  "recorded_end": "2026-09-16T08:37:59.300821+00:00",
+  "focus_session": {
+    "session_id": "61ea5cd6-aeb9-4f44-8aff-37b0a9993823",
+    "title": "Daily news digest",
+    "started_at": "2026-09-16T08:29:59Z",
+    "stopped_at": "2026-09-16T08:38:00Z"
+  },
+  "row_counts": {
+    "events": 435,
+    "by_kind": {
+      "AppSwitch": 4,
+      "ClickIntent": 5,
+      "ClipboardChange": 3,
+      "DwellSnapshot": 411,
+      "FocusChange": 5,
+      "ScrollReadSnapshot": 1,
+      "WindowTitleChange": 6
+    },
+    "chrome_extension": 254,
+    "clipboard_with_preview": 3,
+    "dom_snapshots": 240,
+    "focus_tagged": 178,
+    "with_ocr_text": 168,
+    "with_screenshot": 168
+  }
+}

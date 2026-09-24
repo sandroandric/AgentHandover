@@ -24,9 +24,11 @@ A fixture is a directory under ``fixtures/``:
 ``labels.json`` (optional)
     Ground truth for scoring a replay of the fixture.
 
-``load_fixture`` optionally moves the whole recording in time (whole
-seconds, so each timestamp keeps the daemon's exact text format) so that
-code reading the wall clock sees a recent session.
+``load_fixture`` adds to a database already in the data dir (several runs
+of one routine share it, as they do in the daemon's), and optionally moves
+the whole recording in time (whole seconds, so each timestamp keeps the
+daemon's exact text format) so that code reading the wall clock sees a
+recent session.
 """
 
 from __future__ import annotations
@@ -195,8 +197,10 @@ def load_fixture(
     *,
     rebase_to: datetime | None = None,
 ) -> LoadedFixture:
-    """Create ``data_dir/events.db`` through the daemon's migrations and load
-    the fixture's rows into it.
+    """Load the fixture's rows into ``data_dir/events.db``, creating it
+    through the daemon's migrations when it does not exist yet.  Loading
+    several fixtures into one data dir keeps all their rows, as the
+    daemon's database keeps every day it recorded.
 
     ``rebase_to`` moves every timestamp so the recording ends at that time
     (rounded to whole seconds).
@@ -210,7 +214,9 @@ def load_fixture(
     data_dir.mkdir(parents=True, exist_ok=True)
     screenshots_dir = data_dir / "screenshots"
     screenshots_dir.mkdir(exist_ok=True)
-    db_path = create_daemon_db(data_dir / "events.db")
+    db_path = data_dir / "events.db"
+    if not db_path.exists():
+        create_daemon_db(db_path)
 
     rows = []
     for row in read_rows(name):

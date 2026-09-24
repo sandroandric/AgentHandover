@@ -1,0 +1,36 @@
+{
+  "name": "focus_dailynews_diverge2",
+  "description": "10-minute focus recording of the same routine: again the second story is behind research.example.com's paywall and the user takes the same detour through archive.example.net.",
+  "source": {
+    "kind": "generated",
+    "by": "worker/tests/journeys/record/generate_focus_dailynews.py",
+    "note": "Replace with a real session via record/record_focus_session.py."
+  },
+  "schema_version": 5,
+  "recorded_start": "2026-09-18T08:30:00.900702+00:00",
+  "recorded_end": "2026-09-18T08:40:11.300419+00:00",
+  "focus_session": {
+    "session_id": "277210c3-de46-40db-8edd-5f4fe16c6cac",
+    "title": "Daily news digest",
+    "started_at": "2026-09-18T08:29:59Z",
+    "stopped_at": "2026-09-18T08:40:12Z"
+  },
+  "row_counts": {
+    "events": 553,
+    "by_kind": {
+      "AppSwitch": 6,
+      "ClickIntent": 5,
+      "ClipboardChange": 4,
+      "DwellSnapshot": 524,
+      "FocusChange": 6,
+      "ScrollReadSnapshot": 1,
+      "WindowTitleChange": 7
+    },
+    "chrome_extension": 322,
+    "clipboard_with_preview": 4,
+    "dom_snapshots": 306,
+    "focus_tagged": 227,
+    "with_ocr_text": 214,
+    "with_screenshot": 214
+  }
+}
