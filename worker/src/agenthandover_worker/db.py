@@ -438,19 +438,22 @@ class WorkerDB:
         )
         return self._rows_to_dicts(cur.fetchall())
 
-    def key_evidence(self, event: dict) -> tuple[bool, dict | None] | None:
-        """Whether a key was pressed since the previous annotated frame of
-        *event*'s session, and that frame's row.
+    def key_evidence(self, event: dict) -> dict | None:
+        """The keyboard and clipboard evidence for *event*'s frame: what
+        happened since the previous annotated frame of its session.
 
-        The daemon marks each kept frame with ``keys_since_prev_frame``
-        (a key went down since the previous kept frame).  The frames
-        between the previous annotated frame and *event* (skipped ones
-        included) cover that stretch; the first annotated frame of a
-        session counts every frame of the session up to it.  None when
-        *event* carries no flag (rows from before the flag existed).
+        ``{"keys": int, "pastes": int, "previous": row | None}``: the key
+        presses the daemon counted (``keys_since_prev_frame`` of every
+        event from just after the previous annotated frame up to and
+        including *event*, skipped frames included), the browser's
+        ``PasteDetected`` events in that stretch, and the previous
+        annotated frame's row.  Without a previous annotated frame the
+        stretch starts at the session's first event.  None when *event*
+        carries no count (rows from before the daemon recorded it).
         """
         metadata = parse_json_field(event, "metadata_json")
-        if not isinstance(metadata.get("keys_since_prev_frame"), bool):
+        count = metadata.get("keys_since_prev_frame")
+        if not isinstance(count, int) or isinstance(count, bool):
             return None
         timestamp = str(event.get("timestamp") or "")
         session = metadata.get("focus_session_id")
@@ -463,15 +466,36 @@ class WorkerDB:
             (timestamp, session, event.get("id")),
         ).fetchone()
         previous = dict(row) if row is not None else None
-        flag = "json_extract(metadata_json, '$.keys_since_prev_frame')"
         if previous is not None:
-            where, params = "timestamp > ? AND timestamp <= ?", [previous["timestamp"], timestamp]
+            start_sql, start = "timestamp > ?", previous["timestamp"]
         else:
-            where, params = f"timestamp <= ? AND {session_expr}", [timestamp, session]
-        pressed = self._conn.execute(
-            f"SELECT 1 FROM events WHERE {where} AND {flag} = 1 LIMIT 1", params,
+            first = self._conn.execute(
+                f"SELECT MIN(timestamp) FROM events WHERE {session_expr}", (session,),
+            ).fetchone()[0]
+            start_sql, start = "timestamp >= ?", first or timestamp
+        keys, pastes = self._conn.execute(
+            "SELECT "
+            "  COALESCE(SUM(CASE WHEN json_type(metadata_json, '$.keys_since_prev_frame') "
+            "    = 'integer' THEN json_extract(metadata_json, '$.keys_since_prev_frame') END), 0), "
+            "  COALESCE(SUM(json_extract(kind_json, '$.type') = 'PasteDetected'), 0) "
+            f"FROM events WHERE {start_sql} AND timestamp <= ?",
+            (start, timestamp),
         ).fetchone()
-        return pressed is not None, previous
+        return {"keys": int(keys), "pastes": int(pastes), "previous": previous}
+
+    def get_copies_before(self, timestamp: str, minutes: int = 30) -> list[dict]:
+        """The ``ClipboardChange`` records (``content_hash``, and
+        ``content_preview`` when the user turned it on) copied in the
+        *minutes* up to *timestamp*, newest first."""
+        cur = self._conn.execute(
+            "SELECT kind_json FROM events "
+            "WHERE json_extract(kind_json, '$.type') = 'ClipboardChange' "
+            "  AND timestamp <= ? "
+            "  AND timestamp >= strftime('%Y-%m-%dT%H:%M:%fZ', ?, '-' || ? || ' minutes') "
+            "ORDER BY timestamp DESC",
+            (timestamp, timestamp, str(minutes)),
+        )
+        return [parse_json_field({"kind_json": row[0]}, "kind_json") for row in cur.fetchall()]
 
     def save_annotation(
         self,

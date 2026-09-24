@@ -31,12 +31,14 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
 from agenthandover_worker.annotation_cache import AnnotationCache, cache_key
+from agenthandover_worker.clipboard_grounding import copied
 from agenthandover_worker.contrast import ground_visible_items
 from agenthandover_worker.dom import accessible_name, flatten_dom, implicit_role, url_host
 from agenthandover_worker.event_helpers import display_name, is_bundle_id, parse_json_field
@@ -739,28 +741,45 @@ def _validate_annotation(raw: str) -> dict | None:
     return data
 
 
-def settle_typed_text(db: object, event: dict, annotation: dict) -> None:
-    """Typed text needs keyboard evidence: without a key press since the
-    previous annotated frame (:meth:`WorkerDB.key_evidence`), *event*'s
-    ``key_text.typed_text`` cannot be new typing.
+# Autocomplete and autofill insert more text than the keys pressed: this
+# many key presses back any amount of new typed text.
+_KEYS_FOR_ANY_TEXT = 3
 
-    The model reads typed text off the screen, and short toolbar OCR
-    ("# 10" from TextEdit's font-size control, in an empty document) reads
-    like typing.  Without a key press the frame keeps the previous frame's
-    typed text when it shows the same window, else none; the model's
-    answer stays under ``_typed_text_without_keys``.  Applied once, before
-    the annotation is stored, so the frame diff, step grounding, the SOP
-    prompt and synthesis read the same thing.  A frame without the
-    daemon's flag (older rows) is left as the model gave it.
+
+def _grown(previous: str, current: str) -> str:
+    """The text *current* adds to *previous*: around it when *current*
+    contains it, after their common prefix otherwise (all of *current*
+    when they share nothing)."""
+    if previous and previous in current:
+        return current.replace(previous, "", 1)
+    return current[len(os.path.commonprefix([previous, current])):]
+
+
+def settle_typed_text(db: object, event: dict, annotation: dict) -> None:
+    """Typed text needs keyboard evidence (:meth:`WorkerDB.key_evidence`).
+
+    The model reads typed text off the screen, and a toolbar's OCR ("# 10"
+    from TextEdit's font-size popup, in an empty document) reads like
+    typing.  The text the frame's ``key_text.typed_text`` adds over the
+    previous annotated frame's (same window) is new typing only when the
+    keys pressed since then can have typed it: one per character, up to
+    :data:`_KEYS_FOR_ANY_TEXT` (autocomplete and autofill insert more), or
+    a paste (a key press, or the browser's paste event) of a recorded copy
+    that holds it.  Otherwise the frame keeps the previous frame's typed
+    text (same window) or none, and the model's answer stays under
+    ``_typed_text_without_keys``.  Applied once, before the annotation is
+    stored, so the frame diff, step grounding, the SOP prompt and
+    synthesis read the same thing.  A frame without the daemon's count
+    (older rows) is left as the model gave it.
     """
     kt = annotation.get("key_text")
     typed = str(kt.get("typed_text") or "") if isinstance(kt, dict) else ""
     if not typed.strip():
         return
     evidence = db.key_evidence(event)  # type: ignore[union-attr]
-    if evidence is None or evidence[0]:
+    if evidence is None:
         return
-    previous = evidence[1]
+    previous = evidence["previous"]
     kept = ""
     if previous is not None:
         prev_window = parse_json_field(previous, "window_json")
@@ -771,13 +790,19 @@ def settle_typed_text(db: object, event: dict, annotation: dict) -> None:
             except (json.JSONDecodeError, TypeError):
                 prev_ann = {}
             kept = str((prev_ann.get("key_text") or {}).get("typed_text") or "")
-    if kept == typed:
+    grown = _grown(kept, typed)
+    keys = evidence["keys"]
+    if keys >= min(len(grown), _KEYS_FOR_ANY_TEXT):
+        return
+    if (keys or evidence["pastes"]) and copied(
+        grown, db.get_copies_before(str(event.get("timestamp") or "")),  # type: ignore[union-attr]
+    ):
         return
     kt["typed_text"] = kept
     annotation["_typed_text_without_keys"] = typed
     logger.info(
-        "Annotation %s: typed text without a key press since the previous frame; "
-        "kept %r", str(event.get("id", "?"))[:8], kept,
+        "Annotation %s: typed text %r with %d key press(es) since the previous frame "
+        "and no paste of it; kept %r", str(event.get("id", "?"))[:8], grown, keys, kept,
     )
 
 

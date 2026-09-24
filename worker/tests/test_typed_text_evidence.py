@@ -1,22 +1,28 @@
 """Typed text needs keyboard evidence (WP-F14).
 
-Live on the test Mac (2026-09-24, focus session 57352dfb "Note the IANA
-reserved example domains", Comet + TextEdit): the user opened a new, empty
-TextEdit document and typed nothing.  The daemon's OCR read one
-low-confidence element in the window's format bar (the font-size and
-line-spacing popups): "SEEN 10", then "# 10".  The vision call answered
-``typed_text = "# 10"``, the frame diff reported the input "# 10", and the
-Skill got the step "Type the text '# 10' into the document".
+Live on the test Mac (2026-09-24, Comet + TextEdit, qwen3.5:4b):
 
-The daemon now marks every kept frame with ``keys_since_prev_frame``; a
-frame's typed text cannot change without a key press since the previous
-annotated frame (``scene_annotator.settle_typed_text``, applied before the
-annotation is stored).  These pins run the focus processor's own
-annotation and diff steps on a real daemon database.
+- Session 57352dfb "Note the IANA reserved example domains": the user
+  opened a new, empty TextEdit document and typed nothing.  The daemon's
+  OCR read one low-confidence element in the window's format bar (the
+  font-size and line-spacing popups): "SEEN 10", then "# 10".  The vision
+  call answered ``typed_text = "# 10"``, the frame diff reported the input
+  "# 10", and the Skill got "Type the text '# 10' into the document".
+- Session 62406a55: Cmd-N opened "Untitled 2", and the next frame's answer
+  was ``typed_text = "# 10"``: four characters after one key press.
+
+The daemon now records on every kept frame how many keys were pressed
+since the previous one (``keys_since_prev_frame``).  New typed text needs
+a key press per character (up to three: autocomplete and autofill insert
+more), or a paste of a recorded copy (``scene_annotator.settle_typed_text``,
+applied before the annotation is stored).  These pins run the focus
+processor's own annotation and diff steps, and the passive annotation
+loop, on a real daemon database.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 from pathlib import Path
@@ -44,6 +50,7 @@ _COMET = {"app_id": "pid:700:Comet", "title": "IANA-managed Reserved Domains",
 # read as "# 10") is inside the window's toolbar band.
 _TEXTEDIT = {"app_id": "pid:902:TextEdit", "title": "Untitled",
              "bounds_global_px": [250, 60, 1000, 700]}
+LINE = "Reserved for documentation: example.com, example.net, example.org"
 
 
 def _element(text: str, x: float, y: float, w: float, confidence: float = 1.0) -> dict:
@@ -61,7 +68,7 @@ def _document(*lines: str) -> list[dict]:
 
 def _insert(
     conn: sqlite3.Connection, event_id: str, timestamp: str, window: dict,
-    elements: list[dict], keys: bool | None, *, status: str = "pending",
+    elements: list[dict], keys: int | None, *, status: str = "pending",
     session: str | None = SESSION,
 ) -> None:
     metadata: dict = {"ocr": {"elements": elements}, "capture_trigger": "focus_interval"}
@@ -72,8 +79,24 @@ def _insert(
     conn.execute(
         "INSERT INTO events (id, timestamp, kind_json, window_json, display_topology_json, "
         " primary_display_id, metadata_json, annotation_status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        (event_id, timestamp, '{"DwellSnapshot":{}}', json.dumps(window),
+        (event_id, timestamp, '{"type":"DwellSnapshot"}', json.dumps(window),
          json.dumps(_DISPLAY), "1", json.dumps(metadata), status),
+    )
+
+
+def _insert_copy(conn: sqlite3.Connection, timestamp: str, text: str, *,
+                 preview: bool = False) -> None:
+    """A ``ClipboardChange`` as the daemon writes it (no session tag)."""
+    kind = {"type": "ClipboardChange", "content_types": ["public.utf8-plain-text"],
+            "byte_size": len(text.encode()), "high_entropy": False,
+            "content_hash": hashlib.sha256(text.encode()).hexdigest()}
+    if preview:
+        kind["content_preview"] = text
+    conn.execute(
+        "INSERT INTO events (id, timestamp, kind_json, display_topology_json, "
+        " primary_display_id, metadata_json, annotation_status) "
+        "VALUES (?, ?, ?, '[]', '1', '{}', 'skipped')",
+        (f"copy-{timestamp}", timestamp, json.dumps(kind)),
     )
 
 
@@ -108,6 +131,20 @@ def _processor(typed: dict[str, str]) -> FocusProcessor:
     return FocusProcessor(_annotator(typed), FrameDiffer(), MagicMock(spec=SOPGenerator))
 
 
+def _annotate_session(db_path: Path, tmp_path: Path, typed: dict[str, str]) -> dict[str, str]:
+    """Run the focus processor's annotation step on the session's pending
+    frames; returns each annotated frame's stored typed text."""
+    with WorkerDB(db_path) as db:
+        events = [e for e in db.get_focus_session_events(SESSION)
+                  if e["annotation_status"] == "pending"]
+        _processor(typed)._ensure_annotations(db, events, tmp_path)
+        return {
+            e["id"]: json.loads(db.get_event_by_id(e["id"])["scene_annotation_json"])
+            ["key_text"]["typed_text"]
+            for e in events
+        }
+
+
 # The live diff model's answer for the empty document.
 _LIVE_DIFF = {
     "diff_type": "action",
@@ -118,21 +155,9 @@ _LIVE_DIFF = {
 }
 
 
-def _diff_model(**kwargs) -> tuple[str, float]:
-    """The live answer for the pair it was given (the empty document,
-    "SEEN 10" then "# 10"); the switch from Comet into TextEdit is a switch."""
-    frame_a = kwargs["prompt"].split("FRAME B")[0]
-    if "SEEN 10" in frame_a:
-        return json.dumps(_LIVE_DIFF), 1.0
-    return json.dumps({
-        "diff_type": "action", "actions": ["The user switched to TextEdit"], "inputs": [],
-        "navigation": "none", "step_description": "The user switched to TextEdit",
-    }), 1.0
-
-
-def _run_live_session(tmp_path: Path, keys: bool) -> tuple[dict[str, dict], list[dict], str]:
-    """Annotate and diff the live session's frames, every frame flagged
-    *keys*; returns the stored annotations and diffs by frame, the
+def _run_live_session(tmp_path: Path, keys: int) -> tuple[dict[str, dict], list[dict], str]:
+    """Annotate and diff session 57352dfb's frames, each counting *keys*
+    key presses; returns the stored annotations and diffs by frame, the
     timeline and the focus SOP prompt."""
     db_path = create_daemon_db(tmp_path / "events.db")
     conn = sqlite3.connect(db_path)
@@ -147,7 +172,8 @@ def _run_live_session(tmp_path: Path, keys: bool) -> tuple[dict[str, dict], list
     with WorkerDB(db_path) as db:
         events = db.get_focus_session_events(SESSION)
         processor._ensure_annotations(db, events, tmp_path)
-        with patch("agenthandover_worker.scene_annotator._call_ollama_vlm", side_effect=_diff_model):
+        with patch("agenthandover_worker.scene_annotator._call_ollama_vlm",
+                   return_value=(json.dumps(_LIVE_DIFF), 1.0)):
             processor._ensure_diffs(db, events)
         rows = {e["id"]: db.get_event_by_id(e["id"]) for e in events}
         timeline = processor._collect_timeline(db, events)
@@ -160,7 +186,7 @@ def _run_live_session(tmp_path: Path, keys: bool) -> tuple[dict[str, dict], list
 
 
 def test_toolbar_ocr_without_a_key_press_is_not_typing(tmp_path: Path) -> None:
-    stored, timeline, prompt = _run_live_session(tmp_path, keys=False)
+    stored, timeline, prompt = _run_live_session(tmp_path, keys=0)
     for eid in ("c51c1bda", "15db24e7"):
         annotation = stored[eid]["annotation"]
         assert annotation["key_text"]["typed_text"] == ""
@@ -174,12 +200,11 @@ def test_toolbar_ocr_without_a_key_press_is_not_typing(tmp_path: Path) -> None:
     # Nothing typed reaches step grounding or the SOP prompt.
     assert typed_lines(timeline) == []
     assert 'Typed: "# 10"' not in prompt
-    assert "typed_text: # 10" not in prompt
 
 
-def test_with_a_key_press_the_models_typed_text_stands(tmp_path: Path) -> None:
-    """The same frames with keyboard evidence: today's behaviour."""
-    stored, _timeline, prompt = _run_live_session(tmp_path, keys=True)
+def test_with_enough_key_presses_the_models_typed_text_stands(tmp_path: Path) -> None:
+    """The same frames, each with four key presses: today's behaviour."""
+    stored, _timeline, prompt = _run_live_session(tmp_path, keys=4)
     for eid in ("c51c1bda", "15db24e7"):
         annotation = stored[eid]["annotation"]
         assert annotation["key_text"]["typed_text"] == "# 10"
@@ -188,41 +213,104 @@ def test_with_a_key_press_the_models_typed_text_stands(tmp_path: Path) -> None:
     assert 'Typed: "# 10"' in prompt
 
 
-def test_a_typing_run_keeps_its_typed_lines(tmp_path: Path) -> None:
-    """Keys on some frames only: a key pressed on a skipped frame counts,
-    a frame repeating the previous typed text keeps it, and text that grew
-    with no key press since the previous frame falls back to it."""
-    line = "Reserved for documentation"
+def test_one_key_press_for_a_new_document_does_not_type_four_characters(
+    tmp_path: Path,
+) -> None:
+    """Session 62406a55: Cmd-N (one key press) opened "Untitled 2" at
+    17:38:19.8; the frame at 17:38:21.880 answered "# 10".  The same noise
+    at 17:38:34.876 and 17:38:41.908 came with no key press at all."""
+    untitled_2 = {**_TEXTEDIT, "title": "Untitled 2"}
     db_path = create_daemon_db(tmp_path / "events.db")
     conn = sqlite3.connect(db_path)
-    _insert(conn, "t1", "2026-09-24T09:12:01.000Z", _TEXTEDIT, _document("Reserved"), True)
-    # A frame the keyframe selection skipped: the key presses on it count.
-    _insert(conn, "t2", "2026-09-24T09:12:03.000Z", _TEXTEDIT, _document("Reserved for"), True,
-            status="skipped")
-    _insert(conn, "t3", "2026-09-24T09:12:05.000Z", _TEXTEDIT, _document(line), False)
-    _insert(conn, "t4", "2026-09-24T09:12:07.000Z", _TEXTEDIT, _document(line), False)
-    _insert(conn, "t5", "2026-09-24T09:12:09.000Z", _TEXTEDIT, _document(line), False)
+    _insert(conn, "comet", "2026-09-24T17:38:15.000Z", _COMET, _document("Example domains"), 0)
+    _insert(conn, "n1", "2026-09-24T17:38:21.880Z", untitled_2, _toolbar("# 10"), 1)
+    _insert(conn, "n2", "2026-09-24T17:38:34.876Z", untitled_2, _toolbar("# 10"), 0)
+    _insert(conn, "n3", "2026-09-24T17:38:41.908Z", untitled_2, _toolbar("# 10"), 0)
     conn.commit()
     conn.close()
-    processor = _processor({
-        "t1": "Reserved", "t3": line, "t4": line, "t5": f"{line}, example.com",
+    typed = _annotate_session(db_path, tmp_path, {"n1": "# 10", "n2": "# 10", "n3": "# 10"})
+    assert typed == {"comet": "", "n1": "", "n2": "", "n3": ""}
+
+
+def test_a_typing_run_keeps_its_typed_lines(tmp_path: Path) -> None:
+    """Key presses on some frames only: those on a skipped frame count, a
+    frame repeating the previous typed text needs none, and text that grew
+    with too few key presses falls back to the previous frame's."""
+    first = "Reserved for documentation"
+    db_path = create_daemon_db(tmp_path / "events.db")
+    conn = sqlite3.connect(db_path)
+    _insert(conn, "t1", "2026-09-24T09:12:01.000Z", _TEXTEDIT, _document("Reserved"), 8)
+    # A frame the keyframe selection skipped: its key presses count.
+    _insert(conn, "t2", "2026-09-24T09:12:03.000Z", _TEXTEDIT, _document("Reserved for"), 14,
+            status="skipped")
+    _insert(conn, "t3", "2026-09-24T09:12:05.000Z", _TEXTEDIT, _document(first), 4)
+    _insert(conn, "t4", "2026-09-24T09:12:07.000Z", _TEXTEDIT, _document(first), 0)
+    # Two key presses cannot have typed ": example.com, ..." (39 characters).
+    _insert(conn, "t5", "2026-09-24T09:12:09.000Z", _TEXTEDIT, _document(first), 2)
+    _insert(conn, "t6", "2026-09-24T09:12:20.000Z", _TEXTEDIT, _document(LINE), 40)
+    conn.commit()
+    conn.close()
+    typed = _annotate_session(db_path, tmp_path, {
+        "t1": "Reserved", "t3": first, "t4": first, "t5": LINE, "t6": LINE,
     })
+    assert typed == {"t1": "Reserved", "t3": first, "t4": first, "t5": first, "t6": LINE}
     with WorkerDB(db_path) as db:
         events = [e for e in db.get_focus_session_events(SESSION)
-                  if e["annotation_status"] == "pending"]
-        processor._ensure_annotations(db, events, tmp_path)
-        typed = {
-            e["id"]: json.loads(db.get_event_by_id(e["id"])["scene_annotation_json"])
-            ["key_text"]["typed_text"]
-            for e in events
-        }
-        timeline = processor._collect_timeline(db, events)
-    assert typed == {"t1": "Reserved", "t3": line, "t4": line, "t5": line}
-    assert [text for _i, text in typed_lines(timeline)] == [line]
+                  if e["annotation_status"] == "completed"]
+        timeline = _processor({})._collect_timeline(db, events)
+    # The half-typed line stands for its finished form (``typed_lines``).
+    assert [text for _i, text in typed_lines(timeline)] == [LINE]
 
 
-def test_frames_without_the_flag_are_left_alone(tmp_path: Path) -> None:
-    """Rows from before the daemon recorded the flag (and the journeys'
+def test_autocomplete_inserts_more_than_the_keys_pressed(tmp_path: Path) -> None:
+    """Three key presses ("exa", then Tab or Enter on a suggestion) can
+    insert "example.com" (11 characters); two cannot."""
+    db_path = create_daemon_db(tmp_path / "events.db")
+    conn = sqlite3.connect(db_path)
+    _insert(conn, "a1", "2026-09-24T09:00:00.000Z", _TEXTEDIT, _document("To:"), 0)
+    _insert(conn, "a2", "2026-09-24T09:00:02.000Z", _TEXTEDIT, _document("example.com"), 3)
+    _insert(conn, "a3", "2026-09-24T09:00:04.000Z", _TEXTEDIT, _document("example.com"), 0)
+    _insert(conn, "a4", "2026-09-24T09:00:06.000Z", _TEXTEDIT,
+            _document("example.com, example.net"), 2)
+    conn.commit()
+    conn.close()
+    typed = _annotate_session(db_path, tmp_path, {
+        "a2": "example.com", "a3": "example.com", "a4": "example.com, example.net",
+    })
+    assert typed == {"a1": "", "a2": "example.com", "a3": "example.com", "a4": "example.com"}
+
+
+def test_a_paste_of_a_recorded_copy_needs_one_key_press(tmp_path: Path) -> None:
+    """Cmd-V is one key press: pasted text is kept when a copy before it
+    holds it (by the copy's hash, or its preview), not otherwise."""
+    db_path = create_daemon_db(tmp_path / "events.db")
+    conn = sqlite3.connect(db_path)
+    _insert(conn, "c1", "2026-09-24T09:30:00.000Z", _COMET, _document("Example domains"), 0)
+    _insert_copy(conn, "2026-09-24T09:30:01.000Z", LINE)
+    _insert(conn, "c2", "2026-09-24T09:30:05.000Z", _TEXTEDIT, _document(LINE), 1)
+    # A copy the user turned previews on for, holding more than was pasted.
+    _insert_copy(conn, "2026-09-24T09:30:06.000Z", "Source: IANA reserved domains page, 2026",
+                 preview=True)
+    _insert(conn, "c3", "2026-09-24T09:30:10.000Z", _TEXTEDIT,
+            _document(LINE, "Source: IANA reserved domains page"), 1)
+    # Nothing copied holds this, and one key press cannot type it.
+    _insert(conn, "c4", "2026-09-24T09:30:15.000Z", _TEXTEDIT,
+            _document(LINE, "Source: IANA reserved domains page", "Checked"), 1)
+    # A copy with no key press and no paste event since the previous frame.
+    _insert_copy(conn, "2026-09-24T09:30:16.000Z", "Reviewed")
+    _insert(conn, "c5", "2026-09-24T09:30:20.000Z", _TEXTEDIT,
+            _document(LINE, "Source: IANA reserved domains page", "Reviewed"), 0)
+    conn.commit()
+    conn.close()
+    two = f"{LINE}\nSource: IANA reserved domains page"
+    typed = _annotate_session(db_path, tmp_path, {
+        "c2": LINE, "c3": two, "c4": f"{two}\nChecked", "c5": f"{two}\nReviewed",
+    })
+    assert typed == {"c1": "", "c2": LINE, "c3": two, "c4": two, "c5": two}
+
+
+def test_frames_without_the_count_are_left_alone(tmp_path: Path) -> None:
+    """Rows from before the daemon recorded the count (and the journeys'
     cassettes) keep the model's typed text."""
     db_path = create_daemon_db(tmp_path / "events.db")
     conn = sqlite3.connect(db_path)
@@ -230,27 +318,22 @@ def test_frames_without_the_flag_are_left_alone(tmp_path: Path) -> None:
     _insert(conn, "c51c1bda", "2026-09-24T17:31:08.000Z", _TEXTEDIT, _toolbar("# 10"), None)
     conn.commit()
     conn.close()
-    processor = _processor({"c51c1bda": "# 10"})
-    with WorkerDB(db_path) as db:
-        events = db.get_focus_session_events(SESSION)
-        processor._ensure_annotations(db, events, tmp_path)
-        annotation = json.loads(db.get_event_by_id("c51c1bda")["scene_annotation_json"])
-    assert annotation["key_text"]["typed_text"] == "# 10"
-    assert "_typed_text_without_keys" not in annotation
+    typed = _annotate_session(db_path, tmp_path, {"c51c1bda": "# 10"})
+    assert typed["c51c1bda"] == "# 10"
 
 
 def test_passive_frames_are_settled_too(tmp_path: Path) -> None:
-    """The passive annotation loop applies the same rule; a key pressed
-    during a focus session between two passive frames counts."""
+    """The passive annotation loop applies the same rule; keys pressed
+    during a focus session between two passive frames count."""
     db_path = create_daemon_db(tmp_path / "events.db")
     conn = sqlite3.connect(db_path)
-    _insert(conn, "p1", "2026-09-24T10:00:00.000Z", _TEXTEDIT, _toolbar("SEEN 10"), False,
+    _insert(conn, "p1", "2026-09-24T10:00:00.000Z", _TEXTEDIT, _toolbar("SEEN 10"), 0,
             session=None)
-    _insert(conn, "p2", "2026-09-24T10:01:00.000Z", _TEXTEDIT, _toolbar("# 10"), False,
+    _insert(conn, "p2", "2026-09-24T10:01:00.000Z", _TEXTEDIT, _toolbar("# 10"), 1,
             session=None)
-    _insert(conn, "f1", "2026-09-24T10:02:00.000Z", _TEXTEDIT, _document("Notes"), True,
+    _insert(conn, "f1", "2026-09-24T10:02:00.000Z", _TEXTEDIT, _document("Notes"), 5,
             status="skipped")
-    _insert(conn, "p3", "2026-09-24T10:03:00.000Z", _TEXTEDIT, _document("Notes"), False,
+    _insert(conn, "p3", "2026-09-24T10:03:00.000Z", _TEXTEDIT, _document("Notes"), 0,
             session=None)
     conn.commit()
     conn.close()
