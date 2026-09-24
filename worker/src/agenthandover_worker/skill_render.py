@@ -26,7 +26,7 @@ import yaml
 
 from agenthandover_worker import __version__
 from agenthandover_worker.event_helpers import display_name
-from agenthandover_worker.ledger import SLOTS, unknown_slots
+from agenthandover_worker.ledger import SLOTS, TRACKED_SLOTS, derive_knowledge
 from agenthandover_worker.procedure_schema import procedure_steps, step_key
 from agenthandover_worker.step_grounding import REWRITTEN
 
@@ -601,10 +601,15 @@ def body_sections(proc: dict) -> list[str]:
 
     # What the ledger does not know yet: said, so the agent asks instead
     # of assuming.
+    ledger = derive_knowledge(proc)
     sections.append(_section("Not yet known", [
-        f"- {slot.replace('_', ' ').capitalize()} ({SLOTS[slot]}): not learned "
-        "from the recordings. Ask the user; do not assume."
-        for slot in unknown_slots(proc)
+        f"- {slot.replace('_', ' ').capitalize()} ({SLOTS[slot]}): "
+        + (
+            "an agent's run did not go as the recordings suggested"
+            if ledger[slot]["source"] == "agent" else "not learned from the recordings"
+        )
+        + ". Ask the user; do not assume."
+        for slot in TRACKED_SLOTS if ledger[slot]["status"] == "unknown"
     ]))
 
     # Evidence links
