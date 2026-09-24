@@ -24,6 +24,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable
 
 from agenthandover_worker.contrast import criteria_hypotheses
+from agenthandover_worker.dom import url_host
 from agenthandover_worker.json_extract import extract_json
 from agenthandover_worker.ledger import set_slot
 from agenthandover_worker.model_profiles import STANDARD_TIER
@@ -239,6 +240,48 @@ def phrase_criteria(hypotheses: list[dict], worded: list[dict]) -> list[dict]:
             "basis": h["criterion"],
             "confidence": round(h["support"] / (h["support"] + h["counter"]), 2),
         })
+    return out
+
+
+def _branch_terms(branch: dict) -> list[str]:
+    """What a mined branch's screens shared (its condition's terms and the
+    URL's host), lowercased: the evidence a worded condition must name."""
+    state = branch.get("condition_state") if isinstance(branch.get("condition_state"), dict) else {}
+    terms = [
+        *(str(t) for t in state.get("visible_items") or []),
+        *str(state.get("ocr_snippet") or "").splitlines(),
+        url_host(str(state.get("url") or "")),
+    ]
+    return [t.strip().lower() for t in terms if len(t.strip()) >= 4]
+
+
+def word_branches(branches: list, worded: list[dict], *, slug: str = "") -> list:
+    """The procedure's *branches* with the synthesis's *worded* ones
+    (``decision_branches``) applied as wording only.
+
+    Branches come from evidence: the divergence miner's
+    (``branch_mining``, ``source: "divergence"``, promoted by agreeing
+    runs) and those a generator derived from demonstrations.  A worded
+    branch whose condition names what a divergence branch's screens shared
+    (one of its terms, verbatim) becomes that branch's ``worded_condition``;
+    its ``condition`` stays the evidence.  Any other worded branch is
+    invented and dropped (logged): the model words branches, it never adds
+    them.  Returns a new list; *branches* is not changed."""
+    out = [dict(b) if isinstance(b, dict) else b for b in branches]
+    mined = [b for b in out if isinstance(b, dict) and b.get("source") == "divergence"]
+    for branch in worded:
+        text = str(branch.get("condition") or "").strip() if isinstance(branch, dict) else ""
+        low = text.lower()
+        match = next(
+            (b for b in mined if low and any(t in low for t in _branch_terms(b))), None,
+        )
+        if match is not None:
+            match["worded_condition"] = text[:200]
+        else:
+            logger.info(
+                "Behavioral synthesis for '%s': dropped a decision branch no "
+                "evidence supports: %.200s", slug, text,
+            )
     return out
 
 
@@ -614,14 +657,10 @@ class BehavioralSynthesizer:
             constraints["guardrails"] = merged
             proc["constraints"] = constraints
         if insights.decision_branches:
-            # The branches the divergence miner promoted rest on agreeing
-            # runs (``branch_mining``, ``source: "divergence"``) and stay;
-            # the synthesis's branches replace only an earlier synthesis's.
-            mined = [
-                b for b in proc.get("branches") or []
-                if isinstance(b, dict) and b.get("source") == "divergence"
-            ]
-            proc["branches"] = mined + list(insights.decision_branches)
+            proc["branches"] = word_branches(
+                proc.get("branches") or [], insights.decision_branches,
+                slug=str(proc.get("id") or proc.get("slug") or ""),
+            )
         if insights.timing:
             proc["workflow_rhythm"] = insights.timing
         if insights.confidence > 0:
