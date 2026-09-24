@@ -81,11 +81,18 @@ def test_recommend_tier_by_ram(ram, tier):
 
 
 def test_the_measured_split():
-    """The annotator is qwen3.5:4b on every tier; Skills and synthesis run
-    on qwen3.5:4b up to 16 GB (WP-F6: faster than gemma4:12b-it-qat there,
-    of comparable quality, and it fits next to ordinary apps),
+    """8 GB annotates with qwen3.5:2b-q4_K_M (WP-F8: resident all day in
+    ~2.3 GB, valid annotations 10/10), every other tier with qwen3.5:4b;
+    Skills and synthesis run on qwen3.5:4b up to 16 GB (WP-F6: faster than
+    gemma4:12b-it-qat there, of comparable quality, and it fits next to
+    ordinary apps; WP-F8: 18 correct steps against the 2B's 10),
     gemma4:12b-it-qat at 24 GB and gemma4:31b-it-qat at 48 GB."""
-    assert {t.annotation_model for t in mp.TIERS} == {"qwen3.5:4b"}
+    assert {t.id: t.annotation_model for t in mp.TIERS} == {
+        "standard": "qwen3.5:2b-q4_K_M",
+        "recommended": "qwen3.5:4b",
+        "performance": "qwen3.5:4b",
+        "max_quality": "qwen3.5:4b",
+    }
     assert {t.id: t.sop_model for t in mp.TIERS} == {
         "standard": "qwen3.5:4b",
         "recommended": "qwen3.5:4b",
@@ -104,7 +111,42 @@ def test_every_tier_model_has_a_registered_profile_and_a_size():
                 assert model in mp._PROFILES, model
         for model in tier.models:
             assert model in mp.MODEL_SIZES_GB, model
-    assert mp.get_tier("standard").models == ["qwen3.5:4b", "nomic-embed-text"]
+    assert mp.get_tier("standard").models == [
+        "qwen3.5:2b-q4_K_M", "qwen3.5:4b", "nomic-embed-text",
+    ]
+    assert mp.get_tier("recommended").models == ["qwen3.5:4b", "nomic-embed-text"]
+
+
+def test_the_standard_tiers_annotator_profile():
+    """The 2B's own profile, not the generic Qwen fallback: thinking off on
+    every call type (the Qwen card warns of thinking loops on the 2B) and
+    the compact annotation budget; its download size is the tier table's."""
+    profile = mp.get_profile("qwen3.5:2b-q4_K_M")
+    assert "qwen3.5:2b-q4_K_M" in mp._PROFILES
+    assert profile.model == "qwen3.5:2b-q4_K_M"
+    assert (profile.ann_think, profile.sop_think, profile.diff_think) == (False, False, False)
+    assert (profile.ann_num_predict, profile.ann_num_ctx, profile.ann_temperature) == (300, 4096, 0.0)
+    # The options the 8 GB measurement ran with: those of every Qwen 3.5 tag.
+    assert profile.ann_options() == mp.get_profile("qwen3.5:4b").ann_options()
+    assert mp.MODEL_SIZES_GB["qwen3.5:2b-q4_K_M"] == 1.9
+
+
+def test_the_standard_tier_is_a_split_tier():
+    """Two models on 8 GB: WP-C9's phase schedule applies (the scheduler
+    unloads the annotator before the Skill model loads), the generation
+    phase at the Skill model's context."""
+    from agenthandover_worker.model_scheduler import ModelScheduler
+
+    split = {
+        t.id: ModelScheduler(
+            None, annotation_model=t.annotation_model, sop_model=t.sop_model,
+        ).split
+        for t in mp.TIERS
+    }
+    assert split == {
+        "standard": True, "recommended": False, "performance": True, "max_quality": True,
+    }
+    assert mp.get_profile(mp.get_tier("standard").sop_model).sop_num_ctx == 24_576
 
 
 def test_each_tiers_sop_model_holds_the_largest_measured_generation_call():
