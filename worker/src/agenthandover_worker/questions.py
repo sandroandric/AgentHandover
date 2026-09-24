@@ -346,13 +346,15 @@ FLAG_CLIPBOARD = "clipboard"  # a copy/paste rewritten (evidence.clipboard)
 FLAG_ADDED = "added"  # a typed line the model left out (evidence.grounding)
 FLAG_INPUT = "input"  # a step's input set from the frames (evidence.grounding)
 
-#: Rank tiers for :func:`_rank_value`: between an unknown required slot
-#: (0) and an unknown slot (1) for what the Skill may be missing or have
-#: wrong, between an unknown slot and a hypothesis (2) for a typed line
-#: the recording showed.
+#: Rank tiers for :func:`_rank_value`: every step question sits between
+#: an unknown required slot (0) and an unknown optional slot (1).  A
+#: concrete step question fixes what the agent will execute; a generic
+#: optional slot does not.  Among them: what the Skill may be missing or
+#: have wrong first, then an unconfirmed copy or paste, then a typed line
+#: or an input the recording showed.
 _STEP_TIERS: dict[str, float] = {
     FLAG_DROPPED: 0.5, FLAG_CUT: 0.5, FLAG_CLIPBOARD: 0.6,
-    FLAG_ADDED: 1.5, FLAG_INPUT: 1.5,
+    FLAG_ADDED: 0.7, FLAG_INPUT: 0.7,
 }
 
 YES_I_DID = "Yes, I did"
@@ -753,9 +755,10 @@ def next_questions(
 ) -> list[Question]:
     """The *budget* most valuable questions not asked yet: labelling cards
     (*workflows*, :func:`label_questions`) first, highest value first, then
-    the questions of *procs*: unknown required slots, dropped steps and cut
-    clauses, unconfirmed copies and pastes, other unknown slots, typed
-    lines the model missed, hypotheses; slots in :data:`ASKED_SLOTS` order,
+    the questions of *procs*: unknown required slots, then every step
+    question (dropped steps and cut clauses, unconfirmed copies and
+    pastes, typed lines and inputs the recording showed), then unknown
+    optional slots, then hypotheses; slots in :data:`ASKED_SLOTS` order,
     steps in step order, and the more valuable procedure first."""
     candidates = [
         q for q in [
