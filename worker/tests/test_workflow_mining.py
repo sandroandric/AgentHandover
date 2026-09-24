@@ -771,6 +771,38 @@ class TestSkillsAndObservations:
         assert wm.record_focus_observation(db, events, "payout") is None
         assert db.get_workflow_observations() == []
 
+    def test_a_focus_recording_keeps_the_frames_the_model_calls_reading(
+        self, db: WorkerDB, tmp_path: Path,
+    ) -> None:
+        """The user recorded the routine, so its frames are the task even
+        when the annotation says ``is_workflow: false`` (the instruction
+        for reading and browsing; qwen3.5:4b gave it to 15 to 18 of the 20
+        annotated frames of each daily-news run, so the third run matched
+        no Skill and its paywall detour was never mined).  A skipped frame and one
+        the older schema labelled ``learnability: ignore`` stay out."""
+        t0 = datetime(2026, 9, 1, 9, tzinfo=timezone.utc)
+        events = [
+            _event(f"read-{i}", t0 + timedelta(seconds=90 * i), _ann(loc, workflow=False, **kw))
+            for i, (loc, kw) in enumerate(PAYOUT)
+        ]
+        skipped = _event("skip", t0 + timedelta(seconds=30), {"skip_reason": "system_ui"})
+        ignored = _event("ign", t0 + timedelta(seconds=60), {
+            **_ann("https://youtube.com/watch"),
+            "task_context": {"what_doing": "watching", "learnability": "ignore"},
+        })
+        session = wm._focus_session([*events, skipped, ignored])
+        assert [f.event_id for f in session] == [e["id"] for e in events]
+        # So a later reading-heavy run is still recognised as the Skill.
+        kb = _kb(tmp_path, PAYOUT_SKILL)
+        wm.record_focus_observation(db, events, "payout", "Reconcile payout")
+        again = [
+            _event(f"again-{i}", t0 + timedelta(days=7, seconds=90 * i),
+                   _ann(loc, workflow=False, **kw))
+            for i, (loc, kw) in enumerate(PAYOUT)
+        ]
+        skill = wm.focus_skill(db, kb, again, "Payout", now=t0 + timedelta(days=7, hours=1))
+        assert skill is not None and skill["id"] == "payout"
+
     def test_two_alike_detours_become_a_branch_of_the_skill(
         self, db: WorkerDB, write_conn, tmp_path: Path,
     ) -> None:

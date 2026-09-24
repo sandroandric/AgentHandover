@@ -630,9 +630,28 @@ def link_recorded_skills(db: "WorkerDB", kb: "KnowledgeBase", win: WorkflowWindo
     return linked
 
 
+def _focus_frame(frame: AnnotatedFrame | None) -> bool:
+    """Whether *frame* is part of the focus recording's task.
+
+    The user started the recording for the task, so every annotated frame
+    of it is, except a skipped one (no app and no place) and one the older
+    annotation schema explicitly labelled as not learnable
+    (``learnability: ignore``) or as entertainment or dead time.  The
+    compact schema's ``is_workflow`` does not decide: it is false for
+    reading and browsing, which is what a routine like reading the news
+    and sharing stories mostly is (the passive path's noise filter,
+    ``_is_noise_frame``, falls back to it)."""
+    if frame is None or not (frame.app or frame.location):
+        return False
+    if frame.learnability == "ignore":
+        return False
+    return frame.activity_type not in ("entertainment", "dead_time")
+
+
 def _focus_session(events: list[dict]) -> list[AnnotatedFrame]:
-    """A focus recording's annotated work frames, oldest first."""
-    session = [f for f in map(AnnotatedFrame.from_event, events) if f and not _is_noise_frame(f)]
+    """A focus recording's annotated task frames (:func:`_focus_frame`),
+    oldest first."""
+    session = [f for f in map(AnnotatedFrame.from_event, events) if _focus_frame(f)]
     session.sort(key=lambda f: f.timestamp)
     return session
 
