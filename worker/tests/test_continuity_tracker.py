@@ -954,6 +954,32 @@ class TestIdempotentIngestion:
         assert spans[0].segments == ["seg-a", "seg-b", "seg-c"]
         assert spans[0].total_duration_seconds == 1500
 
+    def test_a_segment_regrown_or_cut_by_the_window_counts_only_new_time(self, tracker):
+        """Re-segmenting the sliding window gives a task still in progress a
+        longer segment (a new content id) and, a day later, a tail cut by
+        the window start: neither re-counts time the span already holds,
+        and neither is an interruption."""
+        base = datetime.now(timezone.utc) - timedelta(hours=2)
+
+        def at(minutes):
+            return (base + timedelta(minutes=minutes)).isoformat().replace("+00:00", "Z")
+
+        def seg(sid, start, end):
+            return _make_test_segment(
+                sid, "Writing code", "VS Code", EMB_CODING,
+                start_time=at(start), end_time=at(end),
+            )
+
+        spans = tracker.build_graph([seg("seg-0-10", 0, 10)], existing_spans=[])
+        spans = tracker.build_graph([seg("seg-0-20", 0, 20)], existing_spans=spans)
+        spans = tracker.build_graph([seg("seg-5-20", 5, 20)], existing_spans=spans)
+
+        assert len(spans) == 1
+        assert spans[0].segments == ["seg-0-10", "seg-0-20", "seg-5-20"]
+        assert spans[0].total_duration_seconds == 20 * 60
+        assert spans[0].interruption_count == 0
+        assert spans[0].last_seen == at(20)
+
 
 class TestSpanRetention:
     def test_spans_older_than_retention_window_are_dropped(self, tracker):

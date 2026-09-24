@@ -519,7 +519,9 @@ class TestEvidenceMerge:
         assert [s["step"] for s in merged["steps"]] == [
             s["step"] for s in existing["steps"]
         ]
-        assert all(s["observation_count"] == 2 for s in merged["steps"])
+        # Two earlier instances (episode_count) plus this one.
+        assert all(s["observation_count"] == 3 for s in merged["steps"])
+        assert all(s["support"] == 1.0 for s in merged["steps"])
         # The rest of the template merge still happens.
         assert merged["episode_count"] == 3
         assert merged["_merge_count"] == 1

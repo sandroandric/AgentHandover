@@ -26,8 +26,6 @@ from agenthandover_worker.procedure_schema import _step_evidence
 from agenthandover_worker.sop_generator import SOPGenerator, _format_timeline_entry
 from agenthandover_worker.task_segmenter import (
     AnnotatedFrame,
-    SegmenterConfig,
-    TaskSegmenter,
     _split_into_contiguous_segments,
     _sleep_starts,
 )
@@ -286,25 +284,6 @@ class TestSleepBoundaries:
 
         split = _split_into_contiguous_segments(frames, 0, 1800, _sleep_starts(sleep))
         assert [[f.event_id for f in s.frames] for s in split] == [["a", "b"], ["c"]]
-
-    def test_interruption_merging_stops_at_a_sleep(self) -> None:
-        segmenter = TaskSegmenter(SegmenterConfig())
-        first = _split_into_contiguous_segments(
-            [self._frame("a", BASE), self._frame("b", BASE + timedelta(minutes=1))], 0,
-        )[0]
-        second = _split_into_contiguous_segments(
-            [self._frame("c", BASE + timedelta(minutes=11)),
-             self._frame("d", BASE + timedelta(minutes=12))], 0,
-        )[0]
-        second.segment_id = "second"
-        frames = first.frames + second.frames
-
-        merged = segmenter.classify_interruptions([first, second], frames)
-        assert len(merged) == 1, "a 10-minute pause merges without a sleep"
-
-        sleep = [(_ts(BASE + timedelta(minutes=2)), _ts(BASE + timedelta(minutes=10)))]
-        kept = segmenter.classify_interruptions([first, second], frames, sleep_boundaries=sleep)
-        assert len(kept) == 2
 
     def test_episode_builder_closes_episodes_at_a_sleep(self) -> None:
         def event(eid: str, at: datetime, kind: dict) -> dict:

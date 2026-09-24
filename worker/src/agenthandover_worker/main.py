@@ -2468,30 +2468,6 @@ def _process_passive_discovery(
         seg_result.noise_frames_dropped,
     )
 
-    # Step 2b: Classify and merge interruptions between segments.
-    # Collect all frames from every segment so classify_interruptions
-    # can check what apps were active during gaps.
-    all_frames = [f for seg in seg_result.segments for f in seg.frames]
-    if all_frames:
-        try:
-            seg_result.segments = segmenter.classify_interruptions(
-                seg_result.segments, all_frames, sleep_boundaries=sleep_boundaries,
-            )
-            # Rebuild cluster dict after merging
-            seg_result.clusters = {}
-            for seg in seg_result.segments:
-                seg_result.clusters.setdefault(seg.cluster_id, []).append(seg)
-            logger.debug(
-                "Interruption classification: %d segments after merge",
-                len(seg_result.segments),
-            )
-        except Exception:
-            logger.debug(
-                "Interruption classification failed, continuing with "
-                "original segments",
-                exc_info=True,
-            )
-
     # Build continuity graph
     if continuity_tracker is not None:
         try:

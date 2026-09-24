@@ -138,15 +138,33 @@ class EvidenceNormalizer:
         new_observation: list[dict],
         alignment: list[AlignedStep] | None = None,
     ) -> dict:
-        """Merge a new observation into an existing procedure.
+        """Merge one new observed instance into an existing procedure.
 
         Unlike ``sop_dedup.merge_sops()`` which uses a "keep more steps"
-        strategy, this method performs semantic matching so that each
-        aligned step accumulates evidence counts and alternatives.
+        strategy, this method aligns the instance against the procedure's
+        steps (``VariantDetector.semantic_align``) so that each step
+        accumulates evidence:
+
+        - a column pairing an existing step with a new step that matches it
+          (similarity >= ``_MERGE_THRESHOLD``) counts one more instance for
+          that step (``observation_count``); different wording is kept
+          under the step's ``alternatives``;
+        - a column pairing an existing step with a new step that does not
+          match it records the new step as an alternative of that step
+          (the instance did something else there) without counting it;
+        - a new step with a gap on the existing side is appended as a
+          ``_variant`` step seen once.
+
+        Every step then carries ``support = observation_count /
+        total_observations``.  A procedure with steps but no evidence
+        section counts as one prior observation.  Without a detector and
+        without an alignment the longer step list is kept (no support).
 
         Args:
             existing_proc: The current procedure dict (not mutated).
-            new_observation: Steps from the new observation.
+            new_observation: Steps from the new observation (v3 steps:
+                ``step_id``, ``action``, ``app``, ``location``,
+                ``parameters``).
             alignment: Optional pre-computed alignment between existing
                 steps and the new observation.
 
@@ -163,21 +181,25 @@ class EvidenceNormalizer:
             "contradictions": [],
             "total_observations": 0,
         })
+        prior_total = evidence.get("total_observations") or (1 if existing_steps else 0)
+        total = prior_total + 1
 
         # Attempt alignment if not provided
         if alignment is None and self._detector is not None and existing_steps:
             alignment = self._compute_pairwise_alignment(existing_steps, new_observation)
 
         if alignment is not None:
-            proc["steps"] = self._merge_aligned(
-                existing_steps, new_observation, alignment,
+            steps = self._merge_aligned(
+                existing_steps, new_observation, alignment, prior_total,
             )
+            for step in steps:
+                step["support"] = step["observation_count"] / total
+            proc["steps"] = steps
         else:
             # Fall back to simple append logic (mirrors sop_dedup.merge_sops)
             proc["steps"] = self._merge_simple(existing_steps, new_observation)
 
-        # Bump total observations
-        evidence["total_observations"] = evidence.get("total_observations", 0) + 1
+        evidence["total_observations"] = total
 
         return proc
 
@@ -505,12 +527,19 @@ class EvidenceNormalizer:
         existing_steps: list[dict],
         new_steps: list[dict],
         alignment: list[AlignedStep],
+        prior_total: int,
     ) -> list[dict]:
-        """Merge steps using alignment data.
+        """Merge steps using alignment data (see ``merge_with_evidence``).
 
-        Returns a new step list — does not mutate the inputs.
+        An existing step without an ``observation_count`` is taken to have
+        been seen in all *prior_total* earlier observations.  Returns a new
+        step list; does not mutate the inputs.
         """
         merged: list[dict] = [dict(s) for s in existing_steps]
+        for step in merged:
+            step.setdefault("observation_count", prior_total)
+            if "alternatives" in step:
+                step["alternatives"] = [dict(a) for a in step["alternatives"]]
         matched_existing: set[int] = set()
 
         for ap in alignment:
@@ -526,46 +555,25 @@ class EvidenceNormalizer:
             if ref_idx is not None and 0 <= ref_idx < len(existing_steps):
                 matched_existing.add(ref_idx)
                 existing_step = merged[ref_idx]
-
-                if similarity >= _MERGE_THRESHOLD:
-                    # Match — update observation count, add alternative
-                    existing_step["observation_count"] = (
-                        existing_step.get("observation_count", 1) + 1
-                    )
-                    new_action = new_step.get("action", "").strip().lower()
-                    existing_action = existing_step.get("action", "").strip().lower()
-                    if new_action and new_action != existing_action:
-                        alts = existing_step.setdefault("alternatives", [])
-                        # Check if this alternative already tracked
-                        found = False
-                        for alt in alts:
-                            if alt.get("action", "").strip().lower() == new_action:
-                                alt["observed_count"] = alt.get("observed_count", 1) + 1
-                                found = True
-                                break
-                        if not found:
-                            alts.append({
-                                "action": new_step.get("action", ""),
-                                "target": new_step.get("target", ""),
-                                "app": new_step.get("app", ""),
-                                "observed_count": 1,
-                            })
-                else:
-                    # Insertion — new step not semantically matching existing
-                    variant_step = dict(new_step)
-                    variant_step["_variant"] = True
-                    variant_step["observation_count"] = 1
-                    merged.append(variant_step)
+                same_step = similarity >= _MERGE_THRESHOLD
+                if same_step:
+                    existing_step["observation_count"] += 1
+                new_action = str(new_step.get("action", "")).strip().lower()
+                existing_action = str(existing_step.get("action", "")).strip().lower()
+                if new_action and (not same_step or new_action != existing_action):
+                    _add_alternative(existing_step, new_step)
             else:
-                # Gap in the existing steps — the new step is an insertion
+                # Gap in the existing steps: the new step is an insertion
                 variant_step = dict(new_step)
                 variant_step["_variant"] = True
                 variant_step["observation_count"] = 1
+                if "step_id" in new_step:
+                    variant_step["step_id"] = _free_step_id(merged)
                 merged.append(variant_step)
 
         # Decrease confidence for unmatched existing steps
         for idx in range(len(existing_steps)):
-            if idx not in matched_existing and idx < len(merged):
+            if idx not in matched_existing:
                 current_conf = merged[idx].get("confidence", 1.0)
                 merged[idx]["confidence"] = max(0.0, current_conf - _ABSENCE_DECAY)
 
@@ -588,6 +596,47 @@ class EvidenceNormalizer:
 # ------------------------------------------------------------------
 # Module-level helpers
 # ------------------------------------------------------------------
+
+
+def _step_field(step: dict, key: str) -> object:
+    """A v3 step's *key*, read from the step or else its ``parameters``
+    (the generator writes app/location/target only under ``parameters``)."""
+    value = step.get(key)
+    if value:
+        return value
+    params = step.get("parameters")
+    return params.get(key, "") if isinstance(params, dict) else ""
+
+
+def _add_alternative(step: dict, other: dict) -> None:
+    """Record *other* as an alternative of *step*, counting repeats of the
+    same action (compared case-insensitively)."""
+    action = str(other.get("action", "")).strip()
+    alts = step.setdefault("alternatives", [])
+    for alt in alts:
+        if str(alt.get("action", "")).strip().lower() == action.lower():
+            alt["observed_count"] = alt.get("observed_count", 1) + 1
+            return
+    alt = {
+        "action": action,
+        "app": _step_field(other, "app"),
+        "target": _step_field(other, "target"),
+        "location": _step_field(other, "location"),
+        "observed_count": 1,
+    }
+    if isinstance(other.get("parameters"), dict) and other["parameters"]:
+        alt["parameters"] = dict(other["parameters"])
+    alts.append(alt)
+
+
+def _free_step_id(steps: list[dict]) -> str:
+    """The first ``step_<n>`` (n counting from ``len(steps) + 1``) that no
+    step in *steps* uses, so an inserted step never shares an id."""
+    used = {s.get("step_id") for s in steps}
+    n = len(steps) + 1
+    while f"step_{n}" in used:
+        n += 1
+    return f"step_{n}"
 
 
 def _deep_copy_proc(proc: dict) -> dict:
