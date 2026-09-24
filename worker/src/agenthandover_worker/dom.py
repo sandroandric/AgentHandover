@@ -1,6 +1,7 @@
 """DOM snapshots from the Chrome extension: one walk over what is stored,
-the host a page belongs to, and the anchor an agent should use for a
-clicked element.
+the host a page belongs to (and the templated place a URL names,
+:func:`host_or_doc`), and the anchor an agent should use for a clicked
+element.
 
 A snapshot's ``metadata_json`` holds either
 
@@ -20,7 +21,7 @@ from __future__ import annotations
 
 import re
 from typing import Iterable, Iterator
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit
 
 from agenthandover_worker.redaction import redact
 
@@ -64,6 +65,47 @@ _INPUT_ROLES = {
 
 _INPUT_TAG = re.compile(r"^input\[type=([\w-]+)\]$")
 _HOSTNAME = re.compile(r"^(localhost|[a-z0-9-]+(\.[a-z0-9-]+)*\.[a-z]{2,}|\d{1,3}(\.\d{1,3}){3})$")
+
+
+# A path segment that names one record rather than a place: numbers,
+# UUIDs, hex ids, prefixed object ids (``po_1Q...``, ``cus_9...``) and short
+# prefixed numbers (``R0012345``, ``INV-2044``).  Long opaque keys without
+# such a shape (a Google Doc id, a Slack channel id) name the document or
+# channel itself and stay: editing two different documents is two tasks.
+_ID_SEGMENT = re.compile(
+    r"""^(?:
+        \d+
+      | [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}
+      | (?=[0-9a-f]*\d)[0-9a-f]{8,}
+      | [a-z]{2,6}_(?=[a-z0-9]*\d)[a-z0-9]{8,}
+      | [a-z]{0,3}[-_]?\d{3,}
+    )$""",
+    re.X | re.I,
+)
+# An issue key (Jira ``PROJ-101``, Linear ``ENG-42``): an upper-case project
+# key of any length, a dash, a number.  Case-sensitive, so a slug such as
+# ``release-2024`` still names its page.
+_ISSUE_KEY = re.compile(r"^[A-Z][A-Z0-9]{1,9}-\d+$")
+
+
+def template_path(path: str) -> str:
+    """*path* with record ids replaced by ``{id}``."""
+    return "/".join(
+        "{id}" if seg and (_ID_SEGMENT.match(seg) or _ISSUE_KEY.match(seg)) else seg
+        for seg in path.split("/")
+    )
+
+
+def host_or_doc(location: str) -> str:
+    """Where a step happened: ``host/templated/path`` for a URL (no scheme,
+    query or fragment, no ``www.``), else the templated location itself
+    (a file path, an app's document)."""
+    location = (location or "").strip()
+    if location.startswith(("http://", "https://")):
+        parts = urlsplit(location)
+        host = (parts.hostname or "").lower().removeprefix("www.")
+        return (host + template_path(parts.path.rstrip("/")))[:200]
+    return template_path(location)[:200]
 
 
 def flatten_dom(nodes: Iterable | None) -> Iterator[dict]:

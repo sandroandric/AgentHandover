@@ -445,6 +445,13 @@ def body_sections(proc: dict) -> list[str]:
     elif proc.get("evidence_summary"):
         when.append(f"- Observed pattern: {proc['evidence_summary']}")
     when += [f"- Usually followed by the `{f}` Skill" for f in chain.get("followed_by") or []]
+    learned = proc.get("learned") if isinstance(proc.get("learned"), dict) else {}
+    trigger = learned.get("trigger") if isinstance(learned.get("trigger"), dict) else {}
+    if trigger.get("description"):
+        line = f"- Observed start: {trigger['description']}"
+        if trigger.get("calendar_event") and trigger.get("kind") != "event":
+            line += f" (calendar event \"{trigger['calendar_event']}\")"
+        when.append(f"{line} ({trigger.get('support', '')}; not confirmed by the user)")
     sections.append(_section("When to use", when))
     when_not = _split_list(proc.get("when_not_to_use"))
     sections.append(_section("When not to use", [f"- {w}" for w in when_not]))
@@ -492,9 +499,27 @@ def body_sections(proc: dict) -> list[str]:
         str(o.get("description") or o.get("type") or "") if isinstance(o, dict) else str(o)
         for o in proc.get("expected_outcomes") or []
     ]
-    sections.append(_section("Success criteria", [f"- {s}" for s in success if s]))
+    done = learned.get("done") if isinstance(learned.get("done"), dict) else {}
+    success_lines = [f"- {s}" for s in success if s]
+    if done.get("description"):
+        success_lines.insert(0, f"- {done['description']} (observed in {done.get('support', '')})")
+    sections.append(_section("Success criteria", success_lines))
     errors = _split_list(_overview(proc).get("common_errors"))
     sections.append(_section("Common errors", [f"- {e}" for e in errors]))
+
+    # How the user checks the result: seen after the commit, and the
+    # values they corrected (quality criteria), both unconfirmed.
+    checks = learned.get("verification") if isinstance(learned.get("verification"), dict) else {}
+    verify = [
+        f"- {c['description']} (observed in {c.get('support', '')})"
+        for c in checks.get("checks") or [] if isinstance(c, dict) and c.get("description")
+    ]
+    verify += [
+        f"- The user corrected \"{c.get('field', 'a field')}\" from \"{c.get('before', '')}\" "
+        f"to \"{c.get('after', '')}\": check that value before finishing."
+        for c in checks.get("corrections") or [] if isinstance(c, dict) and c.get("after")
+    ]
+    sections.append(_section("Verification", verify))
 
     # Decisions
     decisions: list[str] = []

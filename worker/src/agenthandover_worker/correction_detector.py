@@ -11,6 +11,14 @@ to infer guardrails — rules that prevent the corrected behaviour from
 recurring.
 
 Corrections are persisted at ``{kb_root}/observations/corrections.json``.
+
+:func:`field_corrections` finds the fields a user corrected during one
+observed run: successive values of the same field, read from the focused
+element's ``AXValue`` or from a DOM snapshot's interacted anchor (both
+present only with ``[privacy] capture_input_values``), where a later value
+does not simply continue the earlier one.  Each ``{field, before, after}``
+becomes a quality-criterion hypothesis in the procedure's ledger
+(``run_signals``).
 """
 
 from __future__ import annotations
@@ -23,13 +31,18 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from agenthandover_worker.dom import host_or_doc
 from agenthandover_worker.event_helpers import (
+    display_name,
     extract_app_from_event,
     extract_location,
     extract_what_doing,
+    focused_field,
     parse_annotation,
+    parse_json_field,
     parse_timestamp,
 )
+from agenthandover_worker.redaction import redact
 
 if TYPE_CHECKING:
     from agenthandover_worker.llm_reasoning import LLMReasoner
@@ -78,6 +91,96 @@ def _parse_timestamp(event: dict) -> datetime | None:
     """Extract and parse the timestamp from an event."""
     ts = event.get("timestamp") or event.get("created_at")
     return parse_timestamp(ts)
+
+
+# ---------------------------------------------------------------------------
+# Field corrections within one observed run
+# ---------------------------------------------------------------------------
+
+# A later value of a field is a correction of the earlier one only this
+# soon after it: a field used again much later (the same form filled for
+# the next record) holds a new input, not a fix.
+CORRECTION_WINDOW_SECONDS = 120
+_FIELD_VALUE_MAX = 120
+
+
+def _field_readings(event: dict) -> list[tuple[tuple, str, str]]:
+    """``(field key, field name, value)`` for each field value *event*
+    shows: the focused element's ``AXValue`` and the DOM snapshot's
+    interacted anchor's ``value``.  Search fields are left out: a new
+    query is a new input, not a correction."""
+    readings: list[tuple[tuple, str, str]] = []
+    field_ = focused_field(event)
+    if field_ and field_.get("value") and "search" not in field_.get("role", ""):
+        app = display_name(parse_json_field(event, "window_json").get("app_id"))
+        key = (
+            "ax", app, field_.get("document", ""), field_.get("role", ""),
+            field_.get("label", ""), tuple(field_.get("context") or ()),
+        )
+        readings.append((key, field_.get("label") or field_.get("role", "field"), field_["value"]))
+    meta = parse_json_field(event, "metadata_json")
+    anchors = meta.get("anchors")
+    for anchor in anchors if isinstance(anchors, list) else []:
+        if not (isinstance(anchor, dict) and anchor.get("interacted") and anchor.get("value")):
+            continue
+        if str(anchor.get("type") or "").lower() == "search" or anchor.get("role") == "searchbox":
+            continue
+        ident = anchor.get("testId") or anchor.get("id") or anchor.get("selector") or anchor.get("name")
+        if not ident:
+            continue
+        name = str(anchor.get("name") or anchor.get("ariaLabel") or ident)
+        value = " ".join(str(anchor["value"]).split())[:_FIELD_VALUE_MAX]
+        key = ("dom", host_or_doc(str(meta.get("url") or "")), str(ident))
+        readings.append((key, name, value))
+    return readings
+
+
+def field_corrections(events: list[dict]) -> list[dict]:
+    """The fields the user corrected in *events* (one run's raw events).
+
+    Each field's successive values are compared in time order.  A value
+    that starts with the previous one is typing continued; any other
+    change within :data:`CORRECTION_WINDOW_SECONDS` of the previous value
+    is a correction.  One entry per corrected field:
+    ``{"field", "before", "after", "event_ids"}``, where ``before`` is the
+    value first changed, ``after`` the field's last value and
+    ``event_ids`` the two events that showed them.  A field changed back
+    to where it started is left out.  Names and values are redacted.
+    """
+    history: dict[tuple, list[tuple[datetime, str, str, str]]] = {}
+    timed = sorted(
+        ((when, e) for e in events if (when := _parse_timestamp(e)) is not None),
+        key=lambda pair: pair[0],
+    )
+    for when, event in timed:
+        for key, name, value in _field_readings(event):
+            seen = history.setdefault(key, [])
+            if not seen or seen[-1][2] != value:
+                seen.append((when, name, value, str(event.get("id") or "")))
+    corrections: list[dict] = []
+    for seen in history.values():
+        # Edits of the field more than the window apart are separate inputs.
+        episodes = [[seen[0]]]
+        for prev, cur in zip(seen, seen[1:]):
+            if (cur[0] - prev[0]).total_seconds() > CORRECTION_WINDOW_SECONDS:
+                episodes.append([cur])
+            else:
+                episodes[-1].append(cur)
+        for episode in episodes:
+            before = next(
+                (prev for prev, cur in zip(episode, episode[1:]) if not cur[2].startswith(prev[2])),
+                None,
+            )
+            last = episode[-1]
+            if before is None or before[2] == last[2]:
+                continue
+            corrections.append({
+                "field": redact(last[1]),
+                "before": redact(before[2]),
+                "after": redact(last[2]),
+                "event_ids": [before[3], last[3]],
+            })
+    return corrections
 
 
 # ---------------------------------------------------------------------------

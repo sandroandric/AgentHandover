@@ -26,6 +26,9 @@ class ObservationEvidence:
     duration_minutes: int
     session_id: str
     event_count: int
+    # What the run's surrounding events showed: its lead-in, commit,
+    # checks and corrections (``run_signals.instance_signals``).
+    signals: dict | None = None
 
 
 @dataclass
@@ -66,13 +69,16 @@ def append_observation(
         for o in observations
     ):
         return False
-    observations.append({
+    observation = {
         "date": evidence.date,
         "type": evidence.type,
         "duration_minutes": evidence.duration_minutes,
         "session_id": evidence.session_id,
         "event_count": evidence.event_count,
-    })
+    }
+    if evidence.signals is not None:
+        observation["signals"] = evidence.signals
+    observations.append(observation)
     ev["total_observations"] = len(observations)
     proc.setdefault("staleness", {})["last_observed"] = datetime.now(timezone.utc).isoformat()
     return True
