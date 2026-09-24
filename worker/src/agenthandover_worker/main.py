@@ -1679,98 +1679,6 @@ def _process_focus_sessions(
     return exported
 
 
-# The post-recording questions run in a child process (a crash in the model
-# client cannot take the worker down), given this long: a 16 GB Mac can take
-# 10+ minutes per call.
-FOCUS_QA_TIMEOUT_SECONDS = 1800
-
-_FOCUS_QA_SCRIPT = (
-    "import json, sys, os\n"
-    "from dataclasses import asdict\n"
-    "from agenthandover_worker.focus_questioner import FocusQuestioner\n"
-    "from agenthandover_worker.llm_reasoning import LLMReasoner, ReasoningConfig\n"
-    "from agenthandover_worker.vlm_queue import VLMFallbackQueue\n"
-    "data = json.load(open(sys.argv[1]))\n"
-    "host = os.environ.get('OLLAMA_HOST', 'http://localhost:11434')\n"
-    # The Q&A model comes from AH_QNA_MODEL, which the parent always sets
-    # (the generation phase's model): the ReasoningConfig class default
-    # (qwen3.5:4b) silently failed for Gemma-4-only users (fixed in v0.2.3).
-    "model = os.environ.get('AH_QNA_MODEL', 'qwen3.5:4b')\n"
-    "reasoner = LLMReasoner(config=ReasoningConfig(model=model, ollama_host=host), vlm_queue=VLMFallbackQueue())\n"
-    "fq = FocusQuestioner(llm_reasoner=reasoner)\n"
-    "qs = fq.generate_questions(data['procedure'], data['sop'])\n"
-    "out = [asdict(q) if hasattr(q, '__dataclass_fields__') else q for q in qs]\n"
-    "json.dump(out, open(sys.argv[2], 'w'))\n"
-)
-
-
-def _generate_focus_questions(
-    procedure: dict,
-    sop: dict,
-    *,
-    ollama_host: str,
-    qna_model: str,
-    run: Callable[..., subprocess.CompletedProcess] | None = None,
-) -> list:
-    """The post-recording questions for *procedure*, from a child process.
-
-    Its input, script and output are temp files, removed whatever happens
-    (a failed or timed-out child, an unreadable answer, an exception).  The
-    wait is a model wait: the control thread runs meanwhile.  Returns [] when
-    the child fails or its output is unreadable (logged).
-    """
-    run = run or subprocess.run
-    paths: list[str] = []
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".json", delete=False,
-        ) as qa_input:
-            paths.append(qa_input.name)
-            json.dump({"procedure": procedure, "sop": sop}, qa_input)
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".py", delete=False,
-        ) as qa_script:
-            paths.append(qa_script.name)
-            qa_script.write(_FOCUS_QA_SCRIPT)
-        qa_output = qa_input.name + ".out"
-        paths.append(qa_output)
-
-        env = dict(os.environ)
-        env["OLLAMA_HOST"] = ollama_host
-        env["AH_QNA_MODEL"] = qna_model
-        with model_wait("focus questions subprocess"):
-            result = run(
-                [sys.executable, qa_script.name, qa_input.name, qa_output],
-                timeout=FOCUS_QA_TIMEOUT_SECONDS,
-                capture_output=True,
-                env=env,
-            )
-        stderr = (result.stderr or b"")[:500].decode("utf-8", errors="replace")
-        if result.returncode != 0:
-            logger.warning(
-                "Focus Q&A subprocess failed (exit %d): %s",
-                result.returncode, stderr,
-            )
-            return []
-        try:
-            with open(qa_output, encoding="utf-8") as f:
-                questions = json.load(f)
-        except (OSError, ValueError) as exc:
-            logger.warning(
-                "Focus Q&A subprocess exited 0 but its output is unreadable "
-                "(%s): %s; stderr: %s", type(exc).__name__, exc, stderr,
-            )
-            return []
-        logger.info("Focus Q&A subprocess completed: %d question(s)", len(questions))
-        return questions
-    finally:
-        for path in paths:
-            try:
-                os.unlink(path)
-            except FileNotFoundError:
-                pass
-
-
 def _process_focus_sessions_v2(
     db: "WorkerDB",
     *,
@@ -1784,11 +1692,10 @@ def _process_focus_sessions_v2(
     procedure_writer: "ProcedureWriter | None" = None,
     kb_export_adapter: "KnowledgeBaseExportAdapter | None" = None,
     behavioral_synthesizer: "BehavioralSynthesizer | None" = None,
-    focus_questioner: "FocusQuestioner | None" = None,
     knowledge_base=None,
     vector_kb=None,
-    ollama_host: str = "http://localhost:11434",
-    qna_model: str = "qwen3.5:4b",
+    weekly_question_budget: int = 5,
+    now: datetime | None = None,
 ) -> int:
     """Process completed focus recording sessions via v2 VLM pipeline.
 
@@ -1801,19 +1708,22 @@ def _process_focus_sessions_v2(
          If answered, merge answers into the saved procedure and export.
       2. Process new focus-session.json signal (SOP generation).
       3. Run behavioral synthesis with force=True (single demo).
-      4. Generate 1-3 targeted questions via focus_questioner.
-      5. If questions exist, pause export and write Q&A files for the CLI.
-      6. If no questions (or questioner unavailable), export immediately.
+      4. Ask about the slots the ledger does not know yet
+         (``questions.ask_after_focus``: at most 3, within the weekly
+         budget of *weekly_question_budget*, counted at *now*).
+      5. If questions exist, pause export and write Q&A files for the app.
+      6. If no questions, export immediately.
 
     Returns the number of SOPs exported.
     """
     state_dir = _status_dir()
 
     # --- Check for pending focus Q&A answers from a previous cycle ---
+    now = now or datetime.now(timezone.utc)
     pending_export = _check_focus_answers(
         state_dir,
         db=db,
-        focus_questioner=focus_questioner,
+        now=now,
         openclaw_writer=openclaw_writer,
         skill_md_writer=skill_md_writer,
         claude_skill_writer=claude_skill_writer,
@@ -1975,49 +1885,48 @@ def _process_focus_sessions_v2(
                     title, exc_info=True,
                 )
 
-        # --- Generate targeted questions via subprocess (crash-proof) ---
-        questions = []
-        if focus_questioner is not None:
-            logger.info("Focus Q&A: generating questions via subprocess...")
-            try:
-                questions = _generate_focus_questions(
-                    procedure_dict, result.sop,
-                    ollama_host=ollama_host, qna_model=qna_model,
-                )
-                if questions:
-                    from agenthandover_worker.focus_questioner import (
-                        write_focus_questions,
-                        write_focus_pending,
-                    )
-                    write_focus_questions(
-                        state_dir, session_id, slug, questions, title=title,
-                    )
-                    write_focus_pending(
-                        state_dir, session_id, slug,
-                        sop_template=result.sop,
-                        procedure=procedure_dict,
-                    )
-                    logger.info(
-                        "Focus v2 session '%s': %d question(s) generated, "
-                        "pausing export for user answers",
-                        title, len(questions),
-                    )
-                    # The draft stays a draft until the answers: it now
-                    # carries the synthesis.
-                    if not db.update_sop_json(slug, procedure_dict):
-                        logger.warning(
-                            "No draft record to update for '%s'", slug,
-                        )
-                    _clear_focus_signal(signal_path)
-                    (state_dir / FOCUS_DRAFT_FILE).unlink(missing_ok=True)
-                    return 0  # Don't export yet — wait for answers
-            except Exception:
-                logger.warning(
-                    "Focus Q&A failed for '%s' — proceeding without questions",
-                    title, exc_info=True,
-                )
+        # --- Ask about what the ledger does not know yet (no model) ---
+        try:
+            from agenthandover_worker.focus_questioner import (
+                write_focus_pending,
+                write_focus_questions,
+            )
+            from agenthandover_worker.questions import ask_after_focus
 
-        # --- Standard export path (no questions or questioner unavailable) ---
+            questions = ask_after_focus(
+                db, dict(procedure_dict, id=procedure_dict.get("id") or slug),
+                now=now, weekly_budget=weekly_question_budget,
+            )
+            if questions:
+                write_focus_questions(
+                    state_dir, session_id, slug, questions, title=title,
+                )
+                write_focus_pending(
+                    state_dir, session_id, slug,
+                    sop_template=result.sop,
+                    procedure=procedure_dict,
+                )
+                logger.info(
+                    "Focus v2 session '%s': %d question(s) asked, "
+                    "pausing export for user answers",
+                    title, len(questions),
+                )
+                # The draft stays a draft until the answers: it now
+                # carries the synthesis.
+                if not db.update_sop_json(slug, procedure_dict):
+                    logger.warning(
+                        "No draft record to update for '%s'", slug,
+                    )
+                _clear_focus_signal(signal_path)
+                (state_dir / FOCUS_DRAFT_FILE).unlink(missing_ok=True)
+                return 0  # Don't export yet — wait for answers
+        except Exception:
+            logger.warning(
+                "Focus Q&A failed for '%s' — proceeding without questions",
+                title, exc_info=True,
+            )
+
+        # --- Standard export path (no questions) ---
 
         # Save procedure to KB so detail view can display steps/strategy
         try:
@@ -2279,7 +2188,7 @@ def _check_focus_answers(
     state_dir: Path,
     *,
     db: "WorkerDB | None" = None,
-    focus_questioner: "FocusQuestioner | None",
+    now: datetime | None = None,
     openclaw_writer: "SOPExportAdapter",
     skill_md_writer: "SOPExportAdapter | None" = None,
     claude_skill_writer: "SOPExportAdapter | None" = None,
@@ -2302,11 +2211,13 @@ def _check_focus_answers(
         None if no pending Q&A was found (caller should proceed normally).
     """
     from agenthandover_worker.focus_questioner import (
-        read_focus_questions,
-        read_focus_pending,
-        parse_qa_result_from_file,
         clear_focus_qa_files,
+        merge_answers,
+        parse_qa_result_from_file,
+        read_focus_pending,
+        read_focus_questions,
     )
+    from agenthandover_worker.questions import close_focus_questions
 
     questions_data = read_focus_questions(state_dir)
     if questions_data is None:
@@ -2345,9 +2256,13 @@ def _check_focus_answers(
             f"{counts['typed']} typed, {counts['accepted_guess']} accepted guess(es), "
             f"{counts['unanswered']} unanswered"
         )
-    if qa_result is not None and focus_questioner is not None and qa_result.questions:
+    if db is not None:
+        # The micro-questions asked in the window are closed: answered or
+        # skipped (a skipped one leaves its slot as it was).
+        close_focus_questions(db, questions_data, now=now or datetime.now(timezone.utc))
+    if qa_result is not None and qa_result.questions:
         try:
-            procedure_dict = focus_questioner.merge_answers(procedure_dict, qa_result)
+            procedure_dict = merge_answers(procedure_dict, qa_result)
             logger.info(
                 "Focus v2 '%s': merged the answers into the procedure (%s)",
                 title, qa_status,
@@ -2464,6 +2379,7 @@ def _process_passive_discovery(
     variant_detector: "VariantDetector | None" = None,
     evidence_normalizer: "EvidenceNormalizer | None" = None,
     now: datetime | None = None,
+    weekly_question_budget: int = 5,
 ) -> int:
     """Run passive discovery: segment annotations → generate SOPs.
 
@@ -2480,6 +2396,10 @@ def _process_passive_discovery(
          three times, at most three per week, highest value first),
          generate passive SOPs
       5. Export SOPs
+
+    Right after the sessions are recorded, and again after new drafts,
+    the micro-questions they raise are asked as review cards
+    (:func:`_ask_micro_questions`, within *weekly_question_budget*).
     """
     now = now or datetime.now(timezone.utc)
     # Step 1: Load annotated events
@@ -2546,6 +2466,7 @@ def _process_passive_discovery(
         db, events, now=now, labels=labels, sleep_boundaries=sleep_boundaries,
     )
     logger.info("Passive discovery: %d work session(s) recorded", recorded)
+    _ask_micro_questions(db, knowledge_base, now=now, weekly_budget=weekly_question_budget)
 
     # Step 4: the workflows the review queue admits now.
     import json as _json
@@ -2884,7 +2805,36 @@ def _process_passive_discovery(
         # The workflow is promoted: its observations belong to the Skill.
         db.set_observations_promoted(candidate.obs_ids, slug, promoted_at=now)
 
+    if total_exported:
+        _ask_micro_questions(db, knowledge_base, now=now, weekly_budget=weekly_question_budget)
     return total_exported
+
+
+def _ask_micro_questions(
+    db: "WorkerDB", knowledge_base: "KnowledgeBase", *, now: datetime, weekly_budget: int,
+) -> None:
+    """Ask the micro-questions the latest evidence raised, as review cards
+    (``questions.refresh``); model-free, so a failure only loses the cards."""
+    from agenthandover_worker import questions
+
+    try:
+        questions.refresh(db, knowledge_base, _status_dir(), now=now, weekly_budget=weekly_budget)
+    except Exception:
+        logger.warning("Micro-questions: refresh failed", exc_info=True)
+
+
+def _process_micro_answer_trigger(
+    trigger: dict, db: "WorkerDB", knowledge_base: "KnowledgeBase",
+    *, now: datetime | None = None,
+) -> None:
+    """Handle a ``micro-answer`` trigger: a review card answered (or
+    skipped) in the app (``questions.apply_answer``), at *now* (default:
+    the wall clock)."""
+    from agenthandover_worker import questions
+
+    questions.apply_answer(
+        trigger, db, knowledge_base, _status_dir(), now=now or datetime.now(timezone.utc),
+    )
 
 
 def _record_retry_lint_failure(
@@ -4458,10 +4408,6 @@ def main(argv: list[str] | None = None) -> None:
         knowledge_base=knowledge_base,
     )
 
-    # Focus session questioner (gap analysis + targeted questions)
-    from agenthandover_worker.focus_questioner import FocusQuestioner
-    focus_questioner_inst = FocusQuestioner(llm_reasoner=llm_reasoner)
-
     evidence_extractor = None  # Initialized after DB is available
 
     # Phase 5: Curation orchestrator
@@ -5013,6 +4959,7 @@ def main(argv: list[str] | None = None) -> None:
                 sops_dir=args.sops_dir,
                 procedure_writer=procedure_writer,
             ),
+            "micro-answer": lambda t: _process_micro_answer_trigger(t, db, knowledge_base),
         }
         assert set(trigger_handlers) == set(trigger_spool.KINDS)
         trigger_spool.migrate_legacy(_status_dir())
@@ -5061,15 +5008,9 @@ def main(argv: list[str] | None = None) -> None:
                     procedure_writer=procedure_writer,
                     kb_export_adapter=kb_export_adapter,
                     behavioral_synthesizer=behavioral_synthesizer,
-                    focus_questioner=focus_questioner_inst,
                     knowledge_base=knowledge_base,
                     vector_kb=vector_kb,
-                    ollama_host=vlm_cfg.ollama_host,
-                    # Q&A questions on the generation phase's model
-                    # (the configured SOP model): never a hardcoded
-                    # default, which silently failed for users who
-                    # never pulled it (fixed in v0.2.3).
-                    qna_model=model_scheduler.generation_model,
+                    weekly_question_budget=cfg.knowledge.weekly_question_budget,
                 )
             else:
                 focus_sops = _process_focus_sessions(
@@ -5286,6 +5227,7 @@ def main(argv: list[str] | None = None) -> None:
                             continuity_tracker=continuity_tracker,
                             variant_detector=variant_detector,
                             evidence_normalizer=evidence_normalizer,
+                            weekly_question_budget=cfg.knowledge.weekly_question_budget,
                         )
                     if pd_sops > 0:
                         total_passive_sops += pd_sops

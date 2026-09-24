@@ -161,10 +161,12 @@ class ExportConfig:
 
 @dataclass(frozen=True)
 class KnowledgeConfig:
-    """``[knowledge]``: the local query API."""
+    """``[knowledge]``: the local query API, and how many micro-questions
+    (``questions``) may be asked in any seven days (0: none)."""
 
     query_api_enabled: bool = True
     query_api_port: int = 9477
+    weekly_question_budget: int = 5
 
 
 @dataclass(frozen=True)

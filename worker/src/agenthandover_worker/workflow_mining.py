@@ -88,6 +88,9 @@ BAG_THRESHOLD = 0.7
 MIN_OBSERVATIONS = 3
 # Drafts the review queue admits per seven days.
 WEEKLY_REVIEW_CAP = 3
+# A workflow the user labelled "not a routine" stays out of the review
+# queue this long (``questions``).
+SUPPRESS_DAYS = 42
 # task_segments rows are kept this long.
 SEGMENT_TTL_DAYS = 14
 # Observations that never became part of a Skill are kept for two
@@ -498,6 +501,17 @@ def load_window(db: "WorkerDB", now: datetime) -> WorkflowWindow:
     )
 
 
+def suppressed(observations: list[dict], now: datetime) -> bool:
+    """True when the user said, less than :data:`SUPPRESS_DAYS` days
+    before *now*, that this workflow is not a routine they would hand off."""
+    cutoff = now - timedelta(days=SUPPRESS_DAYS)
+    return any(
+        o.get("user_is_routine") == 0 and o.get("labelled_at")
+        and _parse(o["labelled_at"]) >= cutoff
+        for o in observations
+    )
+
+
 def _blocked(db: "WorkerDB", obs_ids: set[str]) -> bool:
     """A passive generation failed for exactly these observations (or a
     superset) and has not been retried: wait for new evidence or a retry."""
@@ -701,7 +715,7 @@ def review_candidates(
     (:func:`link_recorded_skills`), and the attributed observations are
     mined for divergence branches.  A candidate has at least
     :data:`MIN_OBSERVATIONS` observations in the window and two distinct
-    steps; at most :data:`WEEKLY_REVIEW_CAP` drafts are promoted per seven
+    steps, and the user has not said it is no routine (:func:`suppressed`); at most :data:`WEEKLY_REVIEW_CAP` drafts are promoted per seven
     days.
     """
     win = load_window(db, now)
@@ -717,6 +731,8 @@ def review_candidates(
             continue
         observations = win.window_observations(group)
         if len(observations) < MIN_OBSERVATIONS or len(set(group.steps)) < 2:
+            continue
+        if suppressed(group.observations, now):
             continue
         if _blocked(db, {o["obs_id"] for o in observations}):
             continue

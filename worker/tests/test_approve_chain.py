@@ -13,7 +13,6 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -23,7 +22,7 @@ from agenthandover_worker.claude_skill_writer import ClaudeSkillWriter
 from agenthandover_worker.db import WorkerDB
 from agenthandover_worker.evidence_tracker import EvidenceTracker
 from agenthandover_worker.exporter import IndexGenerator
-from agenthandover_worker.focus_questioner import FocusQuestioner, write_focus_pending
+from agenthandover_worker.focus_questioner import write_focus_pending
 from agenthandover_worker.knowledge_base import KnowledgeBase
 from agenthandover_worker.lifecycle_manager import LifecycleManager
 from agenthandover_worker.openclaw_writer import OpenClawWriter
@@ -211,7 +210,6 @@ class TestQAMergeUpdatesTheReviewRecord:
 
         exported = main_mod._check_focus_answers(
             env.state, db=env.db,
-            focus_questioner=FocusQuestioner(MagicMock()),
             sop_auto_approve=False, knowledge_base=env.kb,
             **env.export_kwargs,
         )

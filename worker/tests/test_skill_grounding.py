@@ -30,7 +30,7 @@ from agenthandover_worker.focus_questioner import (
     ANSWER_ACCEPTED_GUESS,
     ANSWER_TYPED,
     FocusQuestion,
-    FocusQuestioner,
+    merge_answers,
     parse_qa_result_from_file,
     write_focus_questions,
 )
@@ -153,7 +153,7 @@ def test_merged_answers_keep_their_source_and_the_ledger_tells_them_apart() -> N
     proc = {"id": "look-up", "title": "Look up", "steps": [
         {"action": "Open Safari", "target": "Safari", "parameters": {}},
     ]}
-    merged = FocusQuestioner(llm_reasoner=None).merge_answers(proc, result)
+    merged = merge_answers(proc, result)
     clarifications = merged["agent_clarifications"]
     assert [(c["status"], c.get("source")) for c in clarifications] == [
         ("answered", ANSWER_ACCEPTED_GUESS),

@@ -1,28 +1,20 @@
-"""Tests for focus_questioner.py — gap analysis and targeted questions.
-
-Tests cover:
-- Question generation with mocked LLM responses
-- Question parsing and validation
-- Answer merging into procedures by category
-- File IPC helpers (write/read questions, pending state)
-- Graceful degradation when LLM fails
-- Edge cases (empty procedures, no gaps, max questions cap)
-"""
+"""Tests for focus_questioner.py: merging the focus Q&A answers into the
+procedure and the Q&A file IPC (the questions themselves are
+``questions.py``'s, tested in test_questions.py)."""
 
 from __future__ import annotations
 
 import json
 import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock, patch
 
 import pytest
 
 from agenthandover_worker.focus_questioner import (
     FocusQuestion,
     FocusQAResult,
-    FocusQuestioner,
     clear_focus_qa_files,
+    merge_answers,
     parse_qa_result_from_file,
     read_focus_pending,
     read_focus_questions,
@@ -76,150 +68,6 @@ def _make_procedure(**overrides) -> dict:
     return proc
 
 
-def _make_reasoner(response_value=None, success=True, abstained=False):
-    """Create a mock LLMReasoner."""
-    from agenthandover_worker.llm_reasoning import ReasoningResult
-
-    reasoner = MagicMock()
-    result = ReasoningResult(
-        value=response_value,
-        success=success,
-        abstained=abstained,
-        model="qwen3.5:4b",
-        prompt_hash="test123",
-        elapsed_seconds=1.5,
-        generated_at="2026-03-18T10:00:00Z",
-    )
-    reasoner.reason_json.return_value = result
-    return reasoner
-
-
-# ---------------------------------------------------------------------------
-# Tests: Question generation
-# ---------------------------------------------------------------------------
-
-
-class TestGenerateQuestions:
-
-    def test_generates_questions_from_llm_response(self):
-        llm_response = {
-            "questions": [
-                {
-                    "question": "Does this workflow require logging into Reddit?",
-                    "category": "credentials",
-                    "context": "Browser URLs detected at reddit.com but no login step recorded",
-                    "default": "No login required",
-                },
-                {
-                    "question": "What is your goal when browsing r/startups?",
-                    "category": "strategy",
-                    "context": "Strategy field is empty — agent needs to know the intent",
-                    "default": "Browse and engage with relevant posts",
-                },
-            ]
-        }
-        reasoner = _make_reasoner(response_value=llm_response)
-        questioner = FocusQuestioner(llm_reasoner=reasoner)
-
-        questions = questioner.generate_questions(_make_procedure())
-
-        assert len(questions) == 2
-        assert questions[0].category == "credentials"
-        assert "Reddit" in questions[0].question
-        assert questions[1].category == "strategy"
-
-    def test_empty_questions_when_no_gaps(self):
-        llm_response = {"questions": []}
-        reasoner = _make_reasoner(response_value=llm_response)
-        questioner = FocusQuestioner(llm_reasoner=reasoner)
-
-        questions = questioner.generate_questions(_make_procedure(strategy="Clear strategy"))
-        assert questions == []
-
-    def test_max_three_questions(self):
-        llm_response = {
-            "questions": [
-                {"question": f"Q{i}?", "category": "strategy", "context": "ctx", "default": "def"}
-                for i in range(5)
-            ]
-        }
-        reasoner = _make_reasoner(response_value=llm_response)
-        questioner = FocusQuestioner(llm_reasoner=reasoner)
-
-        questions = questioner.generate_questions(_make_procedure())
-        assert len(questions) == 3
-
-    def test_graceful_degradation_on_llm_failure(self):
-        reasoner = _make_reasoner(success=False)
-        questioner = FocusQuestioner(llm_reasoner=reasoner)
-
-        questions = questioner.generate_questions(_make_procedure())
-        assert questions == []
-
-    def test_graceful_degradation_on_abstention(self):
-        reasoner = _make_reasoner(abstained=True)
-        questioner = FocusQuestioner(llm_reasoner=reasoner)
-
-        questions = questioner.generate_questions(_make_procedure())
-        assert questions == []
-
-    def test_open_category_preserved(self):
-        """Non-standard categories are kept as-is (not forced to a fixed set)."""
-        llm_response = {
-            "questions": [
-                {
-                    "question": "What happens next?",
-                    "category": "error_handling",
-                    "context": "test",
-                    "default": "default",
-                }
-            ]
-        }
-        reasoner = _make_reasoner(response_value=llm_response)
-        questioner = FocusQuestioner(llm_reasoner=reasoner)
-
-        questions = questioner.generate_questions(_make_procedure())
-        assert len(questions) == 1
-        assert questions[0].category == "error_handling"
-
-    def test_empty_question_text_filtered(self):
-        llm_response = {
-            "questions": [
-                {"question": "", "category": "strategy", "context": "ctx", "default": "def"},
-                {"question": "Valid question?", "category": "strategy", "context": "ctx", "default": "def"},
-            ]
-        }
-        reasoner = _make_reasoner(response_value=llm_response)
-        questioner = FocusQuestioner(llm_reasoner=reasoner)
-
-        questions = questioner.generate_questions(_make_procedure())
-        assert len(questions) == 1
-        assert questions[0].question == "Valid question?"
-
-    def test_empty_default_stays_empty(self):
-        """No invented guess: the app shows its own hint when there is none."""
-        llm_response = {
-            "questions": [
-                {"question": "What?", "category": "strategy", "context": "ctx", "default": ""},
-            ]
-        }
-        reasoner = _make_reasoner(response_value=llm_response)
-        questioner = FocusQuestioner(llm_reasoner=reasoner)
-
-        questions = questioner.generate_questions(_make_procedure())
-        assert questions[0].default == ""
-
-    def test_llm_called_with_correct_caller(self):
-        llm_response = {"questions": []}
-        reasoner = _make_reasoner(response_value=llm_response)
-        questioner = FocusQuestioner(llm_reasoner=reasoner)
-
-        questioner.generate_questions(_make_procedure())
-
-        call_kwargs = reasoner.reason_json.call_args
-        assert call_kwargs.kwargs.get("caller") == "focus_questioner"
-
-
 # ---------------------------------------------------------------------------
 # Tests: Answer merging
 # ---------------------------------------------------------------------------
@@ -251,10 +99,8 @@ class TestMergeAnswers:
             questions,
             {0: "Assume credentials are provided via a logged in browser"},
         )
-        reasoner = _make_reasoner()
-        questioner = FocusQuestioner(llm_reasoner=reasoner)
 
-        result = questioner.merge_answers(_make_procedure(), qa)
+        result = merge_answers(_make_procedure(), qa)
 
         # The free-text answer must NOT corrupt the accounts list.
         assert result.get("environment", {}).get("accounts", []) == []
@@ -286,10 +132,8 @@ class TestMergeAnswers:
             )
         ]
         qa = self._make_qa(questions, {0: "No login required"})
-        reasoner = _make_reasoner()
-        questioner = FocusQuestioner(llm_reasoner=reasoner)
 
-        result = questioner.merge_answers(_make_procedure(), qa)
+        result = merge_answers(_make_procedure(), qa)
 
         assert result.get("environment", {}).get("accounts", []) == []
         assert len(result["agent_clarifications"]) == 1
@@ -304,10 +148,8 @@ class TestMergeAnswers:
             )
         ]
         qa = self._make_qa(questions, {0: "Find and engage with SaaS founders"})
-        reasoner = _make_reasoner()
-        questioner = FocusQuestioner(llm_reasoner=reasoner)
 
-        result = questioner.merge_answers(_make_procedure(), qa)
+        result = merge_answers(_make_procedure(), qa)
         assert "Find and engage with SaaS founders" in result["strategy"]
 
     def test_merge_strategy_does_not_clobber_existing(self):
@@ -327,10 +169,8 @@ class TestMergeAnswers:
             )
         ]
         qa = self._make_qa(questions, {0: "Focus on B2B posts"})
-        reasoner = _make_reasoner()
-        questioner = FocusQuestioner(llm_reasoner=reasoner)
 
-        result = questioner.merge_answers(proc, qa)
+        result = merge_answers(proc, qa)
         # Existing strategy preserved verbatim.
         assert result["strategy"] == "Existing strategy."
         # New answer recorded in clarifications for visibility.
@@ -356,10 +196,8 @@ class TestMergeAnswers:
             )
         ]
         qa = self._make_qa(questions, {0: "Skip posts older than 24h"})
-        reasoner = _make_reasoner()
-        questioner = FocusQuestioner(llm_reasoner=reasoner)
 
-        result = questioner.merge_answers(_make_procedure(), qa)
+        result = merge_answers(_make_procedure(), qa)
         # No bogus branch created from free-text answer.
         assert result.get("branches", []) == []
         # Answer preserved in agent_clarifications.
@@ -382,10 +220,8 @@ class TestMergeAnswers:
             )
         ]
         qa = self._make_qa(questions, {0: "At least 3 comments posted"})
-        reasoner = _make_reasoner()
-        questioner = FocusQuestioner(llm_reasoner=reasoner)
 
-        result = questioner.merge_answers(_make_procedure(), qa)
+        result = merge_answers(_make_procedure(), qa)
         # Don't auto-create expected_outcomes from Q&A.
         assert result.get("expected_outcomes", []) == []
         # Answer recorded in agent_clarifications.
@@ -401,10 +237,8 @@ class TestMergeAnswers:
             )
         ]
         qa = self._make_qa(questions, {0: "Daily at 9am"})
-        reasoner = _make_reasoner()
-        questioner = FocusQuestioner(llm_reasoner=reasoner)
 
-        result = questioner.merge_answers(_make_procedure(), qa)
+        result = merge_answers(_make_procedure(), qa)
         assert result["recurrence"] == "Daily at 9am"
 
     def test_merge_scope_one_off(self):
@@ -417,10 +251,8 @@ class TestMergeAnswers:
             )
         ]
         qa = self._make_qa(questions, {0: "one-off"})
-        reasoner = _make_reasoner()
-        questioner = FocusQuestioner(llm_reasoner=reasoner)
 
-        result = questioner.merge_answers(_make_procedure(), qa)
+        result = merge_answers(_make_procedure(), qa)
         assert result["recurrence"] is None
 
     def test_merge_does_not_mutate_input(self):
@@ -435,10 +267,8 @@ class TestMergeAnswers:
             )
         ]
         qa = self._make_qa(questions, {0: "New strategy"})
-        reasoner = _make_reasoner()
-        questioner = FocusQuestioner(llm_reasoner=reasoner)
 
-        questioner.merge_answers(proc, qa)
+        merge_answers(proc, qa)
         assert proc.get("strategy", "") == original_strategy
 
     def test_merge_empty_answer_is_unanswered_never_the_default(self):
@@ -460,12 +290,10 @@ class TestMergeAnswers:
         ]
         # Question 0 left blank, question 1 absent from the answers.
         qa = self._make_qa(questions, {0: "  "})
-        reasoner = _make_reasoner()
-        questioner = FocusQuestioner(llm_reasoner=reasoner)
 
         proc = _make_procedure()
         proc["strategy"] = ""
-        result = questioner.merge_answers(proc, qa)
+        result = merge_answers(proc, qa)
         assert result["strategy"] == ""
         assert result["steps"] == proc["steps"]
         assert result["agent_clarifications"] == [
@@ -487,10 +315,8 @@ class TestMergeAnswers:
             )
         ]
         qa = self._make_qa(questions, {5: "bogus", -1: "also bogus"})
-        reasoner = _make_reasoner()
-        questioner = FocusQuestioner(llm_reasoner=reasoner)
 
-        result = questioner.merge_answers(_make_procedure(), qa)
+        result = merge_answers(_make_procedure(), qa)
         # Should not crash and strategy should remain empty
         assert result.get("strategy", "") == ""
 
@@ -506,10 +332,8 @@ class TestMergeAnswers:
             1: "Find SaaS founders",
             2: "Weekly on Monday",
         })
-        reasoner = _make_reasoner()
-        questioner = FocusQuestioner(llm_reasoner=reasoner)
 
-        result = questioner.merge_answers(_make_procedure(), qa)
+        result = merge_answers(_make_procedure(), qa)
         # Credentials answer goes to clarifications only — no fake account.
         assert result.get("environment", {}).get("accounts", []) == []
         # Strategy is filled because procedure had no synthesised one.
@@ -546,10 +370,8 @@ class TestMergeAnswers:
             )
         ]
         qa = self._make_qa(questions, {0: "r/ClaudeAI"})
-        reasoner = _make_reasoner()
-        questioner = FocusQuestioner(llm_reasoner=reasoner)
 
-        result = questioner.merge_answers(proc, qa)
+        result = merge_answers(proc, qa)
         step = result["steps"][0]
         assert step["target"] == "r/ClaudeAI"
         assert step["parameters"]["target"] == "r/ClaudeAI"
@@ -573,10 +395,8 @@ class TestMergeAnswers:
             )
         ]
         qa = self._make_qa(questions, {0: "r/ClaudeAI"})
-        reasoner = _make_reasoner()
-        questioner = FocusQuestioner(llm_reasoner=reasoner)
 
-        result = questioner.merge_answers(proc, qa)
+        result = merge_answers(proc, qa)
         # Step target unchanged because question had no step_indexes.
         assert result["steps"][0]["target"] == "r/midclaw"
 
@@ -604,10 +424,8 @@ class TestMergeAnswers:
             )
         ]
         qa = self._make_qa(questions, {0: long_answer})
-        reasoner = _make_reasoner()
-        questioner = FocusQuestioner(llm_reasoner=reasoner)
 
-        result = questioner.merge_answers(proc, qa)
+        result = merge_answers(proc, qa)
         # Step target unchanged: long answer doesn't override step text.
         assert result["steps"][0]["target"] == "r/midclaw"
         # Answer still recorded in clarifications for the agent to consult.
@@ -721,7 +539,7 @@ class TestParseQAResult:
         assert result.answers == {}
         assert result.questions[0].default == "Default 1"  # kept as the guess only
 
-        merged = FocusQuestioner(llm_reasoner=_make_reasoner()).merge_answers(
+        merged = merge_answers(
             _make_procedure(), result,
         )
         assert merged["agent_clarifications"][0]["status"] == "unanswered"
@@ -759,20 +577,3 @@ class TestParseQAResult:
         assert result is not None
         assert 0 in result.answers
         assert len(result.answers) == 1
-
-# Evidence as a row stored before the current redaction rules could carry
-# it: WP-F1 redacts every prompt built from screen text.
-_OLD_ROW_PASSWORD = "hunter22"
-_OLD_ROW_TOKEN = "abc123"
-_OLD_ROW_TEXT = f"my password is {_OLD_ROW_PASSWORD}"
-_OLD_ROW_URL = f"https://x.com/reset?token={_OLD_ROW_TOKEN}"
-
-
-def test_focus_qa_prompt_is_redacted():
-    reasoner = _make_reasoner(response_value={"questions": []})
-    proc = _make_procedure(description=_OLD_ROW_TEXT)
-    proc["steps"][0]["url"] = _OLD_ROW_URL
-    FocusQuestioner(llm_reasoner=reasoner).generate_questions(proc)
-    prompt = reasoner.reason_json.call_args.kwargs["prompt"]
-    assert _OLD_ROW_PASSWORD not in prompt and _OLD_ROW_TOKEN not in prompt
-    assert "https://x.com/reset" in prompt

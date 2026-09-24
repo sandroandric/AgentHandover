@@ -10,7 +10,6 @@ changing a step.
 from __future__ import annotations
 
 import json
-from unittest.mock import MagicMock
 
 from agenthandover_worker import main as wm
 from agenthandover_worker.focus_questioner import (
@@ -18,30 +17,16 @@ from agenthandover_worker.focus_questioner import (
     ANSWER_TYPED,
     FocusQAResult,
     FocusQuestion,
-    FocusQuestioner,
     answer_revision_prompt,
     apply_answer_revisions,
-    drop_unrecorded_clipboard_questions,
+    merge_answers,
 )
 from agenthandover_worker.ledger import derive_knowledge, validate_knowledge
-from agenthandover_worker.llm_reasoning import ReasoningResult
 from agenthandover_worker.procedure_schema import sop_to_procedure, validate_procedure
 from agenthandover_worker.skill_render import render_packet
 from agenthandover_worker.sop_generator import SOPGenerator
 from fixtures import iana_typing_session as iana
 from fixtures.vlm_answers import load_answer
-
-COPY_QUESTION = {
-    "question": "Should I copy the exact text from the IANA page into the document?",
-    "category": "data_source", "context": "Step 3 types the list",
-    "default": "Copy it verbatim", "step_numbers": [3],
-}
-FORMAT_QUESTION = {
-    "question": "Should the list go on one line or one domain per line?",
-    "category": "output_format", "context": "Step 3 types the list",
-    "default": "One line", "step_numbers": [3],
-}
-
 
 def _iana_sop() -> dict:
     """The IANA session's Skill as the generator leaves it (grounded)."""
@@ -60,58 +45,24 @@ def _iana_procedure() -> dict:
     return proc
 
 
-def _questioner(questions: list[dict]) -> tuple[FocusQuestioner, MagicMock]:
-    reasoner = MagicMock()
-    reasoner.reason_json.return_value = ReasoningResult(
-        value={"questions": questions}, success=True, model="qwen3.5:4b",
-    )
-    return FocusQuestioner(llm_reasoner=reasoner), reasoner
-
-
 # ---------------------------------------------------------------------------
 # Questions grounded like the Skill
 # ---------------------------------------------------------------------------
 
 
 def test_a_session_that_copied_nothing_gets_no_copy_question() -> None:
-    sop = _iana_sop()
-    proc = sop_to_procedure(sop)
+    """Live, the model's questions asked "Should I copy the exact text
+    ..." of a session that only typed.  The ledger's questions are written
+    from the slots, never from the screen's or the synthesis's wording."""
+    from agenthandover_worker.clipboard_grounding import claims
+    from agenthandover_worker.questions import slot_questions
+
+    proc = _iana_procedure()
     proc["strategy"] = "The user copies the reserved domains from the IANA page into TextEdit."
-    questioner, reasoner = _questioner([COPY_QUESTION, FORMAT_QUESTION])
-    questions = questioner.generate_questions(proc, sop)
-
-    assert [q.question for q in questions] == [FORMAT_QUESTION["question"]]
-    prompt = reasoner.reason_json.call_args.kwargs["prompt"]
-    assert "CLIPBOARD: no copy, cut or paste was recorded" in prompt
-    # The synthesized text's copy wording is not handed on as a fact.
-    assert "copies" not in prompt
-    assert "The user reads the reserved domains from the IANA page" in prompt
-    # The questioner reads the grounded steps: no tab-title click, and the
-    # typed lines are there.
-    assert "Example Domain" not in prompt
-    assert f'Type "{iana.LINE_2}"' in prompt
-
-
-def test_a_session_that_copied_keeps_its_prompt_and_questions() -> None:
-    sop = _iana_sop()
-    proc = sop_to_procedure(sop)
-    for recorded in (["copy"], None):
-        sop["session_clipboard"] = recorded
-        questioner, reasoner = _questioner([COPY_QUESTION, FORMAT_QUESTION])
-        assert len(questioner.generate_questions(proc, sop)) == 2
-        assert "CLIPBOARD" not in reasoner.reason_json.call_args.kwargs["prompt"]
-
-
-def test_a_paste_question_needs_a_recorded_paste_or_copy() -> None:
-    paste = FocusQuestion(question="Where do I paste the list?", category="data",
-                          context="", default="")
-    assert drop_unrecorded_clipboard_questions([paste], set()) == []
-    assert drop_unrecorded_clipboard_questions([paste], {"copy"}) == [paste]
-    assert drop_unrecorded_clipboard_questions([paste], {"paste"}) == [paste]
-    copy_question = FocusQuestion(question="Which text do I copy?", category="data",
-                                  context="", default="")
-    assert drop_unrecorded_clipboard_questions([copy_question], {"paste"}) == []
-    assert drop_unrecorded_clipboard_questions([copy_question], None) == [copy_question]
+    questions = slot_questions(proc)
+    assert questions
+    for q in questions:
+        assert not claims([q.question, q.context, q.default, *q.choices]), q
 
 
 # ---------------------------------------------------------------------------
@@ -146,7 +97,7 @@ def _qa(answer: str = LIVE_ANSWER, source: str = ANSWER_TYPED) -> FocusQAResult:
 
 
 def _merged(qa: FocusQAResult) -> dict:
-    return FocusQuestioner(llm_reasoner=MagicMock()).merge_answers(_iana_procedure(), qa)
+    return merge_answers(_iana_procedure(), qa)
 
 
 def test_the_revision_prompt_carries_the_typed_step_answers_only() -> None:

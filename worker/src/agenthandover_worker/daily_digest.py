@@ -84,7 +84,7 @@ class DigestGenerator:
         tasks_completed = len(tasks)
         procedures_observed = self._count_procedures(summary_data)
         highlights = self._extract_highlights(date, summary_data)
-        sections = self._build_sections(tasks, summary_data)
+        sections = self._build_sections(tasks, summary_data) + self._question_sections(date)
         stats = self._compute_stats(summary_data, tasks, active_hours)
 
         summary_text = self._build_summary_text(
@@ -317,6 +317,26 @@ class DigestGenerator:
                 priority=2,
             ))
         return out
+
+    def _question_sections(self, date: str) -> list[DigestSection]:
+        """With the worker DB: the micro-questions still open (asked as
+        review cards and not answered yet) and the day's work sessions with
+        whether the user tagged them as a routine (``questions``)."""
+        if self._db is None:
+            return []
+        from agenthandover_worker.questions import digest_items
+
+        try:
+            open_questions, sessions = digest_items(self._db, date)
+        except Exception:
+            logger.debug("Micro-questions unavailable for the digest", exc_info=True)
+            return []
+        sections = []
+        if open_questions:
+            sections.append(DigestSection(title="Open questions", items=open_questions))
+        if sessions:
+            sections.append(DigestSection(title="Tag the day", items=sessions))
+        return sections
 
     def _build_sections(
         self, tasks: list[dict], summary_data: dict | None

@@ -120,7 +120,7 @@ class TestMigrateLegacy:
             "retry", "approve", "failed-query", "search-query", "recall-query",
             "trust-accept", "trust-dismiss", "staleness-reviewed",
             "lifecycle-promote", "merge", "drift-reviewed", "lifecycle-dismiss",
-            "export",
+            "export", "micro-answer",
         }
 
 
