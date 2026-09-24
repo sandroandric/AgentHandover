@@ -13,14 +13,18 @@ import pytest
 from agenthandover_worker.focus_questioner import (
     FocusQuestion,
     FocusQAResult,
+    ask_focus_questions,
     clear_focus_qa_files,
     merge_answers,
     parse_qa_result_from_file,
+    publish_next_focus_questions,
     read_focus_pending,
     read_focus_questions,
+    restore_focus_queue,
     write_focus_pending,
     write_focus_questions,
     FOCUS_QUESTIONS_FILE,
+    FOCUS_PENDING_DIR,
     FOCUS_PENDING_FILE,
 )
 
@@ -483,25 +487,201 @@ class TestFileIPC:
             assert read_focus_pending(Path(tmpdir)) is None
 
     def test_clear_qa_files(self):
+        """Clearing a session removes the questions file and that
+        session's queued state; another queued session stays."""
         with tempfile.TemporaryDirectory() as tmpdir:
             state_dir = Path(tmpdir)
             (state_dir / FOCUS_QUESTIONS_FILE).write_text("{}")
-            (state_dir / FOCUS_PENDING_FILE).write_text("{}")
+            write_focus_pending(state_dir, "sess-1", "a", {}, {})
+            write_focus_pending(state_dir, "sess-2", "b", {}, {})
 
-            clear_focus_qa_files(state_dir)
+            clear_focus_qa_files(state_dir, "sess-1")
 
             assert not (state_dir / FOCUS_QUESTIONS_FILE).exists()
-            assert not (state_dir / FOCUS_PENDING_FILE).exists()
+            assert read_focus_pending(state_dir, "sess-1") is None
+            assert read_focus_pending(state_dir, "sess-2")["slug"] == "b"
 
     def test_clear_nonexistent_files_no_error(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            clear_focus_qa_files(Path(tmpdir))  # Should not raise
+            clear_focus_qa_files(Path(tmpdir), "sess-1")  # Should not raise
 
     def test_read_invalid_json_returns_none(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             state_dir = Path(tmpdir)
             (state_dir / FOCUS_QUESTIONS_FILE).write_text("not valid json{{{")
             assert read_focus_questions(state_dir) is None
+
+
+def _qs(*texts: str) -> list[FocusQuestion]:
+    return [FocusQuestion(t, "goal", "", "", id=f"q-{t}") for t in texts]
+
+
+def _ask(state_dir: Path, session_id: str, *texts: str) -> bool:
+    return ask_focus_questions(
+        state_dir, session_id, f"slug-{session_id}", _qs(*texts),
+        title=f"Title {session_id}",
+        sop_template={"title": session_id}, procedure={"id": f"slug-{session_id}"},
+    )
+
+
+def _shown(state_dir: Path) -> dict:
+    return json.loads((state_dir / FOCUS_QUESTIONS_FILE).read_text(encoding="utf-8"))
+
+
+class TestFocusQueue:
+    """WP-F15: each session's pending Q&A is queued under its id; the app
+    sees one session's questions at a time, the oldest first."""
+
+    def test_a_second_session_waits_behind_the_first(self, tmp_path: Path) -> None:
+        assert _ask(tmp_path, "A", "a1?", "a2?", "a3?") is True
+        before = (tmp_path / FOCUS_QUESTIONS_FILE).read_bytes()
+        assert _ask(tmp_path, "B", "b1?", "b2?") is False
+        # The app still shows A's questions, byte for byte.
+        assert (tmp_path / FOCUS_QUESTIONS_FILE).read_bytes() == before
+        assert _shown(tmp_path)["session_id"] == "A"
+        # Both sessions keep their own pending state.
+        a, b = read_focus_pending(tmp_path, "A"), read_focus_pending(tmp_path, "B")
+        assert a["procedure"] == {"id": "slug-A"} and b["procedure"] == {"id": "slug-B"}
+        assert [q["question"] for q in b["questions"]] == ["b1?", "b2?"]
+        assert b["title"] == "Title B" and a["seq"] < b["seq"]
+        assert read_focus_pending(tmp_path)["session_id"] == "A"
+
+    def test_an_answered_file_is_never_overwritten_by_a_later_session(self, tmp_path: Path) -> None:
+        _ask(tmp_path, "A", "a1?")
+        answered = dict(_shown(tmp_path), status="answered", answers={"0": "yes"})
+        (tmp_path / FOCUS_QUESTIONS_FILE).write_text(json.dumps(answered), encoding="utf-8")
+        before = (tmp_path / FOCUS_QUESTIONS_FILE).read_bytes()
+        assert _ask(tmp_path, "B", "b1?") is False
+        assert (tmp_path / FOCUS_QUESTIONS_FILE).read_bytes() == before
+        assert publish_next_focus_questions(tmp_path) is None
+        assert (tmp_path / FOCUS_QUESTIONS_FILE).read_bytes() == before
+
+    def test_the_next_session_is_shown_once_the_first_is_cleared(self, tmp_path: Path) -> None:
+        _ask(tmp_path, "A", "a1?")
+        _ask(tmp_path, "B", "b1?", "b2?")
+        _ask(tmp_path, "C", "c1?")
+        clear_focus_qa_files(tmp_path, "A")
+        assert publish_next_focus_questions(tmp_path) == "B"
+        shown = _shown(tmp_path)
+        # The app's format, unchanged.
+        assert set(shown) == {"session_id", "slug", "title", "questions", "status"}
+        assert (shown["session_id"], shown["slug"], shown["title"], shown["status"]) == (
+            "B", "slug-B", "Title B", "pending",
+        )
+        assert [(q["index"], q["id"], q["question"]) for q in shown["questions"]] == [
+            (0, "q-b1?", "b1?"), (1, "q-b2?", "b2?"),
+        ]
+        # The same file the worker wrote before the queue.
+        direct = write_focus_questions(
+            tmp_path / "direct", "B", "slug-B", _qs("b1?", "b2?"), title="Title B",
+        )
+        assert json.loads(direct.read_text(encoding="utf-8")) == shown
+        clear_focus_qa_files(tmp_path, "B")
+        assert publish_next_focus_questions(tmp_path) == "C"
+        clear_focus_qa_files(tmp_path, "C")
+        assert publish_next_focus_questions(tmp_path) is None
+        assert not (tmp_path / FOCUS_QUESTIONS_FILE).exists()
+
+    def test_the_same_session_asking_again_replaces_its_pending_questions(
+        self, tmp_path: Path,
+    ) -> None:
+        _ask(tmp_path, "A", "a1?")
+        _ask(tmp_path, "B", "b1?")
+        seq = read_focus_pending(tmp_path, "A")["seq"]
+        assert _ask(tmp_path, "A", "a2?") is True
+        assert [q["question"] for q in _shown(tmp_path)["questions"]] == ["a2?"]
+        assert read_focus_pending(tmp_path, "A")["seq"] == seq
+        assert read_focus_pending(tmp_path)["session_id"] == "A"
+
+    def test_the_queue_is_oldest_first_not_by_name(self, tmp_path: Path) -> None:
+        _ask(tmp_path, "zeta", "z?")
+        _ask(tmp_path, "alpha", "a?")
+        clear_focus_qa_files(tmp_path, "zeta")
+        assert publish_next_focus_questions(tmp_path) == "alpha"
+
+    def test_a_corrupt_queue_entry_is_skipped(self, tmp_path: Path, caplog) -> None:
+        queue = tmp_path / FOCUS_PENDING_DIR
+        queue.mkdir()
+        (queue / "0-broken.json").write_text("{not json", encoding="utf-8")
+        (queue / "1-list.json").write_text("[1, 2]", encoding="utf-8")
+        (queue / "2-no-id.json").write_text('{"slug": "x", "questions": [{}]}', encoding="utf-8")
+        _ask(tmp_path, "B", "b1?")
+        assert _shown(tmp_path)["session_id"] == "B"
+        assert read_focus_pending(tmp_path)["session_id"] == "B"
+        assert "Skipping unreadable queued focus Q&A entry" in caplog.text
+        # A corrupt entry under a session's own name is not that session's.
+        (queue / "C.json").write_text("{oops", encoding="utf-8")
+        assert read_focus_pending(tmp_path, "C") is None
+
+    def test_an_entry_without_questions_is_passed_over(self, tmp_path: Path) -> None:
+        write_focus_pending(tmp_path, "A", "a", {}, {})
+        _ask(tmp_path, "B", "b1?")
+        assert _shown(tmp_path)["session_id"] == "B"
+
+    def test_an_unreadable_questions_file_is_replaced_by_the_next_session(
+        self, tmp_path: Path,
+    ) -> None:
+        (tmp_path / FOCUS_QUESTIONS_FILE).write_text("{half", encoding="utf-8")
+        assert _ask(tmp_path, "B", "b1?") is True
+        assert _shown(tmp_path)["session_id"] == "B"
+
+    def test_a_session_id_is_kept_inside_the_queue_directory(self, tmp_path: Path) -> None:
+        path = write_focus_pending(tmp_path, "../../etc/x", "a", {}, {})
+        assert path.parent == tmp_path / FOCUS_PENDING_DIR
+        assert read_focus_pending(tmp_path, "../../etc/x")["slug"] == "a"
+
+
+class TestLegacyPendingMigration:
+    """A 0.4.x/0.5.0 single ``focus-pending.json`` moves into the queue."""
+
+    def _legacy(self, state_dir: Path, *, status: str = "pending") -> bytes:
+        (state_dir / FOCUS_PENDING_FILE).write_text(json.dumps({
+            "session_id": "old", "slug": "old-slug",
+            "sop_template": {"title": "Old"}, "procedure": {"id": "old-slug"},
+        }), encoding="utf-8")
+        write_focus_questions(state_dir, "old", "old-slug", _qs("o1?", "o2?"), title="Old")
+        if status != "pending":
+            data = dict(_shown(state_dir), status=status, answers={"0": "x"})
+            (state_dir / FOCUS_QUESTIONS_FILE).write_text(json.dumps(data), encoding="utf-8")
+        return (state_dir / FOCUS_QUESTIONS_FILE).read_bytes()
+
+    @pytest.mark.parametrize("status", ["pending", "answered"])
+    def test_the_legacy_file_is_queued_under_its_session(self, tmp_path: Path, status) -> None:
+        before = self._legacy(tmp_path, status=status)
+        assert restore_focus_queue(tmp_path) is None  # the app already shows it
+        assert not (tmp_path / FOCUS_PENDING_FILE).exists()
+        entry = read_focus_pending(tmp_path, "old")
+        assert (entry["slug"], entry["title"], entry["procedure"]) == (
+            "old-slug", "Old", {"id": "old-slug"},
+        )
+        assert [q["question"] for q in entry["questions"]] == ["o1?", "o2?"]
+        assert (tmp_path / FOCUS_QUESTIONS_FILE).read_bytes() == before
+        # Idempotent: a second start changes nothing.
+        queued = sorted(p.read_bytes() for p in (tmp_path / FOCUS_PENDING_DIR).iterdir())
+        assert restore_focus_queue(tmp_path) is None
+        assert sorted(p.read_bytes() for p in (tmp_path / FOCUS_PENDING_DIR).iterdir()) == queued
+        assert (tmp_path / FOCUS_QUESTIONS_FILE).read_bytes() == before
+
+    def test_an_already_queued_session_is_kept(self, tmp_path: Path) -> None:
+        self._legacy(tmp_path)
+        write_focus_pending(tmp_path, "old", "old-slug", {}, {"id": "newer"})
+        restore_focus_queue(tmp_path)
+        assert not (tmp_path / FOCUS_PENDING_FILE).exists()
+        assert read_focus_pending(tmp_path, "old")["procedure"] == {"id": "newer"}
+
+    def test_a_corrupt_legacy_file_is_left_and_the_worker_goes_on(self, tmp_path: Path) -> None:
+        (tmp_path / FOCUS_PENDING_FILE).write_text("{broken", encoding="utf-8")
+        _ask(tmp_path, "B", "b1?")
+        clear_focus_qa_files(tmp_path, "nobody")  # the questions file goes
+        assert restore_focus_queue(tmp_path) == "B"
+        assert (tmp_path / FOCUS_PENDING_FILE).exists()
+
+    def test_startup_shows_the_oldest_queued_session(self, tmp_path: Path) -> None:
+        _ask(tmp_path, "A", "a1?")
+        _ask(tmp_path, "B", "b1?")
+        (tmp_path / FOCUS_QUESTIONS_FILE).unlink()
+        assert restore_focus_queue(tmp_path) == "A"
+        assert restore_focus_queue(tmp_path) is None
 
 
 class TestParseQAResult:
