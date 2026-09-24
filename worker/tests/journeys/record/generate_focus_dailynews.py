@@ -322,7 +322,7 @@ RUNS: dict[str, Run] = {run.name: run for run in (
             Story(
                 rank=5,
                 title="Measuring how people really read on screens",
-                url="https://research.example.com/reading-on-screens",
+                url="https://research.example.com/articles/48213",
                 points=330,
                 outcome="archived",
                 blocker=PAYWALL,
@@ -391,7 +391,7 @@ RUNS: dict[str, Run] = {run.name: run for run in (
             Story(
                 rank=6,
                 title="Energy use of local language models, measured",
-                url="https://research.example.com/local-model-energy",
+                url="https://research.example.com/articles/51877",
                 points=297,
                 outcome="archived",
                 blocker=PAYWALL,
@@ -628,8 +628,9 @@ def host_of(url: str) -> str:
     return url.split("/")[2]
 
 
-def archive_url(run: Run, story: Story) -> str:
-    return f"https://{ARCHIVE_HOST}/{run.start:%Y.%m.%d}/{story.url}"
+def archive_url(story: Story) -> str:
+    # The archive's lookup form submits the story's link as a query.
+    return f"https://{ARCHIVE_HOST}/?url={story.url}"
 
 
 def front_page_headlines(run: Run) -> list[tuple[int, str, int, str]]:
@@ -654,8 +655,8 @@ def blocked_ocr(story: Story) -> list[str]:
     return [story.url, story.title, host_of(story.url), *story.blocker]
 
 
-def archive_ocr(run: Run, story: Story) -> list[str]:
-    return [archive_url(run, story), ARCHIVE_HOST, f"Saved from {story.url}",
+def archive_ocr(story: Story) -> list[str]:
+    return [archive_url(story), ARCHIVE_HOST, f"Saved from {story.url}",
             story.title, *story.body]
 
 
@@ -817,8 +818,8 @@ def cycles(run: Run) -> list[Cycle]:
         if story.outcome == "archived":
             reading = start + PAYWALL_S
             pages.append((start, reading, blocked))
-            story_page = Page(archive_url(run, story), f"{story.title} - {ARCHIVE_HOST}",
-                              archive_ocr(run, story), archive_dom(story))
+            story_page = Page(archive_url(story), f"{story.title} - {ARCHIVE_HOST}",
+                              archive_ocr(story), archive_dom(story))
         copy_at = reading + READ_S
         notes_from = copy_at + 3
         if i == last:
