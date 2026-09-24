@@ -1,6 +1,7 @@
 import SwiftUI
 
 struct FAQView: View {
+    @EnvironmentObject var appState: AppState
     @State private var expandedId: String?
 
     private let darkNavy = Color.primary
@@ -95,10 +96,70 @@ struct FAQView: View {
         )
     }
 
-    // MARK: - Data
-
     private var sections: [FAQSection] {
-        [
+        FAQContent.sections(
+            vlmMode: appState.vlmMode, provider: appState.vlmProvider, model: appState.vlmModel
+        )
+    }
+}
+
+// MARK: - Models
+
+struct FAQSection: Identifiable {
+    let id: String
+    let title: String
+    let icon: String
+    let items: [FAQItem]
+}
+
+struct FAQItem: Identifiable {
+    let id: String
+    let question: String
+    let answer: String
+}
+
+// MARK: - Content
+
+/// The FAQ's questions and answers.  Where the truth depends on the
+/// configured model mode (`[vlm] mode` in config.toml), the answer is
+/// written for that mode: "local" gets the on-device answer, "remote"
+/// names the provider, its model and where its API key is kept.
+enum FAQContent {
+    /// The sentence only local mode may say.
+    static let onDevice = "Screen annotation, Skill writing and questions all run on your Mac through Ollama, and nothing you do leaves your computer."
+
+    static func providerName(_ provider: String?) -> String {
+        guard let provider, !provider.isEmpty else { return "the cloud provider" }
+        return OnboardingView.RemoteProvider(rawValue: provider)?.displayName ?? provider
+    }
+
+    /// What cloud mode sends, and where its key lives (remote mode only).
+    static func cloudModeNote(provider: String?, model: String?) -> String {
+        let name = providerName(provider)
+        let modelText = (model?.isEmpty == false) ? "model \(model!)" : "its default model"
+        return "Cloud mode is on: AgentHandover also sends \(name) (\(modelText)) the window title and details of events it cannot classify on its own. Screen annotation, Skill writing and questions still run on your Mac through Ollama, and screenshots stay on your Mac. The \(name) API key you entered is kept in the macOS Keychain (service com.agenthandover.app), not in a file."
+    }
+
+    static func sections(vlmMode: String, provider: String?, model: String?) -> [FAQSection] {
+        let remote = vlmMode == "remote"
+        let whereItRuns = remote ? cloudModeNote(provider: provider, model: model) : onDevice
+        let privacyAnswer: String
+        if remote {
+            privacyAnswer = "Mostly. \(cloudModeNote(provider: provider, model: model))\n\n"
+                + "- Screenshots are deleted once annotated; frames never annotated are deleted after 7 days.\n"
+                + "- API keys, tokens and passwords are redacted before anything is stored or sent to the local model.\n"
+                + "- Password managers, macOS password and permission prompts, and banking or login pages are never captured.\n\n"
+                + "To keep everything on your Mac, set mode = \"local\" under [vlm] in config.toml."
+        } else {
+            privacyAnswer = "Yes. \(onDevice)\n\n"
+                + "- Screenshots are read by the local model and deleted once annotated; frames never annotated are deleted after 7 days.\n"
+                + "- API keys, tokens and passwords are redacted before anything is stored or sent to the model.\n"
+                + "- Password managers, macOS password and permission prompts, and banking or login pages are never captured.\n"
+                + "- The only request the app makes on its own is its daily update check.\n"
+                + "- To remove everything: agenthandover uninstall --purge-data\n\n"
+                + "AgentHandover needs Accessibility and Screen Recording permissions to observe your screen."
+        }
+        return [
             FAQSection(
                 id: "basics",
                 title: "Getting Started",
@@ -107,17 +168,17 @@ struct FAQView: View {
                     FAQItem(
                         id: "what-is",
                         question: "What is AgentHandover?",
-                        answer: "AgentHandover is a local apprentice that silently watches how you work on your Mac, learns your workflows, and turns them into step-by-step Skills that AI agents (like Claude Code, Cursor, or Codex) can execute for you.\n\nEverything runs locally on your machine. Your data never leaves your computer."
+                        answer: "AgentHandover watches how you work on your Mac, learns your workflows, and turns them into step-by-step Skills that AI agents (like Claude Code, Cursor, or Codex) can execute for you.\n\n\(whereItRuns)"
                     ),
                     FAQItem(
                         id: "focus-vs-observe",
                         question: "What's the difference between Focus Recording and Observe Me?",
-                        answer: "Focus Recording: You click \"Record a Focus Session\", name it (e.g. \"Send weekly report\"), perform the task, then stop. AgentHandover creates a precise, high-quality Skill from that single recording. Best for teaching specific workflows.\n\nObserve Me: Passive background observation. AgentHandover watches everything you do and detects repeated patterns over time. It takes longer but discovers workflows you might not think to record. You control when it's on."
+                        answer: "Focus Recording: You click \"Record a Focus Session\", name it (e.g. \"Send weekly report\"), perform the task, then stop. AgentHandover creates a Skill from that single recording. Best for teaching specific workflows.\n\nObserve Me: Passive background observation. AgentHandover notices when you repeat the same task and, once it has seen enough, drafts a Skill for it (at most three new drafts a week). It takes longer but discovers workflows you might not think to record. You control when it's on."
                     ),
                     FAQItem(
                         id: "privacy",
                         question: "Is my data private?",
-                        answer: "Yes. Everything stays on your machine:\n\n- Screenshots are processed locally by Qwen (a small AI model running on your Mac)\n- No data is sent to any cloud service\n- All analysis happens on-device\n- You can delete all data at any time\n\nAgentHandover needs Accessibility and Screen Recording permissions to observe your screen, but the data never leaves your computer."
+                        answer: privacyAnswer
                     ),
                 ]
             ),
@@ -129,22 +190,22 @@ struct FAQView: View {
                     FAQItem(
                         id: "how-long-focus",
                         question: "How long does it take to create a Skill from a Focus Recording?",
-                        answer: "After you stop recording, the worker processes your session in 2-5 minutes depending on the number of steps and your Mac's speed. You'll see a Q&A popup asking a few clarifying questions (like credentials or preferences), then the Skill appears in your Workflows."
+                        answer: "A few minutes. On a 16 GB test Mac, questions were ready 2.5 to 5 minutes after Stop. A window then asks up to three questions about what the recording could not show, and the Skill is in your Workflows as a draft."
                     ),
                     FAQItem(
                         id: "how-long-observe",
                         question: "How long does Observe Me take to create Skills?",
-                        answer: "Passive observation needs to see you repeat a workflow pattern multiple times before it generates a Skill. This typically takes days or weeks of regular use. Focus Recording is much faster for workflows you already know."
+                        answer: "Passive observation needs to see you repeat a workflow several times before it drafts a Skill. This typically takes days or weeks of regular use. Focus Recording is much faster for workflows you already know."
                     ),
                     FAQItem(
                         id: "qa-questions",
                         question: "Why does it ask me questions after recording?",
-                        answer: "The Q&A step fills in information that can't be seen on screen: login credentials to use, which option to pick when there are choices, whether to send or save a draft, etc. Your answers are stored in the Skill so the agent knows exactly what to do.\n\nYou can skip questions — the agent will ask you at execution time instead."
+                        answer: "The questions fill in what the screen can't show: what starts the task, when it counts as done, why you chose one option over another, or a step the recording did not settle (for example whether you pasted or typed a line). They come from what AgentHandover still doesn't know about the Skill: at most three after a recording, and five a week in all.\n\nYou can skip any question. The Skill keeps it as not yet known, and agents are told to ask you instead."
                     ),
                     FAQItem(
                         id: "approve",
                         question: "Do I need to approve Skills before agents can use them?",
-                        answer: "Yes. Every Skill, recorded or observed, starts as a draft. Agents see it only after you choose Approve for agents, and only while it is fresh and its goal, steps and done criteria are known. The Skill page shows what AgentHandover knows and what it still doesn't; agents are told to ask about the rest."
+                        answer: "Yes. Every Skill, focus-recorded or passively discovered, starts as a draft. Open it in Workflows, review the steps, and click Approve for Agents. Until then agents cannot see it.\n\nAfter approval, agents see it only while it is fresh and its goal, steps and done criteria are known. The Skill page shows what AgentHandover knows and what it still doesn't; agents are told to ask about the rest."
                     ),
                 ]
             ),
@@ -156,7 +217,7 @@ struct FAQView: View {
                     FAQItem(
                         id: "how-connect",
                         question: "How do I connect an AI agent?",
-                        answer: "Click the agent name in the menu bar and hit \"Connect\". For Claude Code this runs `claude mcp add --scope user`, for Codex `codex mcp add`; for the others it adds AgentHandover's MCP server to the agent's MCP config file.\n\nSupported agents: Claude Code, Cursor, Windsurf, Codex, and any MCP-compatible tool.\n\nYou can also connect manually:\n  agenthandover connect claude-code\n  agenthandover connect mcp"
+                        answer: "Click the agent name in the menu bar and hit \"Connect\". For Claude Code this runs `claude mcp add --scope user`, for Codex `codex mcp add`; for Cursor, Windsurf and OpenClaw it adds AgentHandover's MCP server to the agent's MCP config file.\n\nYou can also connect from Terminal:\n  agenthandover connect claude-code\n  agenthandover connect codex\n  agenthandover connect mcp   (prints the MCP config for any other agent)"
                     ),
                     FAQItem(
                         id: "how-use-skill",
@@ -166,7 +227,7 @@ struct FAQView: View {
                     FAQItem(
                         id: "mcp-what",
                         question: "What is the MCP server?",
-                        answer: "MCP (Model Context Protocol) is a standard that lets AI agents use external tools. AgentHandover's MCP server gives agents access to:\n\n- list_ready_skills: See all your executable Skills\n- get_skill: Get the full procedure for a specific Skill\n- search_skills: Find Skills by description\n- report_execution_*: Report progress during execution\n\nWhen you click \"Connect\", this server is automatically configured."
+                        answer: "MCP (Model Context Protocol) is a standard that lets AI agents use external tools. AgentHandover's MCP server gives agents:\n\n- list_ready_skills: the Skills an agent may run, and the approved ones held back and why\n- get_skill: the full Skill\n- search_skills: find Skills by meaning\n- list_all_skills: every Skill, drafts included\n- get_user_profile: your tools, working hours and writing style\n- report_execution_start, report_step_result, report_execution_complete: report progress while running a Skill\n\nWhen you click \"Connect\", this server is configured for the agent."
                     ),
                 ]
             ),
@@ -177,18 +238,18 @@ struct FAQView: View {
                 items: [
                     FAQItem(
                         id: "how-improve",
-                        question: "How does automatic Skill improvement work?",
-                        answer: "When an agent executes a Skill, it reports back what happened at each step:\n\n1. Before starting: \"I'm about to execute this Skill\"\n2. After each step: \"Completed\" or \"I had to deviate because...\"\n3. When done: \"Finished successfully\" or \"Failed at step 3\"\n\nAgentHandover analyzes these reports and updates the Skill. If the agent consistently deviates at a step, that step gets rewritten. If it fails, the Skill gets flagged for your review.\n\nOver time, Skills get more accurate and reliable without you doing anything."
+                        question: "How do agent runs improve a Skill?",
+                        answer: "When an agent runs a Skill through the MCP server, it reports each step (completed, or what it did instead) and the outcome. AgentHandover keeps every run and:\n\n- tracks how agent runs go, apart from how well the Skill is grounded in what you did\n- keeps what the agent did at a deviated step as an observed alternative\n- after three runs that follow the steps as written, counts the steps as confirmed\n- when a run deviates where a decision was only a guess, marks that decision unknown and asks you about it\n\nIt never rewrites your steps on its own: the Skill changes through your answers and your review."
                     ),
                     FAQItem(
                         id: "knowledge-base",
                         question: "What is the Knowledge Base?",
-                        answer: "The Knowledge Base is where AgentHandover stores everything it learns:\n\n- Skills (step-by-step procedures)\n- Your profile (tools you use, working hours, preferences)\n- Decision rules (when you choose X over Y)\n- Constraints and guardrails\n\nIt lives at ~/.agenthandover/knowledge/ and is readable by any tool. The MCP server reads from it to serve Skills to agents."
+                        answer: "The Knowledge Base is where AgentHandover keeps what it learns:\n\n- Skills (steps, strategy, decisions, guardrails, and what is still unknown)\n- Your profile (tools you use, working hours, writing style)\n- Voice profiles per workflow\n\nIt is stored in AgentHandover's database and exported as files to ~/.agenthandover/knowledge/, readable by any tool. The MCP server serves it to agents."
                     ),
                     FAQItem(
                         id: "voice-profile",
                         question: "How does AgentHandover learn my voice and style?",
-                        answer: "As you work, AgentHandover builds a Voice Profile that captures how you communicate:\n\n- Writing tone (formal, casual, technical)\n- Common phrases and patterns you use\n- Email and message formatting preferences\n- How you address different people\n\nWhen an agent executes a Skill that involves writing (emails, messages, docs), it uses your Voice Profile to match your style — so the output sounds like you, not a generic AI.\n\nThe profile improves over time as AgentHandover observes more of your communication. Agents can access it via the MCP server's get_user_profile tool."
+                        answer: "From the text you type and copy while you work, AgentHandover builds a Voice Profile per workflow: formality, sentence length, vocabulary and emoji use.\n\nWhen an agent runs a Skill that involves writing (emails, messages, docs), the Skill carries your Voice Profile so the output sounds like you.\n\nThe profile strengthens as AgentHandover sees more of your writing. Agents can read your overall style with the MCP server's get_user_profile tool."
                     ),
                 ]
             ),
@@ -200,22 +261,22 @@ struct FAQView: View {
                     FAQItem(
                         id: "permissions",
                         question: "The app says permissions are missing",
-                        answer: "AgentHandover needs two macOS permissions:\n\n1. Accessibility: Lets it see window titles and app names\n2. Screen Recording: Lets it capture screenshots for analysis\n\nGo to System Settings > Privacy & Security and toggle AgentHandover ON for both. If AgentHandover doesn't appear in the list, try removing and re-adding it, or reinstall the app."
+                        answer: "AgentHandover needs two macOS permissions:\n\n1. Accessibility: Lets it see window titles and app names\n2. Screen Recording: Lets it capture screenshots for analysis\n\nGo to System Settings > Privacy & Security and toggle AgentHandover ON for both (macOS asks you to quit and reopen the app after Screen Recording). If AgentHandover doesn't appear in the list, try removing and re-adding it, or reinstall the app."
                     ),
                     FAQItem(
                         id: "no-skills",
                         question: "I recorded a Focus Session but no Skill appeared",
-                        answer: "Check these:\n\n1. Is the worker running? (Look for the green dot next to \"Worker\" in the menu bar footer)\n2. Wait 2-5 minutes — processing takes time, especially on 8GB Macs\n3. Check for Q&A: A popup may be waiting for your answers\n4. Run agenthandover status in Terminal to see what's happening\n\nIf the worker shows errors, try: agenthandover sops failed"
+                        answer: "Check these:\n\n1. Is AgentHandover observing? A recording made while observation was off captures nothing, and the menu says so.\n2. Wait a few minutes: processing takes time.\n3. Check for questions: a window may be waiting for your answers.\n4. Did you record a task you already have as a Skill? The recording then counts as a run of that Skill, and no new Skill appears.\n5. Run agenthandover status in Terminal to see what's happening.\n\nIf the worker shows errors, try: agenthandover skills failed"
                     ),
                     FAQItem(
                         id: "vlm",
                         question: "What is VLM / Qwen and do I need it?",
-                        answer: "VLM (Vision Language Model) is the local AI that analyzes your screenshots. AgentHandover uses Qwen 3.5, small models that run on your Mac via Ollama (the 2B annotates on 8 GB Macs, the 4B elsewhere; the 4B writes Skills up to 16 GB).\n\nYes, you need it. Without VLM, AgentHandover can't understand what's on your screen. The app will prompt you to set up Ollama during onboarding.\n\nRequirements: 8GB+ RAM (16GB recommended), ~4GB disk for the models (~6GB on 8GB Macs)."
+                        answer: "VLM (Vision Language Model) is the local AI that reads your screen. AgentHandover runs small models on your Mac via Ollama: Qwen 3.5 2B annotates on 8 GB Macs and Qwen 3.5 4B elsewhere; Qwen 3.5 4B writes Skills up to 16 GB, and a Gemma 4 model from 24 GB.\n\nYes, you need it. Without it, AgentHandover can't understand what's on your screen. The app sets up Ollama during onboarding.\n\nRequirements: 8 GB+ RAM (16 GB recommended); the models take ~4 GB of disk on 16 GB Macs and ~6 GB on 8 GB Macs."
                     ),
                     FAQItem(
                         id: "agent-zero",
                         question: "Agent says 0 procedures available",
-                        answer: "Make sure you've:\n\n1. Recorded and completed at least one Focus Session\n2. Answered the Q&A questions when prompted\n3. Run: agenthandover connect claude-code (to refresh)\n\nThe Skill needs to reach \"agent_ready\" status. Check with: agenthandover skills list"
+                        answer: "Make sure you've:\n\n1. Opened the Skill in Workflows and clicked Approve for Agents\n2. Answered its open questions: a Skill whose goal, steps or done criteria are unknown is held back\n3. Run: agenthandover connect claude-code (to refresh)\n\nThe MCP server's list_ready_skills names every approved Skill it holds back and why. Check your Skills with: agenthandover skills list"
                     ),
                 ]
             ),
@@ -223,22 +284,8 @@ struct FAQView: View {
     }
 }
 
-// MARK: - Models
-
-private struct FAQSection: Identifiable {
-    let id: String
-    let title: String
-    let icon: String
-    let items: [FAQItem]
-}
-
-private struct FAQItem: Identifiable {
-    let id: String
-    let question: String
-    let answer: String
-}
-
 #Preview {
     FAQView()
+        .environmentObject(AppState())
         .frame(width: 560, height: 700)
 }

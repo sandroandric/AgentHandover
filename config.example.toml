@@ -2,39 +2,35 @@
 # Copy to the OS-appropriate location:
 #   macOS:   ~/Library/Application Support/agenthandover/config.toml
 #   Linux:   ~/.config/agenthandover/config.toml
+# Every key is optional; a missing key keeps the default shown here. Every
+# key listed is read by the daemon (crates/common/src/config.rs) or the
+# worker (worker/src/agenthandover_worker/config.py); a test keeps it so.
 
 [observer]
-t_dwell_seconds = 3
-t_scroll_read_seconds = 8
 capture_screenshots = true
 screenshot_max_per_minute = 20  # ceiling on frames kept per minute (passive)
 focus_screenshot_max_per_minute = 40  # separate ceiling during a focus recording
-screenshot_format = "jpeg"       # "jpeg" (half-res, recommended) or "png" (full-res)
-screenshot_quality = 70          # JPEG quality 1-100 (only used for jpeg format)
-screenshot_scale = 0.5           # fraction of native (Retina) pixels; 0.5 recommended for VLM
+screenshot_quality = 70          # JPEG quality 1-100
+screenshot_scale = 0.5           # fraction of native (Retina) pixels of the focused window
 dhash_threshold = 1              # changed screen blocks needed to keep a frame (higher = fewer frames)
 
 [privacy]
-enable_inline_secret_redaction = true
-enable_clipboard_preview = false
+enable_clipboard_preview = false # store the first characters of copied text
 clipboard_preview_max_chars = 200
-secure_field_drop = true
 capture_input_values = false     # include <input>/<textarea> values in browser DOM snapshots
 read_app_state = false           # read the open document/page/message from Safari, Mail, Notes... via AppleScript; opt in during onboarding (macOS asks per app; apps not granted are skipped, `agenthandover doctor` lists them)
 
-[browser]
-extension_id = "jpemkdcihaijkolbkankcldmiimmmnfo"
-native_host_name = "com.agenthandover.host"
-deny_network_egress = true
-
 [storage]
-retention_days_raw = 14
+retention_days_raw = 14          # raw events older than this are deleted by the daemon's maintenance
 retention_days_episodes = 90
-sqlite_wal_mode = true
 vacuum_min_free_gb = 5
 vacuum_safety_multiplier = 2.5
 
 [idle_jobs]
+# The idle-time gate: the fallback VLM queue runs, and passive discovery
+# runs early (instead of every 2 hours), only inside the window and when
+# all of these hold. Passive annotation has its own lighter rule (AC
+# power, a locked screen, or two minutes without input).
 require_ac_power = true
 min_battery_percent = 50
 max_cpu_percent = 30
@@ -42,30 +38,23 @@ max_temp_c = 80
 run_window_local_time = "01:00-05:00"
 
 [vlm]
-enabled = true
-max_jobs_per_day = 50
-max_queue_size = 500
-job_ttl_days = 7
-max_compute_minutes_per_day = 20
-# backend = "ollama"           # "ollama", "openai-compat", "mock"
-# timeout_seconds = 120
-# --- ollama specific ---
+job_ttl_days = 7                 # screenshots never annotated are deleted after this many days
 # ollama_host = "http://localhost:11434"   # another host: doctor checks only its version, not installs or memory
-# --- openai-compat specific ---
-# api_key = ""                 # or set AGENTHANDOVER_API_KEY / OPENAI_API_KEY env var
-# base_url = ""                # for local providers (vLLM, LM Studio, etc.)
 # --- remote mode (cloud APIs) ---
+# Screen annotation, Skill writing and questions always run on Ollama.
+# Remote mode sends the fallback checks (the window title and details of
+# events the local pipeline could not classify) to a cloud API.
 # mode = "local"               # "local" (default) or "remote" (cloud API)
 # provider = "openai"          # "openai" | "anthropic" | "google"
 # model = "gpt-4o-mini"        # provider-specific model name
-# api_key_env = "OPENAI_API_KEY"  # env var name (NEVER store keys directly!)
-# --- v2 scene annotation pipeline ---
+# api_key_env = "OPENAI_API_KEY"  # env var holding the key; else the key the app stored in the Keychain
+# --- scene annotation pipeline ---
 # Model tiers: the table is TIERS in worker/src/agenthandover_worker/
 # model_profiles.py, installed as tiers.json next to this file (copy in
 # resources/tiers.json).  Onboarding and `agenthandover setup` write
 # `tier`, `annotation_model` and `sop_model`; a missing model key falls
 # back to the named tier, else to the tier this Mac's RAM recommends:
-#   standard     (any):  qwen3.5:2b-q4_K_M annotates, qwen3.5:4b writes
+#   standard     (8GB):  qwen3.5:2b-q4_K_M annotates, qwen3.5:4b writes
 #                        Skills (one model loaded at a time)
 #   recommended  (16GB): qwen3.5:4b annotates and writes Skills (it wrote
 #                        Skills faster than gemma4:12b-it-qat on a 16 GB Mac)
@@ -96,98 +85,59 @@ max_rows = 50000                   # hard cap; the least recently updated vector
 max_session_hours = 4              # a recording never stopped is closed as stale after this long
 
 [llm]
+# The SOP text enhancer of the older focus path, used only when
+# [vlm] annotation_enabled = false.
 enhance_sops = true
 max_enhancements_per_day = 20
-# model = "llama3.2:3b"        # lighter text model for local; empty = inherit from vlm
+# model = ""                   # empty = inherit from [vlm]
 # timeout_seconds = 60
 # temperature = 0.3
 # max_tokens = 800
 
 [openclaw]
-workspace_path = "~/.openclaw/workspace"
-sop_output_dir = "memory/apprentice/sops"
-index_path = "memory/apprentice/index.md"
-atomic_writes = true
+workspace_path = "~/.openclaw/workspace"   # where `agenthandover connect openclaw` looks for the workspace
 
 [sop]
-# When false (default), generated SOPs are saved as drafts for human review
-# in the app. Set to true to mark them approved without review. Either way,
-# nothing is written where agents read (Skills, SOP files) until you
-# "Approve for agents" in the app.
+# When false (default), generated Skills are saved as drafts for review in
+# the app. Set to true to mark the draft record approved without review.
+# Either way, nothing is written where agents read (Skills, SOP files, the
+# MCP server's ready list) until you "Approve for agents" in the app.
 auto_approve = false
 
 [export]
-adapter = "openclaw"           # "openclaw", "generic", "skill-md", "claude-skill" or "all"
-json_export = false            # also write .json alongside .md
-# generic_output_dir = "~/Library/Application Support/agenthandover/sops"
+adapter = "openclaw"           # "openclaw", "generic", "skill-md", "claude-skill" or "all" (a pkg install writes "all")
 # claude_skills_dir = "~/.claude/skills"   # where Claude Code skills are written
 
-# ─── Phase 2+: Knowledge base, trust & privacy zones ───────────────
-
 [knowledge]
-# Root directory for the portable knowledge base.
-# Any AI agent can read this directory to execute your workflows.
-root_dir = "~/.agenthandover/knowledge"
-# Time to run daily batch processing (HH:MM, local time)
-daily_batch_time = "23:30"
-# Minimum days of data before pattern detection kicks in
-pattern_detection_min_days = 3
-# Enable the local HTTP query API for agents (default: true)
+# The local HTTP query API for agents (loopback only; POSTs need the token).
 query_api_enabled = true
 query_api_port = 9477
 # Questions AgentHandover may ask you in any seven days (after a focus
 # recording, and as review cards about what it could not learn); 0 = none.
 weekly_question_budget = 5
-# Enable knowledge base sync (Phase 5)
-sync_enabled = false
-# sync_remote = ""             # rsync-style remote path or URL
-
-[trust]
-# Default trust level for new procedures:
-#   "observe" | "suggest" | "draft" | "execute_with_approval" | "autonomous"
-default_trust_level = "observe"
-# Minimum observations before a procedure can be promoted beyond "observe"
-min_observations_for_promotion = 3
-# Minimum success rate (0.0–1.0) before suggesting promotion
-min_success_rate_for_suggestion = 0.90
-# Never auto-promote — only suggest (human must approve)
-auto_promote = false
-
-[constraints]
-# Global guardrails applied to ALL procedures
-# max_spend_usd_without_approval = 100
-# blocked_domains = []         # domains agent must never interact with
-# require_confirmation_for = ["email", "payment", "deletion"]
-# max_autonomous_actions_per_hour = 20
 
 [privacy.zones]
 # Enforced by the daemon before it captures a frame, and again by the worker
 # on stored events. App patterns match the app name and the window title;
 # URL patterns match the browser's current page (origin + path). Globs,
-# case-insensitive. Password managers and banking/login URLs are always
-# blocked in addition to these lists.
+# case-insensitive. Password managers, macOS password and permission
+# prompts, and banking/payroll/login URLs are always blocked in addition
+# to these lists.
 # Apps that are always observed at full fidelity
 # full_observation = ["Safari", "Google Chrome"]
 # Apps where only metadata (app name, timestamp) is captured — no screenshots
 # metadata_only = ["Messages"]
 # Apps that are completely blocked from observation (glob patterns)
-# blocked = ["1Password*", "Bitwarden*", "LastPass*", "KeePassXC*", "Keychain Access"]
+# blocked = ["Signal*", "WhatsApp*"]
 # URL patterns that are always blocked (glob patterns, case-insensitive)
-# blocked_urls = ["*bank*", "*.gov/*", "*payroll*", "*login*password*"]
+# blocked_urls = ["*health*", "*.internal/*"]
 # Time windows during which all observation is paused (HH:MM-HH:MM, local time)
 # auto_pause = ["12:00-13:00"]
 
-# ---- Feature Toggles ----
-# Enable/disable Phase 3-6 features independently.
-# All default to true. Set to false to disable.
 [features]
-# 8-class activity taxonomy (Phase 1)
-activity_classification = true
-# Task continuity graph across interruptions (Phase 2)
-continuity_tracking = true
-# 7-state procedure lifecycle state machine (Phase 3)
-lifecycle_management = true
-# Curation queue with merge/upgrade/drift detection (Phase 5)
-curation = true
-# Runtime environment validation via pgrep (Phase 6)
-runtime_validation = true
+# Pipeline stages that can be switched off. All default to true.
+activity_classification = true     # 8-class work/noise taxonomy of annotated frames
+continuity_tracking = true         # task continuity across interruptions
+lifecycle_management = true        # the daily lifecycle pass (automatic transitions, e.g. to stale)
+curation = true                    # curation queue: merges and drift
+runtime_validation = true          # preflight: are a Skill's apps running (pgrep)

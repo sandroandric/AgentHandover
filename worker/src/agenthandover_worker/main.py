@@ -35,7 +35,7 @@ from agenthandover_worker.exporter import IndexGenerator
 from agenthandover_worker.focus_processor import FocusProcessor, recorded_observations
 from agenthandover_worker.frame_differ import FrameDiffer
 from agenthandover_worker.inference_runner import (
-    P2, InferenceRunner, model_wait, model_work,
+    P2, STATE_LOCK, InferenceRunner, model_wait, model_work,
 )
 from agenthandover_worker.negative_demo import NegativeDemoPruner
 from agenthandover_worker.model_profiles import migrate_vlm_file
@@ -4507,6 +4507,12 @@ def main(argv: list[str] | None = None) -> None:
         logger.info("Connected to database, entering main loop")
         start(ctx)
         ctx.runner = InferenceRunner(on_idle=ctx.model_scheduler.end_generation).start()
+        # The runner's queue is in memory: review-card answers whose step
+        # revision a stop cut short are queued again.
+        from agenthandover_worker.questions import requeue_step_answers
+
+        with STATE_LOCK:
+            requeue_step_answers(ctx.db, ctx.knowledge_base, ctx.sop_generator)
         if ctx.vector_kb is not None:
             ctx.runner.submit(
                 "startup-embedding", P2,

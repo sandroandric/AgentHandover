@@ -2,8 +2,8 @@
 //!
 //! `agenthandover focus start "title"` — start a focus recording session.
 //! `agenthandover focus stop` — stop the active focus recording session.
-//! `agenthandover focus finalize` — answer questions and complete SOP export.
-//! `agenthandover focus skip-questions` — skip questions and export with defaults.
+//! `agenthandover focus finalize` — answer the pending questions.
+//! `agenthandover focus skip-questions` — skip them (recorded as unanswered).
 
 use anyhow::Result;
 use chrono::Utc;
@@ -140,7 +140,7 @@ fn stop_in(state_dir: &std::path::Path) -> Result<()> {
     println!("  Session ID: {}", signal.session_id);
     println!();
     println!(
-        "The worker will process this session and generate a SOP on its next cycle."
+        "The worker will process this session and draft a Skill on its next cycle."
     );
     println!(
         "If the worker has questions, answer them with: {}",
@@ -150,7 +150,8 @@ fn stop_in(state_dir: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
-/// Answer pending focus questions interactively and trigger SOP export.
+/// Answer pending focus questions interactively; the worker then saves the
+/// Skill with the answers (a draft until you approve it).
 ///
 /// Reads `focus-questions.json`, presents each question to the user,
 /// collects answers, and writes them back with `status: "answered"`.
@@ -193,7 +194,7 @@ pub fn finalize() -> Result<()> {
             "{}",
             "Focus questions have already been answered.".dimmed()
         );
-        println!("The worker will export the SOP on its next cycle.");
+        println!("The worker will save the Skill on its next cycle.");
         return Ok(());
     }
 
@@ -261,14 +262,15 @@ pub fn finalize() -> Result<()> {
     write_questions_file(&questions_path, &qa_file)?;
 
     println!(
-        "{} Answers saved. The worker will merge them and export the SOP.",
+        "{} Answers saved. The worker will add them to the Skill; it stays a draft until you approve it.",
         "✓".green().bold()
     );
 
     Ok(())
 }
 
-/// Skip all pending focus questions and export with default answers.
+/// Skip all pending focus questions: the worker records them as unanswered
+/// (not yet known in the Skill) and saves the Skill as a draft.
 ///
 /// Sets `status: "skipped"` in `focus-questions.json` so the worker
 /// uses default values for all questions.
@@ -310,7 +312,7 @@ pub fn skip_questions() -> Result<()> {
     write_questions_file(&questions_path, &qa_file)?;
 
     println!(
-        "{} Questions skipped. The worker will export with default values.",
+        "{} Questions skipped. The worker saves the Skill as a draft, with them not yet known.",
         "→".yellow().bold()
     );
 

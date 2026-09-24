@@ -649,3 +649,130 @@ def test_the_control_thread_passes_the_sop_generator_to_the_micro_answer(
             patch("agenthandover_worker.main._status_dir", return_value=tmp_path):
         control.trigger_handlers(ctx)["micro-answer"]({"question_id": "q", "answer": "a"})
     assert apply.call_args.kwargs["reviser"] is reviser
+
+
+
+# ---------------------------------------------------------------------------
+# A worker restart queues again the revisions it had not run
+# ---------------------------------------------------------------------------
+
+_REVISION = {"revisions": [{
+    "answer": 1, "replaces": [4],
+    "steps": [{"action": "Type the source line", "input": iana.LINE_2, "verify": ""}],
+}]}
+
+
+def _clarification(proc: dict, card: qs.Question) -> dict:
+    [entry] = [c for c in proc["agent_clarifications"] if c.get("question_id") == card.id]
+    return entry
+
+
+def test_a_restart_queues_the_revision_a_stop_cut_short_once(
+    db, kb, tmp_path: Path, runner: InferenceRunner,
+) -> None:
+    """The answer was recorded and its job queued, then the worker stopped
+    (the queue lives in memory): at the next start the revision is queued
+    again, runs on the inference thread, records its result, and is never
+    queued a second time."""
+    card = _typed_line_card(db, kb, tmp_path)
+    # The answer as the stopped worker left it: recorded, its job lost.
+    assert qs.apply_answer({"question_id": card.id, "answer": CARD_ANSWER},
+                           db, kb, tmp_path, now=NOW, reviser=None)
+    assert "revision" not in _clarification(kb.get_procedure(card.subject), card)
+    assert [q.id for q, _ in qs.pending_step_answers(db, kb)] == [card.id]
+
+    reviser = _Reviser(_REVISION)
+    reviser.go.clear()
+    assert qs.requeue_step_answers(db, kb, reviser) == 1
+    # Queued, not run on this (the control) thread, and one job per key.
+    assert qs.requeue_step_answers(db, kb, reviser) == 1
+    status = runner.status()
+    assert status["depth"] == 1
+    assert (status["running"] or status["queued"][0]) == f"P0 {REVISION_KEY}{card.id}"
+    reviser.go.set()
+    assert runner.wait_idle(10)
+    [(prompt, thread)] = reviser.calls
+    assert thread != threading.get_ident()
+    assert f"Answer: {CARD_ANSWER}" in prompt
+
+    saved = kb.get_procedure(card.subject)
+    assert saved["steps"][3]["evidence"]["source"] == "user_answer"
+    assert saved["steps"][3]["input"] == iana.LINE_2
+    assert _clarification(saved, card)["revision"] == qs.REVISION_REVISED
+    # The next start queues nothing.
+    assert qs.pending_step_answers(db, kb) == []
+    assert qs.requeue_step_answers(db, kb, _Reviser(_REVISION)) == 0
+    assert runner.wait_idle(10) and runner.status()["completed"] == 1
+
+
+def test_a_model_that_is_down_or_times_out_leaves_the_revision_for_the_next_start(
+    db, kb, tmp_path: Path, runner: InferenceRunner,
+) -> None:
+    from agenthandover_worker.ollama import OllamaUnavailable
+
+    card = _typed_line_card(db, kb, tmp_path)
+    down = _Reviser(error=OllamaUnavailable("the generation model could not be loaded"))
+    assert qs.apply_answer({"question_id": card.id, "answer": CARD_ANSWER},
+                           db, kb, tmp_path, now=NOW, reviser=down)
+    assert runner.wait_idle(10) and len(down.calls) == 1
+    assert "revision" not in _clarification(kb.get_procedure(card.subject), card)
+
+    slow = _Reviser(error=TimeoutError("the model did not answer in time"))
+    assert qs.requeue_step_answers(db, kb, slow) == 1
+    assert runner.wait_idle(10) and len(slow.calls) == 1
+    assert "revision" not in _clarification(kb.get_procedure(card.subject), card)
+    assert runner.status()["failed"] == 0
+
+    reviser = _Reviser(_REVISION)
+    assert qs.requeue_step_answers(db, kb, reviser) == 1
+    assert runner.wait_idle(10) and len(reviser.calls) == 1
+    assert _clarification(kb.get_procedure(card.subject), card)["revision"] == (
+        qs.REVISION_REVISED
+    )
+
+
+def test_an_unusable_or_rejected_revision_is_settled_and_not_queued_again(
+    db, kb, tmp_path: Path, runner: InferenceRunner,
+) -> None:
+    card = _typed_line_card(db, kb, tmp_path)
+    before = [s["action"] for s in kb.get_procedure(card.subject)["steps"]]
+    unusable = _Reviser(error=ValueError("no JSON object in the answer"))
+    assert qs.apply_answer({"question_id": card.id, "answer": CARD_ANSWER},
+                           db, kb, tmp_path, now=NOW, reviser=unusable)
+    assert runner.wait_idle(10)
+    saved = kb.get_procedure(card.subject)
+    assert _clarification(saved, card)["revision"] == qs.REVISION_UNCHANGED
+    assert [s["action"] for s in saved["steps"]] == before
+    assert qs.requeue_step_answers(db, kb, _Reviser(_REVISION)) == 0
+
+    # A revision the rules reject (it replaces a step that does not exist)
+    # settles as unchanged too.
+    del _clarification(saved, card)["revision"]
+    kb.save_procedure(saved)
+    rejected = _Reviser({"revisions": [{
+        "answer": 1, "replaces": [99], "steps": [{"action": "Type it"}],
+    }]})
+    assert qs.requeue_step_answers(db, kb, rejected) == 1
+    assert runner.wait_idle(10) and len(rejected.calls) == 1
+    saved = kb.get_procedure(card.subject)
+    assert _clarification(saved, card)["revision"] == qs.REVISION_UNCHANGED
+    assert [s["action"] for s in saved["steps"]] == before
+
+
+def test_only_free_text_card_answers_are_queued_again(
+    db, kb, tmp_path: Path, runner: InferenceRunner,
+) -> None:
+    """A choice answer is applied in code, and a focus-window answer is
+    revised by its focus run: neither is queued again at startup."""
+    card = _typed_line_card(db, kb, tmp_path)
+    assert qs.apply_answer({"question_id": card.id, "answer": qs.LEAVE_IT_OUT},
+                           db, kb, tmp_path, now=NOW, reviser=None)
+    focus = qs.Question.from_json({**card.to_json(), "id": f"{card.id}-focus"})
+    qs.record_asked(db, [focus], channel=qs.CHANNEL_FOCUS, now=NOW)
+    db.close_micro_question(focus.id, status="answered", answer=CARD_ANSWER, at=NOW)
+    reviser = _Reviser(_REVISION)
+    assert qs.pending_step_answers(db, kb) == []
+    assert qs.requeue_step_answers(db, kb, reviser) == 0
+    assert runner.wait_idle(10) and reviser.calls == []
+    # Without a reviser (the v2 pipeline off) nothing is queued either.
+    assert qs.requeue_step_answers(db, kb, None) == 0

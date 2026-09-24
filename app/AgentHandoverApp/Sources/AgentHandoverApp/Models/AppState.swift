@@ -194,6 +194,7 @@ final class AppState: ObservableObject {
     @Published var vlmAvailable = false
     @Published var vlmMode: String = "local"
     @Published var vlmProvider: String?
+    @Published var vlmModel: String?
 
     // SOP Index
     @Published var sopDraftCount: Int = 0
@@ -493,7 +494,17 @@ final class AppState: ObservableObject {
         guard let content = try? String(contentsOf: configPath, encoding: .utf8) else {
             return
         }
-        // Simple TOML parsing for vlm section
+        let settings = Self.vlmSettings(inConfig: content)
+        vlmMode = settings.mode
+        vlmProvider = settings.provider
+        vlmModel = settings.model
+    }
+
+    /// `[vlm] mode`, `provider` and `model` from config.toml's text: each
+    /// key matched whole (`model` is not `mode`), comments and quotes
+    /// stripped; `mode` defaults to "local".
+    nonisolated static func vlmSettings(inConfig content: String) -> (mode: String, provider: String?, model: String?) {
+        var values: [String: String] = [:]
         var inVlmSection = false
         for line in content.components(separatedBy: "\n") {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
@@ -501,21 +512,19 @@ final class AppState: ObservableObject {
                 inVlmSection = trimmed == "[vlm]"
                 continue
             }
-            if inVlmSection {
-                if trimmed.hasPrefix("mode") {
-                    let value = trimmed.components(separatedBy: "=").last?
-                        .trimmingCharacters(in: .whitespaces)
-                        .trimmingCharacters(in: CharacterSet(charactersIn: "\"")) ?? "local"
-                    vlmMode = value
-                }
-                if trimmed.hasPrefix("provider") {
-                    let value = trimmed.components(separatedBy: "=").last?
-                        .trimmingCharacters(in: .whitespaces)
-                        .trimmingCharacters(in: CharacterSet(charactersIn: "\""))
-                    vlmProvider = value
-                }
-            }
+            guard inVlmSection, !trimmed.hasPrefix("#"),
+                  let equals = trimmed.firstIndex(of: "=") else { continue }
+            let key = trimmed[..<equals].trimmingCharacters(in: .whitespaces)
+            var value = String(trimmed[trimmed.index(after: equals)...])
+            if let hash = value.firstIndex(of: "#") { value = String(value[..<hash]) }
+            values[key] = value.trimmingCharacters(in: .whitespaces)
+                .trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
         }
+        let nonEmpty = { (key: String) -> String? in
+            guard let value = values[key], !value.isEmpty else { return nil }
+            return value
+        }
+        return (nonEmpty("mode") ?? "local", nonEmpty("provider"), nonEmpty("model"))
     }
 
     /// The user (or a launch) just started the services: show "Starting…"
