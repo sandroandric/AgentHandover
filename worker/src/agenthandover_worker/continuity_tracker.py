@@ -164,7 +164,10 @@ class ContinuityTracker:
         based on elapsed time, drops spans last seen more than
         ``SPAN_RETENTION_DAYS`` before the newest activity, and optionally
         matches procedures.
-        Running it again over the same segments ingests nothing twice.
+        Running it again over the same segments ingests nothing twice, and
+        a segment that overlaps time its span already counts (a task still
+        in progress, re-segmented longer) adds only its time past the
+        span's ``last_seen``.
 
         Args:
             segments: New :class:`TaskSegment` objects to integrate.
@@ -415,23 +418,32 @@ class ContinuityTracker:
         (running average), and continuity_confidence (running minimum).
         """
         n_existing = len(span.segments)
+        # The span's last_seen is its watermark: time up to it is counted.
+        # Passive discovery re-segments a sliding window, so a task still
+        # in progress comes back as a longer segment (a new content id)
+        # that starts before last_seen; only its time past the watermark
+        # is new, and it is no interruption.
+        watermark = _timestamp_to_epoch(span.last_seen)
+        overlaps = bool(watermark) and _timestamp_to_epoch(segment.start_time) < watermark
 
         # Add segment and edge
         span.segments.append(segment.segment_id)
         span.edges.append(edge)
 
         # Update last_seen (never move it backwards)
-        if segment.end_time and _timestamp_to_epoch(segment.end_time) >= _timestamp_to_epoch(
-            span.last_seen,
-        ):
+        if segment.end_time and _timestamp_to_epoch(segment.end_time) >= watermark:
             span.last_seen = segment.end_time
 
-        # Update total duration (add this segment's internal duration)
-        seg_duration = self._segment_duration_seconds(segment)
-        span.total_duration_seconds += seg_duration
+        # Update total duration: the segment's internal duration, or its
+        # part past the watermark when it overlaps time already counted.
+        if overlaps:
+            end = _timestamp_to_epoch(segment.end_time)
+            span.total_duration_seconds += max(int(end - watermark), 0)
+        else:
+            span.total_duration_seconds += self._segment_duration_seconds(segment)
 
-        # Update interruption count (any non-CONTINUE edge is an interruption)
-        if edge.continuity_type != ContinuityType.CONTINUE:
+        # Update interruption count (a non-CONTINUE edge after a gap)
+        if edge.continuity_type != ContinuityType.CONTINUE and not overlaps:
             span.interruption_count += 1
 
         # Update apps_involved (union, preserving order)
