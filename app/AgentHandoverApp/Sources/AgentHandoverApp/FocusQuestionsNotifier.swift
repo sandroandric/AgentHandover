@@ -36,6 +36,8 @@ final class FocusQuestionsNotifier: NSObject, UNUserNotificationCenterDelegate {
 
     /// Opens the Q&A window (set by the app delegate).
     var openQuestions: () -> Void = {}
+    /// Opens the Review Queue (set by the app delegate).
+    var openReviewQueue: () -> Void = {}
 
     private let defaults = UserDefaults.standard
 
@@ -58,6 +60,34 @@ final class FocusQuestionsNotifier: NSObject, UNUserNotificationCenterDelegate {
             }
         }
     }
+
+    /// Called when micro-questions.json changed: one notification for new
+    /// review-card questions, when the user allowed notifications (the
+    /// cards wait in the Review Queue and the day's digest either way).
+    func microQuestionsReady(_ questions: [MicroQuestion]) {
+        let last = defaults.string(forKey: MicroQuestionsNotice.lastNotifiedKey)
+        guard MicroQuestionsNotice.isNew(questions, lastNotified: last) else { return }
+        defaults.set(MicroQuestionsNotice.key(for: questions), forKey: MicroQuestionsNotice.lastNotifiedKey)
+
+        UNUserNotificationCenter.current().getNotificationSettings { settings in
+            let allowed = [.authorized, .provisional].contains(settings.authorizationStatus)
+                && settings.alertSetting != .disabled
+            guard allowed else { return }
+            Task { @MainActor in
+                let content = UNMutableNotificationContent()
+                content.title = MicroQuestionsNotice.title(for: questions)
+                content.body = MicroQuestionsNotice.body
+                content.sound = .default
+                let request = UNNotificationRequest(
+                    identifier: "\(Self.microIdentifierPrefix)\(UUID().uuidString)",
+                    content: content, trigger: nil
+                )
+                try? await UNUserNotificationCenter.current().add(request)
+            }
+        }
+    }
+
+    nonisolated static let microIdentifierPrefix = "micro-questions-"
 
     /// The Q&A window's "Notify me" button: the one place the app asks.
     func requestAuthorization(completion: @escaping @MainActor (Bool) -> Void) {
@@ -95,8 +125,13 @@ final class FocusQuestionsNotifier: NSObject, UNUserNotificationCenterDelegate {
         didReceive response: UNNotificationResponse,
         withCompletionHandler completionHandler: @escaping () -> Void
     ) {
+        let identifier = response.notification.request.identifier
         Task { @MainActor in
-            self.openQuestions()
+            if identifier.hasPrefix(Self.microIdentifierPrefix) {
+                self.openReviewQueue()
+            } else {
+                self.openQuestions()
+            }
             completionHandler()
         }
     }
