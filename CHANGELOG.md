@@ -43,7 +43,7 @@ are marked *(not yet recorded)*.
 - **Recognition of repeated workflows**: recurrence mining with at most 3
   new drafts a week; a session or recording of an existing Skill becomes a
   run and a branch. Proof: `test_workflow_observations.py`, J-ledger; the
-  three-week journey J-passive is *not yet recorded*.
+  three-week journey J-passive (recorded on the 16 GB test Mac).
 - **Agent runs feed Skills**: three runs as written confirm the steps; a
   deviation on a guessed decision reopens it as a question. Proof: J-mcp,
   `test_mcp_feedback.py`.
