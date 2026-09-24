@@ -32,16 +32,29 @@ Fault injection (control endpoints, not counted as API requests):
   ``/__cassette/reset``           clear both
 For a true refused connection, call ``stop()`` and later ``start()``: the
 server comes back on the same port.
+
+Pruning (cassettes are append-only, so a re-recording leaves the entries
+nobody asks for any more): run every journey in replay with
+``AH_CASSETTE_LOG=<file>``, which logs the keys each cassette served and
+missed and every test's outcome, then
+``python -m journeys.cassette prune --used-keys <file>`` (from
+``worker/tests``) drops the entries no journey requested.  It leaves a
+cassette alone when a test that opened it did not pass (failed, errored,
+xfailed), when a skipped test's reason names it (a skip marker waiting on
+a recording), when it missed a request, when no test opened it, and
+always for the self-test cassette, whose entries are hand-written.
 """
 
 from __future__ import annotations
 
 import base64
 import binascii
+import argparse
 import copy
 import hashlib
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -214,6 +227,13 @@ class Cassette:
         self._thread.join()
         self._server = None
         self._thread = None
+        with self._lock:
+            log_use({
+                "cassette": str(self.path.resolve()),
+                "test": current_test(),
+                "served": sorted({entry["key"] for entry in self.served}),
+                "misses": sorted(set(self.misses)),
+            })
 
     def __enter__(self) -> "Cassette":
         return self.start()
@@ -428,3 +448,135 @@ class _Handler(BaseHTTPRequestHandler):
 def open_cassette(journey: str, *, record: bool | None = None) -> Cassette:
     """The cassette for ``journey`` at ``cassettes/<journey>.jsonl``, not started."""
     return Cassette(CASSETTE_DIR / f"{journey}.jsonl", record=record)
+
+
+# ---------------------------------------------------------------------------
+# Usage log and pruning
+# ---------------------------------------------------------------------------
+
+USAGE_LOG_ENV = "AH_CASSETTE_LOG"
+# Hand-written entries that exercise every endpoint (test_cassette.py).
+_NEVER_PRUNED = frozenset({"cassette_selftest"})
+
+
+def current_test() -> str:
+    """The running test's node id (pytest's ``PYTEST_CURRENT_TEST``
+    without its phase), empty outside pytest."""
+    return os.environ.get("PYTEST_CURRENT_TEST", "").rsplit(" (", 1)[0]
+
+
+def log_use(record: dict) -> None:
+    """Append *record* to the usage log named by ``AH_CASSETTE_LOG``, if set."""
+    path = os.environ.get(USAGE_LOG_ENV)
+    if path:
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record, sort_keys=True) + "\n")
+
+
+def log_test_report(report) -> None:
+    """Log one pytest phase report (``pytest_runtest_logreport``): the
+    test's outcome and, for a skip or an xfail, its reason."""
+    if not os.environ.get(USAGE_LOG_ENV):
+        return
+    xfail = hasattr(report, "wasxfail")
+    reason = ""
+    if xfail:
+        reason = str(report.wasxfail)
+    elif report.skipped:
+        longrepr = report.longrepr
+        reason = str(longrepr[2] if isinstance(longrepr, tuple) else longrepr)
+    log_use({"test": report.nodeid, "when": report.when,
+             "outcome": "xfailed" if xfail else report.outcome, "reason": reason})
+
+
+def plan_prune(records: list[dict], cassette_dir: Path = CASSETTE_DIR) -> dict[str, dict]:
+    """Per cassette in *cassette_dir* (by stem): ``before`` and ``keep``
+    (the keys to keep, None to leave the file untouched) and ``why``."""
+    passed: dict[str, bool] = {}
+    reasons: list[str] = []
+    used: dict[Path, set[str]] = {}
+    missed: set[Path] = set()
+    openers: dict[Path, set[str]] = {}
+    for record in records:
+        if "outcome" in record:
+            ok = record["outcome"] == "passed"
+            passed[record["test"]] = passed.get(record["test"], True) and ok
+            if record["reason"]:
+                reasons.append(record["reason"])
+        elif "cassette" in record:
+            path = Path(record["cassette"])
+            used.setdefault(path, set()).update(record["served"])
+            openers.setdefault(path, set()).add(record["test"])
+            if record["misses"]:
+                missed.add(path)
+    if not passed:
+        raise ValueError("the usage log holds no test outcome: run the journeys "
+                         f"with {USAGE_LOG_ENV} set first")
+
+    plan: dict[str, dict] = {}
+    for path in sorted(cassette_dir.glob("*.jsonl")):
+        name, resolved = path.stem, path.resolve()
+        before = len(load_entries(path))
+        named = re.compile(rf"(?<![\w-]){re.escape(name)}(?![\w-])")
+        not_passed = sorted(t for t in openers.get(resolved, ())
+                            if not t or not passed.get(t, False))
+        why = ""
+        if name in _NEVER_PRUNED:
+            why = "hand-written self-test entries"
+        elif resolved not in used:
+            why = "no test opened it"
+        elif resolved in missed:
+            why = "a request missed it"
+        elif not_passed:
+            why = f"opened by a test that did not pass: {', '.join(not_passed)}"
+        elif any(named.search(reason) for reason in reasons):
+            why = "a skipped or xfailed test's reason names it"
+        plan[name] = {"before": before, "keep": None if why else used[resolved],
+                      "why": why}
+    return plan
+
+
+def prune(records: list[dict], cassette_dir: Path = CASSETTE_DIR,
+          *, dry_run: bool = False) -> dict[str, dict]:
+    """Apply :func:`plan_prune`: rewrite each prunable cassette with only
+    its used entries, lines kept byte for byte in their order.  Returns
+    the plan with ``after`` set."""
+    plan = plan_prune(records, cassette_dir)
+    for name, item in plan.items():
+        path = cassette_dir / f"{name}.jsonl"
+        keep = item["keep"]
+        if keep is None:
+            item["after"] = item["before"]
+            continue
+        lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+        kept = [line for line in lines
+                if line.strip() and json.loads(line)["key"] in keep]
+        item["after"] = len(kept)
+        if not dry_run and len(kept) != item["before"]:
+            path.write_text("".join(kept), encoding="utf-8")
+    return plan
+
+
+def _main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="python -m journeys.cassette")
+    commands = parser.add_subparsers(dest="command", required=True)
+    cmd = commands.add_parser("prune", help="drop the entries no journey requested")
+    cmd.add_argument("--used-keys", required=True, type=Path,
+                     help=f"the usage log a full journeys run wrote ({USAGE_LOG_ENV})")
+    cmd.add_argument("--dry-run", action="store_true", help="report, change nothing")
+    args = parser.parse_args(argv)
+    records = [json.loads(line) for line in
+               args.used_keys.read_text(encoding="utf-8").splitlines() if line.strip()]
+    try:
+        plan = prune(records, dry_run=args.dry_run)
+    except ValueError as exc:
+        print(f"prune: {exc}", file=sys.stderr)
+        return 2
+    for name, item in plan.items():
+        note = f"  (left alone: {item['why']})" if item["why"] else ""
+        print(f"{name}.jsonl: {item['before']} -> {item['after']}{note}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(_main())

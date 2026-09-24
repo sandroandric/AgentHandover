@@ -24,11 +24,15 @@ from agenthandover_worker import scene_annotator, sop_generator, task_segmenter
 from agenthandover_worker.llm_reasoning import LLMReasoner, ReasoningConfig
 from agenthandover_worker.ollama import OllamaClient
 from agenthandover_worker.vector_kb import VectorKB, VectorKBConfig
+from journeys import cassette as cassette_module
 from journeys.cassette import (
     Cassette,
     encode_response,
+    key_of,
     load_entries,
     open_cassette,
+    plan_prune,
+    prune,
     request_key,
 )
 
@@ -563,3 +567,123 @@ def test_main_points_the_llm_reasoner_at_the_configured_host(
         root.setLevel(root_level)
 
     assert built[0].ollama_host == "http://127.0.0.1:1"
+
+
+# ---------------------------------------------------------------------------
+# Usage log and pruning
+# ---------------------------------------------------------------------------
+
+
+def _entry(prompt: str) -> dict:
+    request = {"model": "m", "prompt": prompt}
+    return {"key": key_of("/api/generate", request), "path": "/api/generate",
+            "request": request, "response": {"response": prompt.upper()},
+            "source": "recorded"}
+
+
+def _write_cassette(directory: Path, name: str, prompts: list[str]) -> list[dict]:
+    entries = [_entry(p) for p in prompts]
+    (directory / f"{name}.jsonl").write_text(
+        "".join(json.dumps(e) + "\n" for e in entries), encoding="utf-8")
+    return entries
+
+
+def test_a_replay_logs_the_keys_it_served_and_missed(tmp_path, monkeypatch):
+    log = tmp_path / "usage.jsonl"
+    monkeypatch.setenv("AH_CASSETTE_LOG", str(log))
+    [used, unused] = _write_cassette(tmp_path, "journey", ["used", "unused"])
+    # Started and stopped by hand: leaving a ``with`` block would fail on the miss.
+    tape = Cassette(tmp_path / "journey.jsonl", record=False).start()
+    try:
+        assert _post(tape.host, "/api/generate",
+                     {"model": "m", "prompt": "used", "stream": False})[0] == 200
+        assert _post(tape.host, "/api/generate",
+                     {"model": "m", "prompt": "new", "stream": False})[0] == 500
+    finally:
+        tape.stop()
+    [record] = [json.loads(line) for line in log.read_text().splitlines()]
+    assert record["cassette"] == str((tmp_path / "journey.jsonl").resolve())
+    assert record["served"] == [used["key"]]
+    assert record["misses"] == [request_key("/api/generate", {"model": "m", "prompt": "new"})]
+    assert record["test"].endswith(
+        "test_cassette.py::test_a_replay_logs_the_keys_it_served_and_missed")
+    assert unused["key"] not in record["served"]
+
+
+def test_a_journey_run_logs_each_outcome_and_skip_reason(tmp_path, monkeypatch):
+    log = tmp_path / "usage.jsonl"
+    monkeypatch.setenv("AH_CASSETTE_LOG", str(log))
+
+    class Report:
+        def __init__(self, outcome, longrepr=None, wasxfail=None):
+            self.nodeid, self.when, self.outcome = "t.py::t", "call", outcome
+            self.skipped, self.longrepr = outcome == "skipped", longrepr
+            if wasxfail is not None:
+                self.wasxfail = wasxfail
+
+    cassette_module.log_test_report(Report("passed"))
+    cassette_module.log_test_report(Report("skipped", ("t.py", 3, "Skipped: needs x")))
+    cassette_module.log_test_report(Report("skipped", None, wasxfail="waits on y"))
+    records = [json.loads(line) for line in log.read_text().splitlines()]
+    assert [(r["outcome"], r["reason"]) for r in records] == [
+        ("passed", ""), ("skipped", "Skipped: needs x"), ("xfailed", "waits on y")]
+    monkeypatch.delenv("AH_CASSETTE_LOG")
+    cassette_module.log_test_report(Report("passed"))
+    assert len(log.read_text().splitlines()) == 3
+
+
+def test_prune_drops_only_what_no_passing_journey_asked_for(tmp_path):
+    """Unused entries go; a cassette a skip marker waits on, one a test
+    that did not pass opened, one with a miss, one nobody opened and the
+    self-test cassette are left alone."""
+    names = ("clean", "waited_on", "flaky", "missed", "unopened", "cassette_selftest")
+    entries = {name: _write_cassette(tmp_path, name, ["a", "b", "c"]) for name in names}
+    original = {name: (tmp_path / f"{name}.jsonl").read_bytes() for name in names}
+
+    def opened(name, test, served, misses=()):
+        return {"cassette": str((tmp_path / f"{name}.jsonl").resolve()), "test": test,
+                "served": [entries[name][i]["key"] for i in served],
+                "misses": list(misses)}
+
+    records = [
+        opened("clean", "j.py::one", [2]), opened("clean", "j.py::two", [0]),
+        opened("waited_on", "j.py::one", [0]),
+        opened("flaky", "j.py::bad", [0]),
+        opened("missed", "j.py::one", [0], misses=["k"]),
+        opened("cassette_selftest", "j.py::one", [0]),
+        *({"test": t, "when": w, "outcome": "passed", "reason": ""}
+          for t in ("j.py::one", "j.py::two") for w in ("setup", "call", "teardown")),
+        {"test": "j.py::bad", "when": "call", "outcome": "xfailed", "reason": "waits on L2"},
+        {"test": "j.py::later", "when": "setup", "outcome": "skipped",
+         "reason": "cassettes/waited_on.jsonl lacks the SOP request; re-record"},
+    ]
+    plan = prune(records, tmp_path, dry_run=True)
+    assert {n: (p["before"], p["after"]) for n, p in plan.items()} == {
+        "clean": (3, 2), **{n: (3, 3) for n in names if n != "clean"}}
+    assert plan["waited_on"]["why"].startswith("a skipped")
+    assert "j.py::bad" in plan["flaky"]["why"]
+    assert plan["missed"]["why"] == "a request missed it"
+    assert plan["unopened"]["why"] == "no test opened it"
+    assert all((tmp_path / f"{n}.jsonl").read_bytes() == original[n] for n in names)
+
+    prune(records, tmp_path)
+    lines = (tmp_path / "clean.jsonl").read_text().splitlines()
+    assert [json.loads(line)["key"] for line in lines] == [
+        entries["clean"][0]["key"], entries["clean"][2]["key"]]
+    assert set(load_entries(tmp_path / "clean.jsonl")) == {
+        entries["clean"][0]["key"], entries["clean"][2]["key"]}
+    assert all((tmp_path / f"{n}.jsonl").read_bytes() == original[n]
+               for n in names if n != "clean")
+    # A longer cassette name that merely starts with another's is not it.
+    records[-1]["reason"] = "cassettes/clean_performance.jsonl is not recorded yet"
+    assert plan_prune(records, tmp_path)["clean"]["why"] == ""
+
+
+def test_prune_refuses_a_log_without_a_journey_run(tmp_path, capsys):
+    _write_cassette(tmp_path, "clean", ["a"])
+    with pytest.raises(ValueError, match="no test outcome"):
+        plan_prune([], tmp_path)
+    log = tmp_path / "usage.jsonl"
+    log.write_text("")
+    assert cassette_module._main(["prune", "--used-keys", str(log)]) == 2
+    assert "no test outcome" in capsys.readouterr().err

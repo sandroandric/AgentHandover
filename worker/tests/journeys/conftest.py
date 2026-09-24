@@ -22,7 +22,7 @@ import pytest
 
 from agenthandover_worker import bundle_compiler, scene_annotator, staleness_detector
 from agenthandover_worker import main as worker_main
-from journeys.cassette import Cassette, open_cassette
+from journeys.cassette import Cassette, log_test_report, open_cassette
 from journeys.driver import Clock, JourneyWorker
 from journeys.fixture_loader import LoadedFixture, load_fixture
 
@@ -74,6 +74,12 @@ class TempHome:
             encoding="utf-8",
         )
         self.monkeypatch.setenv("OLLAMA_HOST", ollama_host)
+
+
+def pytest_runtest_logreport(report: pytest.TestReport) -> None:
+    """With ``AH_CASSETTE_LOG`` set, log each journey's outcome for
+    ``python -m journeys.cassette prune``."""
+    log_test_report(report)
 
 
 @pytest.fixture()
