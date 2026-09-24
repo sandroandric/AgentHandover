@@ -2058,7 +2058,7 @@ def _process_focus_sessions_v2(
         )
 
     # Clear the signal and the saved draft state.  The keyframes the SOP
-    # did not need are annotated in the next tick's annotation phase
+    # did not need are annotated by a later tick's focus-tail job
     # (``annotate_remaining``).
     _clear_focus_signal(signal_path)
     (state_dir / FOCUS_DRAFT_FILE).unlink(missing_ok=True)
