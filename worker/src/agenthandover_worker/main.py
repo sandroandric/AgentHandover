@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import signal
+import subprocess
 import sys
 import tempfile
 import time
@@ -35,6 +36,9 @@ from agenthandover_worker.evidence_tracker import ObservationEvidence, append_ob
 from agenthandover_worker.exporter import IndexGenerator
 from agenthandover_worker.focus_processor import FocusProcessor, recorded_observations
 from agenthandover_worker.frame_differ import DiffConfig, FrameDiffer
+from agenthandover_worker.inference_runner import (
+    P0, P1, P2, STATE_LOCK, InferenceRunner, model_wait, model_work,
+)
 from agenthandover_worker.negative_demo import NegativeDemoPruner
 from agenthandover_worker.model_profiles import migrate_vlm_file
 from agenthandover_worker.model_scheduler import ModelScheduler
@@ -89,6 +93,9 @@ from agenthandover_worker import __version__ as _WORKER_VERSION
 _DB_RETRY_MAX_SECONDS = 120
 _DB_RETRY_POLL_SECONDS = 5
 _IDLE_LOG_INTERVAL_SECONDS = 300  # 5 minutes
+# A control tick waits this long for the state the inference thread holds
+# while it runs Python; then it writes only the heartbeat (inference_runner).
+CONTROL_LOCK_WAIT_SECONDS = 5.0
 
 
 def _lint_and_log(sop_template: dict, label: str) -> bool:
@@ -193,8 +200,6 @@ def _read_keychain_api_key(provider: str) -> str:
 
     Returns the key string, or "" if not found / not on macOS.
     """
-    import subprocess
-
     if _platform.system() != "Darwin":
         return ""
 
@@ -787,8 +792,14 @@ def _write_worker_status(
     annotation_paused_reason: str | None = None,
     annotation_budget: dict | None = None,
     model_schedule: dict | None = None,
+    inference: dict | None = None,
 ) -> None:
     """Atomically write worker-status.json (tmp + fsync + rename).
+
+    ``inference`` is the inference thread's queue
+    (``InferenceRunner.status``) with ``annotation_backlog``, the passive
+    frames waiting for annotation; the daemon lowers its passive capture
+    cadence while that backlog is long.
 
     ``annotation_paused_reason`` says why passive annotation is not running
     (``annotation_budget_exhausted`` for the day,
@@ -824,6 +835,8 @@ def _write_worker_status(
         # Which model writes Skills, and why generation waits (memory, a
         # failed load), on a tier with two models.
         status["model_schedule"] = model_schedule
+    if inference is not None:
+        status["inference"] = inference
     # Tokens and Ollama timings per model since the worker started, and
     # model seconds per call type (since start and in the last hour).
     status["model_calls"] = MODEL_USAGE.snapshot()
@@ -1666,6 +1679,98 @@ def _process_focus_sessions(
     return exported
 
 
+# The post-recording questions run in a child process (a crash in the model
+# client cannot take the worker down), given this long: a 16 GB Mac can take
+# 10+ minutes per call.
+FOCUS_QA_TIMEOUT_SECONDS = 1800
+
+_FOCUS_QA_SCRIPT = (
+    "import json, sys, os\n"
+    "from dataclasses import asdict\n"
+    "from agenthandover_worker.focus_questioner import FocusQuestioner\n"
+    "from agenthandover_worker.llm_reasoning import LLMReasoner, ReasoningConfig\n"
+    "from agenthandover_worker.vlm_queue import VLMFallbackQueue\n"
+    "data = json.load(open(sys.argv[1]))\n"
+    "host = os.environ.get('OLLAMA_HOST', 'http://localhost:11434')\n"
+    # The Q&A model comes from AH_QNA_MODEL, which the parent always sets
+    # (the generation phase's model): the ReasoningConfig class default
+    # (qwen3.5:4b) silently failed for Gemma-4-only users (fixed in v0.2.3).
+    "model = os.environ.get('AH_QNA_MODEL', 'qwen3.5:4b')\n"
+    "reasoner = LLMReasoner(config=ReasoningConfig(model=model, ollama_host=host), vlm_queue=VLMFallbackQueue())\n"
+    "fq = FocusQuestioner(llm_reasoner=reasoner)\n"
+    "qs = fq.generate_questions(data['procedure'], data['sop'])\n"
+    "out = [asdict(q) if hasattr(q, '__dataclass_fields__') else q for q in qs]\n"
+    "json.dump(out, open(sys.argv[2], 'w'))\n"
+)
+
+
+def _generate_focus_questions(
+    procedure: dict,
+    sop: dict,
+    *,
+    ollama_host: str,
+    qna_model: str,
+    run: Callable[..., subprocess.CompletedProcess] | None = None,
+) -> list:
+    """The post-recording questions for *procedure*, from a child process.
+
+    Its input, script and output are temp files, removed whatever happens
+    (a failed or timed-out child, an unreadable answer, an exception).  The
+    wait is a model wait: the control thread runs meanwhile.  Returns [] when
+    the child fails or its output is unreadable (logged).
+    """
+    run = run or subprocess.run
+    paths: list[str] = []
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".json", delete=False,
+        ) as qa_input:
+            paths.append(qa_input.name)
+            json.dump({"procedure": procedure, "sop": sop}, qa_input)
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".py", delete=False,
+        ) as qa_script:
+            paths.append(qa_script.name)
+            qa_script.write(_FOCUS_QA_SCRIPT)
+        qa_output = qa_input.name + ".out"
+        paths.append(qa_output)
+
+        env = dict(os.environ)
+        env["OLLAMA_HOST"] = ollama_host
+        env["AH_QNA_MODEL"] = qna_model
+        with model_wait("focus questions subprocess"):
+            result = run(
+                [sys.executable, qa_script.name, qa_input.name, qa_output],
+                timeout=FOCUS_QA_TIMEOUT_SECONDS,
+                capture_output=True,
+                env=env,
+            )
+        stderr = (result.stderr or b"")[:500].decode("utf-8", errors="replace")
+        if result.returncode != 0:
+            logger.warning(
+                "Focus Q&A subprocess failed (exit %d): %s",
+                result.returncode, stderr,
+            )
+            return []
+        try:
+            with open(qa_output, encoding="utf-8") as f:
+                questions = json.load(f)
+        except (OSError, ValueError) as exc:
+            logger.warning(
+                "Focus Q&A subprocess exited 0 but its output is unreadable "
+                "(%s): %s; stderr: %s", type(exc).__name__, exc, stderr,
+            )
+            return []
+        logger.info("Focus Q&A subprocess completed: %d question(s)", len(questions))
+        return questions
+    finally:
+        for path in paths:
+            try:
+                os.unlink(path)
+            except FileNotFoundError:
+                pass
+
+
 def _process_focus_sessions_v2(
     db: "WorkerDB",
     *,
@@ -1875,106 +1980,10 @@ def _process_focus_sessions_v2(
         if focus_questioner is not None:
             logger.info("Focus Q&A: generating questions via subprocess...")
             try:
-                import subprocess as _sp
-                import tempfile as _tf
-
-                # Serialize inputs to a temp file
-                _qa_input = _tf.NamedTemporaryFile(
-                    mode="w", suffix=".json", delete=False,
+                questions = _generate_focus_questions(
+                    procedure_dict, result.sop,
+                    ollama_host=ollama_host, qna_model=qna_model,
                 )
-                import json as _json
-                _json.dump({
-                    "procedure": procedure_dict,
-                    "sop": result.sop,
-                }, _qa_input)
-                _qa_input.close()
-
-                _qa_output = _qa_input.name + ".out"
-
-                # Write Q&A script to temp file (avoids -c line length issues)
-                _qa_script_file = _tf.NamedTemporaryFile(
-                    mode="w", suffix=".py", delete=False,
-                )
-                _ollama_host = ollama_host
-
-                _qa_script_file.write(
-                    "import json, sys, os\n"
-                    "from dataclasses import asdict\n"
-                    "from agenthandover_worker.focus_questioner import FocusQuestioner\n"
-                    "from agenthandover_worker.llm_reasoning import LLMReasoner, ReasoningConfig\n"
-                    "from agenthandover_worker.vlm_queue import VLMFallbackQueue\n"
-                    "data = json.load(open(sys.argv[1]))\n"
-                    "host = os.environ.get('OLLAMA_HOST', 'http://localhost:11434')\n"
-                    # Read the Q&A model from the env the parent sets in
-                    # _qa_env below (AH_QNA_MODEL). Defaulting to the
-                    # ReasoningConfig class default (qwen3.5:4b) would
-                    # silently fail for Gemma-4-only users — fixed in v0.2.3.
-                    "model = os.environ.get('AH_QNA_MODEL', 'qwen3.5:4b')\n"
-                    "reasoner = LLMReasoner(config=ReasoningConfig(model=model, ollama_host=host), vlm_queue=VLMFallbackQueue())\n"
-                    "fq = FocusQuestioner(llm_reasoner=reasoner)\n"
-                    "qs = fq.generate_questions(data['procedure'], data['sop'])\n"
-                    "out = [asdict(q) if hasattr(q, '__dataclass_fields__') else q for q in qs]\n"
-                    "json.dump(out, open(sys.argv[2], 'w'))\n"
-                )
-                _qa_script_file.close()
-
-                # Run in separate process with 120s timeout, passing
-                # Ollama host + Q&A model through env.
-                _qa_env = dict(os.environ)
-                _qa_env["OLLAMA_HOST"] = _ollama_host
-                _qa_env["AH_QNA_MODEL"] = qna_model
-                _qa_result = _sp.run(
-                    [sys.executable, _qa_script_file.name, _qa_input.name, _qa_output],
-                    timeout=1800,  # 30 min — 16GB machines can take 10+ min per Qwen call
-                    capture_output=True,
-                    env=_qa_env,
-                )
-
-                if _qa_result.returncode == 0:
-                    try:
-                        questions = _json.load(open(_qa_output))
-                        logger.info(
-                            "Focus Q&A subprocess completed: %d question(s)",
-                            len(questions),
-                        )
-                    except FileNotFoundError:
-                        logger.warning(
-                            "Focus Q&A subprocess exited 0 but output file "
-                            "not found: %s — stderr: %s",
-                            _qa_output,
-                            (_qa_result.stderr or b"")[:500].decode(
-                                "utf-8", errors="replace"
-                            ),
-                        )
-                        questions = []
-                    except Exception as _qa_parse_err:
-                        logger.warning(
-                            "Focus Q&A subprocess exited 0 but output "
-                            "unreadable (%s): %s — stderr: %s",
-                            type(_qa_parse_err).__name__,
-                            _qa_parse_err,
-                            (_qa_result.stderr or b"")[:500].decode(
-                                "utf-8", errors="replace"
-                            ),
-                        )
-                        questions = []
-                else:
-                    logger.warning(
-                        "Focus Q&A subprocess failed (exit %d): %s",
-                        _qa_result.returncode,
-                        (_qa_result.stderr or b"")[:500].decode(
-                            "utf-8", errors="replace"
-                        ),
-                    )
-
-                # Cleanup temp files
-                os.unlink(_qa_input.name)
-                os.unlink(_qa_script_file.name)
-                try:
-                    os.unlink(_qa_output)
-                except FileNotFoundError:
-                    pass
-
                 if questions:
                     from agenthandover_worker.focus_questioner import (
                         write_focus_questions,
@@ -2067,7 +2076,7 @@ def _process_focus_sessions_v2(
         )
 
     # Clear the signal and the saved draft state.  The keyframes the SOP
-    # did not need are annotated in the next tick's annotation phase
+    # did not need are annotated by a later tick's focus-tail job
     # (``annotate_remaining``).
     _clear_focus_signal(signal_path)
     (state_dir / FOCUS_DRAFT_FILE).unlink(missing_ok=True)
@@ -2231,21 +2240,39 @@ def _focus_work_ready(state_dir: Path, db: "WorkerDB") -> str | None:
     never batches or holds back for memory: ``"answers"`` when the
     post-recording questions were answered or skipped, ``"session"`` when
     a stopped recording has its events in the database, else None."""
+    if _focus_answers_ready(state_dir):
+        return "answers"
+    signal = _stopped_focus_signal(state_dir)
+    session_id = signal.get("session_id") if signal else None
+    if session_id and db.get_focus_session_events(session_id):
+        return "session"
+    return None
+
+
+def _focus_answers_ready(state_dir: Path) -> bool:
+    """True when the post-recording questions were answered or skipped."""
     from agenthandover_worker.focus_questioner import read_focus_questions
 
     questions = read_focus_questions(state_dir)
-    if questions is not None and questions.get("status") in ("answered", "skipped"):
-        return "answers"
+    return questions is not None and questions.get("status") in ("answered", "skipped")
+
+
+def _stopped_focus_signal(state_dir: Path) -> dict | None:
+    """``focus-session.json`` when it says the recording stopped."""
     try:
         signal = json.loads((state_dir / "focus-session.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
     if not isinstance(signal, dict) or signal.get("status") != "stopped":
         return None
-    session_id = signal.get("session_id")
-    if session_id and db.get_focus_session_events(session_id):
-        return "session"
-    return None
+    return signal
+
+
+def _focus_job_due(state_dir: Path) -> bool:
+    """True when the focus job has something to do: answered questions, or
+    a stopped recording (with events to process, or none, which closes it
+    as nothing recorded)."""
+    return _focus_answers_ready(state_dir) or _stopped_focus_signal(state_dir) is not None
 
 
 def _check_focus_answers(
@@ -3147,7 +3174,12 @@ def _approve_sop(
         kb_export_adapter=kb_export_adapter,
     )
     logger.info("Approved and exported SOP %s", sop_id)
-    _embed_procedure(vector_kb, sop_template)
+    # The embedding is a model call: queued for the inference thread when
+    # the approval runs on the control thread.
+    model_work(
+        f"embed-procedure:{sop_id}",
+        lambda: _embed_procedure(vector_kb, sop_template),
+    )
     _refresh_claude_commands()
     return True
 
@@ -4916,14 +4948,27 @@ def main(argv: list[str] | None = None) -> None:
             procedure_writer=procedure_writer,
             kb_export_adapter=kb_export_adapter,
         )
+        def _merge_job(trigger: dict) -> None:
+            _process_merge_trigger(trigger, procedure_curator=procedure_curator)
+            # Written again: the tick that took the trigger wrote the
+            # curation queue before the merge ran.
+            _write_curation_queue(procedure_curator)
+
+        # A retry regenerates a Skill and a merge asks the model to settle
+        # conflicts: both run on the inference thread (P0, model_work).
+        # The other handlers run on the control thread; the model part of
+        # an approval (embedding, style analysis) is queued the same way.
         trigger_handlers: dict[str, Callable[[dict], None]] = {
-            "retry": lambda t: _process_retry_triggers(
-                t, db,
-                focus_processor=focus_processor,
-                sop_generator=sop_generator,
-                screenshots_dir=screenshots_dir,
-                sop_auto_approve=sop_auto_approve,
-                **export_kwargs,
+            "retry": lambda t: model_work(
+                f"retry:{uuid.uuid4().hex}",
+                lambda: _process_retry_triggers(
+                    t, db,
+                    focus_processor=focus_processor,
+                    sop_generator=sop_generator,
+                    screenshots_dir=screenshots_dir,
+                    sop_auto_approve=sop_auto_approve,
+                    **export_kwargs,
+                ),
             ),
             "approve": lambda t: _process_approval_triggers(
                 t, db, vector_kb=vector_kb, **export_kwargs,
@@ -4953,8 +4998,8 @@ def main(argv: list[str] | None = None) -> None:
                     or (sop_writer if args.adapter == "claude-skill" else None)
                 ),
             ),
-            "merge": lambda t: _process_merge_trigger(
-                t, procedure_curator=procedure_curator,
+            "merge": lambda t: model_work(
+                f"merge:{uuid.uuid4().hex}", lambda: _merge_job(t),
             ),
             "drift-reviewed": lambda t: _process_drift_reviewed_trigger(
                 t, procedure_curator=procedure_curator,
@@ -4976,12 +5021,610 @@ def main(argv: list[str] | None = None) -> None:
         # immediately sees the latest data (including any new fields).
         _write_sops_index(db, knowledge_base, force=True)
 
-        # Embed all existing KB procedures at startup (idempotent — skips unchanged)
-        if vector_kb is not None:
+        # Model work runs on the inference thread (inference_runner), one
+        # job at a time, highest priority first; this loop submits the jobs
+        # and keeps its heartbeat, triggers and event pipeline going while
+        # a model call runs.  A focus recording (P0) goes before its tail
+        # (P1) and passive work (P2); each job starts its model phase
+        # (model_scheduler.py), and the runner ends the generation phase
+        # (unloads the SOP model) when its queue runs empty.
+        runner = InferenceRunner(on_idle=model_scheduler.end_generation).start()
+        # True when the control thread's last poll found no events and no
+        # VLM jobs (the user is away): passive discovery may run early.
+        control_idle = False
+
+        def _focus_job() -> None:
+            """P0: a stopped focus recording, or its answered questions."""
+            nonlocal total_sops_generated
+            # Frames first: the recording's keyframes are annotated before
+            # its Skill switches Ollama to the generation model.
+            model_scheduler.begin_annotation()
+            model_scheduler.plan_generation(
+                urgent=_focus_work_ready(_status_dir(), db) is not None,
+                due={}, take_batched=False,
+            )
+            # Completed focus recordings, never batched or held for
+            # memory: the v2 VLM pipeline when available (semantic SOPs
+            # from screen annotations; its keyframes are annotated
+            # before the SOP call switches to the generation model),
+            # else v1 (episode builder + translator + one template).
+            if focus_processor is not None and v2_schema_ok:
+                focus_sops = _process_focus_sessions_v2(
+                    db,
+                    focus_processor=focus_processor,
+                    openclaw_writer=sop_writer,
+                    skill_md_writer=skill_md_writer,
+                    claude_skill_writer=claude_skill_writer,
+                    index_generator=index_generator,
+                    screenshots_dir=screenshots_dir,
+                    sop_auto_approve=sop_auto_approve,
+                    procedure_writer=procedure_writer,
+                    kb_export_adapter=kb_export_adapter,
+                    behavioral_synthesizer=behavioral_synthesizer,
+                    focus_questioner=focus_questioner_inst,
+                    knowledge_base=knowledge_base,
+                    vector_kb=vector_kb,
+                    ollama_host=vlm_cfg.ollama_host,
+                    # Q&A questions on the generation phase's model
+                    # (the configured SOP model): never a hardcoded
+                    # default, which silently failed for users who
+                    # never pulled it (fixed in v0.2.3).
+                    qna_model=model_scheduler.generation_model,
+                )
+            else:
+                focus_sops = _process_focus_sessions(
+                    db,
+                    episode_builder=episode_builder,
+                    clipboard_linker=clipboard_linker,
+                    translator=translator,
+                    scorer=scorer,
+                    vlm_queue=vlm_queue,
+                    sop_enhancer=sop_enhancer,
+                    openclaw_writer=sop_writer,
+                    skill_md_writer=skill_md_writer,
+                    claude_skill_writer=claude_skill_writer,
+                    index_generator=index_generator,
+                    sop_auto_approve=sop_auto_approve,
+                    procedure_writer=procedure_writer,
+                    kb_export_adapter=kb_export_adapter,
+                )
+            if focus_sops > 0:
+                total_sops_generated += focus_sops
+                logger.info(
+                    "Focus recording: generated %d SOP(s)!", focus_sops
+                )
+                _write_sops_index(db, knowledge_base)
+
+        def _focus_tail_job() -> None:
+            """P1: the last recording's keyframes its Skill did not need."""
+            model_scheduler.begin_annotation()
+            focus_processor.annotate_remaining(db)
+
+        def _passive_annotation_job() -> None:
+            """P2: fallback VLM jobs, then passive frames and frame diffs
+            (the annotation phase)."""
+            nonlocal v2_schema_ok, annotation_paused_reason
+            nonlocal total_v2_annotations, total_v2_diffs
+            pending_vlm = db.get_pending_vlm_jobs(limit=10)
+            # Process pending VLM jobs only in idle window
+            if pending_vlm and vlm_worker is not None:
+                gate_result = idle_gate.check()
+                if gate_result.can_run:
+                    with charged_to(annotation_budget):
+                        vlm_completed_events = _process_vlm_jobs(
+                            db, pending_vlm, vlm_worker, vlm_queue
+                        )
+                    # VLM reconciliation: reset events with completed VLM
+                    # boosts so the pipeline re-evaluates them with higher
+                    # confidence scores.
+                    if vlm_completed_events:
+                        db.mark_events_unprocessed(vlm_completed_events)
+                        logger.info(
+                            "VLM reconciliation: %d events reset for re-scoring with boost",
+                            len(vlm_completed_events),
+                        )
+
+            model_scheduler.begin_annotation()
+            # --- v2 Scene Annotation Pipeline ---
+            # Process unannotated screenshots and compute frame diffs.
+            # Schema is checked once before the main loop; this fallback
+            # re-checks if the daemon applies migration after worker start.
+            if scene_annotator is not None and not v2_schema_ok:
+                v2_schema_ok = _check_v2_schema(db)
+                if v2_schema_ok:
+                    logger.info(
+                        "v2 schema now available — scene annotation pipeline activated"
+                    )
+
+            if scene_annotator is not None and v2_schema_ok:
+                # Passive frames older than a day are given up on.
+                for expired in db.expire_annotation_backlog(
+                    max_age_hours=ANNOTATION_BACKLOG_MAX_AGE_HOURS,
+                ):
+                    scene_annotator.discard_screenshot(expired, screenshots_dir)
+                # Passive annotation runs on AC, with the screen locked,
+                # or after two idle minutes, within the hourly and
+                # daily budget.  Focus recordings are held by neither
+                # (their keyframes above, their SOP in the generation
+                # phase).
+                annotation_budget.roll(datetime.now())
+                allowed, why = idle_gate.passive_annotation_allowed()
+                ann_stats = {
+                    "annotated": 0, "skipped": 0, "failed": 0,
+                    "blocked": 0, "deferred": 0, "budget_exhausted": False,
+                }
+                if allowed:
+                    ann_stats = _process_annotations(
+                        db, scene_annotator, screenshots_dir,
+                        privacy_checker=privacy_checker,
+                        activity_classifier=activity_classifier,
+                        budget=annotation_budget,
+                    )
+                if not allowed:
+                    reason = why
+                elif ann_stats["budget_exhausted"]:
+                    reason = annotation_budget.pause_reason()
+                else:
+                    reason = None
+                if reason != annotation_paused_reason:
+                    logger.info(
+                        "Passive annotation %s",
+                        f"paused: {reason}" if reason else "resumed",
+                    )
+                annotation_paused_reason = reason
+                total_v2_annotations += ann_stats["annotated"]
+
+                if ann_stats["annotated"] > 0 or ann_stats["blocked"] > 0:
+                    logger.info(
+                        "v2 annotation: %d annotated, %d skipped, %d failed, %d blocked",
+                        ann_stats["annotated"],
+                        ann_stats["skipped"],
+                        ann_stats["failed"],
+                        ann_stats["blocked"],
+                    )
+
+                if ops_telemetry is not None and ann_stats["annotated"] > 0:
+                    try:
+                        ops_telemetry.record_batch(PipelineMetrics(
+                            annotation_count=ann_stats["annotated"],
+                            classification_count=ann_stats["annotated"],
+                        ))
+                    except Exception:
+                        pass
+
+                # Refresh FTS5 search index so newly annotated events
+                # appear in search/recall results.
+                if ann_stats["annotated"] > 0 and activity_searcher is not None:
+                    try:
+                        added = activity_searcher.refresh_index()
+                        if added > 0:
+                            logger.debug(
+                                "FTS5 index refreshed: %d new entries", added,
+                            )
+                    except Exception:
+                        logger.debug(
+                            "FTS5 index refresh failed", exc_info=True,
+                        )
+
+            if frame_differ is not None and v2_schema_ok:
+                diff_stats = _process_diffs(
+                    db, frame_differ, budget=annotation_budget,
+                )
+                total_v2_diffs += diff_stats["diffs"]
+
+                if diff_stats["diffs"] > 0 or diff_stats["failed"] > 0:
+                    logger.info(
+                        "v2 frame diff: %d action diffs, %d edge cases, %d failed",
+                        diff_stats["diffs"],
+                        diff_stats["edge_cases"],
+                        diff_stats["failed"],
+                    )
+
+        def _passive_generation_job() -> None:
+            """P2: passive discovery and the once-a-day jobs (the
+            generation phase: SOP generation, synthesis and the daily model
+            jobs, on the SOP model)."""
+            nonlocal total_sops_generated, total_passive_sops
+            nonlocal _last_passive_discovery, daily_jobs_date
+            # Queued after the passive annotation job, so the frames of this
+            # tick are annotated first.  Passive discovery is due every 2
+            # hours, or when the user has been idle for 5+ minutes.
+            should_segment = False
+            if (
+                task_segmenter is not None
+                and sop_generator is not None
+                and v2_schema_ok
+            ):
+                _now_mono_pd = time.monotonic()
+                should_segment = (
+                    _now_mono_pd - _last_passive_discovery
+                    >= _PASSIVE_DISCOVERY_INTERVAL
+                )
+                # Also run during extended idle (no unprocessed events
+                # for several cycles = user is away)
+                if not should_segment and control_idle:
+                    # Check idle gate — passive discovery during idle window
+                    pd_gate = idle_gate.check()
+                    if pd_gate.can_run and (
+                        _now_mono_pd - _last_passive_discovery >= 300
+                    ):
+                        should_segment = True
+
+                # Skip passive discovery if a focus session is pending
+                # (focus gets absolute priority)
+                _focus_pending = Path(
+                    _status_dir()
+                ).joinpath("focus-session.json").exists()
+                if _focus_pending:
+                    should_segment = False
+
+            today_local = datetime.now().date().isoformat()
+            gen_plan = model_scheduler.plan_generation(
+                urgent=False,
+                due={
+                    "passive_discovery": should_segment,
+                    "daily": today_local != daily_jobs_date,
+                },
+            )
+
+            # --- v2 Passive Discovery (periodic) ---
+            if should_segment and gen_plan.allows("passive_discovery"):
+                try:
+                    with charged_to(annotation_budget):
+                        pd_sops = _process_passive_discovery(
+                            db,
+                            knowledge_base=knowledge_base,
+                            segmenter=task_segmenter,
+                            sop_generator=sop_generator,
+                            openclaw_writer=sop_writer,
+                            skill_md_writer=skill_md_writer,
+                            claude_skill_writer=claude_skill_writer,
+                            index_generator=index_generator,
+                            sop_auto_approve=sop_auto_approve,
+                            procedure_writer=procedure_writer,
+                            kb_export_adapter=kb_export_adapter,
+                            continuity_tracker=continuity_tracker,
+                            variant_detector=variant_detector,
+                            evidence_normalizer=evidence_normalizer,
+                        )
+                    if pd_sops > 0:
+                        total_passive_sops += pd_sops
+                        total_sops_generated += pd_sops
+                        logger.info(
+                            "Passive discovery: generated %d SOP(s)!",
+                            pd_sops,
+                        )
+                        _write_sops_index(db, knowledge_base)
+                except Exception:
+                    logger.warning(
+                        "Passive discovery failed",
+                        exc_info=True,
+                    )
+                _last_passive_discovery = _now_mono_pd
+
+            # --- Once-per-day jobs: the first tick of each local day,
+            # keyed on the date persisted when they last ran. ---
+            run_daily = gen_plan.allows("daily")
+
+            # The v1 miner's episode store is unused (WP-F5): drop it.
+            if run_daily:
+                try:
+                    db.drop_episode_store()
+                except Exception:
+                    logger.debug("Episode store drop failed", exc_info=True)
+
+            # --- Phase 2+: Daily batch + staleness (once per day) ---
+            # Process *yesterday* (the local calendar day) — today is
+            # still in progress and would produce an incomplete summary.
+            yesterday_str = (
+                datetime.now().astimezone() - timedelta(days=1)
+            ).strftime("%Y-%m-%d")
+            if run_daily:
+                try:
+                    # Daily batch: aggregate yesterday's (complete) events
+                    day_events = db.get_annotated_events_for_date(yesterday_str)
+                    if day_events:
+                        _daily_summary = daily_processor.process_day(
+                            yesterday_str, day_events
+                        )
+                        logger.info(
+                            "Daily batch: %d tasks, %.1f active hours",
+                            _daily_summary.task_count,
+                            _daily_summary.active_hours,
+                        )
+                        # Embed daily summary for semantic search
+                        _embed_in_vector_kb(
+                            vector_kb, "daily_summary", yesterday_str,
+                            f"Daily summary for {yesterday_str}: "
+                            f"{_daily_summary.task_count} tasks, "
+                            f"{_daily_summary.active_hours:.1f} active hours. "
+                            + " ".join(
+                                t.get("intent", "")
+                                for t in getattr(_daily_summary, "tasks", [])
+                                if t.get("intent")
+                            )[:2000],
+                        )
+                        # Update profile + patterns periodically
+                        summaries_count = len(
+                            knowledge_base.list_daily_summaries(limit=5)
+                        )
+                        if summaries_count >= 3:
+                            profile_builder.update_profile()
+                            # Embed updated profile
+                            try:
+                                profile = knowledge_base.get_profile()
+                                if profile:
+                                    import json as _json
+                                    _embed_in_vector_kb(
+                                        vector_kb, "profile", "user",
+                                        _json.dumps(profile, default=str)[:4000],
+                                    )
+                            except Exception:
+                                logger.debug("Profile embedding failed", exc_info=True)
+                            # Refresh activity classifier with updated profile
+                            if activity_classifier is not None:
+                                try:
+                                    activity_classifier._profile = knowledge_base.get_profile()
+                                except Exception:
+                                    logger.debug("Failed to refresh classifier profile", exc_info=True)
+                            patterns = pattern_detector.detect_recurrence()
+                            if patterns:
+                                pattern_detector.update_triggers(patterns)
+                            chains = pattern_detector.detect_chains()
+                            if chains:
+                                pattern_detector.update_chains(chains)
+                            # Correction-to-guardrail learning
+                            try:
+                                all_procs = knowledge_base.list_procedures()
+                                guardrail_count = 0
+                                for proc in all_procs:
+                                    _cs = proc.get("id", proc.get("slug", ""))
+                                    if not _cs:
+                                        continue
+                                    _guardrails = correction_detector.analyze_correction_patterns(_cs)
+                                    if _guardrails:
+                                        correction_detector.apply_guardrails_to_procedure(
+                                            _cs, _guardrails,
+                                        )
+                                        guardrail_count += len(_guardrails)
+                                if guardrail_count:
+                                    logger.info(
+                                        "Correction learning: %d guardrail(s) applied",
+                                        guardrail_count,
+                                    )
+                            except Exception:
+                                logger.debug(
+                                    "Correction-to-guardrail learning failed",
+                                    exc_info=True,
+                                )
+                            # Phase 4: Session linking + trust evaluation + digest
+                            try:
+                                session_linker.analyze_daily_summaries()
+                            except Exception:
+                                logger.debug("Session linking failed", exc_info=True)
+                            try:
+                                suggestions = trust_advisor.evaluate_all()
+                                if suggestions:
+                                    logger.info(
+                                        "Trust advisor: %d new suggestion(s)",
+                                        len(suggestions),
+                                    )
+                            except Exception:
+                                logger.debug("Trust evaluation failed", exc_info=True)
+
+                            # --- Behavioral re-synthesis trigger ---
+                            try:
+                                all_procs_for_synth = knowledge_base.list_procedures()
+                                synth_count = 0
+                                # Pre-load daily summaries once for all procedures
+                                _synth_daily = [
+                                    knowledge_base.get_daily_summary(d)
+                                    for d in knowledge_base.list_daily_summaries(limit=7)
+                                ]
+                                _synth_daily = [s for s in _synth_daily if s is not None]
+
+                                for proc_info in all_procs_for_synth:
+                                    p_slug = proc_info.get("id", proc_info.get("slug", ""))
+                                    if not p_slug:
+                                        continue
+                                    proc = knowledge_base.get_procedure(p_slug)
+                                    if proc is None:
+                                        continue
+                                    if proc.get("lifecycle_state") == "archived":
+                                        continue
+                                    if not behavioral_synthesizer.should_synthesize(proc):
+                                        continue
+
+                                    # The recorded instances as rich per-frame
+                                    # dicts (verbatim text and list picks), with
+                                    # the session ids the selection criteria cite
+                                    # (focus_processor.recorded_observations).
+                                    _synth_obs, _synth_ids = recorded_observations(db, proc)
+
+                                    insights = behavioral_synthesizer.synthesize(
+                                        p_slug, proc, _synth_obs,
+                                        daily_summaries=_synth_daily,
+                                        instance_ids=_synth_ids,
+                                    )
+                                    if insights.strategy or insights.guardrails:
+                                        # Into the procedure as saved now:
+                                        # an approval may have moved it
+                                        # during the model call.
+                                        proc = knowledge_base.get_procedure(p_slug) or proc
+                                        updated = behavioral_synthesizer.merge_insights_into_procedure(
+                                            proc, insights,
+                                        )
+                                        knowledge_base.save_procedure(updated)
+                                        synth_count += 1
+                                if synth_count:
+                                    logger.info(
+                                        "Behavioral synthesis: %d procedure(s) updated",
+                                        synth_count,
+                                    )
+                            except Exception:
+                                logger.debug(
+                                    "Behavioral re-synthesis failed", exc_info=True,
+                                )
+
+                            # --- Pre-expiry evidence extraction ---
+                            try:
+                                extracted = evidence_extractor.extract_all_pending()
+                                if extracted:
+                                    logger.info(
+                                        "Evidence extraction: %d procedure(s) processed",
+                                        extracted,
+                                    )
+                            except Exception:
+                                logger.debug(
+                                    "Pre-expiry evidence extraction failed",
+                                    exc_info=True,
+                                )
+
+                        # Seed default constraints if constraints file is empty.
+                        # Runs on every daily batch (outside the summaries >= 3
+                        # gate) so constraints are available from day one.  The
+                        # inner guard ensures the write happens at most once.
+                        try:
+                            existing_constraints = knowledge_base.get_constraints()
+                            if not existing_constraints.get("global"):
+                                knowledge_base.update_constraints({
+                                    "global": {
+                                        "default_trust_level": "observe",
+                                        "require_approval_for_destructive": True,
+                                        "max_autonomous_actions_per_hour": 10,
+                                    },
+                                    "per_procedure": existing_constraints.get(
+                                        "per_procedure", {}
+                                    ),
+                                })
+                                logger.info("Default global constraints seeded")
+                        except Exception:
+                            logger.debug(
+                                "Constraint seeding failed", exc_info=True
+                            )
+                        # Generate daily digest
+                        try:
+                            digest_generator = DigestGenerator(knowledge_base, db=db)
+                            digest = digest_generator.generate(yesterday_str)
+                            digest_generator.save_digest(digest)
+                            logger.info("Daily digest generated for %s", yesterday_str)
+                        except Exception:
+                            logger.debug("Digest generation failed", exc_info=True)
+                except Exception:
+                    logger.debug("Daily batch failed", exc_info=True)
+
+                # Workflow observations: segment and observation TTLs,
+                # the promoted workflows' recurrence and value.
+                workflow_mining.run_daily(
+                    db, knowledge_base, now=datetime.now(timezone.utc),
+                )
+
+                # Preserve OCR text from soon-to-expire events
+                try:
+                    pcount, pitems = db.preserve_ocr_text(retention_days=14)
+                    if pcount:
+                        logger.info("Preserved %d texts before expiry", pcount)
+                    # Embed preserved texts in vector KB
+                    if pitems and vector_kb is not None:
+                        try:
+                            vk_items = [
+                                ("preserved_text", f"{eid}:{src}", txt[:2000])
+                                for eid, src, txt in pitems
+                            ]
+                            vector_kb.upsert_batch(vk_items)
+                        except Exception:
+                            logger.debug("Preserved text embedding failed", exc_info=True)
+                except Exception:
+                    logger.debug("OCR text preservation failed", exc_info=True)
+
+            # Staleness check
+            if run_daily:
+                try:
+                    reports = staleness_detector.check_all()
+                    stale_count = sum(
+                        1 for r in reports if r.status != "current"
+                    )
+                    if stale_count > 0:
+                        logger.info(
+                            "Staleness check: %d/%d procedures need attention",
+                            stale_count, len(reports),
+                        )
+                    # Persist staleness status back into procedure JSON
+                    # so the SwiftUI MicroReviewView can read it.
+                    for report in reports:
+                        try:
+                            proc = knowledge_base.get_procedure(report.slug)
+                            if proc is not None:
+                                staleness = proc.get("staleness", {})
+                                staleness["status"] = report.status
+                                staleness["signals"] = [
+                                    {
+                                        "type": s.type,
+                                        "detail": s.detail,
+                                        "first_seen": s.first_seen,
+                                    }
+                                    for s in report.signals
+                                ]
+                                staleness["recommended_action"] = report.recommended_action
+                                proc["staleness"] = staleness
+                                knowledge_base.save_procedure(proc)
+                        except Exception:
+                            logger.debug(
+                                "Failed to persist staleness for %s",
+                                report.slug,
+                                exc_info=True,
+                            )
+                except Exception:
+                    logger.debug("Staleness check failed", exc_info=True)
+
+                # Lifecycle: auto-demote stale procedures
+                if features.lifecycle_management:
+                    try:
+                        transitions = lifecycle_manager.apply_auto_transitions()
+                        if transitions:
+                            logger.info("Lifecycle: %d auto-transition(s)", len(transitions))
+                    except Exception:
+                        logger.debug("Lifecycle auto-transitions failed", exc_info=True)
+                    # Write what the gate now lets through (approved
+                    # since the last pass); drafts are never written.
+                    try:
+                        bundle_compiler.compile_all()
+                    except Exception:
+                        logger.warning("Bundle compile failed", exc_info=True)
+
+                # Phase 5: Curation queue refresh
+                try:
+                    with charged_to(annotation_budget):
+                        curation_summary = procedure_curator.curate()
+                    if curation_summary.total_queue_items > 0:
+                        logger.info(
+                            "Curation: %d item(s) (%d merges, %d upgrades, %d stale, %d drift)",
+                            curation_summary.total_queue_items,
+                            curation_summary.merge_candidates,
+                            curation_summary.upgrade_candidates,
+                            curation_summary.stale_procedures,
+                            curation_summary.drift_reports,
+                        )
+                except Exception:
+                    logger.debug("Curation batch failed", exc_info=True)
+
+                # Write curation-queue.json for SwiftUI app
+                _write_curation_queue(procedure_curator)
+
+                _run_daily_maintenance(
+                    vector_kb=vector_kb,
+                    activity_searcher=activity_searcher,
+                    annotation_cache=annotation_cache,
+                )
+                db.set_state(DAILY_JOBS_STATE_KEY, today_local)
+                daily_jobs_date = today_local
+
+        def _startup_embedding_job() -> None:
+            """P2: embed the knowledge base's procedures (idempotent: skips
+            unchanged ones)."""
             try:
-                all_procs = knowledge_base.list_procedures()
                 embedded = 0
-                for proc in all_procs:
+                for proc in knowledge_base.list_procedures():
                     full = knowledge_base.get_procedure(proc.get("id", ""))
                     if full:
                         _embed_procedure(vector_kb, full)
@@ -4991,15 +5634,82 @@ def main(argv: list[str] | None = None) -> None:
             except Exception:
                 logger.debug("Startup procedure embedding failed", exc_info=True)
 
-        while not shutdown_flag[0]:
-            # Reset vector KB embedding budget each cycle
-            if vector_kb is not None:
-                vector_kb.reset_cycle_budget()
+        def _heartbeat() -> None:
+            """worker-status.json, written every tick outside the state lock
+            so a long model call never stops it (also after an error: the
+            app and doctor see a worker that is alive but failing, not a
+            dead one)."""
+            try:
+                _write_heartbeat()
+            except Exception:
+                logger.debug("Failed to write worker status", exc_info=True)
 
+        def _write_heartbeat() -> None:
+            """The pending VLM count is
+            the database's (the in-memory queue only tracks enqueue-side
+            stats; completions from _process_vlm_jobs are not reflected)."""
+            _vlm_stats = vlm_queue.get_stats()
+            try:
+                db_vlm_pending = db.count_pending_vlm_jobs()
+            except Exception:
+                db_vlm_pending = _vlm_stats.pending_jobs
+            inference = runner.status()
+            if v2_schema_ok:
+                try:
+                    backlog = db.count_passive_unannotated()
+                    inference["annotation_backlog"] = backlog
+                    # The daemon keeps fewer passive frames meanwhile.
+                    inference["lower_capture_cadence"] = (
+                        annotation_budget.asks_lower_capture(backlog)
+                    )
+                except Exception:
+                    logger.debug("Annotation backlog count failed", exc_info=True)
+            _write_worker_status(
+                started_at=started_at,
+                events_processed_today=total_events_processed,
+                sops_generated=total_sops_generated,
+                last_pipeline_duration_ms=last_pipeline_duration_ms,
+                consecutive_errors=max(
+                    consecutive_errors, runner.consecutive_failures(),
+                ),
+                vlm_available=vlm_available,
+                vlm_queue_pending=db_vlm_pending,
+                vlm_jobs_today=_vlm_stats.jobs_today,
+                vlm_dropped_today=_vlm_stats.dropped_count,
+                vlm_mode=vlm_mode_str,
+                vlm_provider=vlm_provider_str or None,
+                v2_annotation_enabled=v2_annotation_enabled,
+                v2_annotations_today=total_v2_annotations,
+                v2_diffs_today=total_v2_diffs,
+                annotation_paused_reason=annotation_paused_reason,
+                annotation_budget=annotation_budget.status(),
+                model_schedule=model_scheduler.status(),
+                inference=inference,
+            )
+
+        if vector_kb is not None:
+            runner.submit("startup-embedding", P2, _startup_embedding_job)
+
+        while not shutdown_flag[0]:
             # Events handed to run_pipeline and not yet marked processed;
             # an error while this is non-empty counts against them.
             inflight_event_ids: list[str] = []
+            backoff: float | None = None
+            # The inference thread holds the state while it runs Python
+            # between model calls; if that takes long, this tick only
+            # writes the heartbeat.
+            if not STATE_LOCK.acquire(
+                timeout=None if args.once else CONTROL_LOCK_WAIT_SECONDS,
+            ):
+                logger.debug("Control tick skipped: the inference thread holds the state")
+                _heartbeat()
+                time.sleep(current_interval)
+                continue
             try:
+                # Reset vector KB embedding budget each cycle
+                if vector_kb is not None:
+                    vector_kb.reset_cycle_budget()
+
                 # App and CLI requests first, oldest first
                 triggers_consumed = trigger_spool.drain(
                     _status_dir(), trigger_handlers,
@@ -5091,257 +5801,18 @@ def main(argv: list[str] | None = None) -> None:
                     if summary["vlm_enqueued"] > 0:
                         _persist_vlm_jobs(db, vlm_queue)
 
-                # Process pending VLM jobs only in idle window
-                if pending_vlm and vlm_worker is not None:
-                    gate_result = idle_gate.check()
-                    if gate_result.can_run:
-                        with charged_to(annotation_budget):
-                            vlm_completed_events = _process_vlm_jobs(
-                                db, pending_vlm, vlm_worker, vlm_queue
-                            )
-                        # VLM reconciliation: reset events with completed VLM
-                        # boosts so the pipeline re-evaluates them with higher
-                        # confidence scores.
-                        if vlm_completed_events:
-                            db.mark_events_unprocessed(vlm_completed_events)
-                            logger.info(
-                                "VLM reconciliation: %d events reset for re-scoring with boost",
-                                len(vlm_completed_events),
-                            )
-
-                # --- Annotation phase (model_scheduler.py) ---
-                # Every frame this tick annotates, on the annotation model:
-                # the last focus session's leftover keyframes, passive
-                # frames and frame diffs.
-                model_scheduler.begin_annotation()
-                if focus_processor is not None and v2_schema_ok:
-                    focus_processor.annotate_remaining(db)
-
-                # --- v2 Scene Annotation Pipeline ---
-                # Process unannotated screenshots and compute frame diffs.
-                # Schema is checked once before the main loop; this fallback
-                # re-checks if the daemon applies migration after worker start.
-                if scene_annotator is not None and not v2_schema_ok:
-                    v2_schema_ok = _check_v2_schema(db)
-                    if v2_schema_ok:
-                        logger.info(
-                            "v2 schema now available — scene annotation pipeline activated"
-                        )
-
-                if scene_annotator is not None and v2_schema_ok:
-                    # Passive frames older than a day are given up on.
-                    for expired in db.expire_annotation_backlog(
-                        max_age_hours=ANNOTATION_BACKLOG_MAX_AGE_HOURS,
-                    ):
-                        scene_annotator.discard_screenshot(expired, screenshots_dir)
-                    # Passive annotation runs on AC, with the screen locked,
-                    # or after two idle minutes, within the hourly and
-                    # daily budget.  Focus recordings are held by neither
-                    # (their keyframes above, their SOP in the generation
-                    # phase).
-                    annotation_budget.roll(datetime.now())
-                    allowed, why = idle_gate.passive_annotation_allowed()
-                    ann_stats = {
-                        "annotated": 0, "skipped": 0, "failed": 0,
-                        "blocked": 0, "deferred": 0, "budget_exhausted": False,
-                    }
-                    if allowed:
-                        ann_stats = _process_annotations(
-                            db, scene_annotator, screenshots_dir,
-                            privacy_checker=privacy_checker,
-                            activity_classifier=activity_classifier,
-                            budget=annotation_budget,
-                        )
-                    if not allowed:
-                        reason = why
-                    elif ann_stats["budget_exhausted"]:
-                        reason = annotation_budget.pause_reason()
-                    else:
-                        reason = None
-                    if reason != annotation_paused_reason:
-                        logger.info(
-                            "Passive annotation %s",
-                            f"paused: {reason}" if reason else "resumed",
-                        )
-                    annotation_paused_reason = reason
-                    total_v2_annotations += ann_stats["annotated"]
-
-                    if ann_stats["annotated"] > 0 or ann_stats["blocked"] > 0:
-                        logger.info(
-                            "v2 annotation: %d annotated, %d skipped, %d failed, %d blocked",
-                            ann_stats["annotated"],
-                            ann_stats["skipped"],
-                            ann_stats["failed"],
-                            ann_stats["blocked"],
-                        )
-
-                    if ops_telemetry is not None and ann_stats["annotated"] > 0:
-                        try:
-                            ops_telemetry.record_batch(PipelineMetrics(
-                                annotation_count=ann_stats["annotated"],
-                                classification_count=ann_stats["annotated"],
-                            ))
-                        except Exception:
-                            pass
-
-                    # Refresh FTS5 search index so newly annotated events
-                    # appear in search/recall results.
-                    if ann_stats["annotated"] > 0 and activity_searcher is not None:
-                        try:
-                            added = activity_searcher.refresh_index()
-                            if added > 0:
-                                logger.debug(
-                                    "FTS5 index refreshed: %d new entries", added,
-                                )
-                        except Exception:
-                            logger.debug(
-                                "FTS5 index refresh failed", exc_info=True,
-                            )
-
-                if frame_differ is not None and v2_schema_ok:
-                    diff_stats = _process_diffs(
-                        db, frame_differ, budget=annotation_budget,
-                    )
-                    total_v2_diffs += diff_stats["diffs"]
-
-                    if diff_stats["diffs"] > 0 or diff_stats["failed"] > 0:
-                        logger.info(
-                            "v2 frame diff: %d action diffs, %d edge cases, %d failed",
-                            diff_stats["diffs"],
-                            diff_stats["edge_cases"],
-                            diff_stats["failed"],
-                        )
-
-                # --- Generation phase (model_scheduler.py) ---
-                # SOP generation, synthesis, Q&A and the daily model jobs,
-                # on the SOP model, once this tick's frames are annotated.
-                # Passive discovery is due every 2 hours, or when the user
-                # has been idle for 5+ minutes.
-                should_segment = False
+                # --- Model work, handed to the inference thread ---
+                control_idle = not unprocessed and not pending_vlm
+                if _focus_job_due(_status_dir()):
+                    runner.submit("focus", P0, _focus_job)
                 if (
-                    task_segmenter is not None
-                    and sop_generator is not None
+                    focus_processor is not None
                     and v2_schema_ok
+                    and focus_processor.has_remaining
                 ):
-                    _now_mono_pd = time.monotonic()
-                    should_segment = (
-                        _now_mono_pd - _last_passive_discovery
-                        >= _PASSIVE_DISCOVERY_INTERVAL
-                    )
-                    # Also run during extended idle (no unprocessed events
-                    # for several cycles = user is away)
-                    if not should_segment and not unprocessed and not pending_vlm:
-                        # Check idle gate — passive discovery during idle window
-                        pd_gate = idle_gate.check()
-                        if pd_gate.can_run and (
-                            _now_mono_pd - _last_passive_discovery >= 300
-                        ):
-                            should_segment = True
-
-                    # Skip passive discovery if a focus session is pending
-                    # (focus gets absolute priority)
-                    _focus_pending = Path(
-                        _status_dir()
-                    ).joinpath("focus-session.json").exists()
-                    if _focus_pending:
-                        should_segment = False
-
-                today_local = datetime.now().date().isoformat()
-                focus_work = _focus_work_ready(_status_dir(), db)
-                gen_plan = model_scheduler.plan_generation(
-                    urgent=focus_work is not None,
-                    due={
-                        "passive_discovery": should_segment,
-                        "daily": today_local != daily_jobs_date,
-                    },
-                )
-
-                # Completed focus recordings, never batched or held for
-                # memory: the v2 VLM pipeline when available (semantic SOPs
-                # from screen annotations; its keyframes are annotated
-                # before the SOP call switches to the generation model),
-                # else v1 (episode builder + translator + one template).
-                if focus_processor is not None and v2_schema_ok:
-                    focus_sops = _process_focus_sessions_v2(
-                        db,
-                        focus_processor=focus_processor,
-                        openclaw_writer=sop_writer,
-                        skill_md_writer=skill_md_writer,
-                        claude_skill_writer=claude_skill_writer,
-                        index_generator=index_generator,
-                        screenshots_dir=screenshots_dir,
-                        sop_auto_approve=sop_auto_approve,
-                        procedure_writer=procedure_writer,
-                        kb_export_adapter=kb_export_adapter,
-                        behavioral_synthesizer=behavioral_synthesizer,
-                        focus_questioner=focus_questioner_inst,
-                        knowledge_base=knowledge_base,
-                        vector_kb=vector_kb,
-                        ollama_host=vlm_cfg.ollama_host,
-                        # Q&A questions on the generation phase's model
-                        # (the configured SOP model): never a hardcoded
-                        # default, which silently failed for users who
-                        # never pulled it (fixed in v0.2.3).
-                        qna_model=model_scheduler.generation_model,
-                    )
-                else:
-                    focus_sops = _process_focus_sessions(
-                        db,
-                        episode_builder=episode_builder,
-                        clipboard_linker=clipboard_linker,
-                        translator=translator,
-                        scorer=scorer,
-                        vlm_queue=vlm_queue,
-                        sop_enhancer=sop_enhancer,
-                        openclaw_writer=sop_writer,
-                        skill_md_writer=skill_md_writer,
-                        claude_skill_writer=claude_skill_writer,
-                        index_generator=index_generator,
-                        sop_auto_approve=sop_auto_approve,
-                        procedure_writer=procedure_writer,
-                        kb_export_adapter=kb_export_adapter,
-                    )
-                if focus_sops > 0:
-                    total_sops_generated += focus_sops
-                    logger.info(
-                        "Focus recording: generated %d SOP(s)!", focus_sops
-                    )
-                    _write_sops_index(db, knowledge_base)
-
-                # --- v2 Passive Discovery (periodic) ---
-                if should_segment and gen_plan.allows("passive_discovery"):
-                    try:
-                        with charged_to(annotation_budget):
-                            pd_sops = _process_passive_discovery(
-                                db,
-                                knowledge_base=knowledge_base,
-                                segmenter=task_segmenter,
-                                sop_generator=sop_generator,
-                                openclaw_writer=sop_writer,
-                                skill_md_writer=skill_md_writer,
-                                claude_skill_writer=claude_skill_writer,
-                                index_generator=index_generator,
-                                sop_auto_approve=sop_auto_approve,
-                                procedure_writer=procedure_writer,
-                                kb_export_adapter=kb_export_adapter,
-                                continuity_tracker=continuity_tracker,
-                                variant_detector=variant_detector,
-                                evidence_normalizer=evidence_normalizer,
-                            )
-                        if pd_sops > 0:
-                            total_passive_sops += pd_sops
-                            total_sops_generated += pd_sops
-                            logger.info(
-                                "Passive discovery: generated %d SOP(s)!",
-                                pd_sops,
-                            )
-                            _write_sops_index(db, knowledge_base)
-                    except Exception:
-                        logger.warning(
-                            "Passive discovery failed",
-                            exc_info=True,
-                        )
-                    _last_passive_discovery = _now_mono_pd
+                    runner.submit("focus-tail", P1, _focus_tail_job)
+                runner.submit("passive-annotation", P2, _passive_annotation_job)
+                runner.submit("passive-generation", P2, _passive_generation_job)
 
                 # Live recognition (model-free): tag the session in
                 # progress with the Skill it begins, record it at its end.
@@ -5362,353 +5833,8 @@ def main(argv: list[str] | None = None) -> None:
                     saved_budget_json = annotation_budget.to_json()
                     db.set_state(ANNOTATION_BUDGET_STATE_KEY, saved_budget_json)
 
-                # Write status file after each cycle (heartbeat).
-                # Use authoritative DB count for pending VLM jobs (the
-                # in-memory queue only tracks enqueue-side stats; DB-side
-                # completions from _process_vlm_jobs are not reflected).
-                _vlm_stats = vlm_queue.get_stats()
-                try:
-                    db_vlm_pending = db.count_pending_vlm_jobs()
-                except Exception:
-                    db_vlm_pending = _vlm_stats.pending_jobs
-                _write_worker_status(
-                    started_at=started_at,
-                    events_processed_today=total_events_processed,
-                    sops_generated=total_sops_generated,
-                    last_pipeline_duration_ms=last_pipeline_duration_ms,
-                    consecutive_errors=consecutive_errors,
-                    vlm_available=vlm_available,
-                    vlm_queue_pending=db_vlm_pending,
-                    vlm_jobs_today=_vlm_stats.jobs_today,
-                    vlm_dropped_today=_vlm_stats.dropped_count,
-                    vlm_mode=vlm_mode_str,
-                    vlm_provider=vlm_provider_str or None,
-                    v2_annotation_enabled=v2_annotation_enabled,
-                    v2_annotations_today=total_v2_annotations,
-                    v2_diffs_today=total_v2_diffs,
-                    annotation_paused_reason=annotation_paused_reason,
-                    annotation_budget=annotation_budget.status(),
-                    model_schedule=model_scheduler.status(),
-                )
-
                 # Refresh sops-index.json (throttled to every 5s)
                 _write_sops_index(db, knowledge_base)
-
-                # --- Once-per-day jobs: the first tick of each local day,
-                # keyed on the date persisted when they last ran. ---
-                run_daily = gen_plan.allows("daily")
-
-                # The v1 miner's episode store is unused (WP-F5): drop it.
-                if run_daily:
-                    try:
-                        db.drop_episode_store()
-                    except Exception:
-                        logger.debug("Episode store drop failed", exc_info=True)
-
-                # --- Phase 2+: Daily batch + staleness (once per day) ---
-                # Process *yesterday* (the local calendar day) — today is
-                # still in progress and would produce an incomplete summary.
-                yesterday_str = (
-                    datetime.now().astimezone() - timedelta(days=1)
-                ).strftime("%Y-%m-%d")
-                if run_daily:
-                    try:
-                        # Daily batch: aggregate yesterday's (complete) events
-                        day_events = db.get_annotated_events_for_date(yesterday_str)
-                        if day_events:
-                            _daily_summary = daily_processor.process_day(
-                                yesterday_str, day_events
-                            )
-                            logger.info(
-                                "Daily batch: %d tasks, %.1f active hours",
-                                _daily_summary.task_count,
-                                _daily_summary.active_hours,
-                            )
-                            # Embed daily summary for semantic search
-                            _embed_in_vector_kb(
-                                vector_kb, "daily_summary", yesterday_str,
-                                f"Daily summary for {yesterday_str}: "
-                                f"{_daily_summary.task_count} tasks, "
-                                f"{_daily_summary.active_hours:.1f} active hours. "
-                                + " ".join(
-                                    t.get("intent", "")
-                                    for t in getattr(_daily_summary, "tasks", [])
-                                    if t.get("intent")
-                                )[:2000],
-                            )
-                            # Update profile + patterns periodically
-                            summaries_count = len(
-                                knowledge_base.list_daily_summaries(limit=5)
-                            )
-                            if summaries_count >= 3:
-                                profile_builder.update_profile()
-                                # Embed updated profile
-                                try:
-                                    profile = knowledge_base.get_profile()
-                                    if profile:
-                                        import json as _json
-                                        _embed_in_vector_kb(
-                                            vector_kb, "profile", "user",
-                                            _json.dumps(profile, default=str)[:4000],
-                                        )
-                                except Exception:
-                                    logger.debug("Profile embedding failed", exc_info=True)
-                                # Refresh activity classifier with updated profile
-                                if activity_classifier is not None:
-                                    try:
-                                        activity_classifier._profile = knowledge_base.get_profile()
-                                    except Exception:
-                                        logger.debug("Failed to refresh classifier profile", exc_info=True)
-                                patterns = pattern_detector.detect_recurrence()
-                                if patterns:
-                                    pattern_detector.update_triggers(patterns)
-                                chains = pattern_detector.detect_chains()
-                                if chains:
-                                    pattern_detector.update_chains(chains)
-                                # Correction-to-guardrail learning
-                                try:
-                                    all_procs = knowledge_base.list_procedures()
-                                    guardrail_count = 0
-                                    for proc in all_procs:
-                                        _cs = proc.get("id", proc.get("slug", ""))
-                                        if not _cs:
-                                            continue
-                                        _guardrails = correction_detector.analyze_correction_patterns(_cs)
-                                        if _guardrails:
-                                            correction_detector.apply_guardrails_to_procedure(
-                                                _cs, _guardrails,
-                                            )
-                                            guardrail_count += len(_guardrails)
-                                    if guardrail_count:
-                                        logger.info(
-                                            "Correction learning: %d guardrail(s) applied",
-                                            guardrail_count,
-                                        )
-                                except Exception:
-                                    logger.debug(
-                                        "Correction-to-guardrail learning failed",
-                                        exc_info=True,
-                                    )
-                                # Phase 4: Session linking + trust evaluation + digest
-                                try:
-                                    session_linker.analyze_daily_summaries()
-                                except Exception:
-                                    logger.debug("Session linking failed", exc_info=True)
-                                try:
-                                    suggestions = trust_advisor.evaluate_all()
-                                    if suggestions:
-                                        logger.info(
-                                            "Trust advisor: %d new suggestion(s)",
-                                            len(suggestions),
-                                        )
-                                except Exception:
-                                    logger.debug("Trust evaluation failed", exc_info=True)
-
-                                # --- Behavioral re-synthesis trigger ---
-                                try:
-                                    all_procs_for_synth = knowledge_base.list_procedures()
-                                    synth_count = 0
-                                    # Pre-load daily summaries once for all procedures
-                                    _synth_daily = [
-                                        knowledge_base.get_daily_summary(d)
-                                        for d in knowledge_base.list_daily_summaries(limit=7)
-                                    ]
-                                    _synth_daily = [s for s in _synth_daily if s is not None]
-
-                                    for proc_info in all_procs_for_synth:
-                                        p_slug = proc_info.get("id", proc_info.get("slug", ""))
-                                        if not p_slug:
-                                            continue
-                                        proc = knowledge_base.get_procedure(p_slug)
-                                        if proc is None:
-                                            continue
-                                        if proc.get("lifecycle_state") == "archived":
-                                            continue
-                                        if not behavioral_synthesizer.should_synthesize(proc):
-                                            continue
-
-                                        # The recorded instances as rich per-frame
-                                        # dicts (verbatim text and list picks), with
-                                        # the session ids the selection criteria cite
-                                        # (focus_processor.recorded_observations).
-                                        _synth_obs, _synth_ids = recorded_observations(db, proc)
-
-                                        insights = behavioral_synthesizer.synthesize(
-                                            p_slug, proc, _synth_obs,
-                                            daily_summaries=_synth_daily,
-                                            instance_ids=_synth_ids,
-                                        )
-                                        if insights.strategy or insights.guardrails:
-                                            updated = behavioral_synthesizer.merge_insights_into_procedure(
-                                                proc, insights,
-                                            )
-                                            knowledge_base.save_procedure(updated)
-                                            synth_count += 1
-                                    if synth_count:
-                                        logger.info(
-                                            "Behavioral synthesis: %d procedure(s) updated",
-                                            synth_count,
-                                        )
-                                except Exception:
-                                    logger.debug(
-                                        "Behavioral re-synthesis failed", exc_info=True,
-                                    )
-
-                                # --- Pre-expiry evidence extraction ---
-                                try:
-                                    extracted = evidence_extractor.extract_all_pending()
-                                    if extracted:
-                                        logger.info(
-                                            "Evidence extraction: %d procedure(s) processed",
-                                            extracted,
-                                        )
-                                except Exception:
-                                    logger.debug(
-                                        "Pre-expiry evidence extraction failed",
-                                        exc_info=True,
-                                    )
-
-                            # Seed default constraints if constraints file is empty.
-                            # Runs on every daily batch (outside the summaries >= 3
-                            # gate) so constraints are available from day one.  The
-                            # inner guard ensures the write happens at most once.
-                            try:
-                                existing_constraints = knowledge_base.get_constraints()
-                                if not existing_constraints.get("global"):
-                                    knowledge_base.update_constraints({
-                                        "global": {
-                                            "default_trust_level": "observe",
-                                            "require_approval_for_destructive": True,
-                                            "max_autonomous_actions_per_hour": 10,
-                                        },
-                                        "per_procedure": existing_constraints.get(
-                                            "per_procedure", {}
-                                        ),
-                                    })
-                                    logger.info("Default global constraints seeded")
-                            except Exception:
-                                logger.debug(
-                                    "Constraint seeding failed", exc_info=True
-                                )
-                            # Generate daily digest
-                            try:
-                                digest_generator = DigestGenerator(knowledge_base, db=db)
-                                digest = digest_generator.generate(yesterday_str)
-                                digest_generator.save_digest(digest)
-                                logger.info("Daily digest generated for %s", yesterday_str)
-                            except Exception:
-                                logger.debug("Digest generation failed", exc_info=True)
-                    except Exception:
-                        logger.debug("Daily batch failed", exc_info=True)
-
-                    # Workflow observations: segment and observation TTLs,
-                    # the promoted workflows' recurrence and value.
-                    workflow_mining.run_daily(
-                        db, knowledge_base, now=datetime.now(timezone.utc),
-                    )
-
-                    # Preserve OCR text from soon-to-expire events
-                    try:
-                        pcount, pitems = db.preserve_ocr_text(retention_days=14)
-                        if pcount:
-                            logger.info("Preserved %d texts before expiry", pcount)
-                        # Embed preserved texts in vector KB
-                        if pitems and vector_kb is not None:
-                            try:
-                                vk_items = [
-                                    ("preserved_text", f"{eid}:{src}", txt[:2000])
-                                    for eid, src, txt in pitems
-                                ]
-                                vector_kb.upsert_batch(vk_items)
-                            except Exception:
-                                logger.debug("Preserved text embedding failed", exc_info=True)
-                    except Exception:
-                        logger.debug("OCR text preservation failed", exc_info=True)
-
-                # Staleness check
-                if run_daily:
-                    try:
-                        reports = staleness_detector.check_all()
-                        stale_count = sum(
-                            1 for r in reports if r.status != "current"
-                        )
-                        if stale_count > 0:
-                            logger.info(
-                                "Staleness check: %d/%d procedures need attention",
-                                stale_count, len(reports),
-                            )
-                        # Persist staleness status back into procedure JSON
-                        # so the SwiftUI MicroReviewView can read it.
-                        for report in reports:
-                            try:
-                                proc = knowledge_base.get_procedure(report.slug)
-                                if proc is not None:
-                                    staleness = proc.get("staleness", {})
-                                    staleness["status"] = report.status
-                                    staleness["signals"] = [
-                                        {
-                                            "type": s.type,
-                                            "detail": s.detail,
-                                            "first_seen": s.first_seen,
-                                        }
-                                        for s in report.signals
-                                    ]
-                                    staleness["recommended_action"] = report.recommended_action
-                                    proc["staleness"] = staleness
-                                    knowledge_base.save_procedure(proc)
-                            except Exception:
-                                logger.debug(
-                                    "Failed to persist staleness for %s",
-                                    report.slug,
-                                    exc_info=True,
-                                )
-                    except Exception:
-                        logger.debug("Staleness check failed", exc_info=True)
-
-                    # Lifecycle: auto-demote stale procedures
-                    if features.lifecycle_management:
-                        try:
-                            transitions = lifecycle_manager.apply_auto_transitions()
-                            if transitions:
-                                logger.info("Lifecycle: %d auto-transition(s)", len(transitions))
-                        except Exception:
-                            logger.debug("Lifecycle auto-transitions failed", exc_info=True)
-                        # Write what the gate now lets through (approved
-                        # since the last pass); drafts are never written.
-                        try:
-                            bundle_compiler.compile_all()
-                        except Exception:
-                            logger.warning("Bundle compile failed", exc_info=True)
-
-                    # Phase 5: Curation queue refresh
-                    try:
-                        with charged_to(annotation_budget):
-                            curation_summary = procedure_curator.curate()
-                        if curation_summary.total_queue_items > 0:
-                            logger.info(
-                                "Curation: %d item(s) (%d merges, %d upgrades, %d stale, %d drift)",
-                                curation_summary.total_queue_items,
-                                curation_summary.merge_candidates,
-                                curation_summary.upgrade_candidates,
-                                curation_summary.stale_procedures,
-                                curation_summary.drift_reports,
-                            )
-                    except Exception:
-                        logger.debug("Curation batch failed", exc_info=True)
-
-                    # Write curation-queue.json for SwiftUI app
-                    _write_curation_queue(procedure_curator)
-
-                    _run_daily_maintenance(
-                        vector_kb=vector_kb,
-                        activity_searcher=activity_searcher,
-                        annotation_cache=annotation_cache,
-                    )
-                    db.set_state(DAILY_JOBS_STATE_KEY, today_local)
-                    daily_jobs_date = today_local
-
-                # End of the generation phase: unload the SOP model.
-                model_scheduler.end_generation()
 
                 # Any iteration that gets here without raising is healthy,
                 # whether or not it had events to process.
@@ -5735,32 +5861,25 @@ def main(argv: list[str] | None = None) -> None:
                         "between attempts) and staying up",
                         ERROR_THRESHOLD,
                     )
-                # Keep the heartbeat fresh so the app and doctor see a
-                # worker that is alive but failing, not a dead one.
-                try:
-                    _write_worker_status(
-                        started_at=started_at,
-                        events_processed_today=total_events_processed,
-                        sops_generated=total_sops_generated,
-                        last_pipeline_duration_ms=last_pipeline_duration_ms,
-                        consecutive_errors=consecutive_errors,
-                        vlm_available=vlm_available,
-                        vlm_mode=vlm_mode_str,
-                        vlm_provider=vlm_provider_str or None,
-                    )
-                except Exception:
-                    logger.debug("Failed to write worker status", exc_info=True)
-                if args.once:
-                    break
-                interruptible_sleep(
-                    error_backoff_seconds(consecutive_errors),
-                    lambda: shutdown_flag[0],
-                )
-                continue
+                backoff = error_backoff_seconds(consecutive_errors)
+            finally:
+                STATE_LOCK.release()
 
+            _heartbeat()
             if args.once:
+                # One iteration, including the model work it submitted.
+                runner.wait_idle()
+                _heartbeat()
                 break
-            time.sleep(current_interval)
+            if backoff is not None:
+                interruptible_sleep(backoff, lambda: shutdown_flag[0])
+            else:
+                time.sleep(current_interval)
+
+        # A model call in progress cannot be interrupted: the inference
+        # thread is a daemon thread and does not hold up the exit.
+        if not runner.stop():
+            logger.info("Inference job still running at shutdown; not waiting for it")
 
     # Stop query API server if running
     if query_api_server is not None:

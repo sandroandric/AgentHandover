@@ -76,6 +76,15 @@ def test_once_runs_one_iteration_and_cleans_up(
     assert status["consecutive_errors"] == 0
     assert "annotation_paused_reason" in status
     assert status["annotation_budget"]["max_frames"] == 1500
+    # The model work ran on the inference thread and --once waited for it:
+    # nothing queued or running, nothing failed; the thread is stopped.
+    inference = status["inference"]
+    assert inference["running"] is None and inference["depth"] == 0, inference
+    assert inference["failed"] == 0 and inference["completed"] >= 2, inference
+    assert inference["annotation_backlog"] == 0
+    assert inference["lower_capture_cadence"] is False
+    from agenthandover_worker import inference_runner
+    assert inference_runner._ACTIVE is None
     # The once-per-day jobs ran and recorded today's local date.
     from datetime import date
 

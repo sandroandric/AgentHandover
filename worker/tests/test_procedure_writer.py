@@ -315,3 +315,66 @@ class TestRegeneration:
         assert new["execution_stats"] == {"total": 1}
         assert new["staleness"]["last_confirmed"] == "t1"
         assert new["staleness"]["drift_signals"] == [1]
+
+
+# ---------------------------------------------------------------------------
+# Enrichment (embedding, style) on the inference thread (WP-C7)
+# ---------------------------------------------------------------------------
+
+class TestEnrichmentOnTheInferenceThread:
+
+    def test_style_lands_on_the_procedure_as_saved_after_the_model_call(
+        self, writer: ProcedureWriter, kb: KnowledgeBase, sample_sop: dict,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """An approval on the control thread during the style call is kept:
+        the result is written into the procedure as it is after the call."""
+        from agenthandover_worker import style_analyzer
+
+        def style_call(procedure, llm_reasoner=None):
+            # The control thread approves while the model runs.
+            saved = kb.get_procedure(procedure["id"])
+            saved["lifecycle_state"] = "agent_ready"
+            kb.save_procedure(saved)
+            return {"formality": "casual"}, [{"text": "hi"}]
+
+        monkeypatch.setattr(style_analyzer, "analyze_procedure_style", style_call)
+        writer.write_procedure(sample_sop, source="focus", source_id="session-1")
+
+        proc = kb.get_procedure("check-domains")
+        assert proc["lifecycle_state"] == "agent_ready"
+        assert proc["voice_profile"]["formality"] == "casual"
+        assert proc["content_samples"] == [{"text": "hi"}]
+
+    def test_from_the_control_thread_the_enrichment_is_queued(
+        self, kb: KnowledgeBase, tracker: EvidenceTracker, sample_sop: dict,
+    ) -> None:
+        import threading
+
+        from agenthandover_worker.inference_runner import P0, InferenceRunner
+
+        class Embeds:
+            def __init__(self) -> None:
+                self.threads: list[str] = []
+
+            def upsert(self, source_type, source_id, text) -> bool:
+                self.threads.append(threading.current_thread().name)
+                return True
+
+        vkb = Embeds()
+        writer = ProcedureWriter(kb=kb, evidence=tracker, vector_kb=vkb)
+        runner = InferenceRunner().start()
+        try:
+            gate, release = threading.Event(), threading.Event()
+            runner.submit("focus", P0, lambda: (gate.set(), release.wait(5)))
+            assert gate.wait(5)
+            writer.write_procedure(sample_sop, source="focus", source_id="s")
+            # Saved now; embedded after the running job, on its thread.
+            assert kb.get_procedure("check-domains") is not None
+            assert vkb.threads == []
+            assert runner.status()["queued"] == ["P0 enrich-procedure:check-domains"]
+            release.set()
+            assert runner.wait_idle(5)
+            assert vkb.threads == ["inference"]
+        finally:
+            runner.stop()

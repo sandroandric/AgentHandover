@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from agenthandover_worker.evidence_tracker import EvidenceTracker, ObservationEvidence
+from agenthandover_worker.inference_runner import model_work
 from agenthandover_worker.knowledge_base import KnowledgeBase
 from agenthandover_worker.procedure_schema import (
     sop_to_procedure,
@@ -149,12 +150,11 @@ class ProcedureWriter:
         # Save to knowledge base
         path = self._kb.save_procedure(procedure)
 
-        # Embed procedure in vector KB for semantic search
+        # Embed it for semantic search and learn the user's writing style
+        # from it: model calls, so they run on the inference thread (an
+        # approval on the control thread queues them, inference_runner).
         slug = procedure["id"]
-        self._embed_procedure(procedure)
-
-        # Analyze writing style from user-produced text
-        self._analyze_style(procedure)
+        model_work(f"enrich-procedure:{slug}", lambda: self._enrich(slug))
 
         self._evidence.add_observation(
             slug,
@@ -285,13 +285,28 @@ class ProcedureWriter:
         except Exception:
             logger.debug("Procedure embedding failed for %s", procedure.get("id"), exc_info=True)
 
+    def _enrich(self, slug: str) -> None:
+        """Embed the saved procedure *slug* and analyze its writing style."""
+        procedure = self._kb.get_procedure(slug)
+        if procedure is None:
+            return
+        self._embed_procedure(procedure)
+        self._analyze_style(procedure)
+
     def _analyze_style(self, procedure: dict) -> None:
-        """Analyze user writing style via LLM and populate voice_profile + content_samples."""
+        """Analyze user writing style via LLM and populate voice_profile + content_samples.
+
+        The result goes into the procedure as saved *after* the model call:
+        the control thread may have changed it meanwhile (an approval moves
+        its lifecycle), and saving the copy read before the call would undo
+        that."""
         try:
             from agenthandover_worker.style_analyzer import analyze_procedure_style
             voice_profile, content_samples = analyze_procedure_style(
                 procedure, llm_reasoner=self._llm_reasoner,
             )
+            if voice_profile or content_samples:
+                procedure = self._kb.get_procedure(procedure.get("id", "")) or procedure
             if voice_profile:
                 existing_vp = procedure.get("voice_profile", {})
                 existing_vp.update(voice_profile)

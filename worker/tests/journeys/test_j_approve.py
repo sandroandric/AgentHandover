@@ -13,6 +13,7 @@ command is written any more.
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 import pytest
@@ -123,3 +124,103 @@ def test_claude_skill_adapter_writes_only_the_skill_and_the_index_command(
 
 def _files_under(root: Path) -> set[str]:
     return {str(p.relative_to(root)) for p in root.rglob("*") if p.is_file()}
+
+
+# --- WP-C7: approving while the inference thread runs a long model call ---
+
+# The model call the approval overlaps is held this long by the cassette
+# (``/__cassette/slow``, first /api/generate request only).
+SLOW_CALL_SECONDS = 6.0
+# The app's approval must be done this soon after its trigger.
+APPROVE_WITHIN_SECONDS = 2.0
+SEEDED_SLUG = "check-domain-availability"
+
+
+def _seed_draft(worker) -> str:
+    """A draft Skill waiting for approval (the review record and the
+    procedure a finished recording leaves), from a recorded SOP answer."""
+    from agenthandover_worker.procedure_schema import sop_to_procedure
+    from fixtures.vlm_answers import generated_sop_template
+
+    proc = sop_to_procedure(generated_sop_template("check_domain_availability"))
+    proc.update({
+        "id": SEEDED_SLUG, "slug": SEEDED_SLUG, "title": "Check Domain Availability",
+        "source": "focus", "lifecycle_state": "draft",
+    })
+    worker.knowledge_base.save_procedure(proc)
+    worker.db.save_generated_sop(
+        slug=SEEDED_SLUG, title=proc["title"], source="focus", sop_template=proc,
+        confidence=proc["confidence_avg"], source_id="focus-earlier", auto_approve=False,
+    )
+    return SEEDED_SLUG
+
+
+def _wait_for(condition, timeout: float = 10.0) -> None:
+    deadline = time.monotonic() + timeout
+    while not condition():
+        assert time.monotonic() < deadline, "timed out waiting"
+        time.sleep(0.02)
+
+
+def _approve_during_the_slow_call(worker, tape, long_job: str) -> None:
+    """Start the inference thread, let *long_job* reach its slow model call,
+    approve the seeded draft for agents, and check the approval finished
+    within :data:`APPROVE_WITHIN_SECONDS` while the call still runs."""
+    slug = _seed_draft(worker)
+    tape.set_slow(SLOW_CALL_SECONDS, n=1, path="/api/generate")
+    runner = worker.start_inference()
+    worker.run_tick()
+    # The slow request has reached the cassette (its fault budget is spent).
+    _wait_for(lambda: tape.fault_state()["slow_seconds"] == 0.0)
+    assert runner.status()["running"] == long_job
+
+    trigger_spool.write_trigger(
+        worker.state_dir, "lifecycle-promote",
+        {"procedure_slug": slug, "to_state": "agent_ready"},
+    )
+    started = time.monotonic()
+    tick = worker.run_tick()
+    elapsed = time.monotonic() - started
+
+    assert tick["triggers_consumed"] == 1
+    assert elapsed < APPROVE_WITHIN_SECONDS, f"approval took {elapsed:.2f} s"
+    proc = worker.knowledge_base.get_procedure(slug)
+    assert proc["lifecycle_state"] == "agent_ready"
+    skill = worker.cfg.export.skills_dir / slug / "SKILL.md"
+    assert skill.read_text(encoding="utf-8") == render_packet(proc, target="claude-skill")
+    # The heartbeat of that tick: the long call still runs, and the
+    # approval's model work (embedding, style) waits behind it at P0.
+    inference = worker.status()["inference"]
+    assert inference["running"] == long_job
+    assert inference["annotation_backlog"] >= 0
+    assert inference["lower_capture_cadence"] is worker.annotation_budget.asks_lower_capture(
+        inference["annotation_backlog"],
+    )
+    assert f"P0 enrich-procedure:{slug}" in inference["queued"]
+    assert inference["queued"][0].startswith("P0 ")
+
+    # Stop before the queued enrichment runs (the cassette holds no answer
+    # for it); the long job finishes its remaining calls at full speed.
+    tape.reset_faults()
+    assert runner.stop(timeout=60)
+
+
+def test_approval_completes_while_passive_annotation_waits_for_the_model(
+    events_db, worker, clock, temp_home, cassette,
+) -> None:
+    tape = cassette("passive_volatile_hour")
+    fixture = events_db("passive_volatile_hour", rebase_to=clock.now())
+    _approve_during_the_slow_call(
+        worker(fixture, adapter="claude-skill"), tape, "P2 passive-annotation",
+    )
+
+
+@needs_focus_sop_recording
+def test_approval_completes_while_a_focus_recording_is_processed(
+    events_db, worker, clock, temp_home, cassette,
+) -> None:
+    run = start_focus_run(
+        events_db=events_db, worker=worker, clock=clock,
+        temp_home=temp_home, cassette=cassette, adapter="claude-skill",
+    )
+    _approve_during_the_slow_call(run.worker, run.tape, "P0 focus")

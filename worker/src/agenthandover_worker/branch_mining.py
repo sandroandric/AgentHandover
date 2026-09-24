@@ -45,11 +45,11 @@ import logging
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
+from agenthandover_worker.dom import host_or_doc
 from agenthandover_worker.scene_annotator import as_compact
 from agenthandover_worker.sop_dedup import _normalize_app
 from agenthandover_worker.task_segmenter import AnnotatedFrame
 from agenthandover_worker.variant_detector import VariantDetector
-from agenthandover_worker.workflow_mining import host_or_doc
 
 if TYPE_CHECKING:
     from agenthandover_worker.db import WorkerDB

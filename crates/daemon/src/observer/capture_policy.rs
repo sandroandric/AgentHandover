@@ -17,7 +17,12 @@
 //! Budgets: passive frames are capped at `screenshot_max_per_minute` (20 by
 //! default); focus-recording frames have their own counter
 //! (`focus_screenshot_max_per_minute`, 40) so passive capture never leaves a
-//! recording blind. Budgets count kept frames.
+//! recording blind. Budgets count kept frames. While the worker's passive
+//! annotation backlog is long (`worker-status.json` asks for it,
+//! [`CapturePolicy::set_passive_throttled`]) the passive budget is divided
+//! by [`THROTTLED_PASSIVE_DIVISOR`]: frames the worker could not annotate
+//! before they expire are not worth capturing. Focus recordings are never
+//! throttled.
 
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
@@ -31,6 +36,9 @@ pub const FOCUS_INTERVAL: Duration = Duration::from_secs(2);
 /// A heartbeat frame whose OCR words overlap the last kept frame's by at
 /// least this Jaccard similarity shows the same text and is dropped.
 pub const SAME_TEXT_JACCARD: f64 = 0.9;
+/// While throttled, the passive budget per minute is this many times smaller
+/// (at least one frame a minute).
+pub const THROTTLED_PASSIVE_DIVISOR: u32 = 4;
 
 /// Why the shutter fired. Stored as `metadata.capture_trigger`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,6 +107,7 @@ pub struct CapturePolicy {
     last_focus_shutter: Option<Instant>,
     last_kept: Option<FrameSignature>,
     last_kept_words: Option<HashSet<String>>,
+    passive_throttled: bool,
 }
 
 impl CapturePolicy {
@@ -117,6 +126,26 @@ impl CapturePolicy {
             last_focus_shutter: None,
             last_kept: None,
             last_kept_words: None,
+            passive_throttled: false,
+        }
+    }
+
+    /// Throttle passive capture (the worker's annotation backlog is long)
+    /// or lift it.
+    pub fn set_passive_throttled(&mut self, throttled: bool) {
+        self.passive_throttled = throttled;
+    }
+
+    pub fn passive_throttled(&self) -> bool {
+        self.passive_throttled
+    }
+
+    /// Passive frames this minute may keep.
+    fn passive_budget(&self) -> u32 {
+        if self.passive_throttled {
+            (self.passive_cap / THROTTLED_PASSIVE_DIVISOR).max(1)
+        } else {
+            self.passive_cap
         }
     }
 
@@ -144,7 +173,7 @@ impl CapturePolicy {
         let over_budget = if focus_recording {
             self.focus_kept >= self.focus_cap
         } else {
-            self.passive_kept >= self.passive_cap
+            self.passive_kept >= self.passive_budget()
         };
         if over_budget {
             return None;
@@ -309,6 +338,33 @@ mod tests {
         // A new minute resets the budget.
         let now = t0 + Duration::from_secs(61);
         assert!(p.shutter_trigger(&[CaptureTrigger::Click], false, now).is_some());
+    }
+
+    #[test]
+    fn a_throttled_passive_budget_is_a_quarter_and_never_touches_focus() {
+        let t0 = Instant::now();
+        let mut p = CapturePolicy::new(20, 40, 1, t0);
+        p.set_passive_throttled(true);
+        for i in 0..5u8 {
+            assert!(p.shutter_trigger(&[CaptureTrigger::Click], false, t0).is_some());
+            p.record_kept(signature(i * 50), None, false);
+        }
+        assert_eq!(p.shutter_trigger(&[CaptureTrigger::Click], false, t0), None);
+        // A recording keeps its own, unthrottled budget.
+        assert_eq!(
+            p.shutter_trigger(&[], true, t0),
+            Some(CaptureTrigger::FocusInterval)
+        );
+        // Lifted: the full budget again.
+        p.set_passive_throttled(false);
+        assert!(p.shutter_trigger(&[CaptureTrigger::Click], false, t0).is_some());
+
+        // A tiny budget still keeps one frame a minute.
+        let mut tiny = CapturePolicy::new(2, 40, 1, t0);
+        tiny.set_passive_throttled(true);
+        assert!(tiny.shutter_trigger(&[CaptureTrigger::Click], false, t0).is_some());
+        tiny.record_kept(signature(1), None, false);
+        assert_eq!(tiny.shutter_trigger(&[CaptureTrigger::Click], false, t0), None);
     }
 
     #[test]

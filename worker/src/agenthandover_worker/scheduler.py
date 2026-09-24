@@ -462,6 +462,10 @@ def parse_screen_locked(ioreg_plist: bytes) -> bool:
 # ---------------------------------------------------------------------------
 
 HOUR_SECONDS = 3600.0
+# A passive backlog that needs this many hours of the hourly frame cap to
+# clear asks the daemon to keep fewer passive frames (worker-status.json
+# ``inference.lower_capture_cadence``).
+CAPTURE_BACKLOG_HOURS = 4
 DAILY_BUDGET_REASON = "annotation_budget_exhausted"
 HOURLY_BUDGET_REASON = "annotation_hourly_budget_exhausted"
 
@@ -542,6 +546,15 @@ class AnnotationBudget:
     def hour_cache_hits(self) -> int:
         """Frames the annotation cache answered in the hour (not capped)."""
         return int(sum(entry[3] for entry in self._live()))
+
+    def asks_lower_capture(self, backlog: int) -> bool:
+        """True when *backlog* passive frames need
+        :data:`CAPTURE_BACKLOG_HOURS` or more of the hourly frame cap to
+        clear (never without an hourly cap)."""
+        return (
+            self.max_frames_per_hour > 0
+            and backlog >= CAPTURE_BACKLOG_HOURS * self.max_frames_per_hour
+        )
 
     def pause_reason(self) -> str | None:
         """Why passive model use must wait, or None while both caps allow it."""

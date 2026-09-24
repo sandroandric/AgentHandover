@@ -13,6 +13,12 @@ out waiting for llama-server to start").  The worker therefore runs each tick in
    generation, behavioural synthesis, Q&A and the daily model jobs, on the
    SOP model.
 
+The phases run as jobs on the inference thread (:mod:`inference_runner`):
+each job that annotates starts with :meth:`~ModelScheduler.begin_annotation`,
+each job that generates plans with :meth:`~ModelScheduler.plan_generation`,
+and the runner calls :meth:`~ModelScheduler.end_generation` when its queue
+runs empty.
+
 :class:`ModelScheduler` owns the switch between them:
 
 * the first generation call of a phase (every component that calls the
@@ -311,13 +317,16 @@ class ModelScheduler:
             self._unload(self.sop_model)
 
     def plan_generation(
-        self, *, urgent: bool, due: dict[str, bool],
+        self, *, urgent: bool, due: dict[str, bool], take_batched: bool = True,
     ) -> GenerationPlan:
         """Decide whether this tick has a generation phase.
 
         *urgent* is work the user is waiting for (a stopped focus recording,
         answered questions); *due* names the batched jobs and whether each
-        is due now.
+        is due now.  With *take_batched* False the plan lets no batched job
+        run and they keep waiting as they were: the focus job
+        (inference_runner) plans for itself, and the passive jobs plan for
+        themselves when they run.
         """
         now = self._clock()
         if not self._generating:
@@ -327,7 +336,7 @@ class ModelScheduler:
                 self._due_since.setdefault(job, now)
             else:
                 self._due_since.pop(job, None)
-        jobs = frozenset(self._due_since)
+        jobs = frozenset(self._due_since) if take_batched else frozenset()
         if not self.split:
             return self._run(self.sop_model, jobs)
         if not urgent and not jobs:
@@ -449,7 +458,8 @@ class ModelScheduler:
     # -- internals ------------------------------------------------------
 
     def _run(self, model: str, jobs: frozenset[str], *, fallback: bool = False) -> GenerationPlan:
-        self._due_since.clear()
+        for job in jobs:
+            self._due_since.pop(job, None)
         self._plan_model = model
         return GenerationPlan(run=True, model=model, jobs=jobs, fallback=fallback)
 

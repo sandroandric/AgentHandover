@@ -180,7 +180,9 @@ class VectorKB:
     ) -> None:
         self.config = config or VectorKBConfig()
         self._db_path = str(db_path)
-        self._conn = sqlite3.connect(self._db_path)
+        # Shared by the control, inference and query-API threads
+        # (inference_runner); SQLite itself is serialized.
+        self._conn = sqlite3.connect(self._db_path, check_same_thread=False)
         self._conn.execute("PRAGMA busy_timeout = 5000;")
         self._conn.execute("PRAGMA journal_mode = WAL;")
         self._ensure_table()

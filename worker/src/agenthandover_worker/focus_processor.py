@@ -651,10 +651,15 @@ class FocusProcessor:
                 len(keyframes), len(events), dropped,
             )
 
+    @property
+    def has_remaining(self) -> bool:
+        """True while the last session has keyframes for annotate_remaining()."""
+        return bool(self._remaining)
+
     def annotate_remaining(self, db: object) -> dict:
         """Annotate the last session's keyframes that the SOP did not need.
 
-        Called in the annotation phase of the tick after the session's
+        Called by the focus-tail job (inference_runner P1) after the session's
         Skill is written (or its generation has failed), so they never
         delay it and never sit between two generation calls.  Frames Ollama
         cannot take now stay pending with their screenshots.

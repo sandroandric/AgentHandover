@@ -485,7 +485,6 @@ class CorrectionDetector:
                 continue
 
             from agenthandover_worker.llm_reasoning import sanitize_user_data
-            from agenthandover_worker.redaction import redact
 
             # Redacted before truncation, so a cut never splits a secret.
             originals = [

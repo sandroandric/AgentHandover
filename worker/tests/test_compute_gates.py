@@ -78,6 +78,19 @@ def _statuses(db_path: Path) -> dict[str, str]:
 
 class TestAnnotationBudget:
 
+    def test_a_backlog_of_four_hours_asks_the_daemon_for_fewer_frames(self):
+        """WP-C7: worker-status.json's ``lower_capture_cadence``."""
+        budget = AnnotationBudget(
+            max_frames=1500, max_compute_seconds=3600, max_frames_per_hour=60,
+        )
+        assert not budget.asks_lower_capture(0)
+        assert not budget.asks_lower_capture(239)
+        assert budget.asks_lower_capture(240)
+        unlimited = AnnotationBudget(
+            max_frames=1500, max_compute_seconds=3600, max_frames_per_hour=0,
+        )
+        assert not unlimited.asks_lower_capture(100_000)
+
     def test_compute_cap_stops_the_run_with_rows_pending(self, events_db, tmp_path):
         """Cap 5 minutes, each frame costs 2: three frames run, the rest stay
         pending with their JPEGs, and the status names the reason."""

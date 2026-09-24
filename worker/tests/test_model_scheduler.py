@@ -279,6 +279,25 @@ def test_passive_discovery_is_batched_until_other_work_or_the_wait():
     ).allows("passive_discovery")
 
 
+def test_a_focus_job_planning_for_itself_leaves_the_batched_wait_alone():
+    """WP-C7: the focus job plans without taking the batched jobs, so a
+    passive pass that has waited keeps its place in the batch window."""
+    clock = Clock()
+    fake = FakeOllama({QWEN: QWEN_SIZE})
+    scheduler, _ = _scheduler(fake, clock=clock)
+
+    assert scheduler.plan_generation(urgent=False, due={"passive_discovery": True}).run is False
+    clock.now += GENERATION_BATCH_WAIT_SECONDS - 10
+    focus = scheduler.plan_generation(urgent=True, due={}, take_batched=False)
+    assert focus.run and not focus.allows("passive_discovery")
+    scheduler.end_generation()
+    clock.now += 10
+    # Due since before the focus job: its wait is over now.
+    assert scheduler.plan_generation(
+        urgent=False, due={"passive_discovery": True},
+    ).allows("passive_discovery")
+
+
 def test_after_hours_without_memory_the_jobs_run_on_the_annotation_model():
     clock = Clock()
     fake = FakeOllama({QWEN: QWEN_SIZE})

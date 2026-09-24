@@ -58,7 +58,7 @@ from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
 from agenthandover_worker import run_signals
-from agenthandover_worker.dom import host_or_doc, template_path  # noqa: F401 (re-exported)
+from agenthandover_worker.dom import host_or_doc
 from agenthandover_worker.evidence_extractor import EvidenceExtractor
 from agenthandover_worker.pattern_detector import OBSERVATION_WINDOW_DAYS, PatternDetector
 from agenthandover_worker.scene_annotator import as_compact
