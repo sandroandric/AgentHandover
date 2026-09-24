@@ -286,11 +286,11 @@ agenthandover start all  # Start daemon + worker
 
 ### AI Models
 
-AgentHandover auto-detects your Mac's RAM during onboarding and recommends the best model tier; you can pick another tier or name your own models in onboarding or `config.toml`. The small Qwen 3.5 4B model annotates every screen on every tier (it answers within the per-frame budget). Up to 16 GB it also writes Skills and behavioural syntheses: measured on a 16 GB Mac it wrote a Skill in 153 s against Gemma 4 12B's 230 s (29.5 against 12.1 tokens/s), of comparable quality, and Gemma does not fit next to ordinary apps there. From 24 GB a larger Gemma 4 model writes Skills, where quality matters and calls are rare:
+AgentHandover auto-detects your Mac's RAM during onboarding and recommends the best model tier; you can pick another tier or name your own models in onboarding or `config.toml`. A small Qwen 3.5 model annotates every screen (it answers within the per-frame budget). On 8 GB Macs that is Qwen 3.5 2B (`qwen3.5:2b-q4_K_M`, 1.9 GB): it stays loaded all day in ~2.3 GB instead of the 4B's ~3.8 GB, and on a recorded session's prompts its annotations were all valid, with the right app every time. Qwen 3.5 4B writes Skills and behavioural syntheses up to 16 GB (on 8 GB it wrote 18 correct steps where the 2B wrote 10; on a 16 GB Mac it wrote a Skill in 153 s against Gemma 4 12B's 230 s, 29.5 against 12.1 tokens/s, of comparable quality, and Gemma does not fit next to ordinary apps there), and annotates on 16 GB and up. From 24 GB a larger Gemma 4 model writes Skills, where quality matters and calls are rare. Where a tier has two models the worker loads one at a time: annotation first, then Skills.
 
 | RAM | Tier | Screen annotation | Skill generation | Download |
 |-----|------|-------------------|------------------|----------|
-| 8 GB | Standard | Qwen 3.5 4B | Qwen 3.5 4B | ~4 GB |
+| 8 GB | Standard | Qwen 3.5 2B | Qwen 3.5 4B | ~6 GB |
 | 16 GB | Recommended | Qwen 3.5 4B | Qwen 3.5 4B | ~4 GB |
 | 24 GB | Performance | Qwen 3.5 4B | Gemma 4 12B QAT | ~11 GB |
 | 48 GB+ | Max Quality | Qwen 3.5 4B | Gemma 4 31B QAT | ~22 GB |
@@ -301,8 +301,10 @@ The Gemma 4 tiers (24 GB and up) use Google's QAT (Quantization-Aware Training) 
 
 ```bash
 # Or pull manually (Standard and Recommended tiers):
-ollama pull qwen3.5:4b          # Screen annotation and Skill generation (~3.4 GB)
+ollama pull qwen3.5:4b          # Skill generation; screen annotation from 16 GB (~3.4 GB)
 ollama pull nomic-embed-text    # Semantic search (~274 MB)
+# Standard tier (8 GB) adds:
+ollama pull qwen3.5:2b-q4_K_M   # Screen annotation (~1.9 GB)
 # Performance tier (24 GB) adds:
 ollama pull gemma4:12b-it-qat   # Skill generation (~7.2 GB)
 ```

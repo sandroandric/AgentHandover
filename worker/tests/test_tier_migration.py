@@ -27,6 +27,8 @@ FIXTURES = REPO_ROOT / "tests" / "fixtures" / "vlm_block"
 
 OLD_RECOMMENDED = FIXTURES.joinpath("recommended-previous.toml").read_text(encoding="utf-8")
 MIGRATED_RECOMMENDED = FIXTURES.joinpath("recommended-migrated.toml").read_text(encoding="utf-8")
+OLD_STANDARD = FIXTURES.joinpath("standard-previous.toml").read_text(encoding="utf-8")
+MIGRATED_STANDARD = FIXTURES.joinpath("standard-migrated.toml").read_text(encoding="utf-8")
 
 
 def _unchanged(text: str) -> str:
@@ -47,10 +49,12 @@ def test_history_names_known_tiers_and_never_the_current_pair():
         assert (tier.annotation_model, tier.sop_model) not in pairs
 
 
-def test_history_is_the_wp_f6_change():
-    """The one default that changed since WP-C6: the 16 GB tier's Skills
-    model, gemma4:12b-it-qat until dfaa35d (WP-F6)."""
+def test_history_is_the_wp_f6_and_wp_f8_changes():
+    """The defaults that changed since WP-C6: the 16 GB tier's Skills
+    model, gemma4:12b-it-qat until dfaa35d (WP-F6), and the 8 GB tier's
+    annotator, qwen3.5:4b until WP-F8."""
     assert mp.PREVIOUS_TIER_DEFAULTS == {
+        "standard": (("qwen3.5:4b", "qwen3.5:4b"),),
         "recommended": (("qwen3.5:4b", "gemma4:12b-it-qat"),),
     }
 
@@ -59,7 +63,7 @@ def test_tiers_json_carries_the_history():
     doc = mp.tiers_document()
     by_id = {t["id"]: t["previous_defaults"] for t in doc["tiers"]}
     assert by_id == {
-        "standard": [],
+        "standard": [{"annotation_model": "qwen3.5:4b", "sop_model": "qwen3.5:4b"}],
         "recommended": [{"annotation_model": "qwen3.5:4b", "sop_model": "gemma4:12b-it-qat"}],
         "performance": [],
         "max_quality": [],
@@ -102,6 +106,45 @@ def test_old_recommended_block_moves_to_qwen_byte_for_byte():
     assert reason.startswith('tier "recommended": sop_model gemma4:12b-it-qat -> qwen3.5:4b')
     # What `agenthandover setup --tier recommended` writes.
     assert new == mp.apply_vlm_block(OLD_RECOMMENDED, mp.get_tier("recommended"))
+
+
+def test_old_standard_block_moves_to_the_2b_annotator_byte_for_byte():
+    """WP-F8: an 8 GB config the installer or onboarding wrote with
+    qwen3.5:4b for both roles now annotates with qwen3.5:2b-q4_K_M; only
+    the annotation_model line changes."""
+    new, changed, reason = mp.migrate_vlm_block(OLD_STANDARD)
+    assert changed
+    assert new == MIGRATED_STANDARD
+    diff = [
+        (a, b) for a, b in zip(OLD_STANDARD.splitlines(True), new.splitlines(True)) if a != b
+    ]
+    assert diff == [('annotation_model = "qwen3.5:4b"\n', 'annotation_model = "qwen3.5:2b-q4_K_M"\n')]
+    assert reason == (
+        'tier "standard": annotation_model qwen3.5:4b -> qwen3.5:2b-q4_K_M '
+        "(qwen3.5:4b + qwen3.5:4b was the tier's earlier default; "
+        "it now runs qwen3.5:2b-q4_K_M + qwen3.5:4b)"
+    )
+    assert new == mp.apply_vlm_block(OLD_STANDARD, mp.get_tier("standard"))
+    # Idempotent.
+    assert _unchanged(new) == 'already the current models of tier "standard"'
+
+
+@pytest.mark.parametrize(("label", "text", "reason"), [
+    ("customised sop_model",
+     OLD_STANDARD.replace('sop_model = "qwen3.5:4b"', 'sop_model = "gemma4:12b-it-qat"'),
+     'qwen3.5:4b + gemma4:12b-it-qat is not an earlier default of tier "standard" (set by hand)'),
+    ("customised annotation_model",
+     OLD_STANDARD.replace('annotation_model = "qwen3.5:4b"', 'annotation_model = "qwen3.5:2b"'),
+     'qwen3.5:2b + qwen3.5:4b is not an earlier default of tier "standard" (set by hand)'),
+    ("the old standard pair on the recommended tier",
+     OLD_STANDARD.replace('tier = "standard"', 'tier = "recommended"'),
+     'already the current models of tier "recommended"'),
+    ("annotation_model left to the tier",
+     OLD_STANDARD.replace('annotation_model = "qwen3.5:4b"\n', ""),
+     "[vlm] does not pin both models (the tier supplies the rest)"),
+])
+def test_a_customised_standard_block_is_left_alone(label, text, reason):
+    assert _unchanged(text) == reason, label
 
 
 def test_migration_is_idempotent():

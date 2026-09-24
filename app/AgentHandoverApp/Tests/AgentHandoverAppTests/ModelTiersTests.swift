@@ -49,6 +49,9 @@ final class ModelTiersTests: XCTestCase {
         // WP-F6 moved the 16 GB tier off gemma4:12b-it-qat.
         XCTAssertEqual(table.tier(id: "recommended")?.previousDefaults,
                        [ModelPair(annotationModel: "qwen3.5:4b", sopModel: "gemma4:12b-it-qat")])
+        // WP-F8 moved the 8 GB tier's annotator off qwen3.5:4b.
+        XCTAssertEqual(table.tier(id: "standard")?.previousDefaults,
+                       [ModelPair(annotationModel: "qwen3.5:4b", sopModel: "qwen3.5:4b")])
     }
 
     /// A tiers.json from an install before `previous_defaults` still decodes.
@@ -74,7 +77,9 @@ final class ModelTiersTests: XCTestCase {
 
     func testTheMeasuredSplit() throws {
         let table = try ModelTierTable.load(from: Self.tiersURL)
-        XCTAssertEqual(Set(table.tiers.map(\.annotationModel)), ["qwen3.5:4b"])
+        // WP-F8: the 8 GB tier annotates with the 2B, every other with the 4B.
+        XCTAssertEqual(table.tiers.map(\.annotationModel),
+                       ["qwen3.5:2b-q4_K_M", "qwen3.5:4b", "qwen3.5:4b", "qwen3.5:4b"])
         // WP-F6: 16 GB runs qwen3.5:4b for both roles; Gemma 4 writes Skills from 24 GB.
         XCTAssertEqual(table.tiers.map(\.sopModel),
                        ["qwen3.5:4b", "qwen3.5:4b", "gemma4:12b-it-qat", "gemma4:31b-it-qat"])
@@ -89,6 +94,12 @@ final class ModelTiersTests: XCTestCase {
         XCTAssertEqual(table.sizeLabel("qwen3.5:4b"), "3.4 GB")
         XCTAssertEqual(table.sizeLabel("nomic-embed-text"), "270 MB")
         XCTAssertEqual(table.downloadLabel(for: performance), "~11 GB")
+        let standard = try XCTUnwrap(table.tier(id: "standard"))
+        XCTAssertEqual(table.models(for: standard), ["qwen3.5:2b-q4_K_M", "qwen3.5:4b", "nomic-embed-text"])
+        XCTAssertFalse(table.needsNewOllama(table.models(for: standard)))
+        XCTAssertEqual(table.sizeLabel("qwen3.5:2b-q4_K_M"), "1.9 GB")
+        // 1.9 + 3.4 + 0.27 GB.
+        XCTAssertEqual(table.downloadLabel(for: standard), "~6 GB")
     }
 
     func testVLMBlockMatchesTheSharedFixture() throws {
@@ -110,6 +121,18 @@ final class ModelTiersTests: XCTestCase {
             tierID: tier.id, annotationModel: tier.annotationModel, sopModel: tier.sopModel)
         XCTAssertEqual(ModelTierTable.applyVLMBlock(block, to: try fixture("recommended-previous.toml")),
                        try fixture("recommended-migrated.toml"))
+    }
+
+    /// WP-F8: a config on the 8 GB tier's pre-WP-F8 models becomes
+    /// standard-migrated.toml, as the worker's tier migration makes it.
+    func testVLMBlockMatchesTheStandardMigrationFixture() throws {
+        let table = try ModelTierTable.load(from: Self.tiersURL)
+        let tier = try XCTUnwrap(table.tier(id: "standard"))
+        let block = ModelTierTable.vlmBlock(
+            tierID: tier.id, annotationModel: tier.annotationModel, sopModel: tier.sopModel)
+        let once = ModelTierTable.applyVLMBlock(block, to: try fixture("standard-previous.toml"))
+        XCTAssertEqual(once, try fixture("standard-migrated.toml"))
+        XCTAssertEqual(ModelTierTable.applyVLMBlock(block, to: once), once)
     }
 
     func testVLMBlockIsAppendedWithoutAVLMSection() {

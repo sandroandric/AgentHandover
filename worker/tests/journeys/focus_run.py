@@ -93,7 +93,7 @@ def start_focus_run(
     ollama_down_for: int = 0,
     vlm: dict | None = None,
     journey: str = FOCUS_CASSETTE,
-    tier: str = "standard",
+    tier: str = "recommended",
     fixture: str = "focus_dailynews",
 ) -> FocusRun:
     """Models, cassette, fixture and signal in place; no tick run yet.

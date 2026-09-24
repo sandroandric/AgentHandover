@@ -53,7 +53,7 @@ class TempHome:
         return self.path / ".config" / "agenthandover" / "config.toml"
 
     def configure(
-        self, *, ollama_host: str, tier: str = "standard", extra: str = "",
+        self, *, ollama_host: str, tier: str = "recommended", extra: str = "",
         vlm: dict | None = None,
     ) -> None:
         """Write ``config.toml``; ``extra`` is appended verbatim (more TOML
@@ -61,7 +61,11 @@ class TempHome:
 
         ``tier`` names the RAM tier whose models the worker runs, so a
         journey's model calls (and its cassette keys) do not depend on the
-        RAM of the machine running the test.
+        RAM of the machine running the test.  The default is the tier the
+        cassettes were recorded on: qwen3.5:4b annotates and writes Skills.
+        That was "standard" until WP-F8 gave the 8 GB tier the
+        qwen3.5:2b-q4_K_M annotator; since WP-F6 it is also "recommended",
+        whose request bodies are the same bytes.
         """
         vlm_lines = "".join(
             f"{key} = {json.dumps(value)}\n" for key, value in (vlm or {}).items()
@@ -111,13 +115,13 @@ def events_db(temp_home: TempHome) -> Callable[..., LoadedFixture]:
 
 @pytest.fixture()
 def cassette(temp_home: TempHome) -> Callable[..., Cassette]:
-    """``cassette(journey, record=None, tier="standard", vlm=None)``: start the
+    """``cassette(journey, record=None, tier="recommended", vlm=None)``: start the
     journey's cassette and point the worker's config at it (``vlm``: more
     ``[vlm]`` keys).  A replay miss fails the test at teardown."""
     with ExitStack() as stack:
 
         def start(
-            journey: str, *, record: bool | None = None, tier: str = "standard",
+            journey: str, *, record: bool | None = None, tier: str = "recommended",
             vlm: dict | None = None,
         ) -> Cassette:
             tape = stack.enter_context(open_cassette(journey, record=record))

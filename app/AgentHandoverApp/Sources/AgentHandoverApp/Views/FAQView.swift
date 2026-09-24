@@ -210,7 +210,7 @@ struct FAQView: View {
                     FAQItem(
                         id: "vlm",
                         question: "What is VLM / Qwen and do I need it?",
-                        answer: "VLM (Vision Language Model) is the local AI that analyzes your screenshots. AgentHandover uses Qwen, a small model that runs on your Mac via Ollama.\n\nYes, you need it. Without VLM, AgentHandover can't understand what's on your screen. The app will prompt you to set up Ollama during onboarding.\n\nRequirements: 8GB+ RAM (16GB recommended), ~4GB disk for the model."
+                        answer: "VLM (Vision Language Model) is the local AI that analyzes your screenshots. AgentHandover uses Qwen 3.5, small models that run on your Mac via Ollama (the 2B annotates on 8 GB Macs, the 4B elsewhere; the 4B writes Skills up to 16 GB).\n\nYes, you need it. Without VLM, AgentHandover can't understand what's on your screen. The app will prompt you to set up Ollama during onboarding.\n\nRequirements: 8GB+ RAM (16GB recommended), ~4GB disk for the models (~6GB on 8GB Macs)."
                     ),
                     FAQItem(
                         id: "agent-zero",

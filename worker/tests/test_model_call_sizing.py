@@ -207,12 +207,45 @@ class TestAnnotationRequest:
                     "modal", "typed_text", "urls", "emails", "label", "chosen"):
             assert f'"{key}"' in sa.ANNOTATION_INSTRUCTIONS
 
-    def test_default_annotation_model_is_qwen_4b(self):
+    def test_default_annotation_model_is_the_standard_tiers(self):
+        """The library default is the tier every Mac can run (WP-F8: the
+        8 GB tier annotates with qwen3.5:2b-q4_K_M); a config without
+        models gets the RAM tier's, as the worker resolves it."""
         from agenthandover_worker.config import Config
-        from agenthandover_worker.model_profiles import TIERS
+        from agenthandover_worker.model_profiles import get_tier, recommend_tier
 
-        assert AnnotationConfig().model == Config().vlm.annotation_model == "qwen3.5:4b"
-        assert {tier.annotation_model for tier in TIERS} == {"qwen3.5:4b"}
+        assert AnnotationConfig().model == get_tier("standard").annotation_model
+        assert AnnotationConfig().model == "qwen3.5:2b-q4_K_M"
+        assert Config().vlm.annotation_model == recommend_tier().annotation_model
+
+    def test_standard_tier_annotates_on_the_2b_with_thinking_off(self, tmp_path):
+        """A config on the standard tier sends its annotation calls to
+        qwen3.5:2b-q4_K_M with ``think`` false (the 2B is prone to thinking
+        loops) and the capped annotation budget."""
+        from agenthandover_worker.config import load_config
+
+        cfg_file = tmp_path / "config.toml"
+        cfg_file.write_text('[vlm]\ntier = "standard"\n', encoding="utf-8")
+        vlm = load_config(cfg_file).vlm
+        assert (vlm.annotation_model, vlm.sop_model) == ("qwen3.5:2b-q4_K_M", "qwen3.5:4b")
+
+        rec = _Recorder({"response": json.dumps(_valid_annotation())})
+        annotator = SceneAnnotator(AnnotationConfig(
+            model=vlm.annotation_model, delete_screenshot_after_processing=False,
+        ))
+        with patch("urllib.request.urlopen", rec):
+            result = annotator.annotate_event(
+                _event_with_screenshot(tmp_path, metadata=_INBOX_OCR),
+            )
+            assert annotator.preload()
+        assert result.status == "completed"
+        call, preload = (r["body"] for r in rec.requests)
+        assert call["model"] == preload["model"] == "qwen3.5:2b-q4_K_M"
+        assert call["think"] is False
+        assert call["format"] == ANNOTATION_JSON_SCHEMA
+        assert call["options"]["num_predict"] == 300
+        # Preload and calls share num_ctx, so Ollama does not reload.
+        assert call["options"]["num_ctx"] == preload["options"]["num_ctx"] == 4096
 
     def test_invalid_output_is_not_asked_twice(self, tmp_path):
         rec = _Recorder({"response": '{"app": "Chrome", "loc', "done_reason": "length"})

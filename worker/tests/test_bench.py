@@ -70,9 +70,10 @@ def test_prompts_are_split_by_role_and_unreplayable_ones_skipped(cassette_file):
 
 
 def test_bench_reports_tok_per_s_and_golden_score(cassette_file, tmp_path):
+    # The recommended tier runs qwen3.5:4b for both roles, the cassette's model.
     with Cassette(cassette_file, record=False) as live:
         report = bench.bench(
-            "standard", cassette_file, host=live.host, annotators=["qwen3.5:2b"],
+            "recommended", cassette_file, host=live.host, annotators=["qwen3.5:2b"],
         )
         assert len(live.misses) == 1  # the candidate's call: expected here
         live.misses.clear()
@@ -88,7 +89,7 @@ def test_bench_reports_tok_per_s_and_golden_score(cassette_file, tmp_path):
     # A candidate the cassette never answered for fails every call.
     candidate = report["annotators"]["qwen3.5:2b"]
     assert (candidate["calls"], candidate["errors"]) == (1, 1)
-    assert "tier standard" in bench.format_table(report)
+    assert "tier recommended" in bench.format_table(report)
 
 
 def test_golden_score_compares_json_fields_and_text():
@@ -108,13 +109,13 @@ def test_field_agreement_scores_only_fields_the_golden_has():
 
 
 def test_cli_writes_the_report(cassette_file, tmp_path, capsys):
-    out = tmp_path / "bench" / "standard.json"
+    out = tmp_path / "bench" / "recommended.json"
     with Cassette(cassette_file, record=False) as live:
         rc = bench.main([
-            "--tier", "standard", "--cassette", str(cassette_file),
+            "--tier", "recommended", "--cassette", str(cassette_file),
             "--host", live.host, "--out", str(out),
         ])
     assert rc == 0
-    assert json.loads(out.read_text())["tier"]["id"] == "standard"
+    assert json.loads(out.read_text())["tier"]["id"] == "recommended"
     assert "annotation: qwen3.5:4b" in capsys.readouterr().out
     assert bench.main(["--tier", "standard", "--cassette", str(tmp_path / "nope")]) == 2

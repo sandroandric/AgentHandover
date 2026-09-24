@@ -1,0 +1,20 @@
+# A config the installer or onboarding left on the 8 GB tier before WP-F8
+# (qwen3.5:4b annotated), plus a hand-set [vlm] key and the sections around
+# it: the worker's tier migration and `agenthandover setup --tier standard`
+# must turn it into standard-migrated.toml byte for byte.
+
+[export]
+adapter = "all"
+json_export = false
+
+[vlm]
+mode = "local"
+tier = "standard"
+annotation_model = "qwen3.5:4b"
+sop_model = "qwen3.5:4b"
+annotation_timeout_seconds = 240
+
+[embedding]
+model = "nomic-embed-text"
+# Image embeddings need the optional embeddings-apple extra.
+image_embeddings = false

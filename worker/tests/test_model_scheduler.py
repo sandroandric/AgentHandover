@@ -15,7 +15,7 @@ import pytest
 from agenthandover_worker import behavioral_synthesizer, sop_generator
 from agenthandover_worker.behavioral_synthesizer import BehavioralSynthesizer, SynthesizerConfig
 from agenthandover_worker.llm_reasoning import LLMReasoner, ReasoningConfig, annotation_reasoner
-from agenthandover_worker.model_profiles import get_profile
+from agenthandover_worker.model_profiles import get_profile, get_tier
 from agenthandover_worker.model_scheduler import (
     FALLBACK_AFTER_SECONDS,
     GB,
@@ -370,6 +370,81 @@ def test_one_model_tiers_are_left_as_they_were():
     scheduler.end_generation()
     assert fake.log == [("generate", QWEN, get_profile(QWEN).sop_num_ctx)]
     assert scheduler.status() is None
+
+
+STANDARD = get_tier("standard")
+QWEN_2B, QWEN_2B_SIZE = STANDARD.annotation_model, int(2.3 * GB)
+
+
+def _standard_scheduler(fake, *, free=16 * GB):
+    """The 8 GB tier (WP-F8): qwen3.5:2b-q4_K_M annotates, qwen3.5:4b
+    writes Skills."""
+    scheduler, memory = _scheduler(
+        fake, free=free, annotation=STANDARD.annotation_model, sop=STANDARD.sop_model,
+    )
+    component = FakeGenerator(fake)
+    component.config.model = STANDARD.sop_model
+    scheduler.register(component)
+    return scheduler, memory, component
+
+
+def test_the_standard_tier_switches_models_between_the_phases():
+    """The 2B is unloaded before qwen3.5:4b loads (once, at its generation
+    context), and qwen3.5:4b is unloaded before the 2B annotates again."""
+    assert (QWEN_2B, STANDARD.sop_model) == ("qwen3.5:2b-q4_K_M", QWEN)
+    fake = FakeOllama({QWEN_2B: QWEN_2B_SIZE})
+    scheduler, _, component = _standard_scheduler(fake)
+    ann_ctx = get_profile(QWEN_2B).ann_num_ctx
+    sop_ctx = get_profile(QWEN).sop_num_ctx
+
+    scheduler.begin_annotation()
+    fake.generate(QWEN_2B, "frame", options={"num_ctx": ann_ctx})
+    plan = scheduler.plan_generation(urgent=False, due={"daily": True})
+    assert scheduler.split and plan.run and plan.model == QWEN and not plan.fallback
+    component.call()
+    component.call()
+    scheduler.end_generation()
+    scheduler.begin_annotation()
+    fake.generate(QWEN_2B, "frame", options={"num_ctx": ann_ctx})
+
+    assert fake.log == [
+        ("ps",),
+        ("generate", QWEN_2B, ann_ctx),
+        ("ps",),
+        ("unload", QWEN_2B),
+        ("load", QWEN, sop_ctx),
+        ("generate", QWEN, sop_ctx),
+        ("generate", QWEN, sop_ctx),
+        ("ps",),
+        ("unload", QWEN),
+        ("generate", QWEN_2B, ann_ctx),
+    ]
+    assert scheduler.status() == {
+        "annotation_model": QWEN_2B, "sop_model": QWEN, "generation_model": QWEN,
+        "generation_waiting": None, "fallback": False,
+    }
+
+
+def test_the_standard_tier_waits_for_memory_counting_the_2b_it_unloads():
+    """On an 8 GB Mac the memory check counts what unloading the 2B frees
+    against qwen3.5:4b's size plus the margin; short, batched work waits."""
+    fake = FakeOllama({QWEN_2B: QWEN_2B_SIZE})
+    scheduler, memory, component = _standard_scheduler(fake, free=int(1.5 * GB))
+
+    plan = scheduler.plan_generation(urgent=False, due={"daily": True})
+    assert plan.run is False
+    # 3.4 GB + 1 GB margin; 1.5 GB free + 2.3 GB the 2B frees.
+    assert scheduler.reason == "waiting for memory: need 4.4 GB, 3.8 GB free"
+    assert ("unload", QWEN_2B) not in fake.log
+
+    memory["free"] = int(2.5 * GB)
+    plan = scheduler.plan_generation(urgent=False, due={"daily": True})
+    assert plan.allows("daily") and scheduler.reason is None
+    component.call()
+    assert fake.log[-3:] == [
+        ("unload", QWEN_2B), ("load", QWEN, get_profile(QWEN).sop_num_ctx),
+        ("generate", QWEN, get_profile(QWEN).sop_num_ctx),
+    ]
 
 
 def test_a_sop_model_left_loaded_by_an_earlier_run_is_unloaded_at_startup():

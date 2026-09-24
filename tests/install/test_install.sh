@@ -9,7 +9,8 @@
 #              so the probe must skip it and pick a 3.11+ one
 #   upgrade    second install over it, with a stub "app" process running
 #              that preinstall must stop; then a broken venv is rebuilt
-#   tiers      upgrades over a config on the 16 GB tier's pre-WP-F6 models:
+#   tiers      upgrades over a config on the 16 GB tier's pre-WP-F6 models
+#              and on the 8 GB tier's pre-WP-F8 models:
 #              doctor warns, postinstall migrates it with one backup, and a
 #              customised block is kept
 #   tcc        upgrades over a stand-in app: an unchanged code signature
@@ -189,7 +190,7 @@ check_installed_prefix() {
         _ "${py}" "${dd}" "${WORK}"
     check "default config: the worker runs the standard tier's models" \
         env HOME="${p}/home" "${py}" -c \
-        "from agenthandover_worker.config import load_config; v = load_config().vlm; assert (v.tier, v.annotation_model, v.sop_model) == ('standard', 'qwen3.5:4b', 'qwen3.5:4b'), v"
+        "from agenthandover_worker.config import load_config; v = load_config().vlm; assert (v.tier, v.annotation_model, v.sop_model) == ('standard', 'qwen3.5:2b-q4_K_M', 'qwen3.5:4b'), v"
     check "default config: the worker exports through every adapter" \
         env HOME="${p}/home" "${py}" -c \
         "from agenthandover_worker.config import load_config; assert load_config().export.adapter == 'all'"
@@ -386,7 +387,7 @@ import pathlib, sys
 p = pathlib.Path(sys.argv[1])
 text = p.read_text(encoding="utf-8")
 standard = ('[vlm]\nmode = "local"\ntier = "standard"\n'
-            'annotation_model = "qwen3.5:4b"\nsop_model = "qwen3.5:4b"\n')
+            'annotation_model = "qwen3.5:2b-q4_K_M"\nsop_model = "qwen3.5:4b"\n')
 assert text.count(standard) == 1, text
 p.write_text(text.replace(standard, (
     '[vlm]\nmode = "local"\ntier = "recommended"\n'
@@ -432,6 +433,21 @@ run_script "${P}" postinstall "${GOOD_PY}" "${WORK}/tier-post3.log"
 check "a customised block is kept byte for byte" cmp -s "${WORK}/config.custom" "${CFG}"
 check "postinstall says why it kept it" contains "${WORK}/tier-post3.log" "(set by hand)"
 check "no backup of a kept config" bash -c '! ls "$1"/config.toml.*.bak >/dev/null 2>&1' _ "${DD}"
+
+# WP-F8: the fresh-install block of the 8 GB tier before WP-F8 (qwen3.5:4b
+# annotated) moves to the 2B annotator: back to the current standard block.
+sed 's/^annotation_model = "qwen3.5:2b-q4_K_M"$/annotation_model = "qwen3.5:4b"/' \
+    "${WORK}/config.standard" > "${CFG}"
+check "the old standard block differs from the current one" \
+    bash -c '! cmp -s "$1" "$2"' _ "${WORK}/config.standard" "${CFG}"
+run_script "${P}" postinstall "${GOOD_PY}" "${WORK}/tier-post4.log"
+check "postinstall migrates the old standard block" contains "${WORK}/tier-post4.log" \
+    "Migrated [vlm] in ${CFG}: tier \"standard\": annotation_model qwen3.5:4b -> qwen3.5:2b-q4_K_M"
+check "the migrated config is the current standard config byte for byte" \
+    cmp -s "${WORK}/config.standard" "${CFG}"
+TIER_BACKUPS=("${DD}"/config.toml.*.bak)
+check "one backup of the old standard config" test "${#TIER_BACKUPS[@]}" -eq 1
+rm -f "${DD}"/config.toml.*.bak
 cp "${WORK}/config.standard" "${CFG}"
 
 # ---------------------------------------------------------------------------

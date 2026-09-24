@@ -665,7 +665,12 @@ fn step_vlm(check_only: bool, tier_arg: Option<&str>) -> Result<()> {
         }
         return Ok(());
     }
-    println!("  {} Models to pull: {}", "~".yellow(), missing.join(", "));
+    println!(
+        "  {} Models to pull: {} (~{:.1} GB download)",
+        "~".yellow(),
+        missing.join(", "),
+        table.download_gb(&missing)
+    );
     if check_only {
         println!("    Run {} to pull them.", "agenthandover setup --vlm".cyan());
         return Ok(());
