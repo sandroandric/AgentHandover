@@ -150,6 +150,55 @@ pub struct WorkerStatus {
     /// VLM provider when in remote mode (e.g. "openai", "anthropic", "google").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vlm_provider: Option<String>,
+    /// The worker's inference thread and its passive backlog.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inference: Option<InferenceStatus>,
+}
+
+/// `worker-status.json`'s `inference` block: the job the worker's inference
+/// thread runs, the jobs waiting, and the passive annotation backlog.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct InferenceStatus {
+    /// The job running, with its priority (`"P0 focus"`).
+    #[serde(default)]
+    pub running: Option<String>,
+    #[serde(default)]
+    pub running_seconds: Option<f64>,
+    /// Jobs waiting, in the order they will run.
+    #[serde(default)]
+    pub queued: Vec<String>,
+    /// Jobs waiting plus the one running.
+    #[serde(default)]
+    pub depth: u32,
+    /// Passive frames waiting for annotation.
+    #[serde(default)]
+    pub annotation_backlog: Option<u64>,
+    /// The backlog needs hours of the worker's annotation budget to clear:
+    /// the daemon keeps fewer passive frames meanwhile.
+    #[serde(default)]
+    pub lower_capture_cadence: bool,
+}
+
+/// A worker heartbeat older than this is from a worker that is not running:
+/// its requests are ignored.
+pub const WORKER_HEARTBEAT_FRESH_SECS: i64 = 120;
+
+impl WorkerStatus {
+    /// True when a running worker (heartbeat within
+    /// [`WORKER_HEARTBEAT_FRESH_SECS`] of `now`) asks for fewer passive frames.
+    pub fn asks_lower_capture_cadence(&self, now: DateTime<Utc>) -> bool {
+        (now - self.heartbeat).num_seconds() <= WORKER_HEARTBEAT_FRESH_SECS
+            && self
+                .inference
+                .as_ref()
+                .is_some_and(|i| i.lower_capture_cadence)
+    }
+}
+
+/// `worker-status.json` in `dir`, or None when it is missing or unreadable.
+pub fn read_worker_status(dir: &Path) -> Option<WorkerStatus> {
+    let content = std::fs::read_to_string(dir.join("worker-status.json")).ok()?;
+    serde_json::from_str(&content).ok()
 }
 
 /// Standard data directory for AgentHandover.

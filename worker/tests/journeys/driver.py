@@ -646,7 +646,9 @@ class JourneyWorker:
         inference = None
         if self.runner is not None:
             inference = self.runner.status()
-            inference["annotation_backlog"] = self.db.count_passive_unannotated()
+            backlog = self.db.count_passive_unannotated()
+            inference["annotation_backlog"] = backlog
+            inference["lower_capture_cadence"] = self.annotation_budget.asks_lower_capture(backlog)
         wm._write_worker_status(
             started_at=self._started_at,
             events_processed_today=self._events_processed,

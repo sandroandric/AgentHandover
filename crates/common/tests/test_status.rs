@@ -46,6 +46,7 @@ fn sample_worker_status() -> WorkerStatus {
         vlm_dropped_today: 0,
         vlm_mode: None,
         vlm_provider: None,
+        inference: None,
     }
 }
 
@@ -429,6 +430,72 @@ fn worker_status_without_vlm_mode_omits_field() {
     let deserialized: WorkerStatus = serde_json::from_str(&json).expect("deserialize");
     assert_eq!(deserialized.vlm_mode, None);
     assert_eq!(deserialized.vlm_provider, None);
+}
+
+/// The worker's `inference` block as `main.py` writes it (WP-C7), with
+/// fields the daemon does not read.
+fn worker_status_json(heartbeat: &str, lower: bool) -> String {
+    format!(
+        r#"{{
+        "pid": 1, "version": "0.5.0",
+        "started_at": "2026-09-24T08:00:00Z", "heartbeat": "{heartbeat}",
+        "events_processed_today": 0, "sops_generated": 0,
+        "last_pipeline_duration_ms": null, "consecutive_errors": 0,
+        "vlm_available": true,
+        "inference": {{
+            "running": "P0 focus", "running_seconds": 1834.2,
+            "queued": ["P0 enrich-procedure:x", "P2 passive-annotation"],
+            "depth": 3, "completed": 12, "failed": 0, "retry_after_seconds": {{}},
+            "annotation_backlog": 900, "lower_capture_cadence": {lower}
+        }}
+    }}"#
+    )
+}
+
+#[test]
+fn worker_status_reads_the_inference_block() {
+    let status: WorkerStatus =
+        serde_json::from_str(&worker_status_json("2026-09-24T09:00:00Z", true)).expect("parse");
+    let inference = status.inference.expect("inference");
+    assert_eq!(inference.running.as_deref(), Some("P0 focus"));
+    assert_eq!(inference.depth, 3);
+    assert_eq!(inference.queued.len(), 2);
+    assert_eq!(inference.annotation_backlog, Some(900));
+    assert!(inference.lower_capture_cadence);
+}
+
+#[test]
+fn only_a_running_worker_lowers_the_capture_cadence() {
+    use chrono::{DateTime, Duration};
+
+    let heartbeat = "2026-09-24T09:00:00Z";
+    let at: DateTime<Utc> = heartbeat.parse().unwrap();
+    let asking: WorkerStatus =
+        serde_json::from_str(&worker_status_json(heartbeat, true)).unwrap();
+    let not_asking: WorkerStatus =
+        serde_json::from_str(&worker_status_json(heartbeat, false)).unwrap();
+
+    assert!(asking.asks_lower_capture_cadence(at + Duration::seconds(60)));
+    assert!(!not_asking.asks_lower_capture_cadence(at + Duration::seconds(60)));
+    // A stale heartbeat is a worker that stopped: its request lapses.
+    assert!(!asking.asks_lower_capture_cadence(at + Duration::seconds(121)));
+    // An older worker writes no inference block.
+    assert!(!sample_worker_status().asks_lower_capture_cadence(Utc::now()));
+}
+
+#[test]
+fn read_worker_status_reads_the_file_in_a_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    assert!(agenthandover_common::status::read_worker_status(dir.path()).is_none());
+    std::fs::write(dir.path().join("worker-status.json"), "{not json").unwrap();
+    assert!(agenthandover_common::status::read_worker_status(dir.path()).is_none());
+    std::fs::write(
+        dir.path().join("worker-status.json"),
+        worker_status_json("2026-09-24T09:00:00Z", true),
+    )
+    .unwrap();
+    let status = agenthandover_common::status::read_worker_status(dir.path()).unwrap();
+    assert!(status.inference.unwrap().lower_capture_cadence);
 }
 
 #[test]

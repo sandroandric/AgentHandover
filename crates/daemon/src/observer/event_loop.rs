@@ -25,6 +25,10 @@ use crate::observation::{
 };
 use crate::capture::dhash;
 
+/// How often the observer reads `worker-status.json` for the worker's
+/// request to lower passive capture (its annotation backlog is long).
+const WORKER_STATUS_CHECK: Duration = Duration::from_secs(30);
+
 /// Messages sent from the observer to the storage writer.
 ///
 /// The storage writer exits when all senders are dropped (channel close),
@@ -158,6 +162,7 @@ pub async fn run_observer_loop(
         Instant::now(),
     );
     let mut last_tick = Instant::now();
+    let mut worker_status_checked: Option<Instant> = None;
     let zones = PrivacyZones::new(&config.zones);
     let snapshot_warnings = WarnLimiter::new();
     // The browser's current page (origin + path), from the extension's
@@ -220,6 +225,22 @@ pub async fn run_observer_loop(
                             debug!("Focus session signal file removed, clearing active session");
                             active_focus_session_id = None;
                         }
+                    }
+                }
+
+                // The worker asks for fewer passive frames while its
+                // annotation backlog is long (a running worker only).
+                if worker_status_checked.is_none_or(|t| t.elapsed() >= WORKER_STATUS_CHECK) {
+                    worker_status_checked = Some(Instant::now());
+                    let throttle = agenthandover_common::status::read_worker_status(&state_dir)
+                        .is_some_and(|s| s.asks_lower_capture_cadence(Utc::now()));
+                    if throttle != policy.passive_throttled() {
+                        info!(
+                            throttle,
+                            "Passive capture {} (worker annotation backlog)",
+                            if throttle { "throttled" } else { "back to full rate" }
+                        );
+                        policy.set_passive_throttled(throttle);
                     }
                 }
 

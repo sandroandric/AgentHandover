@@ -192,6 +192,10 @@ def _approve_during_the_slow_call(worker, tape, long_job: str) -> None:
     # approval's model work (embedding, style) waits behind it at P0.
     inference = worker.status()["inference"]
     assert inference["running"] == long_job
+    assert inference["annotation_backlog"] >= 0
+    assert inference["lower_capture_cadence"] is worker.annotation_budget.asks_lower_capture(
+        inference["annotation_backlog"],
+    )
     assert f"P0 enrich-procedure:{slug}" in inference["queued"]
     assert inference["queued"][0].startswith("P0 ")
 

@@ -5756,7 +5756,12 @@ def main(argv: list[str] | None = None) -> None:
             inference = runner.status()
             if v2_schema_ok:
                 try:
-                    inference["annotation_backlog"] = db.count_passive_unannotated()
+                    backlog = db.count_passive_unannotated()
+                    inference["annotation_backlog"] = backlog
+                    # The daemon keeps fewer passive frames meanwhile.
+                    inference["lower_capture_cadence"] = (
+                        annotation_budget.asks_lower_capture(backlog)
+                    )
                 except Exception:
                     logger.debug("Annotation backlog count failed", exc_info=True)
             _write_worker_status(
