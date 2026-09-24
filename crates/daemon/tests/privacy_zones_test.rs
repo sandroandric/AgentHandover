@@ -18,7 +18,7 @@ use agenthandover_daemon::observer::event_loop::{run_observer_loop, ObserverConf
 use agenthandover_storage::artifact_store::ArtifactStore;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -448,6 +448,43 @@ async fn an_allowed_window_keeps_its_frame() {
     assert_eq!(compute.since_start.frames_captured, 1);
     assert_eq!(compute.since_start.frames_kept, 1);
     assert!(compute.since_start.frames_gated_by_reason.is_empty());
+}
+
+/// Every kept frame records how many keys went down since the previous
+/// kept frame (`keys_since_prev_frame`, a count: no key code, no text).
+async fn key_counts(key_down_count: fn() -> u32) -> Vec<Option<u64>> {
+    let mut h = harness_with(PrivacyZonesConfig::default(), true);
+    // Keep every frame: the fake capture server serves the same image.
+    h.config.dhash_threshold = 0;
+    h.config.key_down_count = key_down_count;
+    let served = fake_observation_server(
+        &h.config.observation_socket,
+        vec![
+            window_reply("pid:10:TextEdit", "notes.txt"),
+            window_reply("pid:12:Preview", "invoice.pdf"),
+            window_reply("pid:10:TextEdit", "notes.txt"),
+        ],
+    );
+    let events = run_loop(h.config, &h.root, Some(&served), Duration::from_millis(800)).await;
+    events
+        .iter()
+        .filter(|e| matches!(e.kind, EventKind::DwellSnapshot))
+        .map(|e| e.metadata.get("keys_since_prev_frame").and_then(|v| v.as_u64()))
+        .collect()
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn kept_frames_record_how_many_keys_were_pressed() {
+    // The counter rises by 3 between readings (the observer reads it at
+    // its start and at each kept frame): typing throughout.
+    fn typing() -> u32 {
+        static COUNTER: AtomicU32 = AtomicU32::new(1000);
+        COUNTER.fetch_add(3, Ordering::SeqCst)
+    }
+    assert_eq!(key_counts(typing).await, vec![Some(3), Some(3)]);
+    // The counter never moves: no key since the observer started, not even
+    // for the first frame.
+    assert_eq!(key_counts(|| 42).await, vec![Some(0), Some(0)]);
 }
 
 /// A macOS password prompt (`SecurityAgent`, owner of the "... wants to

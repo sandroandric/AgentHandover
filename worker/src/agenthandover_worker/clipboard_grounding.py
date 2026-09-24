@@ -19,6 +19,7 @@ it does not decide.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 
@@ -117,6 +118,24 @@ def clipboard_note(timeline: list[dict]) -> str:
         "user: write those steps as typing, never as Copy or Paste steps, "
         "even where a frame's description says copied or pasted."
     )
+
+
+def copied(text: str, copies: list[dict]) -> bool:
+    """Whether *text* is (part of) one of *copies* (``ClipboardChange``
+    records): the copied bytes' hash, or the copy's preview when the user
+    turned previews on (a preview may be cut short, so either may hold
+    the other)."""
+    squashed = " ".join(text.split()).lower()
+    if not squashed:
+        return False
+    hashes = {hashlib.sha256(t.encode()).hexdigest() for t in (text, text.strip())}
+    for copy in copies:
+        if str(copy.get("content_hash") or "") in hashes:
+            return True
+        preview = " ".join(str(copy.get("content_preview") or "").split()).lower()
+        if preview and (squashed in preview or preview in squashed):
+            return True
+    return False
 
 
 def claims(texts: list[str]) -> set[str]:

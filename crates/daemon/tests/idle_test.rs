@@ -26,4 +26,14 @@ mod macos_tests {
         let idle = detector.seconds_since_last_input();
         assert!(idle >= 0.0);
     }
+
+    #[test]
+    fn test_key_down_count_links_and_never_falls() {
+        // The HID system's key-press counter (a count, no key codes): two
+        // readings a moment apart differ by the keys pressed in between.
+        let detector = IdleDetector::new();
+        let first = detector.key_down_count();
+        let second = detector.key_down_count();
+        assert!(second.wrapping_sub(first) < 1_000, "{first} -> {second}");
+    }
 }

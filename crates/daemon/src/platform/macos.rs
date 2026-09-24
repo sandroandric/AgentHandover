@@ -11,6 +11,11 @@ extern "C" {
         source_state: CGEventSourceStateID,
         event_type: CGEventType,
     ) -> f64;
+    // How many events of a type the HID system has seen (a counter only).
+    fn CGEventSourceCounterForEventType(
+        source_state: CGEventSourceStateID,
+        event_type: CGEventType,
+    ) -> u32;
 }
 
 pub struct IdleDetector;
@@ -40,6 +45,19 @@ impl IdleDetector {
             CGEventSourceSecondsSinceLastEventType(CGEventSourceStateID::HIDSystemState, event_type)
         };
         since(CGEventType::LeftMouseDown).min(since(CGEventType::RightMouseDown))
+    }
+
+    /// How many key presses the HID system has counted (it wraps at
+    /// `u32::MAX`). A count only: no key code, no text, no event tap, no
+    /// Input Monitoring permission. The observer records the difference
+    /// between two kept frames.
+    pub fn key_down_count(&self) -> u32 {
+        unsafe {
+            CGEventSourceCounterForEventType(
+                CGEventSourceStateID::HIDSystemState,
+                CGEventType::KeyDown,
+            )
+        }
     }
 
     pub fn is_idle(&self, threshold_seconds: f64) -> bool {
