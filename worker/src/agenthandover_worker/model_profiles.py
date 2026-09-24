@@ -23,6 +23,7 @@ import shutil
 import sys
 import tempfile
 import tomllib
+from collections.abc import Collection, Iterable
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
@@ -659,6 +660,20 @@ PREVIOUS_TIER_DEFAULTS: dict[str, tuple[tuple[str, str], ...]] = {
     "recommended": (("qwen3.5:4b", "gemma4:12b-it-qat"),),
 }
 
+# The ``[vlm]`` models v0.4.0 wrote, which name no tier: its onboarding
+# (``git show v0.4.0:app/AgentHandoverApp/Sources/AgentHandoverApp/Views/
+# OnboardingView.swift``, ``ModelTier`` and ``saveCustomModelConfig``)
+# appended ``annotation_model`` and ``sop_model`` only, with no ``tier``
+# or ``mode`` key; its installer wrote no ``[vlm]`` block.  Each pair
+# lists the tiers it stood for; :func:`untiered_default_tier` picks one
+# by RAM.  v0.4.0's Recommended (16 GB) and Performance (24 GB) tiers
+# wrote the same Gemma 4 12B pair.
+UNTIERED_DEFAULTS: tuple[tuple[tuple[str, str], tuple[str, ...]], ...] = (
+    (("qwen3.5:2b", "qwen3.5:4b"), ("standard",)),
+    (("gemma4:12b-it-qat", "gemma4:12b-it-qat"), ("recommended", "performance")),
+    (("gemma4:31b-it-qat", "gemma4:31b-it-qat"), ("max_quality",)),
+)
+
 
 # The tier every Mac can run: the library default of every model setting.
 STANDARD_TIER = TIERS[0]
@@ -683,6 +698,21 @@ def recommend_tier(ram_gb: int | None = None) -> Tier:
     return [t for t in TIERS if t.min_ram_gb <= ram][-1]
 
 
+def untiered_default_tier(pair: tuple[str, str], ram_gb: int | None = None) -> Tier | None:
+    """The tier a tier-less ``[vlm]`` pair v0.4.0 wrote now means
+    (:data:`UNTIERED_DEFAULTS`), or None for any other pair.  Of the pair's
+    tiers, the largest whose ``min_ram_gb`` fits *ram_gb* (default: this
+    Mac), as :func:`recommend_tier` picks; the smallest when none fits.
+    The CLI's doctor makes the same pick from ``tiers.json``."""
+    ids = next((ids for p, ids in UNTIERED_DEFAULTS if p == pair), None)
+    if ids is None:
+        return None
+    candidates = [t for t in TIERS if t.id in ids]
+    ram = machine_ram_gb() if ram_gb is None else ram_gb
+    fitting = [t for t in candidates if t.min_ram_gb <= ram]
+    return fitting[-1] if fitting else candidates[0]
+
+
 def tiers_document() -> dict:
     """The tier table as the JSON object ``tiers.json`` holds."""
     return {
@@ -700,6 +730,10 @@ def tiers_document() -> dict:
                 ],
             }
             for t in TIERS
+        ],
+        "untiered_defaults": [
+            {"annotation_model": ann, "sop_model": sop, "tiers": list(ids)}
+            for (ann, sop), ids in UNTIERED_DEFAULTS
         ],
     }
 
@@ -846,41 +880,134 @@ def remote_to_local(config_text: str) -> tuple[str, str | None]:
     )
 
 
-def migrate_vlm_block(config_text: str) -> tuple[str, bool, str]:
+def migrate_vlm_block(
+    config_text: str,
+    served: Collection[str] | None = None,
+    ram_gb: int | None = None,
+) -> tuple[str, bool, str]:
     """Upgrade config.toml's ``[vlm]`` block: a cloud-mode block becomes
-    local (:func:`remote_to_local`), then a block still on a tier's earlier
-    default models moves to the tier's current ones
-    (:func:`_migrate_tier_models`).  Returns ``(new_text, changed,
-    reason)``.
+    local (:func:`remote_to_local`), then a block still on earlier default
+    models moves to its tier's current ones (:func:`_tier_target`), but
+    only when Ollama serves every model of the new pair: *served* is the
+    names ``/api/tags`` lists, or None when Ollama was not asked (the
+    installer), which keeps the models.  Switching to a model that is not
+    pulled would stop processing.  Returns ``(new_text, changed, reason)``.
     """
     text, remote_reason = remote_to_local(config_text)
-    new_text, changed, reason = _migrate_tier_models(text)
+    tier, _, reason = _tier_target(text, ram_gb)
+    new_text, changed = text, False
+    if tier is not None:
+        models = target_models(tier)
+        if served is None:
+            reason += (
+                f"; the switch waits until Ollama serves {', '.join(models)} "
+                "(the app offers the download; or: agenthandover setup --tier "
+                f"{tier.id})"
+            )
+        elif missing := missing_models(models, served):
+            reason += (
+                f"; the switch waits until {', '.join(missing)} "
+                f"({download_label(missing)}) is downloaded (the app offers it; "
+                f"or: agenthandover setup --tier {tier.id})"
+            )
+        else:
+            new_text, changed = apply_vlm_block(text, tier), True
     if remote_reason is None:
         return new_text, changed, reason
-    return new_text, True, remote_reason + (f"; {reason}" if changed else "")
+    return new_text, True, remote_reason + (f"; {reason}" if tier is not None else "")
 
 
-def _migrate_tier_models(config_text: str) -> tuple[str, bool, str]:
-    """Move a config still on a tier's earlier default models to the
-    tier's current ones.  Returns ``(new_text, changed, reason)``.
+def target_models(tier: Tier) -> list[str]:
+    """The models *tier*'s pair runs, annotation model first, no repeats."""
+    return list(dict.fromkeys([tier.annotation_model, tier.sop_model]))
 
-    Changes the managed ``[vlm]`` keys (with :func:`apply_vlm_block`, so the
-    result is what ``agenthandover setup --tier`` writes) only when the
-    block is one a writer left and the user has not customised:
+
+def missing_models(models: Iterable[str], served: Collection[str]) -> list[str]:
+    """The *models* not in *served* (``/api/tags`` names; a bare model
+    name means its ``:latest`` tag, as ``OllamaClient.has_model``)."""
+    return [
+        m for m in models
+        if m not in served and (":" in m or f"{m}:latest" not in served)
+    ]
+
+
+def download_label(models: Iterable[str]) -> str:
+    """"~3.4 GB": the download of *models* by :data:`MODEL_SIZES_GB`."""
+    return f"~{sum(MODEL_SIZES_GB.get(m, 0.0) for m in models):.1f} GB"
+
+
+def _ollama_host(config_text: str) -> str:
+    """``[vlm] ollama_host`` of *config_text*, else Ollama's default."""
+    from agenthandover_worker.ollama import DEFAULT_HOST
+
+    try:
+        vlm = tomllib.loads(config_text).get("vlm")
+    except tomllib.TOMLDecodeError:
+        return DEFAULT_HOST
+    host = vlm.get("ollama_host") if isinstance(vlm, dict) else None
+    return host if isinstance(host, str) and host else DEFAULT_HOST
+
+
+def served_models(config_text: str) -> list[str] | None:
+    """The models Ollama serves at *config_text*'s ``[vlm] ollama_host``
+    (``/api/tags``), or None when it does not answer."""
+    from agenthandover_worker.ollama import OllamaClient
+
+    try:
+        return OllamaClient(_ollama_host(config_text)).tags(timeout=3)
+    except Exception:
+        return None
+
+
+def upgrade_plan(config_text: str, ram_gb: int | None = None) -> tuple[dict | None, str]:
+    """The model switch :func:`migrate_vlm_block` makes once the models
+    are pulled, as ``(plan, reason)``; ``(None, reason)`` when there is
+    none.  Read only.  The plan: ``tier`` and ``label`` (the tier it moves
+    to), ``current`` and ``target`` (``annotation_model`` and
+    ``sop_model``), ``models`` (the target pair's models) and ``sizes_gb``
+    (their download sizes from :data:`MODEL_SIZES_GB`).
+    """
+    text, _ = remote_to_local(config_text)
+    tier, pair, reason = _tier_target(text, ram_gb)
+    if tier is None or pair is None:
+        return None, reason
+    models = target_models(tier)
+    return {
+        "tier": tier.id,
+        "label": tier.label,
+        "current": {"annotation_model": pair[0], "sop_model": pair[1]},
+        "target": {"annotation_model": tier.annotation_model, "sop_model": tier.sop_model},
+        "models": models,
+        "sizes_gb": {m: MODEL_SIZES_GB[m] for m in models if m in MODEL_SIZES_GB},
+    }, reason
+
+
+def _tier_target(
+    config_text: str, ram_gb: int | None = None,
+) -> tuple[Tier | None, tuple[str, str] | None, str]:
+    """The tier a ``[vlm]`` block on earlier default models moves to, the
+    block's ``(annotation_model, sop_model)`` and why; ``(None, None,
+    reason)`` when it stays.
+
+    A block moves only when a writer left it and the user has not
+    customised it:
 
     * ``mode`` is ``"local"`` or absent;
-    * ``tier`` is a known tier id;
-    * ``annotation_model`` and ``sop_model`` are one of that tier's
-      :data:`PREVIOUS_TIER_DEFAULTS` pairs (not its current pair);
+    * with a ``tier`` key: a known tier, and the two models are one of
+      its :data:`PREVIOUS_TIER_DEFAULTS` pairs (not its current pair);
+    * without one: the two models are a pair v0.4.0 wrote
+      (:data:`UNTIERED_DEFAULTS`), and the tier comes from RAM
+      (:func:`untiered_default_tier`);
     * each managed key appears at most once, exactly as the writers put it
       (``key = "value"``, no comment or other quoting), and ``tomllib``
       reads the same values.
 
-    Otherwise *config_text* comes back unchanged with the reason why.
-    Other ``[vlm]`` keys and every other section are kept byte for byte.
+    The move is :func:`apply_vlm_block` with the tier (what ``agenthandover
+    setup --tier`` writes): other ``[vlm]`` keys and every other section
+    are kept byte for byte.
     """
-    def keep(reason: str) -> tuple[str, bool, str]:
-        return config_text, False, reason
+    def keep(reason: str) -> tuple[None, None, str]:
+        return None, None, reason
 
     lines = _config_lines(config_text)
     header = next((i for i, line in enumerate(lines) if line.strip() == "[vlm]"), None)
@@ -915,39 +1042,54 @@ def _migrate_tier_models(config_text: str) -> tuple[str, bool, str]:
     mode = values.get("mode", "local")
     if mode != "local":
         return keep(f'[vlm] mode is "{mode}"')
+    ann, sop = values.get("annotation_model"), values.get("sop_model")
     tier_id = values.get("tier")
     if tier_id is None:
-        return keep("[vlm] names no tier")
-    tier = get_tier(tier_id)
-    if tier is None:
-        return keep(f'unknown tier "{tier_id}"')
-    pair = (values.get("annotation_model"), values.get("sop_model"))
-    if None in pair:
-        return keep("[vlm] does not pin both models (the tier supplies the rest)")
-    current = (tier.annotation_model, tier.sop_model)
-    if pair == current:
-        return keep(f'already the current models of tier "{tier.id}"')
-    if pair not in PREVIOUS_TIER_DEFAULTS.get(tier.id, ()):
-        return keep(
-            f'{pair[0]} + {pair[1]} is not an earlier default of tier "{tier.id}" '
-            "(set by hand)"
-        )
+        if ann is None or sop is None:
+            return keep("[vlm] names no tier")
+        tier = untiered_default_tier((ann, sop), ram_gb)
+        if tier is None:
+            return keep(
+                f"[vlm] names no tier and {ann} + {sop} is not a default of "
+                "0.4.0 (set by hand)"
+            )
+        why = f"{ann} + {sop} was 0.4.0's default"
+    else:
+        tier = get_tier(tier_id)
+        if tier is None:
+            return keep(f'unknown tier "{tier_id}"')
+        if ann is None or sop is None:
+            return keep("[vlm] does not pin both models (the tier supplies the rest)")
+        if (ann, sop) == (tier.annotation_model, tier.sop_model):
+            return keep(f'already the current models of tier "{tier.id}"')
+        if (ann, sop) not in PREVIOUS_TIER_DEFAULTS.get(tier.id, ()):
+            return keep(
+                f'{ann} + {sop} is not an earlier default of tier "{tier.id}" '
+                "(set by hand)"
+            )
+        why = f"{ann} + {sop} was the tier's earlier default"
 
     changes = ", ".join(
         f"{key} {old} -> {new}"
-        for key, old, new in zip(("annotation_model", "sop_model"), pair, current)
+        for key, old, new in zip(
+            ("annotation_model", "sop_model"), (ann, sop), (tier.annotation_model, tier.sop_model),
+        )
         if old != new
-    )
-    return (
-        apply_vlm_block(config_text, tier),
-        True,
-        f'tier "{tier.id}": {changes} ({pair[0]} + {pair[1]} was the tier\'s '
-        f"earlier default; it now runs {current[0]} + {current[1]})",
+    ) or "the tier key added"
+    return tier, (ann, sop), (
+        f'tier "{tier.id}": {changes} ({why}; it now runs '
+        f"{tier.annotation_model} + {tier.sop_model})"
     )
 
 
-def migrate_vlm_file(path: Path, now: datetime | None = None) -> tuple[bool, str, Path | None]:
-    """Apply :func:`migrate_vlm_block` to the config file at *path*.
+def migrate_vlm_file(
+    path: Path,
+    now: datetime | None = None,
+    served: Collection[str] | None = None,
+    ram_gb: int | None = None,
+) -> tuple[bool, str, Path | None]:
+    """Apply :func:`migrate_vlm_block` (with *served* and *ram_gb*) to the
+    config file at *path*.
 
     Only when it changes something: first a timestamped copy of the old
     file (``config.toml.<YYYYmmdd-HHMMSS>.bak`` beside it), then the new
@@ -958,7 +1100,7 @@ def migrate_vlm_file(path: Path, now: datetime | None = None) -> tuple[bool, str
     """
     target = Path(path).resolve()
     original = target.read_bytes()
-    new_text, changed, reason = migrate_vlm_block(original.decode("utf-8"))
+    new_text, changed, reason = migrate_vlm_block(original.decode("utf-8"), served, ram_gb)
     if not changed:
         return False, reason, None
 
@@ -989,8 +1131,51 @@ def migrate_vlm_file(path: Path, now: datetime | None = None) -> tuple[bool, str
     return True, reason, backup
 
 
+# ``upgrade-apply``'s exit status when it refuses: Ollama does not answer
+# or does not serve every model of the new pair.
+EXIT_MODELS_MISSING = 3
+
+
+def _upgrade_apply(target: Path) -> int:
+    """``upgrade-apply``: the model switch, only when Ollama serves every
+    model of the new pair (asked at ``[vlm] ollama_host``)."""
+    text = target.read_text(encoding="utf-8")
+    plan, reason = upgrade_plan(text)
+    if plan is None:
+        print(f"No model switch for [vlm] in {target}: {reason}")
+        return 0
+    served = served_models(text)
+    if served is None:
+        print(
+            f"Kept [vlm] in {target}: Ollama does not answer at {_ollama_host(text)}",
+            file=sys.stderr,
+        )
+        return EXIT_MODELS_MISSING
+    missing = missing_models(plan["models"], served)
+    if missing:
+        print(
+            f"Kept [vlm] in {target}: {', '.join(missing)} not downloaded",
+            file=sys.stderr,
+        )
+        return EXIT_MODELS_MISSING
+    changed, reason, backup = migrate_vlm_file(target, served=served)
+    if changed:
+        print(f"Migrated [vlm] in {target}: {reason}; backup: {backup}")
+    else:
+        print(f"Kept [vlm] in {target} as it is: {reason}")
+    return 0
+
+
 def _main(argv: list[str]) -> int:
-    """``write-tiers PATH`` | ``vlm-block TIER_ID`` | ``migrate-vlm PATH``."""
+    """``write-tiers PATH`` | ``vlm-block TIER_ID`` | ``migrate-vlm PATH`` |
+    ``upgrade-plan PATH`` | ``upgrade-apply PATH``.
+
+    ``migrate-vlm`` is the installer's: it asks no Ollama, so it makes a
+    cloud block local and leaves a model switch to the worker and the
+    app.  ``upgrade-plan`` prints :func:`upgrade_plan` as JSON
+    (``{"plan": ..., "reason": ...}``); ``upgrade-apply`` makes the switch
+    when Ollama serves the models, else exits :data:`EXIT_MODELS_MISSING`.
+    """
     if len(argv) == 2 and argv[0] == "write-tiers":
         target = Path(argv[1])
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -1005,12 +1190,21 @@ def _main(argv: list[str]) -> int:
             return 2
         sys.stdout.write(vlm_block(tier))
         return 0
-    if len(argv) == 2 and argv[0] == "migrate-vlm":
-        target = Path(argv[1])
+    if len(argv) == 2 and argv[0] in ("migrate-vlm", "upgrade-plan", "upgrade-apply"):
+        command, target = argv[0], Path(argv[1])
         if not target.exists():
-            print(f"No {target}; no [vlm] models to migrate")
+            if command == "upgrade-plan":
+                print(json.dumps({"plan": None, "reason": f"no {target}"}))
+            else:
+                print(f"No {target}; no [vlm] models to migrate")
             return 0
         try:
+            if command == "upgrade-plan":
+                plan, reason = upgrade_plan(target.read_text(encoding="utf-8"))
+                print(json.dumps({"plan": plan, "reason": reason}))
+                return 0
+            if command == "upgrade-apply":
+                return _upgrade_apply(target)
             changed, reason, backup = migrate_vlm_file(target)
         except (OSError, UnicodeDecodeError) as exc:
             print(f"could not migrate the [vlm] models in {target}: {exc}", file=sys.stderr)
@@ -1022,7 +1216,8 @@ def _main(argv: list[str]) -> int:
         return 0
     print(
         "usage: python -m agenthandover_worker.model_profiles "
-        "write-tiers PATH | vlm-block TIER_ID | migrate-vlm PATH",
+        "write-tiers PATH | vlm-block TIER_ID | migrate-vlm PATH | "
+        "upgrade-plan PATH | upgrade-apply PATH",
         file=sys.stderr,
     )
     return 2
@@ -1030,4 +1225,3 @@ def _main(argv: list[str]) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(_main(sys.argv[1:]))
-

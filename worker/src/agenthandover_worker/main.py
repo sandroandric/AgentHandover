@@ -40,7 +40,7 @@ from agenthandover_worker.inference_runner import (
     P2, STATE_LOCK, InferenceRunner, model_wait, model_work,
 )
 from agenthandover_worker.negative_demo import NegativeDemoPruner
-from agenthandover_worker.model_profiles import migrate_vlm_file
+from agenthandover_worker.model_profiles import migrate_vlm_file, served_models, upgrade_plan
 from agenthandover_worker.ops_telemetry import COMPUTE, MODEL_USAGE
 from agenthandover_worker.export_adapter import SOPExportAdapter
 from agenthandover_worker.openclaw_writer import OpenClawWriter
@@ -688,23 +688,36 @@ def _status_dir() -> Path:
 
 
 def _migrate_vlm_config(path: Path | None = None) -> bool:
-    """Move config.toml's ``[vlm]`` block off a tier's earlier default
-    models (``model_profiles.migrate_vlm_file``: backup first, atomic
-    write, only when it changes).  One INFO line when it changes
-    something; a failure is a warning and never stops the worker.
-    Returns whether the file changed."""
+    """Move config.toml's ``[vlm]`` block off earlier default models
+    (``model_profiles.migrate_vlm_file``: backup first, atomic write, only
+    when it changes), but only to models Ollama serves: when there is a
+    switch to make, ``/api/tags`` at ``[vlm] ollama_host`` is asked, and a
+    missing model keeps the current ones (one WARNING naming it; the app
+    offers the download).  One INFO line when it changes something; a
+    failure is a warning and never stops the worker.  Returns whether the
+    file changed."""
     target = config_path() if path is None else path
     if not target.is_file():
         return False
     try:
-        changed, reason, backup = migrate_vlm_file(target)
+        text = target.read_text(encoding="utf-8")
+        plan, _ = upgrade_plan(text)
+        served = served_models(text) if plan is not None else None
+        changed, reason, backup = migrate_vlm_file(target, served=served)
     except (OSError, UnicodeDecodeError) as exc:
         logger.warning(
             "Could not check the [vlm] models in %s against the tier table: %s", target, exc,
         )
         return False
+    # The switch still waits when the plan's models are not the file's now.
+    waits = plan is not None and not (
+        changed and upgrade_plan(target.read_text(encoding="utf-8"))[0] is None
+    )
+    level = logging.WARNING if waits else logging.INFO
     if changed:
-        logger.info("Migrated [vlm] in %s: %s; backup: %s", target, reason, backup)
+        logger.log(level, "Migrated [vlm] in %s: %s; backup: %s", target, reason, backup)
+    elif waits:
+        logger.log(level, "Kept the [vlm] models in %s: %s", target, reason)
     return changed
 
 
