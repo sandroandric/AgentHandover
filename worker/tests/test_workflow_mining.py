@@ -231,6 +231,35 @@ class TestObservationLog:
         (obs,) = db.get_workflow_observations()
         assert json.loads(obs["event_ids_json"]) == [e["id"] for e in events]
 
+    def test_a_forty_minute_instance_interrupted_by_a_call_is_one_observation(
+        self, db: WorkerDB, write_conn,
+    ) -> None:
+        """The interruption story is the session split alone (the segmenter's
+        interruption merging is gone): a payout reconciliation that takes 40
+        minutes because a Zoom call lands in its middle is one observation,
+        since no gap between frames reaches the idle gap."""
+        start = datetime(2026, 9, 1, 9, tzinfo=timezone.utc)
+        call = {"app": "zoom.us", "what": "on a call with the finance team"}
+        timeline = [
+            (0, PAYOUT[0]), (2, PAYOUT[1]),
+            *((4 + 7 * k, ("", call)) for k in range(4)),  # minutes 4..25
+            (33, PAYOUT[2]), (36, PAYOUT[3]), (40, PAYOUT[4]),
+        ]
+        events = []
+        for i, (minute, (loc, kw)) in enumerate(timeline):
+            ann = _ann(loc, **kw)
+            if loc == "":
+                ann["task_context"]["activity_type"] = "communication"
+            events.append(_event(f"w-{i}", start + timedelta(minutes=minute), ann))
+        _insert(write_conn, events)
+
+        now = start + timedelta(hours=1)
+        window = db.get_annotated_events_in_window(hours=24, now=now)
+        assert wm.record_observations(db, window, now=now) == 1
+        (obs,) = db.get_workflow_observations()
+        assert obs["duration_s"] == 40 * 60
+        assert json.loads(obs["event_ids_json"]) == [e["id"] for e in events]
+
     def test_a_single_frame_session_is_not_an_observation(self, db: WorkerDB, write_conn) -> None:
         now = datetime(2026, 9, 1, 12, tzinfo=timezone.utc)
         _insert(write_conn, [_event("one", now - timedelta(hours=1), _ann("https://a.io/x"))])
