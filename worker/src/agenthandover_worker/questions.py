@@ -938,18 +938,84 @@ def apply_answer(
         return False
     db.close_micro_question(qid, status="answered", answer=answer, at=now)
     write_cards(db, state_dir)
-    if (
-        question.kind == KIND_STEP and reviser is not None
-        and choice_index(question.choices, answer) is None
-    ):
-        from agenthandover_worker.inference_runner import P0, model_work
-
-        model_work(
-            f"step-answer-revision:{qid}",
-            lambda: revise_step_answer(kb, question, answer, reviser),
-            P0,
-        )
+    if question.kind == KIND_STEP and choice_index(question.choices, answer) is None:
+        _queue_revision(kb, question, answer, reviser)
     return True
+
+
+#: What the revision of a review card's free-text step answer did, recorded
+#: on the answer's clarification (``revision``): it revised the steps, the
+#: model's revision changed nothing (or was unusable), or no flagged step
+#: was left to revise.  A clarification without it still has its revision
+#: to run: queued, the model was unavailable or timed out, the steps
+#: changed during the call, or the worker stopped before the job ran.
+#: :func:`requeue_step_answers` queues those again at worker startup.
+REVISION_REVISED = "revised"
+REVISION_UNCHANGED = "unchanged"
+REVISION_NO_STEP = "no_step"
+
+
+def _queue_revision(
+    kb: "KnowledgeBase", question: Question, answer: str, reviser: "SOPGenerator | None",
+) -> None:
+    """Queue :func:`revise_step_answer` as a P0 job on the inference thread
+    (nothing without a *reviser*: the v2 pipeline is off)."""
+    if reviser is None:
+        return
+    from agenthandover_worker.inference_runner import P0, model_work
+
+    model_work(
+        f"step-answer-revision:{question.id}",
+        lambda: revise_step_answer(kb, question, answer, reviser),
+        P0,
+    )
+
+
+def _clarification(proc: dict, question_id: str) -> dict | None:
+    """The clarification step question *question_id*'s answer was recorded as."""
+    return next(
+        (c for c in proc.get("agent_clarifications") or []
+         if isinstance(c, dict) and c.get("question_id") == question_id),
+        None,
+    )
+
+
+def pending_step_answers(db: "WorkerDB", kb: "KnowledgeBase") -> list[tuple[Question, str]]:
+    """(question, answer) for every review card's free-text step answer
+    whose revision has not run to a result (no ``revision`` on its
+    clarification), oldest first."""
+    pending = []
+    for row in db.get_micro_questions(status="answered", channel=CHANNEL_CARD):
+        if row.get("kind") != KIND_STEP:
+            continue
+        question = Question.from_json(json.loads(row["question_json"]))
+        answer = _text(row.get("answer"))
+        if not answer or choice_index(question.choices, answer) is not None:
+            continue
+        proc = kb.get_procedure(question.subject)
+        entry = _clarification(proc, question.id) if proc is not None else None
+        if entry is not None and not entry.get("revision"):
+            pending.append((question, answer))
+    return pending
+
+
+def requeue_step_answers(
+    db: "WorkerDB", kb: "KnowledgeBase", reviser: "SOPGenerator | None",
+) -> int:
+    """At worker startup, after the inference thread starts: queue again the
+    revision of every review card's free-text step answer that has no
+    result yet (the queue lives in memory, so a stop loses it).  An answer
+    whose revision ran to a result is not queued, and the runner does not
+    queue a key twice.  Returns how many were queued."""
+    if reviser is None:
+        return 0
+    pending = pending_step_answers(db, kb)
+    for question, answer in pending:
+        _queue_revision(kb, question, answer, reviser)
+    if pending:
+        logger.info("Queued %d step answer revision(s) left from before the restart",
+                    len(pending))
+    return len(pending)
 
 
 def _step_answer_qa(proc: dict, question: Question, answer: str) -> "FocusQAResult | None":
@@ -989,11 +1055,21 @@ def revise_step_answer(
     The answer was recorded before this ran (:func:`_apply_slot`).  When
     the model is unavailable, its answer is unusable, or the steps changed
     while it was answering, the steps stay as they are and the answer stays
-    recorded."""
+    recorded.  The result is recorded on the answer's clarification
+    (``revision``), except when another try at the next worker start could
+    do better: the model unavailable or timed out, or the steps changed
+    during the call (:func:`requeue_step_answers`)."""
     from agenthandover_worker.focus_questioner import (
         answer_revision_prompt,
         apply_answer_revisions,
     )
+
+    def settle(result: str) -> None:
+        current = kb.get_procedure(question.subject)
+        entry = _clarification(current, question.id) if current is not None else None
+        if entry is not None:
+            entry["revision"] = result
+            kb.save_procedure(current)
 
     proc = kb.get_procedure(question.subject)
     qa = _step_answer_qa(proc, question, answer) if proc is not None else None
@@ -1001,20 +1077,23 @@ def revise_step_answer(
     if prompt is None:
         logger.info("Step question %s: no step left to revise; the answer stays recorded",
                     question.id)
+        settle(REVISION_NO_STEP)
         return []
     try:
         response = reviser.revise(prompt)
-    except ConnectionError as exc:
+    except (ConnectionError, TimeoutError) as exc:
         logger.warning(
             "Step question %s: the answer could not revise the steps (model "
-            "unavailable: %s); it stays recorded", question.id, exc,
+            "unavailable: %s); it stays recorded and is revised after a restart",
+            question.id, exc,
         )
         return []
-    except (ValueError, TimeoutError, RuntimeError) as exc:
+    except (ValueError, RuntimeError) as exc:
         logger.warning(
             "Step question %s: the answer revision was unusable (%s); steps unchanged",
             question.id, exc,
         )
+        settle(REVISION_UNCHANGED)
         return []
     # The model call let go of the state lock: the procedure is read again,
     # and a revision numbered on steps that changed meanwhile is not applied.
@@ -1026,8 +1105,12 @@ def revise_step_answer(
         )
         return []
     applied = apply_answer_revisions(fresh, qa, response)
-    if applied:
+    entry = _clarification(fresh, question.id)
+    if entry is not None:
+        entry["revision"] = REVISION_REVISED if applied else REVISION_UNCHANGED
+    if applied or entry is not None:
         kb.save_procedure(fresh)
+    if applied:
         logger.info("Step question %s: the card's answer revised the steps", question.id)
     return applied
 

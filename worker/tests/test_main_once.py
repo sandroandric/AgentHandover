@@ -307,3 +307,31 @@ def test_main_only_builds_the_context_and_loops() -> None:
         "run_pipeline", "_process_annotations", "_process_passive_discovery",
         "_process_focus_sessions_v2", "drain",
     }
+
+
+def test_startup_queues_the_step_answer_revisions_a_stop_left(
+    once_home: Path, tmp_db_path: Path, tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """main() queues again the review-card answer revisions a stop cut
+    short (``questions.requeue_step_answers``): once, with the worker's
+    SOP generator, under the state lock, and after the inference thread
+    started, so the revisions are queued rather than run on this thread."""
+    from agenthandover_worker import inference_runner, questions
+
+    calls = []
+
+    def requeue(db, kb, reviser) -> int:
+        runner = inference_runner._ACTIVE
+        calls.append({
+            "runner": runner is not None and not runner.on_inference_thread(),
+            "locked": inference_runner.STATE_LOCK.held(),
+            "reviser": reviser,
+        })
+        return 0
+
+    monkeypatch.setattr(questions, "requeue_step_answers", requeue)
+    _run_once(tmp_db_path, tmp_path)
+    assert len(calls) == 1
+    assert calls[0]["runner"] and calls[0]["locked"]
+    assert type(calls[0]["reviser"]).__name__ == "SOPGenerator"
