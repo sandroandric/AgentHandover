@@ -169,9 +169,23 @@ final class ServiceController {
             try? FileManager.default.removeItem(at: pidPath)
             return false
         }
-        // Fallback: check by process name
-        let result = shell("/bin/ps", args: ["-ax", "-o", "pid,comm"])
-        return result.contains("ah-observer")
+        // Fallback (no PID file): a daemon process, not a browser's
+        // native-messaging bridge, which is the same binary.
+        return daemonListed(inProcessList: shell("/bin/ps", args: ["-ax", "-o", "args="]))
+    }
+
+    /// Whether a `ps -ax -o args=` listing holds a daemon: `ah-observer`
+    /// started without arguments (the app and the CLI start it bare).  A
+    /// browser starts the same binary as its native-messaging bridge with
+    /// the extension's origin (`chrome-extension://…/`), and counting that
+    /// as the daemon kept capture off whenever the browser was open.
+    static func daemonListed(inProcessList listing: String) -> Bool {
+        listing.split(separator: "\n").contains { line in
+            let words = line.split(separator: " ", omittingEmptySubsequences: true)
+            guard let executable = words.first else { return false }
+            return (executable == "ah-observer" || executable.hasSuffix("/ah-observer"))
+                && words.count == 1
+        }
     }
 
     /// Read the daemon's PID from its PID file.
