@@ -29,7 +29,7 @@ mod macos_tests {
 
     #[test]
     fn test_key_down_count_links_and_never_falls() {
-        // The HID system's key-press counter (a count, no key codes): two
+        // The session's key-press counter (a count, no key codes): two
         // readings a moment apart differ by the keys pressed in between.
         let detector = IdleDetector::new();
         let first = detector.key_down_count();

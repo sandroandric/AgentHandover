@@ -47,14 +47,21 @@ impl IdleDetector {
         since(CGEventType::LeftMouseDown).min(since(CGEventType::RightMouseDown))
     }
 
-    /// How many key presses the HID system has counted (it wraps at
+    /// How many key presses the login session has counted (it wraps at
     /// `u32::MAX`). A count only: no key code, no text, no event tap, no
     /// Input Monitoring permission. The observer records the difference
     /// between two kept frames.
+    ///
+    /// The combined session state, not the HID system state: the HID
+    /// counter sees only hardware keyboards, so text typed by a text
+    /// expander, a remote-control or screen-sharing session, or automation
+    /// (measured on the test Mac: five System Events keystrokes moved the
+    /// combined counter by five and the HID counter by none) would read as
+    /// "nothing typed". The combined counter includes the hardware keys.
     pub fn key_down_count(&self) -> u32 {
         unsafe {
             CGEventSourceCounterForEventType(
-                CGEventSourceStateID::HIDSystemState,
+                CGEventSourceStateID::CombinedSessionState,
                 CGEventType::KeyDown,
             )
         }
