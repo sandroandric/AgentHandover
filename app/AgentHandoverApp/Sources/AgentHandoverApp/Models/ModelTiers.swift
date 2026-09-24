@@ -170,14 +170,6 @@ struct ModelTierTable: Decodable {
             + "annotation_model = \"\(annotationModel)\"\nsop_model = \"\(sopModel)\"\n"
     }
 
-    /// The `[vlm]` lines of a remote (API) model choice.
-    static let remoteKeys = ["mode", "provider", "model", "api_key_env"]
-
-    static func remoteVLMBlock(provider: String, model: String, apiKeyEnv: String) -> String {
-        "[vlm]\nmode = \"remote\"\nprovider = \"\(provider)\"\n"
-            + "model = \"\(model)\"\napi_key_env = \"\(apiKeyEnv)\"\n"
-    }
-
     /// `config` with the managed keys of `[vlm]` replaced by `block`'s
     /// (right after the header, other `[vlm]` keys and every other section
     /// kept), or `block` appended when there is no `[vlm]` section: the

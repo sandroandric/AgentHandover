@@ -64,7 +64,6 @@ def test_missing_file_gives_every_default(tmp_path):
     assert cfg.vlm.sliding_window_max_age_sec == 600
     assert cfg.vlm.ollama_host == "http://localhost:11434"
     assert cfg.vlm.annotation_timeout_seconds == 180.0
-    assert cfg.vlm.mode == "local"
     assert cfg.focus.max_session_hours == 4.0
     assert cfg.sop.auto_approve is False
     assert cfg.knowledge.query_api_enabled is True
@@ -105,8 +104,6 @@ def test_vlm_values(tmp_path):
         '[vlm]\nannotation_enabled = false\nannotation_model = "qwen3:4b"\n'
         'sop_model = "gemma4:e4b"\nannotation_max_frames_per_day = 5\n'
         'sliding_window_max_age_sec = 900\nollama_host = "http://127.0.0.1:1"\n'
-        'mode = "remote"\nprovider = "openai"\nmodel = "gpt"\n'
-        'api_key_env = "KEY"\n'
     )))
     vlm = cfg.vlm
     assert vlm.annotation_enabled is False
@@ -115,9 +112,6 @@ def test_vlm_values(tmp_path):
     assert vlm.annotation_max_frames_per_day == 5
     assert vlm.sliding_window_max_age_sec == 900
     assert vlm.ollama_host == "http://127.0.0.1:1"
-    assert (vlm.mode, vlm.provider, vlm.model, vlm.api_key_env) == (
-        "remote", "openai", "gpt", "KEY",
-    )
 
 
 @pytest.mark.parametrize("raw, expected", [

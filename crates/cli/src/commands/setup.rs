@@ -567,43 +567,12 @@ fn step_vlm(check_only: bool, tier_arg: Option<&str>) -> Result<()> {
     // Report what the running worker says, if it is up.
     if let Ok(worker) = status::read_status_file::<status::WorkerStatus>("worker-status.json") {
         if worker.vlm_available {
-            println!(
-                "  {} VLM {} ({}/{})",
-                "✓".green(),
-                "available".green(),
-                worker.vlm_mode.as_deref().unwrap_or("local"),
-                worker.vlm_provider.as_deref().unwrap_or("auto-detect"),
-            );
+            println!("  {} VLM {}", "✓".green(), "available".green());
         }
     }
 
     let config = load_config()?;
-    if config.vlm.mode == "remote" && tier_arg.is_none() {
-        let provider = config.vlm.provider.as_deref().unwrap_or("unknown");
-        let model = config.vlm.model.as_deref().unwrap_or("(default)");
-        println!(
-            "  {} VLM configured as {} ({}/{})",
-            "✓".green(),
-            "remote".cyan(),
-            provider,
-            model,
-        );
-        if let Some(ref env_var) = config.vlm.api_key_env {
-            if std::env::var(env_var).is_ok() {
-                println!("  {} API key ({}) {}", "✓".green(), env_var, "is set".green());
-            } else {
-                println!(
-                    "  {} API key ({}) {}",
-                    "✗".red(),
-                    env_var,
-                    "NOT set — export it in your shell profile".red()
-                );
-            }
-        }
-        return Ok(());
-    }
-
-    // Local mode: the models of the chosen tier (the one tier table,
+    // The models of the chosen tier (the one tier table,
     // tiers.json), pulled with Ollama; the choice is written to [vlm] in
     // the same bytes onboarding writes.
     let table = tiers::table();

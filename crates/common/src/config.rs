@@ -113,18 +113,10 @@ pub struct VlmConfig {
     pub max_queue_size: u32,
     pub job_ttl_days: u32,
     pub max_compute_minutes_per_day: u32,
-    /// VLM mode: "local" (default) or "remote" (cloud API).
-    #[serde(default = "default_vlm_mode")]
-    pub mode: String,
-    /// Remote provider: "openai" | "anthropic" | "google".
-    #[serde(default)]
-    pub provider: Option<String>,
-    /// Provider-specific model name override.
-    #[serde(default)]
-    pub model: Option<String>,
-    /// Environment variable name holding the API key (NEVER store keys directly!).
-    #[serde(default)]
-    pub api_key_env: Option<String>,
+    // `mode = "local"`, which the tier writers put in the file, is not
+    // read: cloud mode was removed in 0.5.0 (the worker's
+    // `model_profiles.migrate_vlm_block` turns an old remote block local,
+    // and `doctor` flags one it could not).
 
     // --- v2 scene annotation pipeline fields ---
 
@@ -153,7 +145,6 @@ fn default_screenshot_scale() -> f64 { 0.5 }
 fn default_dhash_threshold() -> u32 { 1 }
 fn default_focus_screenshot_max_per_minute() -> u32 { 40 }
 
-fn default_vlm_mode() -> String { "local".to_string() }
 fn default_annotation_model() -> String { crate::tiers::recommended_tier().annotation_model.clone() }
 fn default_sop_model() -> String { crate::tiers::recommended_tier().sop_model.clone() }
 fn default_annotation_enabled() -> bool { true }
@@ -311,10 +302,6 @@ impl Default for VlmConfig {
             max_queue_size: 500,
             job_ttl_days: 7,
             max_compute_minutes_per_day: 20,
-            mode: default_vlm_mode(),
-            provider: None,
-            model: None,
-            api_key_env: None,
             tier: None,
             annotation_model: default_annotation_model(),
             sop_model: default_sop_model(),

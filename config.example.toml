@@ -39,14 +39,8 @@ run_window_local_time = "01:00-05:00"
 [vlm]
 job_ttl_days = 7                 # screenshots never annotated are deleted after this many days
 # ollama_host = "http://localhost:11434"   # another host: doctor checks only its version, not installs or memory
-# --- remote mode (cloud APIs) ---
-# Screen annotation, Skill writing and questions always run on Ollama.
-# Remote mode sends the fallback checks (the window title and details of
-# events the local pipeline could not classify) to a cloud API.
-# mode = "local"               # "local" (default) or "remote" (cloud API)
-# provider = "openai"          # "openai" | "anthropic" | "google"
-# model = "gpt-4o-mini"        # provider-specific model name
-# api_key_env = "OPENAI_API_KEY"  # env var holding the key; else the key the app stored in the Keychain
+# Every model runs locally through Ollama (cloud mode was removed in 0.5.0;
+# the upgrade turns an old mode = "remote" block local, with a backup).
 # --- scene annotation pipeline ---
 # Model tiers: the table is TIERS in worker/src/agenthandover_worker/
 # model_profiles.py, installed as tiers.json next to this file (copy in
@@ -90,7 +84,7 @@ max_session_hours = 4              # a recording never stopped is closed as stal
 # [vlm] annotation_enabled = false.
 enhance_sops = true
 max_enhancements_per_day = 20
-# model = ""                   # empty = inherit from [vlm]
+# model = ""                   # empty = [vlm] sop_model
 # timeout_seconds = 60
 # temperature = 0.3
 # max_tokens = 800

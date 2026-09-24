@@ -134,13 +134,8 @@ pub struct WorkerStatus {
     pub sops_generated: u64,
     pub last_pipeline_duration_ms: Option<u64>,
     pub consecutive_errors: u32,
+    /// Ollama answers at `[vlm] ollama_host` and has the annotation model.
     pub vlm_available: bool,
-    /// VLM operating mode: "local" or "remote".
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub vlm_mode: Option<String>,
-    /// VLM provider when in remote mode (e.g. "openai", "anthropic", "google").
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub vlm_provider: Option<String>,
     /// The worker's inference thread and its passive backlog.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inference: Option<InferenceStatus>,

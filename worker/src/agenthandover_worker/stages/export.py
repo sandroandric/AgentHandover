@@ -57,7 +57,6 @@ def _write_heartbeat(ctx: Any) -> None:
                 )
             except Exception:
                 logger.debug("Annotation backlog count failed", exc_info=True)
-    vlm_cfg = ctx.cfg.vlm
     wm._write_worker_status(
         started_at=ctx.started_at,
         events_processed_today=ctx.total_events_processed,
@@ -68,8 +67,6 @@ def _write_heartbeat(ctx: Any) -> None:
             runner.consecutive_failures() if runner is not None else 0,
         ),
         vlm_available=ctx.vlm_available,
-        vlm_mode=vlm_cfg.mode,
-        vlm_provider=vlm_cfg.provider or None,
         v2_annotation_enabled=ctx.v2_annotation_enabled,
         v2_annotations_today=ctx.total_v2_annotations,
         v2_diffs_today=ctx.total_v2_diffs,

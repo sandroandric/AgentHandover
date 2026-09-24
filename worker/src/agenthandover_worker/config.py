@@ -51,12 +51,13 @@ def config_path() -> Path:
 
 @dataclass(frozen=True)
 class VlmConfig:
-    """``[vlm]``: remote-VLM selection and the local annotation pipeline."""
+    """``[vlm]``: the local models (through Ollama) and their budgets.
 
-    mode: str = "local"
-    provider: str = ""
-    model: str = ""
-    api_key_env: str = ""
+    ``mode = "local"`` in the file is what the tier writers put there;
+    the loader does not read it (cloud mode was removed in 0.5.0 and
+    ``model_profiles.migrate_vlm_block`` turns an old remote block local).
+    """
+
     annotation_enabled: bool = True
     # The RAM tier onboarding or ``agenthandover setup`` chose; a model key
     # the file leaves out comes from this tier, else from the tier this

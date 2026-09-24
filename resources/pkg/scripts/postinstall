@@ -171,7 +171,7 @@ pip_failed() {
     exit 1
 }
 
-WORKER_SPEC="${LIB_DIR}/worker[mcp,vlm-ollama]"
+WORKER_SPEC="${LIB_DIR}/worker[mcp]"
 
 # Liveness probe on an existing venv: it must start and be new enough.
 # A venv whose interpreter was removed (brew upgrade) or is too old is

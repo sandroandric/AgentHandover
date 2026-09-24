@@ -173,8 +173,8 @@ check_installed_prefix() {
     dd="$(data_dir "$1")"
     local py="${lib}/venv/bin/python"
     check "venv python runs" "${py}" -c "import sys"
-    check "worker, mcp and ollama import in the venv" \
-        "${py}" -c "import agenthandover_worker, mcp, ollama"
+    check "worker and mcp import in the venv" \
+        "${py}" -c "import agenthandover_worker, mcp"
     check "mcp pinned to >=1.30,<2" "${py}" -c \
         "import importlib.metadata as m; v=tuple(int(x) for x in m.version('mcp').split('.')[:2]); assert (1,30) <= v < (2,0), v"
     check "mlx-embeddings not installed by the installer" \

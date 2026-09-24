@@ -15,52 +15,7 @@ struct OnboardingView: View {
     @State private var vlmPullInProgress = false
     @State private var vlmPullOutput = ""
 
-    // Cloud VLM state
-    enum VLMMode: String, CaseIterable {
-        case local = "Local"
-        case cloud = "Cloud"
-    }
-
-    enum RemoteProvider: String, CaseIterable, Identifiable {
-        case openai = "openai"
-        case anthropic = "anthropic"
-        case google = "google"
-
-        var id: String { rawValue }
-
-        var displayName: String {
-            switch self {
-            case .openai: return "OpenAI"
-            case .anthropic: return "Anthropic (Claude)"
-            case .google: return "Google (Gemini)"
-            }
-        }
-
-        var defaultModel: String {
-            switch self {
-            case .openai: return "gpt-4.1-mini"
-            case .anthropic: return "claude-sonnet-4-6-20260320"
-            case .google: return "gemini-2.5-flash"
-            }
-        }
-
-        var envVar: String {
-            switch self {
-            case .openai: return "OPENAI_API_KEY"
-            case .anthropic: return "ANTHROPIC_API_KEY"
-            case .google: return "GOOGLE_API_KEY"
-            }
-        }
-    }
-
-    @State private var vlmMode: VLMMode = .local
-    @State private var selectedProvider: RemoteProvider = .openai
-    @State private var apiKeyInput: String = ""
-    @State private var customModelName: String = ""
-    @State private var apiKeyValidating = false
-    @State private var apiKeyValid: Bool? = nil
     @State private var enableImageEmbeddings = false
-    @State private var remoteConsentGiven = false
     @State private var useCustomModels = false
     @State private var customAnnotationModel = ""
     @State private var customSOPModel = ""
@@ -79,7 +34,6 @@ struct OnboardingView: View {
     /// problems and each tier's memory need (nil when the CLI is absent).
     @State private var ollamaReport: OllamaReport? = nil
     @State private var readAppState = false
-    @State private var remoteConfigSaved = false
     @State private var vlmStateRefreshing = false
     @State private var vlmStatusMessage = ""
     @State private var hasSeededVLMFromConfig = false
@@ -303,7 +257,7 @@ struct OnboardingView: View {
             case 6:
                 // VLM Setup -- blocked until model ready
                 VStack(spacing: 4) {
-                    if onboardingVLMReady {
+                    if localVLMReady {
                         HStack(spacing: 6) {
                             Image(systemName: "checkmark.circle.fill")
                                 .foregroundColor(.green)
@@ -318,12 +272,12 @@ struct OnboardingView: View {
                         "Next",
                         icon: "arrow.right",
                         style: .darkFilled,
-                        disabled: !onboardingVLMReady
+                        disabled: !localVLMReady
                     ) {
                         withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) { currentStep += 1 }
                     }
 
-                    if !onboardingVLMReady {
+                    if !localVLMReady {
                         Text("Set up an AI model above to continue")
                             .font(.system(size: 12, weight: .medium, design: .rounded))
                             .foregroundColor(warmOrange)
@@ -547,7 +501,7 @@ struct OnboardingView: View {
                 Image(systemName: "lock.fill")
                     .font(.system(size: 10, weight: .semibold))
                     .foregroundColor(.white.opacity(0.7))
-                Text("Runs on your Mac. Cloud models are opt-in.")
+                Text("Runs on your Mac with local AI models.")
                     .font(.system(size: 12, weight: .medium, design: .rounded))
                     .foregroundColor(.white.opacity(0.7))
             }
@@ -1040,46 +994,8 @@ struct OnboardingView: View {
         ollamaInstalled && ollamaRunning && ollamaHasRequiredModels
     }
 
-    private var cloudVLMReady: Bool {
-        remoteConfigSaved || apiKeyValid == true
-    }
-
-    private var onboardingVLMReady: Bool {
-        vlmMode == .cloud ? cloudVLMReady : localVLMReady
-    }
-
     private var hasOllamaAppBundle: Bool {
         FileManager.default.fileExists(atPath: "/Applications/Ollama.app")
-    }
-
-    private var vlmModeSwitcher: some View {
-        HStack(spacing: 10) {
-            vlmModeButton(.local)
-            vlmModeButton(.cloud)
-        }
-        .frame(maxWidth: 280)
-    }
-
-    private func vlmModeButton(_ mode: VLMMode) -> some View {
-        let selected = vlmMode == mode
-        return Button {
-            vlmMode = mode
-        } label: {
-            Text(mode.rawValue)
-                .font(.system(size: 13, weight: .bold, design: .rounded))
-                .foregroundColor(selected ? .white : darkNavy)
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 10)
-                .background(
-                    RoundedRectangle(cornerRadius: 12)
-                        .fill(selected ? darkNavy : Color.white)
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 12)
-                        .stroke(selected ? darkNavy : darkNavy.opacity(0.2), lineWidth: contraBorder)
-                )
-        }
-        .buttonStyle(.plain)
     }
 
     /// Shared view for a single permission step.
@@ -1451,22 +1367,20 @@ struct OnboardingView: View {
                     .font(titleFont)
                     .foregroundColor(darkNavy)
 
-                Text("Choose a local or cloud AI model to understand what\u{2019}s on your screen.")
+                Text("AgentHandover runs its AI models on your Mac through Ollama, to understand what\u{2019}s on your screen.")
                     .font(bodyFont)
                     .foregroundColor(darkNavy.opacity(0.5))
                     .multilineTextAlignment(.center)
                     .lineSpacing(5)
                     .frame(maxWidth: 440)
 
-                if onboardingVLMReady {
+                if localVLMReady {
                     PermissionStatusBadge(
                         granted: true,
-                        grantedLabel: vlmMode == .cloud ? "Cloud AI Ready" : "Local AI Ready",
+                        grantedLabel: "Local AI Ready",
                         deniedLabel: ""
                     )
                 }
-
-                vlmModeSwitcher
 
                 if vlmStateRefreshing {
                     ProgressView("Checking AI setup...")
@@ -1474,11 +1388,7 @@ struct OnboardingView: View {
                         .tint(warmOrange)
                 }
 
-                if vlmMode == .cloud {
-                    cloudVLMContent
-                } else {
-                    localVLMContent
-                }
+                localVLMContent
             }
             .frame(maxWidth: 520)
         }
@@ -1873,180 +1783,6 @@ struct OnboardingView: View {
         }
     }
 
-    // MARK: - Cloud VLM Content
-
-    private var cloudVLMContent: some View {
-        VStack(spacing: 14) {
-            // Privacy consent
-            if !remoteConsentGiven {
-                VStack(spacing: 10) {
-                    HStack(spacing: 6) {
-                        Image(systemName: "exclamationmark.triangle.fill")
-                            .foregroundColor(warmOrange)
-                        Text("Privacy Notice")
-                            .font(.system(size: 13, weight: .bold, design: .rounded))
-                            .foregroundColor(darkNavy)
-                    }
-                    Text("With scene annotation turned off, cloud mode sends the steps of Skills written from your recordings to a third-party API, to add a task description and overview. Screen annotation and Skill writing still run locally through Ollama, so the local models are still needed. Only enable this if you accept this trade-off.")
-                        .font(.system(size: 12))
-                        .foregroundColor(darkNavy.opacity(0.5))
-                        .multilineTextAlignment(.center)
-                        .frame(maxWidth: 350)
-
-                    Button("I Understand & Consent") {
-                        remoteConsentGiven = true
-                    }
-                    .font(.system(size: 14, weight: .bold, design: .rounded))
-                    .foregroundColor(.white)
-                    .padding(.horizontal, 20)
-                    .padding(.vertical, 10)
-                    .background(
-                        RoundedRectangle(cornerRadius: contraRadius)
-                            .fill(darkNavy)
-                    )
-                    .buttonStyle(.plain)
-                }
-                .padding(20)
-                .background(
-                    RoundedRectangle(cornerRadius: contraRadius)
-                        .fill(Color.white)
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: contraRadius)
-                        .stroke(warmOrange, lineWidth: contraBorder)
-                )
-            } else {
-                VStack(spacing: 12) {
-                    // Provider picker
-                    Picker("Provider", selection: $selectedProvider) {
-                        ForEach(RemoteProvider.allCases) { provider in
-                            Text(provider.displayName).tag(provider)
-                        }
-                    }
-                    .pickerStyle(.menu)
-                    .frame(maxWidth: 280)
-                    .onChange(of: selectedProvider) { _ in
-                        customModelName = ""
-                    }
-
-                    // Model selection
-                    HStack(spacing: 8) {
-                        Text("Model:")
-                            .font(.system(size: 13, weight: .medium))
-                            .foregroundColor(darkNavy.opacity(0.5))
-                        TextField("Model name", text: $customModelName)
-                            .textFieldStyle(.roundedBorder)
-                            .frame(maxWidth: 220)
-                    }
-
-                    Text("Default: \(selectedProvider.defaultModel)")
-                        .font(.system(size: 11))
-                        .foregroundColor(darkNavy.opacity(0.4))
-
-                    // API Key input
-                    SecureField("API Key", text: $apiKeyInput)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(maxWidth: 300)
-
-                    Text("Stored securely in macOS Keychain")
-                        .font(.system(size: 11))
-                        .foregroundColor(darkNavy.opacity(0.4))
-
-                    // Save & Test button
-                    HStack(spacing: 8) {
-                        Button("Save Configuration") {
-                            saveCloudVLMConfig()
-                        }
-                        .font(.system(size: 14, weight: .bold, design: .rounded))
-                        .foregroundColor(.white)
-                        .padding(.horizontal, 20)
-                        .padding(.vertical, 10)
-                        .background(
-                            RoundedRectangle(cornerRadius: contraRadius)
-                                .fill(apiKeyInput.count < 10 ? darkNavy.opacity(0.2) : darkNavy)
-                        )
-                        .buttonStyle(.plain)
-                        .disabled(apiKeyInput.count < 10)
-
-                        if apiKeyValidating {
-                            ProgressView()
-                                .controlSize(.small)
-                        }
-                    }
-
-                    if let valid = apiKeyValid {
-                        PermissionStatusBadge(
-                            granted: valid,
-                            grantedLabel: "Configuration Saved",
-                            deniedLabel: "Failed to save"
-                        )
-                    }
-                }
-                .padding(20)
-                .background(
-                    RoundedRectangle(cornerRadius: contraRadius)
-                        .fill(Color.white)
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: contraRadius)
-                        .stroke(darkNavy, lineWidth: contraBorder)
-                )
-            }
-        }
-    }
-
-    // MARK: - Cloud VLM Config Save
-
-    private func saveCloudVLMConfig() {
-        apiKeyValidating = true
-
-        DispatchQueue.global(qos: .userInitiated).async {
-            // Store key in Keychain
-            let stored = KeychainHelper.store(
-                key: "agenthandover-\(selectedProvider.rawValue)-key",
-                value: apiKeyInput
-            )
-
-            // Write config.toml update
-            if stored {
-                writeRemoteVLMConfig(
-                    provider: selectedProvider.rawValue,
-                    model: customModelName.isEmpty ? selectedProvider.defaultModel : customModelName,
-                    apiKeyEnv: selectedProvider.envVar
-                )
-            }
-
-            DispatchQueue.main.async {
-                apiKeyValidating = false
-                apiKeyValid = stored
-                if stored && !apiKeyInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    remoteConfigSaved = true
-                    appState.vlmAvailable = onboardingVLMReady
-                }
-            }
-        }
-    }
-
-    private func writeRemoteVLMConfig(provider: String, model: String, apiKeyEnv: String) {
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        let configDir = home
-            .appendingPathComponent("Library/Application Support/agenthandover")
-        let configPath = configDir.appendingPathComponent("config.toml")
-
-        try? FileManager.default.createDirectory(at: configDir, withIntermediateDirectories: true)
-
-        // Only [vlm] is edited: a "model =" in another section (the
-        // embedding model, say) belongs to that section.
-        let current = (try? String(contentsOf: configPath, encoding: .utf8)) ?? ""
-        let block = ModelTierTable.remoteVLMBlock(
-            provider: provider, model: model, apiKeyEnv: apiKeyEnv
-        )
-        let updated = ModelTierTable.applyVLMBlock(
-            block, to: current, managedKeys: ModelTierTable.remoteKeys
-        )
-        try? updated.write(to: configPath, atomically: true, encoding: .utf8)
-    }
-
     // MARK: - Screen 8: Browser Extension (Optional, Load Unpacked, WHITE BACKGROUND)
 
     private var chromeExtensionStep: some View {
@@ -2416,7 +2152,7 @@ struct OnboardingView: View {
                 readinessChip(
                     icon: "brain.head.profile",
                     label: "AI Model",
-                    ok: onboardingVLMReady
+                    ok: localVLMReady
                 )
             }
 
@@ -2828,16 +2564,6 @@ struct OnboardingView: View {
         }
 
         appState.refreshStatus()
-        if appState.vlmMode == "remote" {
-            vlmMode = .cloud
-            remoteConsentGiven = true
-            remoteConfigSaved = appState.vlmProvider != nil || appState.vlmAvailable
-        } else {
-            vlmMode = .local
-        }
-        if let providerRaw = appState.vlmProvider, let provider = RemoteProvider(rawValue: providerRaw) {
-            selectedProvider = provider
-        }
     }
 
     private func refreshVLMSetupState(force: Bool = false) {
@@ -2845,7 +2571,6 @@ struct OnboardingView: View {
         let requiredModels = requiredLocalModels.map(canonicalModelName)
         vlmStateRefreshing = true
         appState.refreshStatus()
-        remoteConfigSaved = appState.vlmMode == "remote" && (appState.vlmProvider != nil || appState.vlmAvailable)
 
         DispatchQueue.global(qos: .userInitiated).async {
             let ollamaPath = findOllamaPath()
@@ -2883,11 +2608,11 @@ struct OnboardingView: View {
                 self.ollamaRunning = running
                 self.ollamaHasRequiredModels = hasRequiredModels
                 self.vlmStatusMessage = statusMessage
-                if hasRequiredModels && self.vlmMode == .local {
+                if hasRequiredModels {
                     self.persistModelChoice()
                 }
                 self.vlmStateRefreshing = false
-                self.appState.vlmAvailable = self.onboardingVLMReady
+                self.appState.vlmAvailable = self.localVLMReady
             }
         }
     }
@@ -3064,50 +2789,6 @@ enum OnboardingAction {
 }
 
 // MARK: - Subviews
-
-/// Simple macOS Keychain wrapper for storing/retrieving API keys.
-struct KeychainHelper {
-    static func store(key: String, value: String) -> Bool {
-        guard let data = value.data(using: .utf8) else { return false }
-
-        // Delete existing item first
-        let deleteQuery: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: "com.agenthandover.app",
-            kSecAttrAccount as String: key,
-        ]
-        SecItemDelete(deleteQuery as CFDictionary)
-
-        // Add new item
-        let addQuery: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: "com.agenthandover.app",
-            kSecAttrAccount as String: key,
-            kSecValueData as String: data,
-        ]
-        let status = SecItemAdd(addQuery as CFDictionary, nil)
-        return status == errSecSuccess
-    }
-
-    static func retrieve(key: String) -> String? {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: "com.agenthandover.app",
-            kSecAttrAccount as String: key,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne,
-        ]
-
-        var result: AnyObject?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-        guard status == errSecSuccess,
-              let data = result as? Data,
-              let string = String(data: data, encoding: .utf8) else {
-            return nil
-        }
-        return string
-    }
-}
 
 private final class OnboardingViewHost {}
 

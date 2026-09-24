@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Unified setup script for AgentHandover.
-# Installs native messaging host, then offers VLM setup.
+# Installs native messaging host, then pulls the local models.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -22,13 +22,12 @@ else
     echo
 fi
 
-# Step 2: VLM setup (use worker venv if available)
-echo "Step 2/2: VLM setup..."
-WORKER_VENV="$SCRIPT_DIR/../worker/.venv/bin/python"
-if [ -x "$WORKER_VENV" ]; then
-    "$WORKER_VENV" -m agenthandover_worker.setup_vlm "$@"
+# Step 2: the local models (Ollama) of this Mac's RAM tier
+echo "Step 2/2: Local models..."
+if command -v agenthandover >/dev/null 2>&1; then
+    agenthandover setup --vlm "$@"
 else
-    python3 -m agenthandover_worker.setup_vlm "$@"
+    echo "  agenthandover CLI not found; after installing it run: agenthandover setup --vlm"
 fi
 
 echo

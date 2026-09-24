@@ -11,26 +11,13 @@ dependencies = ["pyyaml>=6.0"]
 
 [project.optional-dependencies]
 dev = ["pytest>=7.0", "pytest-cov"]
-vlm-ollama = ["ollama>=0.3"]
-vlm-openai = ["openai>=1.0"]
-vlm-anthropic = ["anthropic>=0.39"]
-vlm-google = ["google-genai>=1.0"]
-vlm-remote = ["openai>=1.0", "anthropic>=0.39", "google-genai>=1.0"]
 embeddings-apple = [
     "mlx-embeddings>=0.0.4; platform_machine == 'arm64' and sys_platform == 'darwin'",
 ]
 mcp = ["mcp>=1.30,<2"]
-vlm-all = [
-    "ollama>=0.3",
-    "openai>=1.0",
-    "anthropic>=0.39",
-    "google-genai>=1.0",
-    "mlx-embeddings>=0.0.4; platform_machine == 'arm64' and sys_platform == 'darwin'",
-]
 
 [project.scripts]
 agenthandover-worker = "agenthandover_worker.main:main"
-agenthandover-setup-vlm = "agenthandover_worker.setup_vlm:main"
 agenthandover-mcp = "agenthandover_worker.mcp_server:main"
 agenthandover-connect = "agenthandover_worker.agent_connect:main"
 

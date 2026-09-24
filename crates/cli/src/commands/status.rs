@@ -301,24 +301,10 @@ fn print_service_status(name: &str, status_file: &str, pid_name: &str) {
                 println!("    Pipeline:   last run {}ms", duration);
             }
             if let Some(vlm) = value.get("vlm_available").and_then(|v| v.as_bool()) {
-                let vlm_mode = value
-                    .get("vlm_mode")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("local");
-                let vlm_provider = value
-                    .get("vlm_provider")
-                    .and_then(|v| v.as_str());
                 let vlm_str = if vlm {
-                    // Show mode/provider info
-                    let mode_info = if vlm_mode == "remote" {
-                        let provider = vlm_provider.unwrap_or("unknown");
-                        format!("remote ({})", provider)
-                    } else {
-                        "local".to_string()
-                    };
-                    mode_info.green()
+                    "local".green()
                 } else {
-                    "not installed".dimmed()
+                    "not available".dimmed()
                 };
                 println!("    VLM:        {}", vlm_str);
             }

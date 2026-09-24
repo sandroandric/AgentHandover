@@ -4,14 +4,13 @@ from __future__ import annotations
 
 import hashlib
 from datetime import datetime, timezone
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
 from agenthandover_worker.sop_enhancer import (
     SOPEnhancer,
     _OVERVIEW_KEYS,
-    create_llm_backend,
 )
 
 
@@ -352,58 +351,3 @@ class TestParseResponse:
         task_desc, _, __ = SOPEnhancer._parse_response(response)
         assert task_desc == "padded text"
 
-
-# ---------------------------------------------------------------------------
-# create_llm_backend factory
-# ---------------------------------------------------------------------------
-
-
-class TestCreateLlmBackend:
-    """Factory function for LLM backend."""
-
-    def test_returns_none_when_ollama_unavailable(self):
-        with patch.dict("sys.modules", {"ollama": None}):
-            result = create_llm_backend({"model": ""}, {"mode": "local"})
-        assert result is None
-
-    @patch("agenthandover_worker.vlm_worker.create_backend")
-    def test_remote_provider_mapping(self, mock_create):
-        mock_backend = MagicMock()
-        mock_backend.is_available.return_value = True
-        mock_create.return_value = mock_backend
-
-        result = create_llm_backend(
-            {"model": "gpt-4o-mini"},
-            {"mode": "remote", "provider": "openai", "api_key_env": "OPENAI_API_KEY"},
-        )
-        assert result is mock_backend
-
-    @patch("agenthandover_worker.vlm_worker.create_backend")
-    def test_remote_unknown_provider_returns_none(self, mock_create):
-        result = create_llm_backend(
-            {"model": ""},
-            {"mode": "remote", "provider": "unknown_provider"},
-        )
-        assert result is None
-
-    @patch("agenthandover_worker.vlm_worker.create_backend")
-    def test_remote_backend_not_available_returns_none(self, mock_create):
-        mock_backend = MagicMock()
-        mock_backend.is_available.return_value = False
-        mock_create.return_value = mock_backend
-
-        result = create_llm_backend(
-            {"model": ""},
-            {"mode": "remote", "provider": "anthropic", "api_key_env": "ANTHROPIC_API_KEY"},
-        )
-        assert result is None
-
-    def test_none_vlm_config_defaults_to_local(self):
-        # Should attempt local mode (Ollama).  Returns an OllamaBackend if
-        # the ``ollama`` package is installed and the server is reachable,
-        # or None otherwise.
-        result = create_llm_backend({"model": ""}, None)
-        if result is not None:
-            from agenthandover_worker.backends.ollama import OllamaBackend
-            assert isinstance(result, OllamaBackend)
-        # Either case is valid — depends on environment

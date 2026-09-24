@@ -570,34 +570,25 @@ def _writers(cfg: Any, adapter: str, sops_dir: Path, json_export: bool) -> tuple
 
 
 def _sop_enhancer(cfg: Any, overrides: dict) -> Any:
-    """The LLM SOP enhancer (the v1 focus path's), when enabled and a
-    backend is available."""
+    """The LLM SOP enhancer (the v1 focus path's) when enabled: the local
+    SOP model through Ollama."""
     llm_config = dataclasses.asdict(cfg.llm)
     llm_config.update(overrides)
     if not llm_config.get("enhance_sops", True):
         logger.info("SOP enhancement disabled by config")
         return None
-    try:
-        from agenthandover_worker.sop_enhancer import SOPEnhancer, create_llm_backend
+    from agenthandover_worker.sop_enhancer import SOPEnhancer, create_llm_backend
 
-        vlm_cfg = cfg.vlm
-        llm_backend = create_llm_backend(llm_config, {
-            "mode": vlm_cfg.mode,
-            "provider": vlm_cfg.provider,
-            "model": vlm_cfg.model,
-            "api_key_env": vlm_cfg.api_key_env,
-        })
-        if llm_backend is None:
-            logger.info("SOP enhancement disabled (no LLM backend available)")
-            return None
-        logger.info("SOP enhancement enabled (LLM backend ready)")
-        return SOPEnhancer(
-            backend=llm_backend,
-            max_enhancements_per_day=int(llm_config.get("max_enhancements_per_day", 20)),
-        )
-    except Exception:
-        logger.debug("SOP enhancement unavailable", exc_info=True)
+    llm_backend = create_llm_backend(
+        llm_config, ollama_host=cfg.vlm.ollama_host, sop_model=cfg.vlm.sop_model,
+    )
+    if llm_backend is None:
         return None
+    logger.info("SOP enhancement enabled (%s via Ollama)", llm_backend.model)
+    return SOPEnhancer(
+        backend=llm_backend,
+        max_enhancements_per_day=int(llm_config.get("max_enhancements_per_day", 20)),
+    )
 
 
 def _v2_pipeline(

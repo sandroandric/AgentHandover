@@ -12,7 +12,6 @@ import json
 import logging
 import os
 import signal
-import subprocess
 import sys
 import tempfile
 import time
@@ -180,39 +179,6 @@ def _export_via_adapter(
                 slug, type(adapter).__name__, exc_info=True,
             )
     return paths
-
-
-def _read_keychain_api_key(provider: str) -> str:
-    """Read an API key from macOS Keychain (set by SwiftUI onboarding).
-
-    The onboarding stores keys with service 'com.agenthandover.app'
-    and account 'agenthandover-{provider}-key'.  We retrieve via the
-    ``security`` CLI to avoid a native dependency.
-
-    Returns the key string, or "" if not found / not on macOS.
-    """
-    if _platform.system() != "Darwin":
-        return ""
-
-    account = f"agenthandover-{provider}-key"
-    try:
-        result = subprocess.run(
-            [
-                "/usr/bin/security",
-                "find-generic-password",
-                "-s", "com.agenthandover.app",
-                "-a", account,
-                "-w",  # print password only
-            ],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            return result.stdout.strip()
-    except Exception:
-        pass
-    return ""
 
 
 def _check_v2_schema(db: "WorkerDB") -> bool:
@@ -771,8 +737,6 @@ def _write_worker_status(
     last_pipeline_duration_ms: int | None,
     consecutive_errors: int,
     vlm_available: bool,
-    vlm_mode: str | None = None,
-    vlm_provider: str | None = None,
     v2_annotations_today: int = 0,
     v2_diffs_today: int = 0,
     v2_annotation_enabled: bool = False,
@@ -810,10 +774,6 @@ def _write_worker_status(
         "consecutive_errors": consecutive_errors,
         "vlm_available": vlm_available,
     }
-    if vlm_mode:
-        status["vlm_mode"] = vlm_mode
-    if vlm_provider:
-        status["vlm_provider"] = vlm_provider
     if v2_annotation_enabled:
         status["v2_annotation_enabled"] = True
         status["v2_annotations_today"] = v2_annotations_today
@@ -4045,100 +4005,19 @@ def _log_model_profiles(vlm_cfg) -> None:
 
 
 def _vlm_backend_available(vlm_cfg) -> bool:
-    """Whether the configured VLM backend, remote (a cloud API) or local (a
-    detected backend), can be built: ``vlm_available`` in
-    ``worker-status.json``.  The backend is not kept: no worker job uses it
-    (the SOP text enhancer builds its own, ``sop_enhancer.create_llm_backend``)."""
-    from agenthandover_worker.vlm_worker import VLMBackend, VLMConfig, create_backend
+    """``vlm_available`` in ``worker-status.json``: Ollama answers at
+    ``[vlm] ollama_host`` and has the annotation model pulled."""
+    from agenthandover_worker.ollama import OllamaClient
 
-    provider = vlm_cfg.provider
-    if vlm_cfg.mode == "remote" and provider:
-        logger.info("VLM mode: remote (provider=%s)", provider)
-        remote_backend = {
-            "openai": VLMBackend.OPENAI_COMPAT,
-            "anthropic": VLMBackend.ANTHROPIC,
-            "google": VLMBackend.GOOGLE_GENAI,
-        }.get(provider)
-        if remote_backend is None:
-            logger.error("Unknown VLM provider: %s", provider)
-            return False
-        try:
-            api_key_env = vlm_cfg.api_key_env
-            # The env var (shell profiles), else the macOS Keychain (set by
-            # the app's onboarding).
-            api_key_value = os.environ.get(api_key_env, "") if api_key_env else ""
-            if not api_key_value:
-                api_key_value = _read_keychain_api_key(provider)
-                if api_key_value:
-                    logger.info(
-                        "Resolved API key from macOS Keychain "
-                        "(set by onboarding) for provider=%s",
-                        provider,
-                    )
-            create_backend(VLMConfig(
-                backend=remote_backend,
-                mode="remote",
-                provider=provider,
-                remote_model=vlm_cfg.model or None,
-                api_key=api_key_value or None,
-                api_key_env=api_key_env or None,
-            ))
-            logger.info(
-                "VLM backend available: remote/%s/%s", provider, vlm_cfg.model or "(default)",
-            )
-            return True
-        except Exception:
-            logger.warning("Failed to initialize the remote VLM backend", exc_info=True)
-            return False
-
-    from agenthandover_worker.setup_vlm import check_vlm_available
-
-    vlm_status = check_vlm_available()
-    if not any(vlm_status.values()):
-        logger.info("VLM not installed (agenthandover-setup-vlm sets one up)")
-        return False
-    logger.info("VLM backend(s) detected — attempting initialization")
-    try:
-        backend_type = None
-        if vlm_status["ollama"]:
-            backend_type = VLMBackend.OLLAMA
-        elif vlm_status.get("openai_compat"):
-            base_url = os.environ.get("AGENTHANDOVER_VLM_BASE_URL", "")
-            local_prefixes = (
-                "http://localhost", "http://127.0.0.1",
-                "https://localhost", "https://127.0.0.1",
-                "http://[::1]",
-            )
-            if base_url and any(base_url.startswith(p) for p in local_prefixes):
-                backend_type = VLMBackend.OPENAI_COMPAT
-            else:
-                logger.warning(
-                    "OpenAI-compat backend skipped: deny_network_egress is "
-                    "enforced by default. Set AGENTHANDOVER_VLM_BASE_URL to a "
-                    "local server (e.g. http://localhost:8000) to use it."
-                )
-        if backend_type is None:
-            logger.warning(
-                "VLM backend(s) detected but none usable (check config). "
-                "VLM unavailable."
-            )
-            return False
-        # [vlm] model, else the annotation model (the config loader fills
-        # that from the tier table when unset).
-        config_model = vlm_cfg.model or vlm_cfg.annotation_model
-        vlm_kwargs: dict = {"backend": backend_type}
-        if config_model:
-            vlm_kwargs["model_name"] = config_model
-        create_backend(VLMConfig(**vlm_kwargs))
+    available = OllamaClient(vlm_cfg.ollama_host).has_model(vlm_cfg.annotation_model)
+    if available:
+        logger.info("VLM available: %s at %s", vlm_cfg.annotation_model, vlm_cfg.ollama_host)
+    else:
         logger.info(
-            "VLM backend available (%s, model=%s)",
-            backend_type.value,
-            config_model or "(default)",
+            "VLM not available: %s is not served at %s (agenthandover setup --vlm pulls it)",
+            vlm_cfg.annotation_model, vlm_cfg.ollama_host,
         )
-        return True
-    except Exception:
-        logger.warning("Failed to initialize the VLM backend", exc_info=True)
-        return False
+    return available
 
 
 def _start_query_api(ctx) -> "object | None":
@@ -4252,7 +4131,7 @@ def main(argv: list[str] | None = None) -> None:
     _write_worker_status(
         started_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         events_processed_today=0, sops_generated=0, last_pipeline_duration_ms=None,
-        consecutive_errors=0, vlm_available=False, vlm_mode="starting",
+        consecutive_errors=0, vlm_available=False,
     )
     if not _wait_for_db(args.db_path, shutdown_flag) or not _schema_ready(
         args.db_path, shutdown_flag,
