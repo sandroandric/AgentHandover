@@ -121,13 +121,13 @@ def _journey(events_db, worker, clock, temp_home, cassette):
     session = asyncio.run(
         _agent_runs_skill(temp_home.path, slug, deviate="Opened the digest from Drafts instead"),
     )
-    return kb, slug, before, kb.get_procedure(slug), session
+    return kb, slug, before, kb.get_procedure(slug), session, run
 
 
 def test_mcp_agent_gets_the_packet_and_reports_one_run(
     events_db, worker, clock, temp_home, cassette,
 ) -> None:
-    kb, slug, before, after, session = _journey(events_db, worker, clock, temp_home, cassette)
+    kb, slug, before, after, session, _run = _journey(events_db, worker, clock, temp_home, cassette)
 
     assert session.tools == TOOLS
     # Only the approved focus Skill is ready; the stale, observe-trust one
@@ -162,7 +162,7 @@ def test_mcp_deviation_lands_on_the_reported_step(
 ) -> None:
     """The deviation is recorded against the packet's first step, and the
     run lists every step of the procedure (no extra '(dynamic)' step)."""
-    kb, slug, before, _after, session = _journey(events_db, worker, clock, temp_home, cassette)
+    kb, slug, before, _after, session, _run = _journey(events_db, worker, clock, temp_home, cassette)
     [run] = ExecutionMonitor(kb).get_history(slug)
     packet_ids = [s.step_id for s in parse_packet(session.skill["packet"]).steps()]
     assert [s.step_id for s in run.steps] == packet_ids
@@ -177,6 +177,49 @@ def test_mcp_finished_run_updates_last_confirmed(
 ) -> None:
     """A run that reached the end (here with a deviation) confirms the
     Skill is still current."""
-    _kb, _slug, before, after, _session = _journey(events_db, worker, clock, temp_home, cassette)
+    _kb, _slug, before, after, _session, _run = _journey(events_db, worker, clock, temp_home, cassette)
     confirmed = (after.get("staleness") or {}).get("last_confirmed")
     assert confirmed and confirmed != (before.get("staleness") or {}).get("last_confirmed")
+
+
+def test_mcp_deviation_asks_the_user_in_the_next_digest(
+    events_db, worker, clock, temp_home, cassette,
+) -> None:
+    """WP-L5: the agent deviated at a step the Skill's decision (a
+    hypothesis, from one recording) applies at.  The decision is no longer
+    trusted: the ledger holds it unknown on the run's evidence, the next
+    digest asks the user how they decide there, and the next agent is told
+    to ask instead of assuming."""
+    kb, slug, before, after, session, run = _journey(
+        events_db, worker, clock, temp_home, cassette,
+    )
+    assert before["knowledge"]["decisions"]["status"] == "hypothesis"
+    execution_id = session.started["execution_id"]
+    decisions = after["knowledge"]["decisions"]
+    assert decisions["status"] == "unknown" and decisions["source"] == "agent"
+    assert decisions["evidence"] == [{"kind": "run", "id": execution_id}]
+
+    # The daily batch's digest, as the worker writes it and the app reads it.
+    from agenthandover_worker.daily_digest import DigestGenerator
+
+    day = clock.now().strftime("%Y-%m-%d")
+    generator = DigestGenerator(kb, db=run.worker.db)
+    generator.save_digest(generator.generate(day))
+    saved = json.loads((kb.root / "observations" / "digests" / f"{day}.json").read_text())
+    [section] = [s for s in saved["sections"] if s["title"] == "Questions for you"]
+    [question] = section["items"]
+    step_id = parse_packet(session.skill["packet"]).steps()[0].step_id
+    assert (question["slug"], question["execution_id"], question["step_id"]) == (
+        slug, execution_id, step_id,
+    )
+    assert "Opened the digest from Drafts instead" in question["title"]
+    assert question["category"] == "decision"
+
+    # The next agent gets the question in its packet, and the decision as
+    # not yet known.
+    packet = render_packet(after, target="mcp")
+    assert question["title"] in packet
+    assert (
+        "- Decisions (how the user chooses between options): an agent's run did "
+        "not go as the recordings suggested. Ask the user; do not assume."
+    ) in packet

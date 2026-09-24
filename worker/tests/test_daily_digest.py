@@ -397,3 +397,47 @@ class TestSections:
         gen = DigestGenerator(kb)
         digest = gen.generate("2025-03-01")
         assert digest.sections == []
+
+
+class TestRunQuestions:
+    """A question an agent run raised (``skill_improver.feed_ledger``)
+    stays in every digest until the user answers it."""
+
+    def _proc(self, kb: KnowledgeBase, answer: str = "") -> None:
+        kb.save_procedure({
+            "id": "export-report", "title": "Export the report",
+            "steps": [{"step_id": "step_1", "action": "Open the dashboard"}],
+            "agent_clarifications": [
+                # A post-recording question the user skipped: not a run question.
+                {"category": "goal", "question": "Why?", "answer": "", "status": "unanswered"},
+                {
+                    "category": "decision",
+                    "question": "An agent running this Skill did not follow step step_1.",
+                    "answer": answer, "status": "answered" if answer else "unanswered",
+                    "origin": {"kind": "agent_run", "id": "run-1", "step_id": "step_1"},
+                    "asked_at": "2025-03-01T10:00:00+00:00",
+                },
+            ],
+        })
+
+    def test_an_open_run_question_is_listed(self, kb: KnowledgeBase) -> None:
+        self._proc(kb)
+        digest = DigestGenerator(kb).generate("2025-03-02")
+        [section] = [s for s in digest.sections if s.title == "Questions for you"]
+        assert section.items == [{
+            "title": "An agent running this Skill did not follow step step_1.",
+            "detail": "Export the report: asked after an agent run",
+            "slug": "export-report", "clarification": 1, "category": "decision",
+            "execution_id": "run-1", "step_id": "step_1",
+            "asked_at": "2025-03-01T10:00:00+00:00",
+        }]
+        # And it survives the round trip the app reads.
+        gen = DigestGenerator(kb)
+        gen.save_digest(digest)
+        loaded = gen.get_digest("2025-03-02")
+        assert loaded.sections[-1].items == section.items
+
+    def test_an_answered_question_is_not_listed(self, kb: KnowledgeBase) -> None:
+        self._proc(kb, answer="Retry once, then stop")
+        digest = DigestGenerator(kb).generate("2025-03-02")
+        assert [s for s in digest.sections if s.title == "Questions for you"] == []

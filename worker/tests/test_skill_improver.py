@@ -8,6 +8,7 @@ import pytest
 
 from agenthandover_worker.execution_monitor import ExecutionMonitor
 from agenthandover_worker.knowledge_base import KnowledgeBase
+from agenthandover_worker.ledger import unknown_slots
 from agenthandover_worker.skill_improver import SkillImprover, execution_confidence
 
 SLUG = "test-skill"
@@ -163,3 +164,162 @@ class TestEdgeCases:
     ])
     def test_execution_confidence(self, stats, expected):
         assert execution_confidence(stats) == pytest.approx(expected)
+
+
+# ---------------------------------------------------------------------------
+# Runs feed the learning ledger (WP-L5)
+# ---------------------------------------------------------------------------
+
+
+def _with(kb: KnowledgeBase, **fields) -> None:
+    proc = kb.get_procedure(SLUG)
+    proc.update(fields)
+    kb.save_procedure(proc)
+
+
+def _slot(kb: KnowledgeBase, slot: str) -> dict:
+    return kb.get_procedure(SLUG)["knowledge"][slot]
+
+
+def _runs(entry: dict) -> list[str]:
+    return [e["id"] for e in entry["evidence"] if e["kind"] == "run"]
+
+
+def _run_questions(kb: KnowledgeBase) -> list[dict]:
+    return [
+        c for c in kb.get_procedure(SLUG).get("agent_clarifications") or []
+        if (c.get("origin") or {}).get("kind") == "agent_run"
+    ]
+
+
+# A decision the synthesiser wrote: it names no step, so it applies at every step.
+UNANCHORED = [{"condition": "The export is empty", "action": "Stop and tell the owner"}]
+# A decision divergence mining found before step 2.
+AT_STEP_2 = [{"step_index": 1, "condition": "the screen shows \"Export failed\"",
+              "action": "before step 2: retry", "source": "divergence",
+              "evidence": [{"kind": "instance", "id": "obs-1"}]}]
+
+
+class TestLedgerFromRuns:
+
+    def test_the_fixture_starts_with_hypotheses(self, kb):
+        _with(kb, branches=UNANCHORED)
+        assert _slot(kb, "steps")["status"] == "hypothesis"
+        assert _slot(kb, "decisions")["status"] == "hypothesis"
+
+    def test_a_deviation_at_a_hypothesis_decision_demotes_it_and_asks(
+        self, improver, monitor, kb,
+    ):
+        _with(kb, branches=UNANCHORED)
+        record = _deviated(monitor, "step_3", "Emailed the CSV")
+        result = improver.process_execution(record)
+
+        decisions = _slot(kb, "decisions")
+        assert decisions["status"] == "unknown"
+        assert decisions["source"] == "agent"
+        assert decisions["evidence"] == [{"kind": "run", "id": record.execution_id}]
+        assert "ledger_unknown:decisions" in result and "question_queued" in result
+        [question] = _run_questions(kb)
+        assert question["status"] == "unanswered" and question["category"] == "decision"
+        assert question["origin"] == {
+            "kind": "agent_run", "id": record.execution_id, "step_id": "step_3",
+        }
+        assert 'step [step_3] ("Upload the CSV to the shared drive")' in question["question"]
+        assert '"Emailed the CSV"' in question["question"]
+        # The packet tells the next agent to ask.
+        assert "decisions" in unknown_slots(kb.get_procedure(SLUG))
+
+        # Processing the same run again queues nothing new.
+        improver.process_execution(record)
+        assert len(_run_questions(kb)) == 1
+
+    def test_a_deviation_away_from_the_decision_step_keeps_it(self, improver, monitor, kb):
+        _with(kb, branches=AT_STEP_2)
+        improver.process_execution(_deviated(monitor, "step_3"))
+        assert _slot(kb, "decisions")["status"] == "hypothesis"
+        assert _run_questions(kb) == []
+
+        improver.process_execution(_deviated(monitor, "step_2", "Retried twice"))
+        assert _slot(kb, "decisions")["status"] == "unknown"
+        [question] = _run_questions(kb)
+        assert question["origin"]["step_id"] == "step_2"
+
+    def test_a_decision_the_user_gave_is_not_demoted(self, improver, monitor, kb):
+        _with(kb, branches=UNANCHORED, agent_clarifications=[{
+            "category": "decision", "question": "When do you stop?",
+            "answer": "When the export is empty", "status": "answered",
+        }])
+        assert _slot(kb, "decisions")["status"] == "known"
+        improver.process_execution(_deviated(monitor))
+        assert _slot(kb, "decisions")["status"] == "known"
+        assert _run_questions(kb) == []
+
+    def test_no_decision_no_question(self, improver, monitor, kb):
+        assert _slot(kb, "decisions")["status"] == "unknown"
+        improver.process_execution(_deviated(monitor))
+        assert _run_questions(kb) == []
+        assert _slot(kb, "decisions")["source"] is None
+
+    def test_the_users_answer_makes_the_demoted_decision_known(self, improver, monitor, kb):
+        _with(kb, branches=UNANCHORED)
+        improver.process_execution(_deviated(monitor))
+        proc = kb.get_procedure(SLUG)
+        [question] = [c for c in proc["agent_clarifications"] if c.get("origin")]
+        question.update(answer="Email it when the drive is full", status="answered")
+        kb.save_procedure(proc)
+        decisions = _slot(kb, "decisions")
+        assert decisions["status"] == "known" and decisions["source"] == "user"
+
+    def test_three_successful_runs_make_a_hypothesis_known(self, improver, monitor, kb):
+        _with(kb, branches=UNANCHORED)
+        ids = []
+        for n in range(1, 4):
+            record = _completed(monitor)
+            ids.append(record.execution_id)
+            result = improver.process_execution(record)
+            steps, decisions = _slot(kb, "steps"), _slot(kb, "decisions")
+            expected = "known" if n == 3 else "hypothesis"
+            assert (steps["status"], decisions["status"]) == (expected, expected), n
+            assert _runs(steps) == ids and _runs(decisions) == ids
+            assert steps["source"] == decisions["source"] == "agent"
+            assert f"ledger_{expected}:steps" in result
+        # The observed value is still what the slot points at.
+        assert _slot(kb, "decisions")["value_ref"] == "branches"
+        # Counted once per run.
+        improver.process_execution(record)
+        assert _runs(_slot(kb, "steps")) == ids
+
+    def test_a_run_that_skipped_reporting_steps_confirms_only_what_it_reported(
+        self, improver, monitor, kb,
+    ):
+        _with(kb, branches=AT_STEP_2)
+        eid = monitor.start_execution(SLUG)
+        monitor.record_step(eid, "step_2")
+        improver.process_execution(monitor.complete_execution(eid))
+        # Step 2 (where the decision is) was reported; the other steps were not.
+        assert _runs(_slot(kb, "decisions")) == [eid]
+        assert _runs(_slot(kb, "steps")) == []
+
+    def test_a_failed_run_confirms_nothing(self, improver, monitor, kb):
+        _with(kb, branches=UNANCHORED)
+        eid = monitor.start_execution(SLUG)
+        for sid in ("step_1", "step_2", "step_3"):
+            monitor.record_step(eid, sid)
+        improver.process_execution(monitor.fail_execution(eid, "upload refused"))
+        assert _runs(_slot(kb, "steps")) == [] and _runs(_slot(kb, "decisions")) == []
+
+    def test_an_accepted_guess_does_not_erase_run_confirmations(self, improver, monitor, kb):
+        _with(kb, agent_clarifications=[{
+            "category": "decision", "question": "When do you stop?",
+            "answer": "When the export is empty", "status": "answered",
+            "source": "accepted_guess",
+        }])
+        assert _slot(kb, "decisions")["status"] == "hypothesis"
+        record = _completed(monitor)
+        improver.process_execution(record)
+        decisions = _slot(kb, "decisions")
+        assert decisions["source"] == "agent"
+        assert decisions["evidence"] == [
+            {"kind": "answer", "id": "agent_clarifications.0"},
+            {"kind": "run", "id": record.execution_id},
+        ]

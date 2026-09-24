@@ -444,6 +444,22 @@ def observation_pointers(observations: list[dict]) -> list[dict]:
     return pointers
 
 
+def add_instances(proc: dict, observations: list[dict]) -> bool:
+    """Add *observations* the procedure does not yet cite to
+    ``proc["evidence"]["observations"]`` as :func:`observation_pointers`
+    (with their run signals, which ``run_signals.learn`` reads when the
+    procedure is saved), in place.  Returns whether any was added."""
+    evidence = proc.setdefault("evidence", {})
+    cited = evidence.setdefault("observations", [])
+    held = {str(o.get("obs_id")) for o in cited if isinstance(o, dict) and o.get("obs_id")}
+    new = observation_pointers([o for o in observations if o["obs_id"] not in held])
+    if not new:
+        return False
+    cited.extend(new)
+    evidence["total_observations"] = max(evidence.get("total_observations", 0), len(cited))
+    return True
+
+
 @dataclass
 class WorkflowWindow:
     """The observation window at *now*: its groups and what recurrence
@@ -522,8 +538,11 @@ def attach_observations(
     db: "WorkerDB", kb: "KnowledgeBase | None", slug: str, observations: list[dict],
 ) -> None:
     """Attribute *observations* (new instances of an existing Skill) to
-    *slug* and, with a knowledge base, record where they diverge from its
-    steps (:func:`branch_mining.mine_observations`)."""
+    *slug* and, with a knowledge base, add them to the procedure's
+    evidence (:func:`add_instances`: what the runs teach, its learned
+    trigger, done and verification, is recomputed from them) and record
+    where they diverge from its steps
+    (:func:`branch_mining.mine_observations`)."""
     if not observations:
         return
     db.set_observations_promoted([o["obs_id"] for o in observations], slug)
@@ -531,6 +550,9 @@ def attach_observations(
         obs["promoted_slug"] = slug
     if kb is None:
         return
+    proc = kb.get_procedure(slug)
+    if proc is not None and add_instances(proc, observations):
+        kb.save_procedure(proc)  # saving recomputes ``learned`` and the ledger
     from agenthandover_worker.branch_mining import mine_observations
 
     try:
