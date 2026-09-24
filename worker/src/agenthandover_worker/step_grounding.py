@@ -68,7 +68,11 @@ _NAMED_ELEMENT_RE = re.compile(
 _SELECT_RE = re.compile(r"^\s*(select|selects|selecting|highlight|highlights|highlighting)\b", re.I)
 _SCROLL_RE = re.compile(r"^\s*(scroll|scrolls|scrolling)\b", re.IGNORECASE)
 _SELECTION_EVIDENCE_RE = re.compile(r"\b(select|selects|selected|selecting|highlight\w*)\b", re.I)
-_SCROLL_EVIDENCE_RE = re.compile(r"\bscroll\w*\b", re.IGNORECASE)
+# A save or rename the step claims: a save sheet or a document that got a
+# real name must show it (seen live: "Save the document and rename it to
+# 'Untitled 4'" for a new, unsaved TextEdit window).
+_SAVE_RE = re.compile(r"^\s*(save|saves|saving|rename|renames|renaming)\b", re.IGNORECASE)
+_UNTITLED_RE = re.compile(r"^\s*untitled(\s+\d+)?(\s*[-—].*)?$", re.IGNORECASE)
 _TYPING_RE = re.compile(r"\b(type|types|typed|typing|enter|enters|write|writes)\b", re.I)
 # "Open Safari and navigate to ..." / "Scroll down, then click ..."
 _CLAUSE_RE = re.compile(r",?\s+(?:and then|then|and)\s+|;\s*", re.IGNORECASE)
@@ -188,9 +192,56 @@ def _targets(clause: str) -> list[str]:
     return [named.group(1)] if named else []
 
 
-def _unsupported(clause: str, frames: list[dict], window_kinds: set[str]) -> str | None:
-    """Why *clause* is not shown by *frames* (the step's cited frames), or
-    None when it is."""
+def _app(frame: dict) -> str:
+    annotation = frame.get("annotation") if isinstance(frame.get("annotation"), dict) else {}
+    return str(annotation.get("app") or frame.get("app") or "")
+
+
+def _location(frame: dict) -> str:
+    annotation = frame.get("annotation") if isinstance(frame.get("annotation"), dict) else {}
+    return str(annotation.get("location") or "")
+
+
+def _scrolled(timeline: list[dict], index: int) -> bool:
+    """Whether frame *index* shows the page scrolled since the previous
+    frame of the same app and place: lines left while others arrived, and
+    some stayed.  A page that loads only gains lines (seen live: the diff
+    model called a loading page "scrolled down", twice)."""
+    frame = timeline[index]
+    if frame.get("kind") == "ScrollReadSnapshot":
+        return True
+    before = next((
+        timeline[j] for j in range(index - 1, -1, -1) if _app(timeline[j]) == _app(frame)
+    ), None)
+    if before is None or _location(before) != _location(frame):
+        return False
+    old = {_norm(line) for line in frame_content(before)} - {""}
+    new = {_norm(line) for line in frame_content(frame)} - {""}
+    return bool(old - new) and bool(new - old) and bool(old & new)
+
+
+def _saved(timeline: list[dict], indexes: list[int]) -> bool:
+    """Whether the frames around *indexes* show a save: a save sheet, or
+    the document going from an untitled name to a real one."""
+    window = range(max(indexes[0] - 1, 0), min(indexes[-1] + 2, len(timeline)))
+    names = [_location(timeline[i]) for i in window]
+    if any("save as" in _norm("\n".join(frame_content(timeline[i]))) for i in window):
+        return True
+    return any(
+        _UNTITLED_RE.match(a) and b and not _UNTITLED_RE.match(b)
+        for a, b in zip(names, names[1:])
+    )
+
+
+def _unsupported(
+    clause: str, frames: list[dict], window_kinds: set[str],
+    timeline: list[dict] | None = None, indexes: list[int] | None = None,
+) -> str | None:
+    """Why *clause* is not shown by *frames* (the step's cited frames, at
+    *indexes* of *timeline*), or None when it is.  Scrolls and saves need
+    what the recording shows, not the diff model's own words."""
+    timeline = timeline or frames
+    indexes = indexes if indexes is not None else list(range(len(frames)))
     for target in _targets(clause):
         if not any(_contains(_frame_corpus(f), _norm(target)) for f in frames):
             return f"'{target.strip()}' is not in the frames this step cites"
@@ -202,11 +253,10 @@ def _unsupported(clause: str, frames: list[dict], window_kinds: set[str]) -> str
         if not shown:
             return "no frame this step cites shows a selection"
     if _SCROLL_RE.search(clause):
-        if not any(
-            f.get("kind") == "ScrollReadSnapshot" or _SCROLL_EVIDENCE_RE.search(_diff_text(f))
-            for f in frames
-        ):
+        if not any(_scrolled(timeline, i) for i in indexes):
             return "no frame this step cites shows a scroll"
+    if _SAVE_RE.search(clause) and indexes and not _saved(timeline, indexes):
+        return "no frame shows a save (a save sheet, or the document getting a name)"
     return None
 
 
@@ -373,7 +423,10 @@ def ground_steps(
         window_kinds = {e.get("kind") for f in window for e in f.get("clipboard_events") or []}
         action = str(step.get("step") or "")
         clauses = _clauses(action)
-        reasons = {c: r for c in clauses if (r := _unsupported(c, frames, window_kinds))}
+        reasons = {
+            c: r for c in clauses
+            if (r := _unsupported(c, frames, window_kinds, timeline, indexes))
+        }
         if not reasons:
             kept.append(step)
             continue

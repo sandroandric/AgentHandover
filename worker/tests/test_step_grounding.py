@@ -153,6 +153,40 @@ def test_a_line_only_a_verify_mentions_is_not_typed_by_any_step() -> None:
     assert [a["input"] for a in report["added"]] == [full]
 
 
+def test_a_loading_page_is_not_a_scroll_but_shifted_content_is() -> None:
+    """Seen live: the diff model called a loading page "scrolled down"; the
+    check trusted those words. Now only the content says: lines that left
+    while others arrived, on the same page."""
+    loaded = ["IANA-managed Reserved Domains", "Example Domains", "Test Domains"]
+    timeline = [
+        _frame("a", 0, "Safari", loaded[:1], location="iana.org"),
+        _frame("b", 2, "Safari", loaded, location="iana.org",
+               diff={"diff_type": "action", "step_description": "The user scrolled down"}),
+    ]
+    steps = [_step("Scroll down the page to the example domains", ["b"])]
+    assert ground_steps(steps, timeline)["dropped"], steps
+    timeline[1]["content_text"] = ["Example Domains", "Test Domains", "Second-level domains"]
+    timeline[0]["content_text"] = ["IANA-managed Reserved Domains", "Example Domains", "Test Domains"]
+    steps = [_step("Scroll down the page to the example domains", ["b"])]
+    assert not ground_steps(steps, timeline)["dropped"]
+
+
+def test_a_new_untitled_window_is_not_a_save() -> None:
+    """Seen live: "Save the document and rename it to 'Untitled 4'" for a
+    new TextEdit window that was never saved."""
+    timeline = [
+        _frame("a", 0, "TextEdit", [], location="Untitled 3"),
+        _frame("b", 2, "TextEdit", ["Reserved for documentation"], location="Untitled 4"),
+    ]
+    steps = [_step("Type the line", ["b"], input="Reserved for documentation"),
+             _step("Save the document and rename it to 'Untitled 4'", ["b"])]
+    report = ground_steps(steps, timeline)
+    assert [s["step"] for s in steps] == ["Type the line"], report
+    timeline[1]["annotation"]["location"] = "IANA notes"
+    steps = [_step("Save the document as 'IANA notes'", ["b"])]
+    assert not ground_steps(steps, timeline)["dropped"]
+
+
 def test_one_stray_citation_does_not_move_a_step() -> None:
     """Seen in the focus_dailynews recording: "Navigate to the GitHub
     repository page" cited frames 11, 13, 14, 15; frame 11 was the paste
