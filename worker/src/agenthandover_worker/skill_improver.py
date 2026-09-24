@@ -115,7 +115,7 @@ def _queue_question(proc: dict, record, deviation: dict, now: str) -> None:
     step = next((s for s in record.steps if s.step_id == step_id), None)
     expected = step.expected_action if step is not None else ""
     did = deviation.get("actual_action") or deviation.get("detail") or "something else"
-    at = f'step {step_id} ("{expected}")' if expected else f"step {step_id}"
+    at = f'step [{step_id}] ("{expected}")' if expected else f"step [{step_id}]"
     clarifications.append({
         "category": "decision",
         "question": (
@@ -141,7 +141,7 @@ def feed_ledger(proc: dict, record, now: str) -> list[str]:
 
     if record.deviations and decisions["status"] == "hypothesis":
         hit = [
-            d for d in record.deviations or []
+            d for d in record.deviations
             if at_steps is None or d.get("step_id") in at_steps
         ]
         if hit:

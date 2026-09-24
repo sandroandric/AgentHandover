@@ -224,7 +224,7 @@ class TestLedgerFromRuns:
         assert question["origin"] == {
             "kind": "agent_run", "id": record.execution_id, "step_id": "step_3",
         }
-        assert 'step step_3 ("Upload the CSV to the shared drive")' in question["question"]
+        assert 'step [step_3] ("Upload the CSV to the shared drive")' in question["question"]
         assert '"Emailed the CSV"' in question["question"]
         # The packet tells the next agent to ask.
         assert "decisions" in unknown_slots(kb.get_procedure(SLUG))
