@@ -507,3 +507,191 @@ class TestLocalDay:
         ])
         assert [e["id"] for e in db.get_annotated_events_for_date("2026-09-04")] == ["evening"]
         assert [e["id"] for e in db.get_annotated_events_for_date("2026-09-05")] == ["midnight"]
+
+
+# ---------------------------------------------------------------------------
+# Skills and their observations: recognise, attach, link, diverge (WP-M5)
+# ---------------------------------------------------------------------------
+
+PAYOUT_SKILL = {
+    "id": "payout",
+    "title": "Reconcile payout",
+    "steps": [
+        {"action": "Open the payouts list", "app": "Google Chrome", "location": PAYOUT[0][0]},
+        {"action": "Open today's payout", "app": "Google Chrome", "location": PAYOUT[1][0]},
+        {"action": "Enter the amount in the sheet", "app": "Google Chrome", "location": PAYOUT[2][0]},
+        {"action": "Post in #finance", "app": "Google Chrome", "location": PAYOUT[4][0]},
+    ],
+}
+# The routine, but on a failed payout the user emails the bank first.
+DETOUR = [
+    PAYOUT[0],
+    (PAYOUT[1][0], {"chosen": "Payout failed"}),
+    ("https://mail.google.com/mail/u/0/#inbox", {"typed": "Hi, the payout failed"}),
+    *PAYOUT[2:],
+]
+
+
+def _kb(tmp_path: Path, *procs: dict):
+    from agenthandover_worker.knowledge_base import KnowledgeBase
+
+    kb = KnowledgeBase(root=tmp_path / "kb")
+    kb.ensure_structure()
+    for proc in procs:
+        kb.save_procedure(json.loads(json.dumps(proc)))
+    return kb
+
+
+class TestSkillsAndObservations:
+    def _promote(self, db: WorkerDB, first: date = date(2026, 9, 1)) -> list[dict]:
+        rows = [_obs(d, key="a") for d in _workdays(first, 3)]
+        for row in rows:
+            assert db.save_workflow_observation(row)
+        db.set_observations_promoted(
+            [r["obs_id"] for r in rows], "payout", promoted_at=datetime(2026, 9, 4, tzinfo=timezone.utc),
+        )
+        return rows
+
+    def test_a_session_is_recognised_in_progress_and_attached_at_its_end(
+        self, db: WorkerDB, write_conn,
+    ) -> None:
+        self._promote(db)
+        start = datetime(2026, 9, 8, 9, tzinfo=timezone.utc)
+        events = _session_events("live", start)  # five frames, 90 s apart
+        _insert(write_conn, events)
+        # Two frames, two steps: too few to tell.
+        assert wm.recognize(db, None, now=start + timedelta(minutes=2)) is None
+        assert db.get_state(wm.LIVE_SESSION_STATE_KEY) is None
+        # Three steps (payouts, a payout, the sheet): the Skill's opening.
+        assert wm.recognize(db, None, now=start + timedelta(minutes=4)) == "payout"
+        assert json.loads(db.get_state(wm.LIVE_SESSION_STATE_KEY))["first_event_id"] == "live-0"
+        assert wm.recognize(db, None, now=start + timedelta(minutes=8)) == "payout"
+        assert db.get_workflow_observations(since=start) == []  # still in progress
+        # Idle for ten minutes: the session ended; it is recorded, attached.
+        last = start + timedelta(seconds=90 * (len(events) - 1))
+        assert wm.recognize(db, None, now=last + timedelta(minutes=10, seconds=30)) is None
+        (obs,) = db.get_workflow_observations(since=start)
+        assert json.loads(obs["event_ids_json"]) == [e["id"] for e in events]
+        assert obs["promoted_slug"] == "payout"
+        assert obs["promoted_at"] is None  # an instance, not a promotion
+        assert db.get_state(wm.LIVE_SESSION_STATE_KEY) == ""
+
+    def test_a_new_session_ends_the_tagged_one(self, db: WorkerDB, write_conn) -> None:
+        self._promote(db)
+        start = datetime(2026, 9, 8, 9, tzinfo=timezone.utc)
+        _insert(write_conn, _session_events("live", start))
+        assert wm.recognize(db, None, now=start + timedelta(minutes=4)) == "payout"
+        # The laptop slept; the next frames are a new session.
+        slept, woke = start + timedelta(minutes=6, seconds=30), start + timedelta(minutes=7, seconds=30)
+        write_conn.execute(
+            "INSERT INTO events (id, timestamp, kind_json, window_json, display_topology_json, "
+            "primary_display_id, artifact_ids_json, metadata_json, processed) "
+            "VALUES ('sleep', ?, ?, '{}', '[]', '', '[]', '{}', 1)",
+            (woke.isoformat(), json.dumps(
+                {"type": "SystemSleep", "slept_at": slept.isoformat(), "woke_at": woke.isoformat()},
+            )),
+        )
+        write_conn.commit()
+        later = start + timedelta(minutes=8)
+        _insert(write_conn, [_event("other", later, _ann("https://a.io/x"))])
+        wm.recognize(db, None, now=later + timedelta(seconds=30))
+        assert [o["promoted_slug"] for o in db.get_workflow_observations(since=start)] == ["payout"]
+
+    def test_an_unrelated_session_is_not_tagged(self, db: WorkerDB, write_conn) -> None:
+        self._promote(db)
+        start = datetime(2026, 9, 8, 9, tzinfo=timezone.utc)
+        other = [(f"https://{h}.io/page", {}) for h in ("crm", "billing", "wiki", "calendar")]
+        _insert(write_conn, _session_events("o", start, steps=other))
+        assert wm.recognize(db, None, now=start + timedelta(minutes=6)) is None
+        assert db.get_state(wm.LIVE_SESSION_STATE_KEY) is None
+
+    def test_a_recorded_skill_holds_its_workflow_group(self, db: WorkerDB, tmp_path: Path) -> None:
+        """A recorded Skill has no observation of its own: its workflow's
+        group is linked to it by its steps' places, so it is never
+        proposed again as a new draft and its recurrence is written."""
+        for day in _workdays(date(2026, 9, 1), 3):
+            assert db.save_workflow_observation(_obs(day, key="a"))
+        now = datetime(2026, 9, 20, tzinfo=timezone.utc)
+        assert [c.source_id for c in wm.review_candidates(db, now=now)] == ["a"]  # no kb: unlinked
+        kb = _kb(tmp_path, PAYOUT_SKILL)
+        assert wm.review_candidates(db, now=now, kb=kb) == []
+        rows = db.get_workflow_observations()
+        assert {o["promoted_slug"] for o in rows} == {"payout"}
+        assert all(o["promoted_at"] is None for o in rows)  # the weekly cap is untouched
+        assert wm.refresh_skills(db, kb, now=now) == 1
+        proc = kb.get_procedure("payout")
+        assert proc["recurrence"]["pattern"] == "daily"
+        assert proc["evidence"]["total_observations"] == 3
+
+    def test_a_skill_without_places_is_not_linked(self, db: WorkerDB, tmp_path: Path) -> None:
+        for day in _workdays(date(2026, 9, 1), 3):
+            db.save_workflow_observation(_obs(day, key="a"))
+        vague = {"id": "vague", "title": "Vague", "steps": [{"action": "Do the payout"}, {"action": "Tell finance"}]}
+        now = datetime(2026, 9, 20, tzinfo=timezone.utc)
+        assert [c.source_id for c in wm.review_candidates(db, now=now, kb=_kb(tmp_path, vague))] == ["a"]
+
+    def test_a_skill_is_linked_to_its_own_workflow_only(self, db: WorkerDB, tmp_path: Path) -> None:
+        other = [("https://crm.io/leads", {}), ("https://crm.io/leads/42", {"chosen": "Acme"}),
+                 ("https://mail.google.com/mail/u/0/", {"typed": "Hello"})]
+        for day in _workdays(date(2026, 9, 1), 3):
+            db.save_workflow_observation(_obs(day, key="crm", steps=_sigs(other)))
+        now = datetime(2026, 9, 20, tzinfo=timezone.utc)
+        assert [c.source_id for c in wm.review_candidates(db, now=now, kb=_kb(tmp_path, PAYOUT_SKILL))] == ["crm"]
+
+    def test_a_focus_recording_is_an_observation_of_its_skill(self, db: WorkerDB) -> None:
+        events = _session_events("focus", datetime(2026, 9, 1, 9, tzinfo=timezone.utc))
+        obs_id = wm.record_focus_observation(db, events, "payout", "Reconcile payout")
+        (obs,) = db.get_workflow_observations()
+        assert obs["obs_id"] == obs_id
+        assert obs["source"] == "focus" and obs["promoted_slug"] == "payout"
+        assert obs["task_label"] == "Reconcile payout"
+        # The run's signals (WP-L3) are stored as on a passive observation.
+        assert set(json.loads(obs["evidence_json"])["signals"]) >= {"lead_in", "done"}
+        # Later passive sessions of the workflow belong to the Skill.
+        for day in _workdays(date(2026, 9, 8), 3):
+            db.save_workflow_observation(_obs(day, key="a"))
+        assert wm.review_candidates(db, now=datetime(2026, 9, 20, tzinfo=timezone.utc)) == []
+        assert {o["promoted_slug"] for o in db.get_workflow_observations()} == {"payout"}
+
+    def test_a_focus_recording_needs_two_annotated_frames(self, db: WorkerDB) -> None:
+        events = _session_events("focus", datetime(2026, 9, 1, 9, tzinfo=timezone.utc))[:1]
+        assert wm.record_focus_observation(db, events, "payout") is None
+        assert db.get_workflow_observations() == []
+
+    def test_two_alike_detours_become_a_branch_of_the_skill(
+        self, db: WorkerDB, write_conn, tmp_path: Path,
+    ) -> None:
+        kb = _kb(tmp_path, PAYOUT_SKILL)
+        self._promote(db)
+        for n, day in enumerate((8, 9)):
+            start = datetime(2026, 9, day, 9, tzinfo=timezone.utc)
+            _insert(write_conn, _session_events(f"detour{n}", start, steps=DETOUR))
+        now = datetime(2026, 9, 10, tzinfo=timezone.utc)
+        assert wm.record_observations(db, db.get_annotated_events_in_window(hours=48, now=now), now=now) == 2
+        assert wm.review_candidates(db, now=now, kb=kb) == []
+
+        proc = kb.get_procedure("payout")
+        detours = [o["obs_id"] for o in db.get_workflow_observations(since=datetime(2026, 9, 8, tzinfo=timezone.utc))]
+        assert [h["step_index"] for h in proc["branch_hypotheses"]] == [2, 2]
+        [branch] = proc["branches"]
+        assert branch["condition"] == (
+            'the screen shows "Payout failed" (https://dashboard.stripe.com/payouts/po_1QxAbCdEfGh23Jk)'
+        )
+        assert branch["action"] == "before step 3: working"
+        assert branch["alternative_steps"][0]["location"] == "https://mail.google.com/mail/u/0/#inbox"
+        assert {e["id"] for e in branch["evidence"] if e["kind"] == "instance"} == set(detours)
+        # Mined once: a later pass adds nothing.
+        wm.review_candidates(db, now=now, kb=kb)
+        assert len(kb.get_procedure("payout")["branch_hypotheses"]) == 2
+
+    def test_an_instance_that_follows_the_steps_adds_no_hypothesis(
+        self, db: WorkerDB, write_conn, tmp_path: Path,
+    ) -> None:
+        kb = _kb(tmp_path, PAYOUT_SKILL)
+        self._promote(db)
+        start = datetime(2026, 9, 8, 9, tzinfo=timezone.utc)
+        _insert(write_conn, _session_events("same", start))
+        now = start + timedelta(hours=1)
+        wm.record_observations(db, db.get_annotated_events_in_window(hours=4, now=now), now=now)
+        wm.review_candidates(db, now=now, kb=kb)
+        assert kb.get_procedure("payout").get("branch_hypotheses", []) == []

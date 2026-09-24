@@ -12,6 +12,9 @@ daily.
 What these tests do not cover is the rest of J-passive (SOP generation from
 the promoted workflows through the cassette and the daily batch driven by
 ``run_tick``); see ``test_j_passive.py``.
+
+WP-M5 adds live recognition on the same fixture: a Skill's session is
+tagged while it runs and recorded as the Skill's observation at its end.
 """
 
 from __future__ import annotations
@@ -296,3 +299,46 @@ def test_the_weekly_routine_is_triggered_by_its_monday_clock(tmp_path: Path, loc
     assert (done["status"], done["value_ref"]) == ("hypothesis", "learned.done")
     assert daily["learned"]["done"]["label"] == "Send now"
     assert daily["learned"]["done"]["support"] == "15 of 15 runs"
+
+
+def test_a_skill_is_recognised_while_it_runs(tmp_path: Path) -> None:
+    """WP-M5 recognise-and-attach.  The payout routine became a Skill in
+    its first week; in the second week, live recognition (every two
+    minutes, no model) tags the Tuesday session with the Skill before it
+    ends and records it as the Skill's observation once the user has been
+    idle for ten minutes, before any passive discovery pass sees it.  The
+    later passes keep that one observation."""
+    fixture, labels, start, end = _load(tmp_path)
+    routine = next(r for r in labels["routines"] if r["slug"] == STRIPE)
+    tuesday = next(i for i in routine["instances"] if i["instance_id"].endswith("20260908"))
+    first_week = datetime.fromisoformat("2026-09-05T00:00:00+00:00")
+    with WorkerDB(fixture.db_path) as db:
+        _walk(db, start, first_week)
+        unit_of = _unit_of(labels)
+        [cand] = [c for c in wm.review_candidates(db, now=first_week)
+                  if set(_routine_of(c, unit_of)) == {STRIPE}]
+        db.set_observations_promoted(cand.obs_ids, STRIPE, promoted_at=first_week)
+
+        stamps = sorted(
+            parse_timestamp(r["timestamp"]) for r in db.get_events_by_ids(tuesday["event_ids"])
+        )
+        now, tagged_at = stamps[0], None
+        while now <= stamps[-1] + timedelta(minutes=12):
+            if wm.recognize(db, None, now=now) == STRIPE and tagged_at is None:
+                tagged_at = now
+            now += timedelta(seconds=wm.RECOGNIZE_INTERVAL_SECONDS)
+        assert tagged_at is not None and tagged_at < stamps[-1]  # while in progress
+
+        [obs] = [o for o in db.get_workflow_observations(since=stamps[0] - timedelta(minutes=1))
+                 if o["started_utc"] <= stamps[-1].strftime("%Y-%m-%dT%H:%M:%S.999Z")]
+        assert obs["promoted_slug"] == STRIPE and obs["promoted_at"] is None
+        assert set(json.loads(obs["event_ids_json"])) <= set(tuesday["event_ids"])
+        # It carries its run signals (WP-L3) like any recorded session.
+        assert json.loads(obs["evidence_json"])["signals"]["done"]["label"] == "Send now"
+
+        # Passive discovery's later passes update that row, never add one.
+        _walk(db, first_week, end)
+        holding = [o for o in db.get_workflow_observations()
+                   if set(json.loads(o["event_ids_json"])) & set(tuesday["event_ids"])]
+        assert [o["obs_id"] for o in holding] == [obs["obs_id"]]
+        assert holding[0]["promoted_slug"] == STRIPE

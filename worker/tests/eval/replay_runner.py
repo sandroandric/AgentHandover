@@ -524,44 +524,72 @@ class ReplayRunner:
     # ------------------------------------------------------------------
 
     def run_recurrence(self, kb: Any) -> list[dict]:
-        """Detect recurrence patterns the way the daily batch does.
+        """Detect each Skill's recurrence the way the worker writes it.
 
-        Each day's events go through ``DailyBatchProcessor.process_day``
-        with the production ``ProcedureMatcher`` over the scenario's
-        procedures, so which procedure a task matches is the matcher's
-        answer; then ``PatternDetector.detect_recurrence()`` runs with its
-        production ``min_observations``.
+        The scenario's events are stored in a scratch daemon database next
+        to *kb* (each observation's run signals are read from the events
+        around it) and go through the observation log
+        (``workflow_mining.record_observations``: one observation per work
+        session); then the daily
+        batch's ``workflow_mining.refresh_skills`` links each workflow to
+        the Skill it performs (a recorded Skill by its steps' places) and
+        writes the recurrence onto the procedure.  "Now" is the day after
+        the last event.
+
+        Fixtures written before the compact annotation carry the app and
+        location under ``visual_context``; they are lifted to the
+        top-level ``app`` / ``location`` the annotator writes today.
 
         Args:
             kb: A ``KnowledgeBase`` instance (from ``setup_kb()``).
 
         Returns:
-            List of pattern dicts (serialized ``RecurrencePattern`` objects).
+            One pattern dict per procedure with a recurrence.
         """
-        from agenthandover_worker.daily_processor import DailyBatchProcessor
-        from agenthandover_worker.pattern_detector import PatternDetector
-        from agenthandover_worker.procedure_matcher import ProcedureMatcher
+        import sqlite3
 
-        processor = DailyBatchProcessor(knowledge_base=kb, matcher=ProcedureMatcher(kb=kb))
-        by_date: dict[str, list[dict]] = {}
+        from agenthandover_worker import workflow_mining
+        from agenthandover_worker.db import WorkerDB
+        from daemon_db import create_daemon_db
+
+        events = []
         for event in self._prepare_events_for_daily_processor():
-            by_date.setdefault(str(event.get("timestamp", ""))[:10], []).append(event)
-        for date in sorted(d for d in by_date if d):
-            processor.process_day(date, by_date[date])
+            ann = json.loads(event["scene_annotation_json"])
+            visual = ann.get("visual_context") or {}
+            ann.setdefault("app", visual.get("active_app", ""))
+            ann.setdefault("location", visual.get("location", ""))
+            events.append({**event, "scene_annotation_json": json.dumps(ann)})
+        if not events:
+            return []
+        last = max(datetime.fromisoformat(e["timestamp"].replace("Z", "+00:00")) for e in events)
+        now = last + timedelta(days=1)
 
-        patterns = PatternDetector(kb).detect_recurrence()
+        db_path = create_daemon_db(Path(kb.root) / "events.db")
+        conn = sqlite3.connect(str(db_path))
+        try:
+            conn.executemany(
+                "INSERT INTO events (id, timestamp, kind_json, window_json, "
+                "display_topology_json, primary_display_id, metadata_json, "
+                "scene_annotation_json, frame_diff_json, annotation_status) "
+                "VALUES (?, ?, ?, ?, '[]', 'main', ?, ?, ?, 'completed')",
+                [
+                    (e["id"], e["timestamp"], e.get("kind_json"), e.get("window_json"),
+                     e.get("metadata_json") or "{}", e["scene_annotation_json"],
+                     e.get("frame_diff_json"))
+                    for e in events
+                ],
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        with WorkerDB(db_path) as db:
+            workflow_mining.record_observations(db, events, now=now)
+            workflow_mining.refresh_skills(db, kb, now=now)
 
         return [
-            {
-                "procedure_slug": p.procedure_slug,
-                "pattern": p.pattern,
-                "confidence": round(p.confidence, 4),
-                "day": p.day,
-                "time": p.time,
-                "avg_duration_minutes": p.avg_duration_minutes,
-                "observations": p.observations,
-            }
-            for p in patterns
+            {"procedure_slug": proc["id"], **proc["recurrence"]}
+            for proc in kb.list_procedures()
+            if isinstance(proc.get("recurrence"), dict) and proc["recurrence"].get("pattern")
         ]
 
     # ------------------------------------------------------------------
