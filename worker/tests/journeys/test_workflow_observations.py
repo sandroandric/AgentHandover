@@ -28,6 +28,7 @@ from agenthandover_worker import workflow_mining as wm
 from agenthandover_worker.daily_digest import DigestGenerator
 from agenthandover_worker.db import WorkerDB
 from agenthandover_worker.knowledge_base import KnowledgeBase
+from agenthandover_worker.procedure_schema import sop_to_procedure
 from journeys.fixture_loader import load_fixture, parse_timestamp, read_labels, read_manifest
 
 NAME = "passive_3weeks"
@@ -220,3 +221,78 @@ def test_the_digest_says_how_long_a_workflow_takes(mined, tmp_path: Path) -> Non
     (payout,) = [h for h in highlights if "(daily)" in h.detail]
     assert payout.title.startswith("Recurring workflow:")
     assert payout.detail.endswith("a month.") and "about " in payout.detail
+
+
+def _insert_frame(db_path: Path, event_id: str, when: datetime, app: str, title: str) -> None:
+    """A captured frame the annotator has not labelled (it joins no work
+    session): what was on screen before a run."""
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        "INSERT INTO events (id, timestamp, kind_json, window_json, display_topology_json, "
+        "primary_display_id, metadata_json) VALUES (?, ?, ?, ?, '[]', 'main', '{}')",
+        (event_id, when.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z", '{"type":"DwellSnapshot"}',
+         json.dumps({"window_id": "1", "app_id": f"pid:1:{app}", "title": title,
+                     "bounds_global_px": [0, 0, 100, 100], "z_order": 0, "is_fullscreen": False})),
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_the_weekly_routine_is_triggered_by_its_monday_clock(tmp_path: Path, local_tz) -> None:
+    """WP-L3: the Monday expense report starts after a different app each
+    week (Slack, Mail, a calendar reminder), so no lead-in recurs; its runs
+    share the local weekday and time, so the ledger's ``trigger`` slot is a
+    time-based hypothesis resting on those runs, and the calendar event
+    seen before one of them is the trigger's value.  The Stripe payout is
+    done when "Send now" is clicked in Slack, in every run."""
+    local_tz("UTC")
+    fixture, labels, start, end = _load(tmp_path)
+    expenses = next(r for r in labels["routines"] if r["slug"] == EXPENSES)
+    lead_ins = [
+        ("Slack", "finance (Channel) - Acme - Slack"),
+        ("Mail", "Receipts for last week - Inbox"),
+        ("Calendar", "Submit expenses - Calendar"),
+    ]
+    assert len(expenses["instances"]) == len(lead_ins)
+    for n, (inst, (app, title)) in enumerate(zip(expenses["instances"], lead_ins)):
+        began = parse_timestamp(inst["start"])
+        _insert_frame(fixture.db_path, f"lead-{n}", began - timedelta(minutes=2), app, title)
+
+    with WorkerDB(fixture.db_path) as db:
+        _walk(db, start, end)
+        candidates = wm.review_candidates(db, now=end)
+    unit_of = _unit_of(labels)
+    by_routine = {next(iter(_routine_of(c, unit_of))): c for c in candidates}
+    kb = KnowledgeBase(root=tmp_path / "knowledge")
+    kb.ensure_structure()
+    procs = {}
+    for slug, cand in by_routine.items():
+        # The draft's template carries its observations (as passive
+        # discovery's does); saving it computes the ledger.
+        template = {"slug": slug, "title": cand.task_label,
+                    "steps": [{"step": "step_1", "action": cand.task_label}]}
+        template.update(cand.template_evidence())
+        kb.save_procedure(sop_to_procedure(template))
+        procs[slug] = kb.get_procedure(slug)
+
+    weekly = procs[EXPENSES]
+    trigger = weekly["knowledge"]["trigger"]
+    assert (trigger["status"], trigger["source"]) == ("hypothesis", "observation")
+    learned = weekly["learned"]["trigger"]
+    assert (learned["kind"], learned["weekday"], learned["time"]) == ("time", 0, "10:30")
+    assert learned["weekday"] == expenses["local_weekday"]
+    assert learned["description"] == "Most Mondays around 10:30"
+    # Each Monday it rests on is one of the routine's observations.
+    assert {e["kind"] for e in trigger["evidence"]} == {"instance"}
+    assert len(trigger["evidence"]) == 3
+    assert {e["id"] for e in trigger["evidence"]} <= set(by_routine[EXPENSES].obs_ids)
+    assert learned["calendar_event"] == "Submit expenses"
+    assert trigger["value_ref"] == "learned.trigger.calendar_event"
+    assert weekly["learned"]["done"]["label"] == "Submit"
+
+    daily = procs[STRIPE]
+    assert daily["learned"]["trigger"]["description"] == "Most weekdays around 09:15"
+    done = daily["knowledge"]["done_criteria"]
+    assert (done["status"], done["value_ref"]) == ("hypothesis", "learned.done")
+    assert daily["learned"]["done"]["label"] == "Send now"
+    assert daily["learned"]["done"]["support"] == "15 of 15 runs"
