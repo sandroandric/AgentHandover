@@ -48,6 +48,7 @@ from agenthandover_worker.annotation_cache import AnnotationCache
 from agenthandover_worker.scene_annotator import (
     SceneAnnotator,
     page_for_event,
+    settle_typed_text,
     skip_record,
 )
 from agenthandover_worker.sop_generator import SOPGenerator, _generate_slug
@@ -324,6 +325,7 @@ def _process_annotations(
             if result.visual_text_proxy:
                 result.annotation["_visual_text_proxy"] = result.visual_text_proxy
 
+            settle_typed_text(db, event, result.annotation)
             db.save_annotation(
                 event_id,
                 json.dumps(result.annotation),

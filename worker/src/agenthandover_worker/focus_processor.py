@@ -38,6 +38,7 @@ from agenthandover_worker.scene_annotator import (
     SceneAnnotator,
     as_compact,
     page_for_event,
+    settle_typed_text,
     skip_record,
 )
 from agenthandover_worker.frame_differ import FrameDiffer, content_lines
@@ -741,6 +742,7 @@ class FocusProcessor:
             )
 
             if result.status == "completed" and result.annotation:
+                settle_typed_text(db, event, result.annotation)
                 db.save_annotation(  # type: ignore[union-attr]
                     event_id,
                     json.dumps(result.annotation),

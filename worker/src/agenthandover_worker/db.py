@@ -19,6 +19,7 @@ from pathlib import Path
 from collections.abc import Callable
 from typing import Self
 
+from agenthandover_worker.event_helpers import parse_json_field
 from agenthandover_worker.redaction import redact
 
 logger = logging.getLogger(__name__)
@@ -436,6 +437,41 @@ class WorkerDB:
             (before_timestamp, before_timestamp, str(max_age_seconds), limit),
         )
         return self._rows_to_dicts(cur.fetchall())
+
+    def key_evidence(self, event: dict) -> tuple[bool, dict | None] | None:
+        """Whether a key was pressed since the previous annotated frame of
+        *event*'s session, and that frame's row.
+
+        The daemon marks each kept frame with ``keys_since_prev_frame``
+        (a key went down since the previous kept frame).  The frames
+        between the previous annotated frame and *event* (skipped ones
+        included) cover that stretch; the first annotated frame of a
+        session counts every frame of the session up to it.  None when
+        *event* carries no flag (rows from before the flag existed).
+        """
+        metadata = parse_json_field(event, "metadata_json")
+        if not isinstance(metadata.get("keys_since_prev_frame"), bool):
+            return None
+        timestamp = str(event.get("timestamp") or "")
+        session = metadata.get("focus_session_id")
+        session_expr = "json_extract(metadata_json, '$.focus_session_id') IS ?"
+        row = self._conn.execute(
+            "SELECT * FROM events "
+            "WHERE annotation_status = 'completed' AND scene_annotation_json IS NOT NULL "
+            f"  AND timestamp < ? AND {session_expr} AND id != ? "
+            "ORDER BY timestamp DESC LIMIT 1",
+            (timestamp, session, event.get("id")),
+        ).fetchone()
+        previous = dict(row) if row is not None else None
+        flag = "json_extract(metadata_json, '$.keys_since_prev_frame')"
+        if previous is not None:
+            where, params = "timestamp > ? AND timestamp <= ?", [previous["timestamp"], timestamp]
+        else:
+            where, params = f"timestamp <= ? AND {session_expr}", [timestamp, session]
+        pressed = self._conn.execute(
+            f"SELECT 1 FROM events WHERE {where} AND {flag} = 1 LIMIT 1", params,
+        ).fetchone()
+        return pressed is not None, previous
 
     def save_annotation(
         self,

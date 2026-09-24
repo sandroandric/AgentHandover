@@ -739,6 +739,48 @@ def _validate_annotation(raw: str) -> dict | None:
     return data
 
 
+def settle_typed_text(db: object, event: dict, annotation: dict) -> None:
+    """Typed text needs keyboard evidence: without a key press since the
+    previous annotated frame (:meth:`WorkerDB.key_evidence`), *event*'s
+    ``key_text.typed_text`` cannot be new typing.
+
+    The model reads typed text off the screen, and short toolbar OCR
+    ("# 10" from TextEdit's font-size control, in an empty document) reads
+    like typing.  Without a key press the frame keeps the previous frame's
+    typed text when it shows the same window, else none; the model's
+    answer stays under ``_typed_text_without_keys``.  Applied once, before
+    the annotation is stored, so the frame diff, step grounding, the SOP
+    prompt and synthesis read the same thing.  A frame without the
+    daemon's flag (older rows) is left as the model gave it.
+    """
+    kt = annotation.get("key_text")
+    typed = str(kt.get("typed_text") or "") if isinstance(kt, dict) else ""
+    if not typed.strip():
+        return
+    evidence = db.key_evidence(event)  # type: ignore[union-attr]
+    if evidence is None or evidence[0]:
+        return
+    previous = evidence[1]
+    kept = ""
+    if previous is not None:
+        prev_window = parse_json_field(previous, "window_json")
+        window = parse_json_field(event, "window_json")
+        if all(prev_window.get(k) == window.get(k) for k in ("app_id", "title")):
+            try:
+                prev_ann = as_compact(json.loads(previous.get("scene_annotation_json") or ""))
+            except (json.JSONDecodeError, TypeError):
+                prev_ann = {}
+            kept = str((prev_ann.get("key_text") or {}).get("typed_text") or "")
+    if kept == typed:
+        return
+    kt["typed_text"] = kept
+    annotation["_typed_text_without_keys"] = typed
+    logger.info(
+        "Annotation %s: typed text without a key press since the previous frame; "
+        "kept %r", str(event.get("id", "?"))[:8], kept,
+    )
+
+
 def as_compact(annotation: dict | None) -> dict:
     """*annotation* in the compact schema.
 
