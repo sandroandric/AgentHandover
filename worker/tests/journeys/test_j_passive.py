@@ -10,14 +10,16 @@ and minute from it, as it reads the user's on a Mac.
 
 The full journey (:func:`test_three_weeks_discover_exactly_the_two_planted_routines`)
 also runs the worker's once-per-day pass through the tick, as ``main()``
-does, and the user approves each draft from the review queue on the tick it
-appears: ``[sop] auto_approve`` is off by default, so a passive Skill
-reaches the knowledge base only by approval, and live recognition records
-the later runs of an approved Skill only.  The cassette lacks the model
-calls of both (the daily pass's session links and embeddings, the
-approval's embeddings and style analysis), so it waits on a recording.
-What the drafts show before either is pinned now, on the same replay
-without the daily pass (:func:`passive_drafts`).
+does, and the user approves the drafts from the review queue at the end of
+the three weeks, as a real user who looks at the queue now and then:
+``[sop] auto_approve`` is off by default, so a passive Skill reaches the
+knowledge base only by approval, and a draft learns from its later runs
+meanwhile as evidence only (WP-F12, ``workflow_mining.learn_on_draft``).
+The cassette lacks the model calls of the daily pass and the approvals, so
+it waits on a recording.  What the drafts show before either is pinned on
+the same replay without the daily pass (:func:`passive_drafts`); the
+learning itself is pinned model-free in
+``test_workflow_observations.test_drafts_learn_from_later_runs_until_approved_at_the_end``.
 """
 
 from __future__ import annotations
@@ -44,16 +46,24 @@ WEEKLY = next(r for r in MANIFEST["planted_routines"] if r["cadence"] == "weekly
 # The review queue a three-week run may leave the user (PLAN.md, J-passive).
 MAX_REVIEW_QUEUE = 3
 
+# WP-F12: the interrupted Monday is one observation now (the 40-minute
+# call no longer splits it), so the expense report's passive SOP request
+# changed: discovery waits on its recording.
+DISCOVERY_MISSING_KEYS: tuple[str, ...] = (
+    "69d22760a76f69b91aedb45db80086af6ec93f97ea3c39b0787395a2ff58125c",
+)
+
 # The calls the full journey makes that the cassette lacks, found by
-# running it with AH_RECORD=1 AH_RECORD_UPSTREAM at a closed port (5,889
-# distinct requests): the ones whose request depends on no other missing
-# answer.  The rest follow from these answers and cannot be keyed before
-# they are recorded: the session linker's other embeddings (it embeds each
-# intent once; at a closed port it retried every pair, 5,810 keys) and its
-# YES/NO checks (they depend on the vectors), the profile's embeddings and
-# the behavioural synthesis (both carry the style analysis's voice
-# profile).  Record with AH_RECORD=1 on the test Mac until the journey
-# misses nothing.
+# running it with AH_RECORD=1 AH_RECORD_UPSTREAM at a closed port: the ones
+# whose request depends on no other missing answer.  The rest follow from
+# these answers and cannot be keyed before they are recorded: the session
+# linker's later batches and its YES/NO checks (they depend on the
+# vectors), and after the approval the behavioural synthesis (it carries
+# the style analysis's voice profile).  Before WP-F12 the closed-port run
+# listed 6,153 distinct requests (5,811 of them the linker's per-pair
+# embeddings); after it, 321 (the linker embeds each day's new intents in
+# one batch and asks at most 10 new YES/NO pairs a day).
+# Record with AH_RECORD=1 on the test Mac until the journey misses nothing.
 DAILY_AND_APPROVAL_MISSING_KEYS: tuple[str, ...] = (
     # The daily summary's embedding, one per day with work (stages.daily).
     "c8fc20b77844f04cd4f85e7b8bf38307e9b696045b329fd10515608ac16a0da3",  # 2026-08-31
@@ -71,19 +81,38 @@ DAILY_AND_APPROVAL_MISSING_KEYS: tuple[str, ...] = (
     "5caf1fb4dc0a3834e8f7b8067ede5477d8fef09b03096abc4afb209424a8b769",  # 2026-09-16
     "ec62ca70fe0ab296d8549e7eb0f59e1e4c7954f9050e48d477b2e2732dfb09aa",  # 2026-09-17
     "76bfe871abb86b57e4b25636494aa518917fa44276e3f9ef7263e67cea553c87",  # 2026-09-18
-    # The session linker's first intent embedding (stages.daily, day 3).
-    "783426732123516105e760924f9131a055e04ba39190a7b17a0805d68a9a8a85",
-    # Approving the Stripe payout draft: the procedure's two embeddings
-    # and the style analysis.
-    "8424c83987c5f7c8a0599005b5d73271d075e4d6871ac82d25772ecb680a35be",
-    "bf4397fa3455f661c7c73595e745ff08f70488bf7717337363330eeaf522fc3f",
-    "4c60822764a168f68a1ae59be1b108e1b51645baee8a271a86fa872abdb8404d",
-    # Approving the expense report draft: the same three.
-    "0b11da012e18597113955b693298cbbfc7593939fe3d5f75f4572c42e2055c39",
-    "f6e7cb68c776642f4a09e71a5989a6c44b00aeb1b42a3ee5e8faa6ebefacdfd5",
-    "fb186f03f006a5b0fa0a64d0abb937bea2fc37e42c173efd52451ee45dff92ab",
+    # The profile's embedding, from the third summary on.
+    "b3d99754909c847b4c5ed40c36cdb5a2dcfae8e9334cadd55cea61134ed86d1e",  # 2026-09-02
+    "3c6d501fd93162728acfb723d18cdc59f476039e26319382accecac7e7f81995",  # 2026-09-03
+    "791b20e2e8f00120b60e97b43650190bf5181e060393df94e13b714b991a6cac",  # 2026-09-04
+    "1daf3a0681117c619361711da31af8d0a9db097916d64fa1e1fd1204c31deba7",  # 2026-09-07
+    "31d1d551e73bb5c0809a3a82eac2478d679e9b7a7bcaab2f8b8b6de83d9a52f6",  # 2026-09-08
+    "95c8476235dcb8ecc61a15680905a1e1061b731202f60b5c57494df5283af51d",  # 2026-09-09
+    "26ac105e0a62cc5d3f57b2bb83e006f579c518f7219a7470ea973012e593bd97",  # 2026-09-10
+    "1714af954f356a4c4cf5180bda4d824dcdee7ec795f9bfa82dcb3121d947c153",  # 2026-09-11
+    "8b6518a3da480abe5d7804a55aeb31e19e83e4dd6a1b88385d8e12b386403291",  # 2026-09-14
+    "ac2afb49de4766ed27ba01e8fc06890b836c80aa33482336ed1ec0b5d3897840",  # 2026-09-15
+    "86511cbc66dd6600c4d08a66bc2c2f0bfa4b2079098660693d04f0218e7c5d83",  # 2026-09-16
+    "5fe84b91b7dd60ff7104659f5675eb77ea676ab38601d15be26e5ae13ec364e9",  # 2026-09-17
+    "192aaf0f39f1a1240a4259b91dc4431e311ead21e6accfdb8e78e66d2be7a5fb",  # 2026-09-18
+    # The session linker's first batch of intent embeddings (day 3).
+    "c4ac6160207dd102c5ceb5338b3b934f7d612768ba1acfb4e692f476683338dc",
+    # The approvals' calls (the procedures' embeddings, the style analysis)
+    # follow the expense report's discovery answer
+    # (DISCOVERY_MISSING_KEYS) and the approval at the end: they are keyed
+    # once that is recorded.
 )
 _ENTRIES = load_entries(CASSETTE) if CASSETTE.exists() else {}
+needs_discovery_recording = pytest.mark.skipif(
+    any(key not in _ENTRIES for key in DISCOVERY_MISSING_KEYS)
+    and os.environ.get("AH_RECORD") != "1",
+    reason=(
+        f"cassettes/{NAME}.jsonl lacks the expense report's passive SOP request "
+        "now that the interrupted Monday is one observation: "
+        + ", ".join(k for k in DISCOVERY_MISSING_KEYS if k not in _ENTRIES)
+        + "; record with AH_RECORD=1 on the test Mac"
+    ),
+)
 needs_daily_recording = pytest.mark.skipif(
     any(key not in _ENTRIES for key in DAILY_AND_APPROVAL_MISSING_KEYS)
     and os.environ.get("AH_RECORD") != "1",
@@ -142,6 +171,7 @@ def _routine_of(run: Replay) -> dict[str, str]:
     return {c.slug: c.routine for c in run.report.candidates if c.verdict == "true_positive"}
 
 
+@needs_discovery_recording
 def test_discovery_drafts_exactly_the_two_planted_routines(passive_drafts: Replay) -> None:
     """No chimera and no one-off: one draft per planted routine, with the
     weekly one's weekday, its runs as observations and URLs for steps."""
@@ -165,44 +195,44 @@ def test_discovery_drafts_exactly_the_two_planted_routines(passive_drafts: Repla
         )
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "passive steps carry no DOM anchor: sop_generator.generate_from_passive "
-    "builds the template without a timeline (_vlm_sop_to_template(mode="
-    "'passive')), the passive prompt numbers frames per demonstration, and "
-    "no passive frame carries click_targets (only focus_processor joins "
-    "ClickIntents to frames), so _anchor_for_step has neither cited frames "
-    "nor clicks; how passive steps are grounded is the lead's decision"
-))
+@needs_discovery_recording
 def test_the_drafts_carry_dom_anchors(passive_drafts: Replay) -> None:
+    """WP-F12: each draft's steps are anchored, model-free, to the elements
+    its runs clicked (``workflow_mining.anchor_draft_steps``), each anchor
+    resting on the recorded clicks."""
     for draft in _drafts(passive_drafts.worker).values():
-        assert any(isinstance(s.get("anchor"), dict) for s in draft["sop_json"]["steps"])
+        anchored = [s for s in draft["sop_json"]["steps"] if isinstance(s.get("anchor"), dict)]
+        assert anchored
+        for step in anchored:
+            assert step["anchor"]["selector"] and step["evidence"]["click_ids"]
 
 
+@needs_discovery_recording
 @needs_daily_recording
 def test_three_weeks_discover_exactly_the_two_planted_routines(local_tz) -> None:
     """The whole journey: three weeks through the worker's tick with its
-    daily pass, the user approving each draft as it appears."""
+    daily pass; the drafts wait in the review queue, learning from their
+    later runs, until the user approves them at the end."""
     local_tz(MANIFEST["timezone"])
     queue_sizes: list[int] = []
-    approved: set[str] = set()
 
-    def approve_new_drafts(worker: JourneyWorker) -> None:
-        # The app's review queue: approve what it shows (the next tick
-        # consumes the trigger).
-        drafts = worker.db.get_generated_sops(status="draft")
-        queue_sizes.append(len(drafts))
-        for draft in drafts:
-            if draft["sop_id"] not in approved:
-                approved.add(draft["sop_id"])
-                trigger_spool.write_trigger(
-                    worker.state_dir, "approve", {"sop_id": draft["sop_id"], "action": "approve"},
-                )
+    def watch_queue(worker: JourneyWorker) -> None:
+        queue_sizes.append(len(worker.db.get_generated_sops(status="draft")))
 
-    with _replay(daily_jobs=True, on_tick=approve_new_drafts) as run:
+    with _replay(daily_jobs=True, on_tick=watch_queue) as run:
         # Discovery, and a digest with content for every day with work.
         assert run.report.failures(min_recall=1.0, min_precision=1.0, max_chimeras=0) == []
         assert run.report.days
         assert max(queue_sizes) <= MAX_REVIEW_QUEUE
+        assert run.worker.knowledge_base.list_procedures() == []  # nothing approved yet
+
+        # The user approves what the review queue shows; the next tick
+        # consumes the triggers.
+        for draft in run.worker.db.get_generated_sops(status="draft"):
+            trigger_spool.write_trigger(
+                run.worker.state_dir, "approve", {"sop_id": draft["sop_id"], "action": "approve"},
+            )
+        run.worker.run_tick()
 
         kb = run.worker.knowledge_base
         routine_of = _routine_of(run)
@@ -217,6 +247,11 @@ def test_three_weeks_discover_exactly_the_two_planted_routines(local_tz) -> None
         # runs share (model-free pin: test_workflow_observations.py).
         assert weekly["knowledge"]["trigger"]["status"] == "hypothesis"
         assert weekly["learned"]["trigger"]["weekday"] == WEEKLY["local_weekday"]
+        assert weekly["learned"]["trigger"]["description"] == "Most Mondays around 10:30"
+        # The daily routine's draft learned from every later run (WP-F12).
+        daily = next(p for slug, p in procs.items() if slug != WEEKLY["slug"])
+        assert len(daily["evidence"]["observations"]) == 15
+        assert daily["learned"]["done"]["support"] == "15 of 15 runs"
         for proc in procs.values():
             assert proc["evidence"]["total_observations"] >= 3
             assert any(s.get("location", "").startswith("http") for s in proc["steps"])
