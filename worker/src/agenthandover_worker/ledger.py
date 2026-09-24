@@ -39,7 +39,8 @@ Who writes what:
   ``agent_clarifications`` (the post-recording questions): an answer the
   user typed makes its slot ``known`` and wins over everything else; the
   model's guess submitted unchanged (``source: "accepted_guess"``) makes
-  it a ``hypothesis`` unless the slot is already known.
+  it a ``hypothesis`` unless the slot is already known or agent runs
+  confirmed it.
 - ``trigger``, ``done_criteria`` and ``verification`` are also derived
   from what the runs' own events showed: :func:`refresh_knowledge` first
   recomputes ``proc["learned"]`` (``run_signals.learn``: a recurring
@@ -49,8 +50,9 @@ Who writes what:
   ``instance`` pointers of the runs it was seen in.
 - ``contrast`` / ``divergence`` / ``agent`` entries are written by the
   learners that produce them (chosen-versus-visible contrast, divergence
-  analysis, agent runs) through :func:`set_slot`.  The derivation keeps
-  them as they are until their writer changes them.
+  analysis, agent runs: ``skill_improver.feed_ledger``) through
+  :func:`set_slot`.  The derivation keeps them as they are until their
+  writer changes them.
 
 Rules the derivation follows (see :func:`_observed`):
 
@@ -350,9 +352,13 @@ def derive_knowledge(proc: dict) -> dict[str, dict]:
         else:
             entry = _observed(proc, slot)
         # A typed answer wins; an accepted guess (a hypothesis) never
-        # replaces what is already known.
+        # replaces what is already known, nor a hypothesis agent runs
+        # have confirmed (that entry already cites the guess).
         answer = answered.get(slot)
-        if answer is not None and (answer["status"] == "known" or entry["status"] != "known"):
+        if answer is not None and (
+            answer["status"] == "known" or entry["status"] == "unknown"
+            or (entry["status"] == "hypothesis" and entry["source"] != "agent")
+        ):
             entry = answer
         same = previous is not None and all(
             previous.get(k) == entry[k] for k in ("status", "value_ref", "evidence", "source")
