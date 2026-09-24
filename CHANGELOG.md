@@ -96,6 +96,31 @@ are marked *(not yet recorded)*.
   menu bar's "Processing" count and health warning built on them).
 
 ### Fixed
+- **Typed text needs key presses.** On the test Mac, OCR of an empty
+  TextEdit document's toolbar ("# 10") became a Skill step "Type '# 10'".
+  The daemon now records, per frame, how many keys were pressed since the
+  previous frame (a count only: no key codes, no text, no event tap, no
+  Input Monitoring). New typed text stands only when enough keys were
+  pressed (one per character, up to 3 for autocomplete), or a paste
+  explains it. Dictated text presses no key and is not recorded as typed
+  input yet. Proof: `test_typed_text_evidence.py`; a live session.
+- **A second recording's questions no longer erase the first's.** Each
+  session's pending questions wait in a queue (`focus-pending/`), and the
+  app still sees one session at a time. Before, the second session
+  overwrote the first's questions and saved state, so its answers could
+  never apply. Proof: `test_focus_questioner.py`, `test_focus_qa.py`.
+- **Capture starts while a browser is open.** With Chrome or Comet
+  running, the app took the extension's native-messaging bridge (the same
+  binary) for the daemon and never started capture: after an upgrade, and
+  at login if the browser opened first. Proof: `DaemonDetectionTests`; a
+  live relaunch.
+- **Upgrades remove the files a release dropped.** The installer never
+  deletes files, and the worker is installed from its folder, so 0.5.0
+  over 0.4.x still carried the removed cloud backends. Proof: the install
+  journey's upgrade scenario.
+- **The package refuses stale Rust binaries** older than the Rust sources.
+- The worker's wait for the database upgrade names the usual cause: the
+  daemon has not started yet (the app needs its permissions).
 - **The daily pass runs to its end again.** It read the day's tasks
   (`TaskBoundary` records) as dicts and stopped on every day with work,
   logged only at DEBUG, so the app's daily digest was never written, and
@@ -104,7 +129,7 @@ are marked *(not yet recorded)*.
   it. A failed daily batch now logs a warning. The profile's embedding no
   longer includes its save time, which made it a new embedding call every
   day. Proof: `test_daily_processor.py`; the three-week replay and
-  J-passive now run the worker's own daily pass *(not yet recorded)*.
+  J-passive now run the worker's own daily pass (recorded on the 16 GB test Mac).
 - **Cluster labels and synthesis no longer stop for the day** after 50
   rejected translations. The fallback queue was also the daily budget of the
   LLM reasoner and the behavioral synthesizer, so its 50 jobs a day skipped
