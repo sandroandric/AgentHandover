@@ -83,12 +83,11 @@ pub struct ObserverConfig {
     /// since the previous tick fires the shutter). Tests replace it: the
     /// real value follows whoever is using the machine running them.
     pub seconds_since_last_click: fn() -> f64,
-    /// Seconds since the last key press anywhere on the system (a timing
-    /// only: no key code, no text, no event tap). Each kept frame records
-    /// whether a key went down since the previous kept frame
-    /// (`keys_since_prev_frame`): typed text needs keyboard evidence.
-    /// Tests replace it, as for clicks.
-    pub seconds_since_last_key: fn() -> f64,
+    /// The system's running count of key presses (a count only: no key
+    /// code, no text, no event tap). Each kept frame records how many keys
+    /// went down since the previous kept frame (`keys_since_prev_frame`):
+    /// typed text needs keyboard evidence. Tests replace it, as for clicks.
+    pub key_down_count: fn() -> u32,
 }
 
 /// The system's time since the last left or right mouse-down.
@@ -102,21 +101,21 @@ fn system_seconds_since_last_click() -> f64 {
     f64::INFINITY
 }
 
-/// Whether a key went down after `since`, given the system's seconds since
-/// the last key press (the HID timestamp: never which key).
-fn key_pressed_since(seconds_since_last_key: f64, since: Instant) -> bool {
-    seconds_since_last_key < since.elapsed().as_secs_f64()
+/// Key presses between two readings of the system's key-press counter
+/// (which wraps at `u32::MAX`).
+fn keys_between(previous: u32, now: u32) -> u32 {
+    now.wrapping_sub(previous)
 }
 
-/// The system's time since the last key press.
+/// The system's running count of key presses.
 #[cfg(target_os = "macos")]
-fn system_seconds_since_last_key() -> f64 {
-    crate::platform::IdleDetector::new().seconds_since_last_key()
+fn system_key_down_count() -> u32 {
+    crate::platform::IdleDetector::new().key_down_count()
 }
 
 #[cfg(not(target_os = "macos"))]
-fn system_seconds_since_last_key() -> f64 {
-    f64::INFINITY
+fn system_key_down_count() -> u32 {
+    0
 }
 
 impl Default for ObserverConfig {
@@ -140,7 +139,7 @@ impl Default for ObserverConfig {
             read_app_state: false,
             capture_stats: CaptureStats::shared(),
             seconds_since_last_click: system_seconds_since_last_click,
-            seconds_since_last_key: system_seconds_since_last_key,
+            key_down_count: system_key_down_count,
         }
     }
 }
@@ -193,12 +192,12 @@ pub async fn run_observer_loop(
     // navigations, tab switches, clicks and form submits.
     let mut browser_url: Option<String> = None;
 
-    // When the previous kept frame's shutter fired (the observer's start
-    // before the first): a key pressed since then is keyboard evidence for
-    // the next kept frame. Mouse clicks and key presses are read from the
-    // HID system's "seconds since last event" (no event tap, nothing
-    // intercepted).
-    let mut last_frame_at = Instant::now();
+    // The key-press counter at the previous kept frame (at the observer's
+    // start before the first): the keys pressed since then are the next
+    // kept frame's keyboard evidence. Clicks and key presses are read from
+    // the HID system's timestamps and counters (no event tap, nothing
+    // intercepted, never which key).
+    let mut last_key_count = (config.key_down_count)();
 
     // Focus recording session tracking; browser transitions share the dir.
     let state_dir = config.state_dir.clone();
@@ -482,18 +481,16 @@ pub async fn run_observer_loop(
                     warnings: &snapshot_warnings,
                     browser_url: browser_url.as_deref(),
                 };
-                let shutter_at = Instant::now();
                 let Some(kept) =
                     capture_kept_frame(&mut policy, trigger, focus_recording, &config, &gate).await
                 else {
                     continue;
                 };
-                // Any key down since the previous kept frame's shutter (a
-                // key during this capture counts here and again for the
-                // next frame: evidence is never lost between frames).
-                let keys_since_prev_frame =
-                    key_pressed_since((config.seconds_since_last_key)(), last_frame_at);
-                last_frame_at = shutter_at;
+                // Keys pressed since the previous kept frame (frames not
+                // kept add theirs to the next one: none is lost).
+                let key_count = (config.key_down_count)();
+                let keys_since_prev_frame = keys_between(last_key_count, key_count);
+                last_key_count = key_count;
 
                 let mut event = make_event(
                     EventKind::DwellSnapshot,
@@ -522,7 +519,7 @@ pub async fn run_observer_loop(
                     }
                 }
                 event.metadata["capture_trigger"] = serde_json::Value::String(trigger.as_str().to_string());
-                event.metadata["keys_since_prev_frame"] = serde_json::Value::Bool(keys_since_prev_frame);
+                event.metadata["keys_since_prev_frame"] = serde_json::Value::from(keys_since_prev_frame);
                 if focus_recording {
                     event.metadata["focus_capture"] = serde_json::Value::Bool(true);
                 }
@@ -1146,20 +1143,13 @@ mod tests {
     }
 
     #[test]
-    fn test_key_pressed_since_the_previous_frame() {
-        let previous_frame = Instant::now() - Duration::from_secs(2);
-        assert!(key_pressed_since(0.5, previous_frame), "a key 0.5 s ago, the frame 2 s ago");
-        assert!(!key_pressed_since(5.0, previous_frame), "the last key came before the frame");
-        assert!(!key_pressed_since(f64::INFINITY, previous_frame), "no key since boot");
-    }
-
-    #[test]
-    fn test_the_first_frame_counts_keys_since_the_observer_started() {
-        // Before any kept frame the reference is the observer's start: a
-        // key pressed before it is not evidence for the first frame.
-        let observer_start = Instant::now() - Duration::from_secs(10);
-        assert!(!key_pressed_since(60.0, observer_start));
-        assert!(key_pressed_since(3.0, observer_start));
+    fn test_keys_between_two_frames() {
+        assert_eq!(keys_between(100, 100), 0, "no key since the previous frame");
+        assert_eq!(keys_between(100, 104), 4);
+        // The first frame counts from the observer's start.
+        assert_eq!(keys_between(7, 8), 1, "one key (the new-document shortcut)");
+        // The system counter wraps.
+        assert_eq!(keys_between(u32::MAX - 1, 2), 4);
     }
 
     #[tokio::test]
