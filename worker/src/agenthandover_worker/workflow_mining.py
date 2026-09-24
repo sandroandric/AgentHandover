@@ -665,7 +665,8 @@ def recognize(db: "WorkerDB", kb: "KnowledgeBase | None", *, now: datetime) -> s
     the session in progress is tagged with, if any.
     """
     events = db.get_annotated_events_in_window(hours=RECOGNIZE_WINDOW_HOURS, now=now)
-    sessions = split_sessions(events, db.get_sleep_boundaries())
+    window_start = now - timedelta(hours=RECOGNIZE_WINDOW_HOURS)
+    sessions = split_sessions(events, db.get_sleep_boundaries(since=window_start.isoformat()))
     cutoff = now.timestamp() - IDLE_GAP_SECONDS
     live = sessions[-1] if sessions and _timestamp_to_epoch(sessions[-1][-1].timestamp) > cutoff else None
 
