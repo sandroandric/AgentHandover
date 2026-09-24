@@ -14,22 +14,34 @@ the loop body's processors in the loop's order:
 2. the stale focus-session sweep;
 3. ``run_pipeline`` over one ``EventRetryGuard`` batch of unprocessed
    events, marking them processed and persisting VLM jobs;
-4. the annotation phase: ``ModelScheduler.begin_annotation``, the focus
-   processor's ``annotate_remaining``, ``_process_annotations`` within
-   main()'s hourly and daily ``AnnotationBudget`` (rolled on the clock)
-   and ``_process_diffs``, charged to it;
-5. the generation phase: ``ModelScheduler.plan_generation``, then
-   ``_process_focus_sessions_v2`` (or the v1 path when the v2 pipeline is
-   off), then ``_process_passive_discovery`` every 2 hours of *clock* time
-   (the timer starts when the worker is built, as main() seeds it at loop
-   entry) while no focus session is pending, charged to the budget, then
-   ``ModelScheduler.end_generation``;
-6. ``_write_sops_index``;
-7. the status heartbeat, ``_write_worker_status`` with the running totals,
-   the annotation budget and pause reason, the compute counters and the
-   model schedule (``status()`` reads it back).  Building a
-   ``JourneyWorker`` resets the process-wide usage counters, as a worker
-   start does.
+4. the model jobs main() hands to its inference thread
+   (``inference_runner``), decided from what this tick sees and run in the
+   runner's priority order:
+
+   a. P0, when a recording stopped or its questions were answered: the
+      focus job (``ModelScheduler.begin_annotation``, ``plan_generation``
+      for itself, ``_process_focus_sessions_v2`` or the v1 path when the
+      v2 pipeline is off);
+   b. P1, when the last recording's Skill left keyframes (so from the tick
+      after its focus job): ``annotate_remaining``;
+   c. P2: the passive annotation job (``begin_annotation``,
+      ``_process_annotations`` within main()'s hourly and daily
+      ``AnnotationBudget``, rolled on the clock, and ``_process_diffs``,
+      charged to it);
+   d. P2: the passive generation job (``plan_generation``, then
+      ``_process_passive_discovery`` every 2 hours of *clock* time, the
+      timer starting when the worker is built as main() seeds it at loop
+      entry, while no focus session is pending, charged to the budget);
+
+   then the runner's idle hook, ``ModelScheduler.end_generation``.  After
+   :meth:`JourneyWorker.start_inference` the jobs are submitted to a real
+   inference thread instead, and ``run_tick()`` is the control tick alone;
+5. the status heartbeat, ``_write_worker_status`` with the running totals,
+   the annotation budget and pause reason, the compute counters, the
+   model schedule and, with an inference thread, its queue (``status()``
+   reads it back).  Building a ``JourneyWorker`` resets the process-wide
+   usage counters, as a worker start does;
+6. ``_write_sops_index``.
 
 The scheduler runs on the journey clock and, unless a journey passes
 ``free_memory``, sees memory to spare, no swap in use and disk to spare
@@ -63,6 +75,9 @@ from agenthandover_worker import ops_telemetry
 from agenthandover_worker import trigger_spool
 from agenthandover_worker.annotation_cache import AnnotationCache
 from agenthandover_worker.config import load_config
+from agenthandover_worker.inference_runner import (
+    P0, P1, P2, STATE_LOCK, InferenceRunner, model_work,
+)
 from agenthandover_worker.loop_guard import EventRetryGuard
 from agenthandover_worker.model_scheduler import GB, ModelScheduler
 from agenthandover_worker.ollama import OllamaClient, OllamaError
@@ -149,6 +164,8 @@ class JourneyWorker:
         self._sops_generated = 0
         self._annotations = 0
         self._diffs = 0
+        self._paused_reason: str | None = None
+        self.runner: InferenceRunner | None = None
 
         cfg = load_config()
         self.cfg = cfg
@@ -355,13 +372,16 @@ class JourneyWorker:
         db = self.db
         export_kwargs = self._export_kwargs()
         return {
-            "retry": lambda t: wm._process_retry_triggers(
-                t, db,
-                focus_processor=self.focus_processor,
-                sop_generator=self.sop_generator,
-                screenshots_dir=self.screenshots_dir,
-                sop_auto_approve=self.sop_auto_approve,
-                **export_kwargs,
+            "retry": lambda t: model_work(
+                f"retry:{id(t)}",
+                lambda: wm._process_retry_triggers(
+                    t, db,
+                    focus_processor=self.focus_processor,
+                    sop_generator=self.sop_generator,
+                    screenshots_dir=self.screenshots_dir,
+                    sop_auto_approve=self.sop_auto_approve,
+                    **export_kwargs,
+                ),
             ),
             "approve": lambda t: wm._process_approval_triggers(
                 t, db, vector_kb=self.vector_kb, **export_kwargs,
@@ -389,9 +409,7 @@ class JourneyWorker:
                     or (self.sop_writer if self.adapter == "claude-skill" else None)
                 ),
             ),
-            "merge": lambda t: wm._process_merge_trigger(
-                t, procedure_curator=self.procedure_curator,
-            ),
+            "merge": lambda t: model_work(f"merge:{id(t)}", lambda: self._merge_job(t)),
             "drift-reviewed": lambda t: wm._process_drift_reviewed_trigger(
                 t, procedure_curator=self.procedure_curator,
             ),
@@ -406,7 +424,14 @@ class JourneyWorker:
             ),
         }
 
+    def _merge_job(self, trigger: dict) -> None:
+        wm._process_merge_trigger(trigger, procedure_curator=self.procedure_curator)
+        wm._write_curation_queue(self.procedure_curator)
+
     def close(self) -> None:
+        if self.runner is not None:
+            self.runner.stop(timeout=60)
+            self.runner = None
         self.db.close()
         if self.vector_kb is not None:
             self.vector_kb.close()
@@ -420,73 +445,97 @@ class JourneyWorker:
     def __exit__(self, *exc: object) -> None:
         self.close()
 
-    def run_tick(self) -> dict:
-        """One poll iteration of main()'s loop body (see module docstring).
+    def start_inference(self) -> InferenceRunner:
+        """Run model work on an inference thread, as ``main()`` does: from
+        now on :meth:`run_tick` is the control thread's tick only (it
+        submits the jobs and returns; the runner takes them in priority
+        order).  :meth:`close` stops it."""
+        self.runner = InferenceRunner(
+            on_idle=self.model_scheduler.end_generation,
+        ).start()
+        return self.runner
 
-        Returns what the iteration did, for assertions.
+    def run_tick(self) -> dict:
+        """One poll iteration of main()'s loop (see module docstring).
+
+        Returns what the iteration did, for assertions.  With an inference
+        thread (:meth:`start_inference`) the model jobs are only submitted,
+        so their entries stay at their defaults.
         """
         db = self.db
-        writers = self._export_kwargs()
-        if self.vector_kb is not None:
-            self.vector_kb.reset_cycle_budget()
+        result: dict = {
+            "triggers_consumed": 0, "focus_sops": 0, "pipeline": None,
+            "annotations": None, "diffs": None, "passive_sops": None,
+            "generation_plan": None,
+        }
+        with STATE_LOCK:
+            if self.vector_kb is not None:
+                self.vector_kb.reset_cycle_budget()
 
-        triggers_consumed = trigger_spool.drain(self.state_dir, self.trigger_handlers)
-        if triggers_consumed:
-            wm._write_curation_queue(self.procedure_curator)
+            triggers_consumed = trigger_spool.drain(self.state_dir, self.trigger_handlers)
+            result["triggers_consumed"] = triggers_consumed
+            if triggers_consumed:
+                wm._write_curation_queue(self.procedure_curator)
 
-        wm._sweep_stale_focus_session(self.state_dir, self.focus_max_session_hours)
-        unprocessed = db.get_unprocessed_events(limit=self.event_guard.batch_limit)
-        summary = None
-        if unprocessed:
-            summary = wm.run_pipeline(
-                unprocessed,
-                episode_builder=self.episode_builder,
-                clipboard_linker=self.clipboard_linker,
-                pruner=self.pruner,
-                translator=self.translator,
-                scorer=self.scorer,
-                vlm_queue=self.vlm_queue,
-                db=db,
-            )
-            event_ids = [ev["id"] for ev in unprocessed if "id" in ev]
-            if event_ids:
-                db.mark_events_processed(event_ids)
-            self.event_guard.succeeded(event_ids)
-            if summary["vlm_enqueued"] > 0:
-                wm._persist_vlm_jobs(db, self.vlm_queue)
+            wm._sweep_stale_focus_session(self.state_dir, self.focus_max_session_hours)
+            unprocessed = db.get_unprocessed_events(limit=self.event_guard.batch_limit)
+            if unprocessed:
+                summary = wm.run_pipeline(
+                    unprocessed,
+                    episode_builder=self.episode_builder,
+                    clipboard_linker=self.clipboard_linker,
+                    pruner=self.pruner,
+                    translator=self.translator,
+                    scorer=self.scorer,
+                    vlm_queue=self.vlm_queue,
+                    db=db,
+                )
+                result["pipeline"] = summary
+                event_ids = [ev["id"] for ev in unprocessed if "id" in ev]
+                if event_ids:
+                    db.mark_events_processed(event_ids)
+                self.event_guard.succeeded(event_ids)
+                if summary["vlm_enqueued"] > 0:
+                    wm._persist_vlm_jobs(db, self.vlm_queue)
+            self._events_processed += len(unprocessed)
 
+            # main() decides the jobs from what the control thread sees now:
+            # a recording's tail is due only once its focus job has run.
+            jobs: list[tuple[str, int, Callable[[], None]]] = []
+            if wm._focus_job_due(self.state_dir):
+                jobs.append(("focus", P0, lambda: self._focus_job(result)))
+            if (
+                self.focus_processor is not None
+                and self.v2_schema_ok
+                and self.focus_processor.has_remaining
+            ):
+                jobs.append(("focus-tail", P1, self._focus_tail_job))
+            jobs.append(("passive-annotation", P2, lambda: self._passive_annotation_job(result)))
+            jobs.append(("passive-generation", P2, lambda: self._passive_generation_job(result)))
+            if self.runner is not None:
+                for key, priority, job in jobs:
+                    self.runner.submit(key, priority, job)
+
+        if self.runner is None:
+            # The runner's order (the list is already by priority), then its
+            # idle hook: the end of the generation phase.
+            for _key, _priority, job in sorted(jobs, key=lambda j: j[1]):
+                job()
+            self.model_scheduler.end_generation()
+        # As main(): the heartbeat and the index.
+        self._write_status(result)
+        with STATE_LOCK:
+            wm._write_sops_index(db, self.knowledge_base)
+        return result
+
+    def _focus_job(self, result: dict) -> None:
+        """main()'s P0 focus job."""
+        db = self.db
         scheduler = self.model_scheduler
         scheduler.begin_annotation()
-        if self.focus_processor is not None and self.v2_schema_ok:
-            self.focus_processor.annotate_remaining(db)
-        ann_stats = diff_stats = None
-        if self.scene_annotator is not None and not self.v2_schema_ok:
-            self.v2_schema_ok = wm._check_v2_schema(db)
-        if self.scene_annotator is not None and self.v2_schema_ok:
-            self.annotation_budget.roll(self.clock.now())
-            ann_stats = wm._process_annotations(
-                db, self.scene_annotator, self.screenshots_dir,
-                privacy_checker=self.privacy_checker,
-                activity_classifier=self.activity_classifier,
-                budget=self.annotation_budget,
-            )
-            if ann_stats["annotated"] > 0:
-                self.activity_searcher.refresh_index()
-        if self.frame_differ is not None and self.v2_schema_ok:
-            diff_stats = wm._process_diffs(
-                db, self.frame_differ, budget=self.annotation_budget,
-            )
-
-        passive_due = bool(
-            self.task_segmenter is not None
-            and self.sop_generator is not None
-            and self.v2_schema_ok
-            and self._passive_discovery_due()
-            and not (self.state_dir / "focus-session.json").exists()
-        )
-        focus_work = wm._focus_work_ready(self.state_dir, db)
-        plan = scheduler.plan_generation(
-            urgent=focus_work is not None, due={"passive_discovery": passive_due},
+        scheduler.plan_generation(
+            urgent=wm._focus_work_ready(self.state_dir, db) is not None,
+            due={}, take_batched=False,
         )
         if self.focus_processor is not None and self.v2_schema_ok:
             focus_sops = wm._process_focus_sessions_v2(
@@ -500,7 +549,7 @@ class JourneyWorker:
                 vector_kb=self.vector_kb,
                 ollama_host=self.cfg.vlm.ollama_host,
                 qna_model=scheduler.generation_model,
-                **writers,
+                **self._export_kwargs(),
             )
         else:
             focus_sops = wm._process_focus_sessions(
@@ -512,16 +561,67 @@ class JourneyWorker:
                 vlm_queue=self.vlm_queue,
                 sop_enhancer=self.sop_enhancer,
                 sop_auto_approve=self.sop_auto_approve,
-                **writers,
+                **self._export_kwargs(),
             )
+        result["focus_sops"] = focus_sops
+        self._sops_generated += focus_sops
         if focus_sops > 0:
             wm._write_sops_index(db, self.knowledge_base)
 
-        passive_sops = None
+    def _focus_tail_job(self) -> None:
+        """main()'s P1 focus-tail job."""
+        self.model_scheduler.begin_annotation()
+        self.focus_processor.annotate_remaining(self.db)
+
+    def _passive_annotation_job(self, result: dict) -> None:
+        """main()'s P2 passive annotation job (no VLM fallback jobs, no
+        backlog expiry: see the module docstring)."""
+        db = self.db
+        self.model_scheduler.begin_annotation()
+        if self.scene_annotator is not None and not self.v2_schema_ok:
+            self.v2_schema_ok = wm._check_v2_schema(db)
+        if self.scene_annotator is not None and self.v2_schema_ok:
+            self.annotation_budget.roll(self.clock.now())
+            ann_stats = wm._process_annotations(
+                db, self.scene_annotator, self.screenshots_dir,
+                privacy_checker=self.privacy_checker,
+                activity_classifier=self.activity_classifier,
+                budget=self.annotation_budget,
+            )
+            result["annotations"] = ann_stats
+            self._annotations += ann_stats["annotated"]
+            # As main(): the budget names the cap that closed (hourly or daily).
+            self._paused_reason = (
+                self.annotation_budget.pause_reason()
+                if ann_stats["budget_exhausted"] else None
+            )
+            if ann_stats["annotated"] > 0:
+                self.activity_searcher.refresh_index()
+        if self.frame_differ is not None and self.v2_schema_ok:
+            diff_stats = wm._process_diffs(
+                db, self.frame_differ, budget=self.annotation_budget,
+            )
+            result["diffs"] = diff_stats
+            self._diffs += diff_stats["diffs"]
+
+    def _passive_generation_job(self, result: dict) -> None:
+        """main()'s P2 passive generation job (passive discovery; not the
+        daily jobs: see the module docstring)."""
+        passive_due = bool(
+            self.task_segmenter is not None
+            and self.sop_generator is not None
+            and self.v2_schema_ok
+            and self._passive_discovery_due()
+            and not (self.state_dir / "focus-session.json").exists()
+        )
+        plan = self.model_scheduler.plan_generation(
+            urgent=False, due={"passive_discovery": passive_due},
+        )
+        result["generation_plan"] = plan
         if passive_due and plan.allows("passive_discovery"):
             with charged_to(self.annotation_budget):
                 passive_sops = wm._process_passive_discovery(
-                    db,
+                    self.db,
                     knowledge_base=self.knowledge_base,
                     segmenter=self.task_segmenter,
                     sop_generator=self.sop_generator,
@@ -530,41 +630,23 @@ class JourneyWorker:
                     variant_detector=self.variant_detector,
                     evidence_normalizer=self.evidence_normalizer,
                     now=self.clock.now(),
-                    **writers,
+                    **self._export_kwargs(),
                 )
+            result["passive_sops"] = passive_sops
+            self._sops_generated += passive_sops
             self._last_passive_discovery = self.clock.now()
             if passive_sops > 0:
-                wm._write_sops_index(db, self.knowledge_base)
-        # As main(): the heartbeat and the index, then (after the daily
-        # jobs main() runs here) the end of the generation phase.
-        self._write_status(unprocessed, summary, focus_sops, passive_sops, ann_stats, diff_stats)
-        wm._write_sops_index(db, self.knowledge_base)
-        scheduler.end_generation()
-        return {
-            "triggers_consumed": triggers_consumed,
-            "focus_sops": focus_sops,
-            "pipeline": summary,
-            "annotations": ann_stats,
-            "diffs": diff_stats,
-            "passive_sops": passive_sops,
-            "generation_plan": plan,
-        }
+                wm._write_sops_index(self.db, self.knowledge_base)
 
-    def _write_status(
-        self, unprocessed, summary, focus_sops, passive_sops, ann_stats, diff_stats,
-    ) -> None:
-        """main()'s end-of-iteration heartbeat: ``worker-status.json`` with
-        the running totals, the passive annotation budget and pause reason
-        (on AC, so only the budget pauses it), the compute counters and the
-        model schedule."""
-        self._events_processed += len(unprocessed)
-        self._sops_generated += (
-            focus_sops + (passive_sops or 0)
-        )
-        self._annotations += (ann_stats or {}).get("annotated", 0)
-        self._diffs += (diff_stats or {}).get("diffs", 0)
-        # As main(): the budget names the cap that closed (hourly or daily).
-        exhausted = bool((ann_stats or {}).get("budget_exhausted"))
+    def _write_status(self, result: dict) -> None:
+        """main()'s heartbeat: ``worker-status.json`` with the running
+        totals, the passive annotation budget and pause reason (on AC, so
+        only the budget pauses it), the compute counters, the model schedule
+        and, with an inference thread, its queue."""
+        inference = None
+        if self.runner is not None:
+            inference = self.runner.status()
+            inference["annotation_backlog"] = self.db.count_passive_unannotated()
         wm._write_worker_status(
             started_at=self._started_at,
             events_processed_today=self._events_processed,
@@ -576,9 +658,10 @@ class JourneyWorker:
             v2_annotation_enabled=self.scene_annotator is not None,
             v2_annotations_today=self._annotations,
             v2_diffs_today=self._diffs,
-            annotation_paused_reason=self.annotation_budget.pause_reason() if exhausted else None,
+            annotation_paused_reason=self._paused_reason,
             annotation_budget=self.annotation_budget.status(),
             model_schedule=self.model_scheduler.status(),
+            inference=inference,
         )
 
     def status(self) -> dict:
