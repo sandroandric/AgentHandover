@@ -704,15 +704,15 @@ def _migrate_vlm_config(path: Path | None = None) -> bool:
         plan, _ = upgrade_plan(text)
         served = served_models(text) if plan is not None else None
         changed, reason, backup = migrate_vlm_file(target, served=served)
+        # The switch still waits when the file has a plan after the run.
+        waits = plan is not None and not (
+            changed and upgrade_plan(target.read_text(encoding="utf-8"))[0] is None
+        )
     except (OSError, UnicodeDecodeError) as exc:
         logger.warning(
             "Could not check the [vlm] models in %s against the tier table: %s", target, exc,
         )
         return False
-    # The switch still waits when the plan's models are not the file's now.
-    waits = plan is not None and not (
-        changed and upgrade_plan(target.read_text(encoding="utf-8"))[0] is None
-    )
     level = logging.WARNING if waits else logging.INFO
     if changed:
         logger.log(level, "Migrated [vlm] in %s: %s; backup: %s", target, reason, backup)
