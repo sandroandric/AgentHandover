@@ -381,11 +381,6 @@ fn test_full_maintenance_purges_events_with_queued_vlm_jobs() {
 fn set_distilled_through(store: &EventStore, value: &str) {
     let conn = store.connection();
     conn.execute(
-        "CREATE TABLE IF NOT EXISTS worker_state (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
-        [],
-    )
-    .unwrap();
-    conn.execute(
         "INSERT OR REPLACE INTO worker_state (key, value) \
          VALUES ('observations_distilled_through', ?1)",
         [value],

@@ -1,5 +1,5 @@
 use anyhow::Result;
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use tracing::{info, warn};
@@ -47,30 +47,20 @@ impl<'a> MaintenanceRunner<'a> {
     /// (`observations_distilled_through`).  An expired event newer than
     /// that is kept until the worker catches up, but never past twice the
     /// retention, so a worker that stopped distilling cannot fill the disk.
-    /// Without the key (no worker yet, an older worker), retention alone
-    /// decides.
+    /// Without the key (no worker run yet), retention alone decides.
     fn expired_event_clause(
         &self,
         column: &str,
         retention_days: u32,
     ) -> Result<(String, Vec<String>)> {
-        let has_state: bool = self.conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_master \
-             WHERE type = 'table' AND name = 'worker_state')",
-            [],
-            |row| row.get(0),
-        )?;
-        let distilled: Option<String> = if has_state {
-            self.conn
-                .query_row(
-                    "SELECT value FROM worker_state WHERE key = 'observations_distilled_through'",
-                    [],
-                    |row| row.get(0),
-                )
-                .ok()
-        } else {
-            None
-        };
+        let distilled: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT value FROM worker_state WHERE key = 'observations_distilled_through'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
         let clause = format!(
             "datetime({column}) < datetime('now', ?1) \
              AND (datetime({column}) < datetime(?2) OR datetime({column}) < datetime('now', ?3))"
