@@ -363,6 +363,115 @@ class TestHighlights:
         assert len(milestones) == 0
 
 
+class TestWorkHighlights:
+    """Every day with recorded work (a task of a minute or more) says what
+    the work was, from the day's own summary, before any Skill or
+    recurring workflow exists; a day without work stays empty."""
+
+    def _highlights(self, kb: KnowledgeBase, tasks: list[dict], **summary) -> list[DigestHighlight]:
+        _save_daily(kb, "2026-08-31", {"tasks": tasks, **summary})
+        return DigestGenerator(kb).generate("2026-08-31").highlights
+
+    def test_a_first_day_names_its_top_tasks_by_time(self, kb: KnowledgeBase) -> None:
+        highlights = self._highlights(kb, [
+            {"intent": "Reply to email", "duration_minutes": 4, "apps": ["Mail"]},
+            {"intent": "Reconcile the Stripe payout", "duration_minutes": 12,
+             "apps": ["Google Chrome"]},
+            {"intent": "Fill in the payout sheet", "duration_minutes": 9,
+             "apps": ["Google Chrome"]},
+            {"intent": "Post in Slack", "duration_minutes": 7, "apps": ["Slack"]},
+            # A single frame: counted among the tasks, never a top task.
+            {"intent": "Glance at Mail", "duration_minutes": 0, "apps": ["Mail"]},
+        ], top_apps=[
+            {"app": "Google Chrome", "minutes": 21}, {"app": "Slack", "minutes": 7},
+            {"app": "Mail", "minutes": 4},
+        ])
+        top = [(h.title, h.detail) for h in highlights if h.type == "top_task"]
+        assert top == [
+            ("Top task: Reconcile the Stripe payout", "12 min in Google Chrome."),
+            ("Top task: Fill in the payout sheet", "9 min in Google Chrome."),
+            ("Top task: Post in Slack", "7 min in Slack."),
+        ]
+        (overview,) = [h for h in highlights if h.type == "day_overview"]
+        assert overview.title == "32 min of work across 5 tasks"
+        assert overview.detail == (
+            "Most time in Google Chrome (21 min), Slack (7 min), Mail (4 min)."
+        )
+        assert {h.priority for h in highlights} == {3}
+
+    def test_the_same_task_split_by_an_app_switch_adds_up(self, kb: KnowledgeBase) -> None:
+        highlights = self._highlights(kb, [
+            {"intent": "Reconcile the payout", "duration_minutes": 5, "apps": ["Google Chrome"]},
+            {"intent": "Chat", "duration_minutes": 6, "apps": ["Slack"]},
+            {"intent": "Reconcile the payout", "duration_minutes": 3, "apps": ["Numbers"]},
+        ])
+        top = [(h.title, h.detail) for h in highlights if h.type == "top_task"]
+        assert top == [
+            ("Top task: Reconcile the payout", "8 min in Google Chrome, Numbers."),
+            ("Top task: Chat", "6 min in Slack."),
+        ]
+
+    def test_a_two_minute_day_has_a_highlight(self, kb: KnowledgeBase) -> None:
+        """No cut-off beyond the daily processor's: the digest's summary
+        and Tasks section already report the two minutes."""
+        highlights = self._highlights(kb, [
+            {"intent": "Check the payout", "duration_minutes": 2, "apps": ["Google Chrome"]},
+        ])
+        assert [(h.type, h.title) for h in highlights] == [
+            ("top_task", "Top task: Check the payout"),
+            ("day_overview", "2 min of work across 1 task"),
+        ]
+
+    def test_a_task_without_an_intent_is_named_by_its_apps(self, kb: KnowledgeBase) -> None:
+        highlights = self._highlights(kb, [
+            {"intent": "", "duration_minutes": 3, "apps": ["Terminal"]},
+            {"intent": "", "duration_minutes": 1, "apps": []},
+        ])
+        assert [h.title for h in highlights if h.type == "top_task"] == [
+            "Top task: Work in Terminal", "Top task: Unlabelled task",
+        ]
+
+    def test_a_day_without_recorded_work_has_none(self, kb: KnowledgeBase) -> None:
+        assert self._highlights(kb, []) == []
+        # Single frames: tasks of zero minutes are no recorded work.
+        assert self._highlights(kb, [
+            {"intent": "Glance at Slack", "duration_minutes": 0, "apps": ["Slack"]},
+        ]) == []
+
+    def test_other_highlights_come_first(self, kb: KnowledgeBase) -> None:
+        highlights = self._highlights(
+            kb, [{"intent": "Deploy", "duration_minutes": 20, "apps": ["Terminal"]}],
+            new_procedures=["deploy-api"],
+        )
+        assert [h.type for h in highlights] == ["new_procedure", "top_task", "day_overview"]
+
+    def test_the_overview_counts_the_days_work_sessions(
+        self, kb: KnowledgeBase, tmp_db_path: Path,
+    ) -> None:
+        from agenthandover_worker.db import WorkerDB
+
+        with WorkerDB(tmp_db_path) as db:
+            for n, (date, minute) in enumerate([
+                ("2026-08-31", 540), ("2026-08-31", 600), ("2026-09-01", 540),
+            ]):
+                assert db.save_workflow_observation({
+                    "obs_id": f"o{n}", "workflow_key": f"k{n}",
+                    "started_utc": f"{date}T{minute // 60:02d}:00:00.000Z",
+                    "started_local_date": date, "started_local_weekday": 0,
+                    "started_local_minute": minute, "duration_s": 600.0,
+                    "apps_json": json.dumps(["Slack"]), "hosts_json": "[]",
+                    "step_sig_json": "[]", "evidence_json": "{}", "source": "passive",
+                    "task_label": "Chat", "event_ids_json": json.dumps([f"o{n}-e1"]),
+                })
+            _save_daily(kb, "2026-08-31", {
+                "tasks": [{"intent": "Chat", "duration_minutes": 20, "apps": ["Slack"]}],
+                "top_apps": [{"app": "Slack", "minutes": 20}],
+            })
+            digest = DigestGenerator(kb, db=db).generate("2026-08-31")
+        (overview,) = [h for h in digest.highlights if h.type == "day_overview"]
+        assert overview.detail == "2 work sessions; most time in Slack (20 min)."
+
+
 # ---------------------------------------------------------------------------
 # Tests: sections
 # ---------------------------------------------------------------------------

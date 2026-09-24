@@ -26,8 +26,8 @@ positive* when they span exactly one and it is a routine.  Precision is true
 positives over candidates, recall the share of routines with a true
 positive, and days-to-discovery the time from a routine's first instance to
 its first true positive.  Each day's digest must have content: active hours
-above zero and close to the daily summary's, at least one highlight, task
-minutes above zero.
+above zero and close to the daily summary's, task minutes above zero, and
+(the day having recorded work) at least one highlight.
 
 Usage (from ``worker/tests``)::
 
@@ -490,7 +490,9 @@ def _daily_batch(db, daily, digests, day) -> list[DayCheck]:
         failures.append(
             f"digest active_hours {digest.active_hours} vs summary {summary.active_hours}"
         )
-    if not digest.highlights:
+    # The digest's rule (``DigestGenerator._work_highlights``): a day with
+    # recorded work, a task of a minute or more, has a highlight.
+    if task_minutes > 0 and not digest.highlights:
         failures.append("digest has no highlights")
     if task_minutes <= 0:
         failures.append("task durations sum to 0 minutes")

@@ -23,12 +23,24 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# A day's work highlights: its longest tasks, and the apps it took most
+# time in (``DigestGenerator._work_highlights``).
+TOP_TASKS = 3
+TOP_APPS = 3
+
+
+def _sentence(text: str) -> str:
+    """*text* with its first letter upper-cased and a full stop."""
+    return text[:1].upper() + text[1:] + "."
+
 
 @dataclass
 class DigestHighlight:
     """A notable event from the day."""
 
-    type: str  # "new_procedure", "trust_suggestion", "stale_alert", "pattern_detected", "milestone"
+    # "new_procedure", "trust_suggestion", "stale_alert", "pattern_detected",
+    # "milestone", "top_task", "day_overview"
+    type: str
     title: str
     detail: str
     priority: int  # 1 (high) to 3 (low)
@@ -286,7 +298,89 @@ class DigestGenerator:
                 )
             )
 
+        highlights += self._work_highlights(date, tasks, summary_data)
+
         return highlights
+
+    def _work_highlights(
+        self, date: str, tasks: list[dict], summary_data: dict,
+    ) -> list[DigestHighlight]:
+        """What the day's work was, from the day's own summary: its top
+        tasks by time and an overview of the sessions and apps.
+
+        Every day with recorded work (a task of at least one minute) gets
+        them, however short the day: the digest's summary line and Tasks
+        section already report that work, and what counts as a task is the
+        daily processor's segmentation, not a second cut-off here.  A day
+        whose tasks all last zero minutes has no recorded work and gets
+        none.  Nothing is inferred: labels are the tasks' own intents (or
+        their apps when the annotator gave no intent), minutes and apps are
+        the summary's."""
+        worked = [t for t in tasks if (t.get("duration_minutes") or 0) > 0]
+        if not worked:
+            return []
+
+        # Tasks with the same label are one piece of work split by an app
+        # switch or a pause: their minutes add up.
+        by_label: dict[str, dict] = {}
+        for task in worked:
+            apps = [a for a in task.get("apps") or [] if a]
+            label = (
+                (task.get("intent") or task.get("description") or "").strip()
+                or (f"Work in {', '.join(apps)}" if apps else "Unlabelled task")
+            )
+            entry = by_label.setdefault(label, {"minutes": 0, "apps": []})
+            entry["minutes"] += task["duration_minutes"]
+            entry["apps"] += [a for a in apps if a not in entry["apps"]]
+        # Most minutes first; ties keep the day's order (sorted is stable).
+        top = sorted(by_label.items(), key=lambda kv: -kv[1]["minutes"])[:TOP_TASKS]
+
+        out = []
+        for label, entry in top:
+            minutes = entry["minutes"]
+            where = f" in {', '.join(entry['apps'])}" if entry["apps"] else ""
+            out.append(DigestHighlight(
+                type="top_task",
+                title=f"Top task: {label}",
+                detail=f"{minutes} min{where}.",
+                priority=3,
+            ))
+
+        # Across all the day's tasks, as the summary line counts them.
+        total = sum(t["duration_minutes"] for t in worked)
+        title = f"{total} min of work across {len(tasks)} task{'s' if len(tasks) != 1 else ''}"
+        details = []
+        sessions = self._session_count(date)
+        if sessions:
+            details.append(f"{sessions} work session{'s' if sessions != 1 else ''}")
+        apps = [
+            f"{a['app']} ({a['minutes']} min)"
+            for a in summary_data.get("top_apps") or []
+            if isinstance(a, dict) and a.get("app") and (a.get("minutes") or 0) > 0
+        ][:TOP_APPS]
+        if apps:
+            details.append(f"most time in {', '.join(apps)}")
+        out.append(DigestHighlight(
+            type="day_overview",
+            title=title,
+            detail=_sentence("; ".join(details)) if details else "",
+            priority=3,
+        ))
+        return out
+
+    def _session_count(self, date: str) -> int:
+        """With the worker DB: the work sessions (workflow observations)
+        that started on the local *date*."""
+        if self._db is None:
+            return 0
+        try:
+            return sum(
+                1 for obs in self._db.get_workflow_observations()
+                if obs.get("started_local_date") == date
+            )
+        except Exception:
+            logger.debug("Work sessions unavailable for the digest", exc_info=True)
+            return 0
 
     def _workflow_highlights(self, date: str) -> list[DigestHighlight]:
         """One highlight per recurring workflow observed on the local *date*,
