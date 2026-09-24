@@ -94,7 +94,7 @@ def test_auto_approved_draft_reaches_no_agent_until_approved_for_agents(
     openclaw = run.worker.sops_dir
     exported = wm._focus_v2_export(
         sop_templates=[draft], title=draft["title"], inference_time=0.0,
-        **run.worker._export_kwargs(),
+        **run.worker.export_kwargs(),
     )
 
     assert exported == 0

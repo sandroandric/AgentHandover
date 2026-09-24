@@ -268,23 +268,26 @@ class WorkerDB:
         )
         return self._rows_to_dicts(cur.fetchall())
 
-    def expire_annotation_backlog(self, max_age_hours: float = 24.0) -> list[dict]:
+    def expire_annotation_backlog(
+        self, max_age_hours: float = 24.0, *, now: datetime | None = None,
+    ) -> list[dict]:
         """Give up on passive frames that waited too long for annotation.
 
         Pending rows outside any focus session and older than
-        *max_age_hours* are marked ``skipped`` (the passive loop takes the
-        oldest first, so an old backlog would otherwise hold back today's
-        frames).  Returns the expired rows so their screenshots can be
-        deleted.
+        *max_age_hours* before *now* (aware; default the current time) are
+        marked ``skipped`` (the passive loop takes the oldest first, so an
+        old backlog would otherwise hold back today's frames).  Returns the
+        expired rows so their screenshots can be deleted.
         """
+        now_utc = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
         where = (
             "annotation_status = 'pending' "
             "AND json_extract(metadata_json, '$.focus_session_id') IS NULL "
-            "AND julianday(timestamp) < julianday('now') - ? / 24.0"
+            "AND julianday(timestamp) < julianday(?) - ? / 24.0"
         )
         rows = self._rows_to_dicts(self._conn.execute(
             f"SELECT id, metadata_json, artifact_ids_json FROM events WHERE {where}",
-            (max_age_hours,),
+            (now_utc.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3], max_age_hours),
         ).fetchall())
         if not rows:
             return []

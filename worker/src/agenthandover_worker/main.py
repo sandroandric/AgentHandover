@@ -8,7 +8,6 @@ VLM fallback enqueuing, SOP induction, formatting, and export.
 from __future__ import annotations
 
 import argparse
-import dataclasses
 import json
 import logging
 import os
@@ -20,11 +19,10 @@ import time
 import uuid
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 
 from agenthandover_worker import run_signals
-from agenthandover_worker import trigger_spool
 from agenthandover_worker import workflow_mining
 from agenthandover_worker.clipboard_linker import ClipboardLinker
 from agenthandover_worker.event_helpers import focused_field, parse_json_field
@@ -35,39 +33,31 @@ from agenthandover_worker.episode_builder import EpisodeBuilder
 from agenthandover_worker.evidence_tracker import ObservationEvidence, append_observation
 from agenthandover_worker.exporter import IndexGenerator
 from agenthandover_worker.focus_processor import FocusProcessor, recorded_observations
-from agenthandover_worker.frame_differ import DiffConfig, FrameDiffer
+from agenthandover_worker.frame_differ import FrameDiffer
 from agenthandover_worker.inference_runner import (
-    P0, P1, P2, STATE_LOCK, InferenceRunner, model_wait, model_work,
+    P2, InferenceRunner, model_wait, model_work,
 )
 from agenthandover_worker.negative_demo import NegativeDemoPruner
 from agenthandover_worker.model_profiles import migrate_vlm_file
-from agenthandover_worker.model_scheduler import ModelScheduler
-from agenthandover_worker.ollama import OllamaClient, OllamaError
 from agenthandover_worker.ops_telemetry import COMPUTE, MODEL_USAGE
 from agenthandover_worker.export_adapter import SOPExportAdapter
 from agenthandover_worker.openclaw_writer import OpenClawWriter
 from agenthandover_worker.annotation_cache import AnnotationCache
 from agenthandover_worker.scene_annotator import (
-    AnnotationConfig,
     SceneAnnotator,
     page_for_event,
     skip_record,
 )
-from agenthandover_worker.sop_generator import SOPGenerator, SOPGeneratorConfig, _generate_slug
+from agenthandover_worker.sop_generator import SOPGenerator, _generate_slug
 from agenthandover_worker.sop_linter import lint_sop
-from agenthandover_worker.task_segmenter import TaskSegmenter, SegmenterConfig
+from agenthandover_worker.task_segmenter import TaskSegmenter
 from agenthandover_worker.scheduler import (
     AnnotationBudget,
-    IdleJobGate,
-    SchedulerConfig,
     charged_to,
 )
 from agenthandover_worker.translator import SemanticTranslator
 from agenthandover_worker.vlm_queue import VLMFallbackQueue, VLMJob
 from agenthandover_worker.loop_guard import (
-    ERROR_THRESHOLD,
-    EventRetryGuard,
-    error_backoff_seconds,
     interruptible_sleep,
 )
 
@@ -4132,10 +4122,267 @@ def _wait_for_db(db_path: Path, shutdown_flag: list[bool]) -> bool:
     return False
 
 
-def main(argv: list[str] | None = None) -> None:
-    """Worker entry-point: connect to DB, poll for work, run until shutdown."""
-    args = _parse_args(argv)
+def _setup_logging(args: argparse.Namespace) -> None:
+    """The rotating ``worker.log`` (plus stderr in a terminal)."""
+    if _platform.system() == "Darwin":
+        log_dir = Path.home() / "Library" / "Application Support" / "agenthandover" / "logs"
+    else:
+        log_dir = Path.home() / ".local" / "share" / "agenthandover" / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    logging.basicConfig(
+        level=getattr(logging, args.log_level),
+        handlers=_log_handlers(log_dir, stderr_is_tty=sys.stderr.isatty()),
+    )
 
+
+def _install_signal_handlers(shutdown_flag: list[bool]) -> Callable[[], None]:
+    """SIGINT and SIGTERM request a shutdown; returns the function that
+    puts the previous handlers back."""
+
+    def _handle_signal(signum: int, _frame: object) -> None:
+        logger.info("Received %s — requesting shutdown", signal.Signals(signum).name)
+        shutdown_flag[0] = True
+
+    previous = {
+        signum: signal.signal(signum, _handle_signal)
+        for signum in (signal.SIGINT, signal.SIGTERM)
+    }
+
+    def restore() -> None:
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
+
+    return restore
+
+
+def _llm_overrides(args: argparse.Namespace) -> dict:
+    """The command line's ``[llm]`` overrides."""
+    return {
+        key: value
+        for key, value in (
+            ("enhance_sops", args.enhance_sops),
+            ("model", args.llm_model),
+            ("max_enhancements_per_day", args.max_enhancements_per_day),
+        )
+        if value is not None
+    }
+
+
+def _log_model_profiles(vlm_cfg) -> None:
+    """Warn when a Gemma 4 model meets an Ollama too old for it, and log the
+    active model profiles."""
+    try:
+        from agenthandover_worker.model_profiles import (
+            MINIMUM_OLLAMA_VERSION_FOR_GEMMA4, get_profile, ollama_supports_gemma4,
+        )
+
+        ann_model = vlm_cfg.annotation_model
+        sop_model = vlm_cfg.sop_model
+        uses_gemma = "gemma4" in ann_model or "gemma4" in sop_model
+        if uses_gemma and not ollama_supports_gemma4(vlm_cfg.ollama_host):
+            logger.warning(
+                "Gemma 4 QAT models require Ollama %s+. "
+                "Current version is too old (pulls will fail with HTTP 412). "
+                "Update the official app: https://ollama.com/download "
+                "(or: brew install --cask ollama-app). "
+                "Note: the Homebrew 'ollama' formula does not bundle the "
+                "GGUF runner — use the official app instead.",
+                MINIMUM_OLLAMA_VERSION_FOR_GEMMA4,
+            )
+        logger.info(
+            "Model profiles: annotation=%s (think=%s), SOP=%s (think=%s)",
+            ann_model, get_profile(ann_model).ann_think,
+            sop_model, get_profile(sop_model).sop_think,
+        )
+    except Exception:
+        logger.debug("Model profile detection failed", exc_info=True)
+
+
+def _start_vlm_worker(vlm_cfg) -> tuple:
+    """The fallback VLM worker, remote (a cloud API) or local (a detected
+    backend): ``(worker or None, available)``."""
+    from agenthandover_worker.vlm_worker import VLMBackend, VLMConfig, VLMWorker
+
+    provider = vlm_cfg.provider
+    if vlm_cfg.mode == "remote" and provider:
+        logger.info(
+            "VLM mode: remote (provider=%s). "
+            "⚠️  Screenshots will be sent to %s cloud API for analysis.",
+            provider,
+            provider,
+        )
+        remote_backend = {
+            "openai": VLMBackend.OPENAI_COMPAT,
+            "anthropic": VLMBackend.ANTHROPIC,
+            "google": VLMBackend.GOOGLE_GENAI,
+        }.get(provider)
+        if remote_backend is None:
+            logger.error("Unknown VLM provider: %s", provider)
+            return None, False
+        try:
+            api_key_env = vlm_cfg.api_key_env
+            # The env var (shell profiles), else the macOS Keychain (set by
+            # the app's onboarding).
+            api_key_value = os.environ.get(api_key_env, "") if api_key_env else ""
+            if not api_key_value:
+                api_key_value = _read_keychain_api_key(provider)
+                if api_key_value:
+                    logger.info(
+                        "Resolved API key from macOS Keychain "
+                        "(set by onboarding) for provider=%s",
+                        provider,
+                    )
+            worker = VLMWorker(config=VLMConfig(
+                backend=remote_backend,
+                mode="remote",
+                provider=provider,
+                remote_model=vlm_cfg.model or None,
+                api_key=api_key_value or None,
+                api_key_env=api_key_env or None,
+            ))
+            logger.info(
+                "VLM worker initialized: remote/%s/%s", provider, vlm_cfg.model or "(default)",
+            )
+            return worker, True
+        except Exception:
+            logger.warning("Failed to initialize remote VLM worker", exc_info=True)
+            return None, False
+
+    from agenthandover_worker.setup_vlm import check_vlm_available
+
+    vlm_status = check_vlm_available()
+    if not any(vlm_status.values()):
+        logger.info(
+            "VLM not installed. For better native app observation, run: agenthandover-setup-vlm"
+        )
+        return None, False
+    logger.info("VLM backend(s) detected — attempting initialization")
+    try:
+        backend_type = None
+        if vlm_status["ollama"]:
+            backend_type = VLMBackend.OLLAMA
+        elif vlm_status.get("openai_compat"):
+            base_url = os.environ.get("AGENTHANDOVER_VLM_BASE_URL", "")
+            local_prefixes = (
+                "http://localhost", "http://127.0.0.1",
+                "https://localhost", "https://127.0.0.1",
+                "http://[::1]",
+            )
+            if base_url and any(base_url.startswith(p) for p in local_prefixes):
+                backend_type = VLMBackend.OPENAI_COMPAT
+            else:
+                logger.warning(
+                    "OpenAI-compat backend skipped: deny_network_egress is "
+                    "enforced by default. Set AGENTHANDOVER_VLM_BASE_URL to a "
+                    "local server (e.g. http://localhost:8000) to use it."
+                )
+        if backend_type is None:
+            logger.warning(
+                "VLM backend(s) detected but none usable (check config). "
+                "VLM features disabled."
+            )
+            return None, False
+        # [vlm] model, else the annotation model (the config loader fills
+        # that from the tier table when unset).
+        config_model = vlm_cfg.model or vlm_cfg.annotation_model
+        vlm_kwargs: dict = {"backend": backend_type}
+        if config_model:
+            vlm_kwargs["model_name"] = config_model
+        worker = VLMWorker(config=VLMConfig(**vlm_kwargs))
+        logger.info(
+            "VLM worker initialized (%s, model=%s) — enhanced native app observation enabled",
+            backend_type.value,
+            config_model or "(default)",
+        )
+        return worker, True
+    except Exception:
+        logger.warning("Failed to initialize VLM worker", exc_info=True)
+        return None, False
+
+
+def _start_query_api(ctx) -> "object | None":
+    """The localhost query API server, when ``[knowledge]
+    query_api_enabled``; None otherwise or when it could not start."""
+    try:
+        if not ctx.cfg.knowledge.query_api_enabled:
+            logger.info("Query API server disabled (knowledge.query_api_enabled = false)")
+            return None
+        from agenthandover_worker.query_api import TOKEN_FILE, QueryAPIServer
+
+        port = ctx.cfg.knowledge.query_api_port
+        server = QueryAPIServer(
+            knowledge_base=ctx.knowledge_base,
+            port=port,
+            activity_searcher=ctx.activity_searcher,
+            execution_monitor=ctx.execution_monitor,
+            procedure_verifier=ctx.procedure_verifier,
+            bundle_compiler=ctx.bundle_compiler,
+            procedure_curator=ctx.procedure_curator,
+            runtime_validator=ctx.runtime_validator,
+            ops_telemetry=ctx.ops_telemetry,
+            vector_kb=ctx.vector_kb,
+            token_path=_status_dir() / TOKEN_FILE,
+        )
+        server.start()
+        logger.info(
+            "Query API server started on 127.0.0.1:%d (localhost-only; POST "
+            "requires the X-AgentHandover-Token header from %s). "
+            "Set knowledge.query_api_enabled = false in config.toml to disable.",
+            port, TOKEN_FILE,
+        )
+        return server
+    except Exception:
+        logger.debug("Query API server not started", exc_info=True)
+        return None
+
+
+def _startup_embedding_job(knowledge_base, vector_kb) -> None:
+    """P2: embed the knowledge base's procedures (idempotent: skips
+    unchanged ones)."""
+    try:
+        embedded = 0
+        for proc in knowledge_base.list_procedures():
+            full = knowledge_base.get_procedure(proc.get("id", ""))
+            if full:
+                _embed_procedure(vector_kb, full)
+                embedded += 1
+        if embedded:
+            logger.info("Embedded %d existing procedure(s) in vector KB", embedded)
+    except Exception:
+        logger.debug("Startup procedure embedding failed", exc_info=True)
+
+
+def _shutdown(ctx, pid_file: Path, restore_signals: Callable[[], None], *, once: bool) -> None:
+    """Stop the inference thread, the query API and the stores; remove the
+    PID file and (after a loop, unless --once) the status file."""
+    if ctx is not None:
+        # A model call in progress cannot be interrupted: the inference
+        # thread is a daemon thread and does not hold up the exit.
+        if ctx.runner is not None and not ctx.runner.stop():
+            logger.info("Inference job still running at shutdown; not waiting for it")
+        if ctx.query_api_server is not None:
+            try:
+                ctx.query_api_server.stop()
+                logger.info("Query API server stopped")
+            except Exception:
+                pass
+        ctx.close()
+    try:
+        pid_file.unlink(missing_ok=True)
+    except Exception:
+        pass
+    # A --once run keeps worker-status.json: it records that iteration,
+    # and readers treat it as not running because the PID is gone.
+    if ctx is not None and not once:
+        _remove_worker_status()
+    restore_signals()
+
+
+def main(argv: list[str] | None = None) -> None:
+    """Worker entry-point: wait for the daemon's database, build the
+    context (``context.py``), then tick (``stages.tick``) until shutdown;
+    model work runs on the inference thread."""
+    args = _parse_args(argv)
     if args.backfill_procedures:
         # One-shot maintenance: no PID file, status file or DB, so it is
         # safe to run while the worker service is running.
@@ -4146,1709 +4393,76 @@ def main(argv: list[str] | None = None) -> None:
         print(f"Backfilled {count} procedure(s) in {args.knowledge_dir}")
         return
 
-    if _platform.system() == "Darwin":
-        log_dir = Path.home() / "Library" / "Application Support" / "agenthandover" / "logs"
-    else:
-        log_dir = Path.home() / ".local" / "share" / "agenthandover" / "logs"
-    log_dir.mkdir(parents=True, exist_ok=True)
-
-    logging.basicConfig(
-        level=getattr(logging, args.log_level),
-        handlers=_log_handlers(log_dir, stderr_is_tty=sys.stderr.isatty()),
-    )
-
-    # Signal handling — set up BEFORE the DB retry loop so we can
-    # exit cleanly if the user hits Ctrl-C while waiting.
+    _setup_logging(args)
+    # Before the DB wait, so Ctrl-C while waiting exits cleanly.
     shutdown_flag: list[bool] = [False]
-
-    def _handle_signal(signum: int, _frame: object) -> None:
-        sig_name = signal.Signals(signum).name
-        logger.info("Received %s — requesting shutdown", sig_name)
-        shutdown_flag[0] = True
-
-    previous_signal_handlers = {
-        signum: signal.signal(signum, _handle_signal)
-        for signum in (signal.SIGINT, signal.SIGTERM)
-    }
-
-    def _restore_signal_handlers() -> None:
-        for signum, handler in previous_signal_handlers.items():
-            signal.signal(signum, handler)
-
-    # Write PID file
-    pid_dir = _status_dir()
-    pid_dir.mkdir(parents=True, exist_ok=True)
-    pid_file = pid_dir / "worker.pid"
+    restore_signals = _install_signal_handlers(shutdown_flag)
+    pid_file = _status_dir() / "worker.pid"
+    pid_file.parent.mkdir(parents=True, exist_ok=True)
     pid_file.write_text(str(os.getpid()))
     logger.info("PID file written: %s", pid_file)
-
     logger.info("Starting agenthandover-worker v%s", _WORKER_VERSION)
     logger.info("Database path: %s", args.db_path)
     logger.info("Poll interval: %.1fs", args.poll_interval)
-
-    # Write an early "starting" status file so the CLI and menu bar app
-    # can see the worker is alive before heavy initialization finishes.
-    # Previously the first status write happened ~700 lines later (after
-    # DB connect, module imports, knowledge base init, vector KB, Ollama
-    # health checks) — if anything failed before that point, no status
-    # file was ever written and the CLI reported "not running" even though
-    # the Python process was alive.  hikoae reported this exact symptom
-    # on v0.2.5: launchctl showed a running process but no
-    # worker-status.json appeared.
-    started_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    # An early "starting" status, so the CLI and the app see the worker is
+    # alive before the heavy initialization finishes (or fails).
     _write_worker_status(
-        started_at=started_at,
-        events_processed_today=0,
-        sops_generated=0,
-        last_pipeline_duration_ms=None,
-        consecutive_errors=0,
-        vlm_available=False,
-        vlm_mode="starting",
+        started_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        events_processed_today=0, sops_generated=0, last_pipeline_duration_ms=None,
+        consecutive_errors=0, vlm_available=False, vlm_mode="starting",
     )
-
-    # Task 1: Retry loop — wait for the daemon to create the DB
     if not _wait_for_db(args.db_path, shutdown_flag):
-        # Clean up PID file before exiting
-        try:
-            pid_file.unlink(missing_ok=True)
-        except Exception:
-            pass
-        _restore_signal_handlers()
+        _shutdown(None, pid_file, restore_signals, once=args.once)
         sys.exit(1)
-
     if shutdown_flag[0]:
-        try:
-            pid_file.unlink(missing_ok=True)
-        except Exception:
-            pass
-        _restore_signal_handlers()
+        _shutdown(None, pid_file, restore_signals, once=args.once)
         return
 
-    # Initialize knowledge base and Phase 2+ modules
-    from agenthandover_worker.knowledge_base import KnowledgeBase
-    from agenthandover_worker.evidence_tracker import EvidenceTracker
-    from agenthandover_worker.procedure_writer import ProcedureWriter
-    from agenthandover_worker.knowledge_export_adapter import KnowledgeBaseExportAdapter
-    from agenthandover_worker.privacy_zones import PrivacyZoneChecker, PrivacyZoneConfig
-    from agenthandover_worker.daily_processor import DailyBatchProcessor
-    from agenthandover_worker.user_policy import UserPolicy
-    from agenthandover_worker.activity_classifier import ActivityClassifier
-    from agenthandover_worker.staleness_detector import StalenessDetector
-    from agenthandover_worker.profile_builder import ProfileBuilder
-    from agenthandover_worker.pattern_detector import PatternDetector
-    from agenthandover_worker.constraint_manager import ConstraintManager
-    from agenthandover_worker.execution_monitor import ExecutionMonitor
-    from agenthandover_worker.correction_detector import CorrectionDetector
-    from agenthandover_worker.trust_advisor import TrustAdvisor
-    from agenthandover_worker.session_linker import SessionLinker
-    from agenthandover_worker.daily_digest import DigestGenerator
-    from agenthandover_worker.procedure_matcher import ProcedureMatcher
-    from agenthandover_worker.continuity_tracker import ContinuityTracker
-    from agenthandover_worker.lifecycle_manager import LifecycleManager
-    from agenthandover_worker.procedure_curator import ProcedureCurator
-    from agenthandover_worker.runtime_validator import RuntimeValidator
-    from agenthandover_worker.config_validator import ConfigValidator
-    from agenthandover_worker.ops_telemetry import OpsTelemetry, PipelineMetrics
+    from agenthandover_worker import stages
+    from agenthandover_worker.context import build_context, start
+    from agenthandover_worker.stages import export
 
-    knowledge_base = KnowledgeBase(root=args.knowledge_dir)
-    knowledge_base.ensure_structure()
-
-    # A config still on a tier's earlier default models moves to the
-    # tier's current ones (the installer does this too; this covers
-    # upgrades by other means), then one read of config.toml for the run.
+    # A config still on a tier's earlier default models moves to the tier's
+    # current ones, then one read of config.toml for the run.
     _migrate_vlm_config()
     cfg = load_config()
-    vlm_cfg = cfg.vlm
     if args.adapter is None:
         args.adapter = cfg.export.adapter
     logger.info("Export adapter: %s", args.adapter)
-
-    # Config validation
+    ctx = build_context(
+        cfg, db_path=args.db_path, knowledge_dir=args.knowledge_dir,
+        sops_dir=args.sops_dir, adapter=args.adapter,
+        poll_interval=args.poll_interval, json_export=args.json_export,
+        llm_overrides=_llm_overrides(args),
+    )
     try:
-        for issue in ConfigValidator().validate(cfg.raw):
-            log_fn = logger.error if issue.severity == "error" else logger.warning
-            log_fn("Config [%s.%s]: %s", issue.section, issue.key, issue.message)
-    except Exception:
-        logger.debug("Config validation skipped", exc_info=True)
-
-    ops_telemetry = OpsTelemetry(knowledge_base)
-
-    features = cfg.features
-    logger.info(
-        "Feature flags: %s",
-        [k for k, v in vars(features).items() if not v] or "all enabled",
-    )
-
-    # Shared LLM reasoning utility — must be created before modules that use it.
-    # VLMFallbackQueue is imported at module level (line 40) — do NOT re-import
-    # it here, that shadows the module-level binding and makes Python treat
-    # VLMFallbackQueue as local to this whole main() function (same class of
-    # bug as the FocusProcessor regression caught by hikoae in issue #1).
-    # LLMReasoner stays as a local import because it's not at module level —
-    # the worker/llm_reasoning module is deliberately loaded lazily here.
-    vlm_queue = VLMFallbackQueue()
-    from agenthandover_worker.llm_reasoning import (
-        LLMReasoner, ReasoningConfig, annotation_reasoner,
-    )
-    llm_reasoner = LLMReasoner(
-        config=ReasoningConfig(
-            model=vlm_cfg.reasoner_model, ollama_host=vlm_cfg.ollama_host,
-        ),
-        vlm_queue=vlm_queue,
-    )
-
-    # Initialize vector KB for semantic search and embedding storage
-    vector_kb = None
-    try:
-        from agenthandover_worker.vector_kb import VectorKB, VectorKBConfig
-        vkb_config = VectorKBConfig(
-            embedding_model=cfg.embedding.model,
-            ollama_host=vlm_cfg.ollama_host,
-            retention_days=cfg.embedding.retention_days,
-            max_rows=cfg.embedding.max_rows,
-        )
-        vector_kb = VectorKB(args.db_path, vkb_config)
-        # Health check: verify embedding model is available
-        try:
-            test_emb = vector_kb.compute_embeddings(["health check"])
-            if test_emb and test_emb[0]:
-                logger.info(
-                    "Vector KB ready (model=%s, dim=%d, vectors=%d)",
-                    vkb_config.embedding_model, len(test_emb[0]),
-                    vector_kb.count(),
-                )
-            else:
-                logger.warning(
-                    "Vector KB model '%s' returned empty embeddings — "
-                    "run 'ollama pull %s' to enable semantic search",
-                    vkb_config.embedding_model, vkb_config.embedding_model,
-                )
-                vector_kb.close()
-                vector_kb = None
-        except (ConnectionError, OllamaError):
-            logger.warning(
-                "Vector KB model '%s' not available — "
-                "run 'ollama pull %s' to enable semantic search",
-                vkb_config.embedding_model, vkb_config.embedding_model,
-            )
-            vector_kb.close()
-            vector_kb = None
-    except Exception:
-        logger.debug("Vector KB initialization failed — semantic search disabled", exc_info=True)
-
-    evidence_tracker = EvidenceTracker(knowledge_base=knowledge_base)
-    lifecycle_manager = LifecycleManager(knowledge_base)
-    procedure_writer = ProcedureWriter(kb=knowledge_base, evidence=evidence_tracker, lifecycle_manager=lifecycle_manager, vector_kb=vector_kb, llm_reasoner=llm_reasoner)
-    kb_export_adapter = KnowledgeBaseExportAdapter(knowledge_base)
-    # Build PrivacyZoneConfig from user's config.toml [privacy.zones]
-    _pz_cfg = PrivacyZoneConfig()
-    try:
-        _pz_raw = cfg.privacy_zones
-        if _pz_raw:
-            _pz_cfg = PrivacyZoneConfig.from_zones(_pz_raw)
-            logger.info(
-                "Privacy zones loaded: %d blocked, %d metadata_only, %d blocked_urls",
-                len(_pz_cfg.blocked), len(_pz_cfg.metadata_only), len(_pz_cfg.blocked_urls),
-            )
-    except Exception:
-        logger.debug("Privacy zone config parsing failed, using defaults", exc_info=True)
-    privacy_checker = PrivacyZoneChecker(config=_pz_cfg)
-    staleness_detector = StalenessDetector(knowledge_base)
-    profile_builder = ProfileBuilder(knowledge_base)
-    activity_classifier = None
-    if features.activity_classification:
-        user_policy = UserPolicy(knowledge_base)
-        activity_classifier = ActivityClassifier(
-            profile=knowledge_base.get_profile(),
-            policy=user_policy,
-            # It classifies frames in the annotation phase: annotation model.
-            llm_reasoner=annotation_reasoner(
-                vlm_cfg.annotation_model, vlm_cfg.ollama_host, vlm_queue,
-            ),
-        )
-    pattern_detector = PatternDetector(knowledge_base)
-    constraint_manager = ConstraintManager(knowledge_base)
-
-    # Phase 4: Execution monitoring, correction detection, trust advisor
-    runtime_validator = None
-    if features.runtime_validation:
-        runtime_validator = RuntimeValidator(knowledge_base)
-    execution_monitor = ExecutionMonitor(knowledge_base)
-    correction_detector = CorrectionDetector(knowledge_base, llm_reasoner=llm_reasoner)
-    trust_advisor = TrustAdvisor(knowledge_base, execution_monitor=execution_monitor)
-    session_linker = SessionLinker(knowledge_base, llm_reasoner=llm_reasoner, vector_kb=vector_kb)
-    procedure_matcher = ProcedureMatcher(kb=knowledge_base, vector_kb=vector_kb)
-    daily_processor = DailyBatchProcessor(
-        knowledge_base=knowledge_base, matcher=procedure_matcher,
-    )
-    continuity_tracker = None
-    if features.continuity_tracking:
-        continuity_tracker = ContinuityTracker(
-            kb=knowledge_base,
-            matcher=procedure_matcher,
-        )
-
-    # Phase 4: Variant detection and evidence normalization
-    from agenthandover_worker.variant_detector import VariantDetector
-    from agenthandover_worker.evidence_normalizer import EvidenceNormalizer
-
-    variant_detector = VariantDetector()
-    evidence_normalizer = EvidenceNormalizer(variant_detector=variant_detector)
-
-    # A focus recording still "recording" after this long is closed as stale.
-    focus_max_session_hours = cfg.focus.max_session_hours
-
-    # Behavioral synthesis + evidence extraction
-    from agenthandover_worker.behavioral_synthesizer import BehavioralSynthesizer, SynthesizerConfig
-    _synth_model = vlm_cfg.sop_model
-    _synth_host = vlm_cfg.ollama_host
-    behavioral_synthesizer = BehavioralSynthesizer(
-        config=SynthesizerConfig(model=_synth_model, ollama_host=_synth_host),
-        vlm_queue=vlm_queue,
-        knowledge_base=knowledge_base,
-    )
-
-    evidence_extractor = None  # Initialized after DB is available
-
-    # Phase 5: Curation orchestrator
-    procedure_curator = None
-    quality_judge = None
-    if features.curation:
-        from agenthandover_worker.quality_judge import QualityJudge
-        quality_judge = QualityJudge(llm_reasoner)
-        procedure_curator = ProcedureCurator(
-            kb=knowledge_base,
-            staleness_detector=staleness_detector,
-            trust_advisor=trust_advisor,
-            lifecycle_manager=lifecycle_manager,
-            evidence_normalizer=evidence_normalizer,
-            quality_judge=quality_judge,
-            llm_reasoner=llm_reasoner,
-        )
-
-    logger.info("Knowledge base initialized: %s", args.knowledge_dir)
-
-    # Check Ollama compatibility and log the active model profiles
-    try:
-        from agenthandover_worker.model_profiles import (
-            MINIMUM_OLLAMA_VERSION_FOR_GEMMA4, get_profile, ollama_supports_gemma4,
-        )
-
-        # Warn if using Gemma 4 but Ollama is too old
-        ann_model = vlm_cfg.annotation_model
-        sop_model = vlm_cfg.sop_model
-        uses_gemma = "gemma4" in ann_model or "gemma4" in sop_model
-        if uses_gemma:
-            ollama_host = vlm_cfg.ollama_host
-            if not ollama_supports_gemma4(ollama_host):
-                logger.warning(
-                    "Gemma 4 QAT models require Ollama %s+. "
-                    "Current version is too old (pulls will fail with HTTP 412). "
-                    "Update the official app: https://ollama.com/download "
-                    "(or: brew install --cask ollama-app). "
-                    "Note: the Homebrew 'ollama' formula does not bundle the "
-                    "GGUF runner — use the official app instead.",
-                    MINIMUM_OLLAMA_VERSION_FOR_GEMMA4,
-                )
-
-        # Log active model profiles
-        ann_profile = get_profile(ann_model)
-        sop_profile = get_profile(sop_model)
-        logger.info(
-            "Model profiles: annotation=%s (think=%s), SOP=%s (think=%s)",
-            ann_model, ann_profile.ann_think,
-            sop_model, sop_profile.sop_think,
-        )
-    except Exception:
-        logger.debug("Model profile detection failed", exc_info=True)
-
-    # Initialize pipeline components
-    episode_builder = EpisodeBuilder()
-    clipboard_linker = ClipboardLinker()
-    pruner = NegativeDemoPruner()
-    translator = SemanticTranslator()
-    scorer = ConfidenceScorer()
-    # vlm_queue + llm_reasoner already created above
-    index_generator = IndexGenerator()
-    # Create export adapter based on config
-    skill_md_writer = None
-    claude_skill_writer = None
-    if args.adapter == "generic":
-        from agenthandover_worker.generic_writer import GenericWriter
-        sop_writer = GenericWriter(output_dir=args.sops_dir, json_export=args.json_export)
-    elif args.adapter == "skill-md":
-        from agenthandover_worker.skill_md_writer import SkillMdWriter
-        sop_writer = SkillMdWriter(workspace_dir=args.sops_dir.parent.parent)
-    elif args.adapter == "claude-skill":
-        from agenthandover_worker.claude_skill_writer import ClaudeSkillWriter
-        sop_writer = ClaudeSkillWriter(skills_dir=cfg.export.skills_dir)
-    elif args.adapter == "all":
-        sop_writer = OpenClawWriter(workspace_dir=args.sops_dir.parent.parent)
-        from agenthandover_worker.skill_md_writer import SkillMdWriter
-        skill_md_writer = SkillMdWriter(workspace_dir=args.sops_dir.parent.parent)
-        from agenthandover_worker.claude_skill_writer import ClaudeSkillWriter
-        claude_skill_writer = ClaudeSkillWriter(skills_dir=cfg.export.skills_dir)
-    else:
-        sop_writer = OpenClawWriter(workspace_dir=args.sops_dir.parent.parent)
-
-    # VLM initialization — supports local and remote modes
-    from agenthandover_worker.vlm_worker import VLMWorker, VLMConfig, VLMBackend
-    vlm_worker = None
-    vlm_available = False
-    vlm_mode_str = vlm_cfg.mode
-    vlm_provider_str = vlm_cfg.provider
-
-    if vlm_mode_str == "remote" and vlm_provider_str:
-        # --- Remote mode: use cloud API ---
-        logger.info(
-            "VLM mode: remote (provider=%s). "
-            "⚠️  Screenshots will be sent to %s cloud API for analysis.",
-            vlm_provider_str,
-            vlm_provider_str,
-        )
-        _provider_to_backend = {
-            "openai": VLMBackend.OPENAI_COMPAT,
-            "anthropic": VLMBackend.ANTHROPIC,
-            "google": VLMBackend.GOOGLE_GENAI,
-        }
-        remote_backend = _provider_to_backend.get(vlm_provider_str)
-        if remote_backend is None:
-            logger.error("Unknown VLM provider: %s", vlm_provider_str)
-        else:
-            try:
-                remote_model = vlm_cfg.model
-                api_key_env = vlm_cfg.api_key_env
-                # Resolve the actual API key:
-                # 1. Check env var (standard path, works with shell profiles)
-                # 2. Fall back to macOS Keychain (set by SwiftUI onboarding)
-                api_key_value = os.environ.get(api_key_env, "") if api_key_env else ""
-                if not api_key_value and vlm_provider_str:
-                    api_key_value = _read_keychain_api_key(vlm_provider_str)
-                    if api_key_value:
-                        logger.info(
-                            "Resolved API key from macOS Keychain "
-                            "(set by onboarding) for provider=%s",
-                            vlm_provider_str,
-                        )
-                vlm_config = VLMConfig(
-                    backend=remote_backend,
-                    mode="remote",
-                    provider=vlm_provider_str,
-                    remote_model=remote_model or None,
-                    api_key=api_key_value or None,
-                    api_key_env=api_key_env or None,
-                )
-                vlm_worker = VLMWorker(config=vlm_config)
-                vlm_available = True
-                model_display = remote_model or "(default)"
-                logger.info(
-                    "VLM worker initialized: remote/%s/%s",
-                    vlm_provider_str,
-                    model_display,
-                )
-            except Exception:
-                logger.warning("Failed to initialize remote VLM worker", exc_info=True)
-    else:
-        # --- Local mode: existing detection chain ---
-        from agenthandover_worker.setup_vlm import check_vlm_available
-        vlm_status = check_vlm_available()
-        if any(vlm_status.values()):
-            logger.info("VLM backend(s) detected — attempting initialization")
-            try:
-                if vlm_status["ollama"]:
-                    backend_type = VLMBackend.OLLAMA
-                elif vlm_status.get("openai_compat"):
-                    base_url = os.environ.get("AGENTHANDOVER_VLM_BASE_URL", "")
-                    _local_prefixes = (
-                        "http://localhost", "http://127.0.0.1",
-                        "https://localhost", "https://127.0.0.1",
-                        "http://[::1]",
-                    )
-                    if base_url and any(base_url.startswith(p) for p in _local_prefixes):
-                        backend_type = VLMBackend.OPENAI_COMPAT
-                    else:
-                        logger.warning(
-                            "OpenAI-compat backend skipped: deny_network_egress is "
-                            "enforced by default. Set AGENTHANDOVER_VLM_BASE_URL to a "
-                            "local server (e.g. http://localhost:8000) to use it."
-                        )
-                        backend_type = None  # type: ignore[assignment]
-                else:
-                    backend_type = None  # type: ignore[assignment]
-                if backend_type is not None:
-                    # [vlm] model, else the annotation model (the config
-                    # loader fills that from the tier table when unset)
-                    config_model = vlm_cfg.model or vlm_cfg.annotation_model
-                    vlm_kwargs: dict = {"backend": backend_type}
-                    if config_model:
-                        vlm_kwargs["model_name"] = config_model
-                    vlm_worker = VLMWorker(config=VLMConfig(**vlm_kwargs))
-                    vlm_available = True
-                    model_display = config_model or "(default)"
-                    logger.info(
-                        "VLM worker initialized (%s, model=%s) — enhanced native app observation enabled",
-                        backend_type.value,
-                        model_display,
-                    )
-                else:
-                    logger.warning(
-                        "VLM backend(s) detected but none usable (check config). "
-                        "VLM features disabled."
-                    )
-            except Exception:
-                logger.warning("Failed to initialize VLM worker", exc_info=True)
-        else:
-            logger.info(
-                "VLM not installed. For better native app observation, run: agenthandover-setup-vlm"
-            )
-
-    # Initialize LLM-enhanced SOP descriptions
-    sop_enhancer = None
-    llm_config = dataclasses.asdict(cfg.llm)
-
-    # CLI args override config
-    if args.enhance_sops is not None:
-        llm_config["enhance_sops"] = args.enhance_sops
-    if args.llm_model is not None:
-        llm_config["model"] = args.llm_model
-    if args.max_enhancements_per_day is not None:
-        llm_config["max_enhancements_per_day"] = args.max_enhancements_per_day
-
-    if llm_config.get("enhance_sops", True):
-        try:
-            from agenthandover_worker.sop_enhancer import (
-                SOPEnhancer,
-                create_llm_backend,
-            )
-
-            # Build vlm config dict for create_llm_backend
-            vlm_cfg_dict = {
-                "mode": vlm_mode_str,
-                "provider": vlm_provider_str,
-                "model": vlm_cfg.model,
-                "api_key_env": vlm_cfg.api_key_env,
-            }
-            llm_backend = create_llm_backend(llm_config, vlm_cfg_dict)
-            if llm_backend is not None:
-                sop_enhancer = SOPEnhancer(
-                    backend=llm_backend,
-                    max_enhancements_per_day=int(
-                        llm_config.get("max_enhancements_per_day", 20)
-                    ),
-                )
-                logger.info("SOP enhancement enabled (LLM backend ready)")
-            else:
-                logger.info("SOP enhancement disabled (no LLM backend available)")
-        except Exception:
-            logger.debug("SOP enhancement unavailable", exc_info=True)
-    else:
-        logger.info("SOP enhancement disabled by config")
-
-    # Initialize v2 scene annotation pipeline
-    scene_annotator: SceneAnnotator | None = None
-    frame_differ: FrameDiffer | None = None
-    v2_annotation_enabled = vlm_cfg.annotation_enabled
-    screenshots_dir = _status_dir() / "screenshots"
-
-    focus_processor: FocusProcessor | None = None
-    task_segmenter: TaskSegmenter | None = None
-    sop_generator: SOPGenerator | None = None
-
-    annotation_cache: AnnotationCache | None = None
-    if v2_annotation_enabled:
-        annotation_cache = AnnotationCache(args.db_path)
-        ann_config = AnnotationConfig(
-            model=vlm_cfg.annotation_model,
-            ollama_host=vlm_cfg.ollama_host,
-            sliding_window_max_age_sec=vlm_cfg.sliding_window_max_age_sec,
-            timeout_seconds=vlm_cfg.annotation_timeout_seconds,
-        )
-        # Initialize image embedder (SigLIP via mlx-embeddings, optional)
-        # Only if user opted in via config.toml [embedding] image_embeddings = true
-        _image_embedder = None
-        if cfg.embedding.image_embeddings:
-            try:
-                from agenthandover_worker.vector_kb import ImageEmbedder
-                _image_embedder = ImageEmbedder()
-                if _image_embedder.available:
-                    logger.info("Image embedder enabled (SigLIP %dd)", _image_embedder.DIM)
-                else:
-                    logger.info("Image embeddings enabled but mlx-embeddings not installed")
-                    _image_embedder = None
-            except Exception:
-                logger.debug("Image embedder init failed", exc_info=True)
-        else:
-            logger.info("Image embeddings disabled (enable in config.toml [embedding] image_embeddings = true)")
-
-        scene_annotator = SceneAnnotator(
-            config=ann_config,
-            image_embedder=_image_embedder,
-            vector_kb=vector_kb,
-            cache=annotation_cache,
-        )
-        # Load the annotation model now (with keep_alive) so the first
-        # real frame meets a warm model.  A failure only logs and starts
-        # the transport backoff; annotation retries after it.
-        scene_annotator.preload()
-
-        diff_config = DiffConfig(
-            model=vlm_cfg.annotation_model,
-            ollama_host=vlm_cfg.ollama_host,
-        )
-        frame_differ = FrameDiffer(config=diff_config)
-
-        # SOP generator (4B thinking model) for focus session SOPs
-        sop_gen_config = SOPGeneratorConfig(
-            model=vlm_cfg.sop_model,
-            ollama_host=vlm_cfg.ollama_host,
-        )
-        sop_generator = SOPGenerator(config=sop_gen_config)
-
-        # Focus processor orchestrates: annotate → diff → generate SOP
-        focus_processor = FocusProcessor(
-            annotator=scene_annotator,
-            differ=frame_differ,
-            sop_generator=sop_generator,
-        )
-
-        # Task segmenter for passive discovery (CPU-only, no GPU)
-        seg_config = SegmenterConfig(
-            embedding_model=cfg.embedding.model,
-            ollama_host=vlm_cfg.ollama_host,
-        )
-        task_segmenter = TaskSegmenter(
-            config=seg_config,
-            llm_reasoner=llm_reasoner,
-            cluster_label_store=knowledge_base.root / "observations" / "cluster_labels.json",
-            vector_kb=vector_kb,
-        )
-
-        logger.info(
-            "v2 scene annotation pipeline enabled "
-            "(annotation=%s, sop=%s, window=%ds)",
-            vlm_cfg.annotation_model,
-            vlm_cfg.sop_model,
-            vlm_cfg.sliding_window_max_age_sec,
-        )
-    else:
-        logger.info("v2 scene annotation pipeline disabled by config")
-
-    # Initialize activity searcher for CLI search/recall commands
-    activity_searcher = None
-    try:
-        from agenthandover_worker.activity_search import ActivitySearcher
-        activity_searcher = ActivitySearcher(db_path=args.db_path)
-        logger.info("Activity searcher initialized")
-    except Exception:
-        logger.debug("Activity searcher not available", exc_info=True)
-
-    # Phase 3: Bundle compiler
-    from agenthandover_worker.bundle_compiler import BundleCompiler
-    bundle_adapters: dict[str, SOPExportAdapter] = {}
-    if sop_writer is not None:
-        bundle_adapters["openclaw"] = sop_writer
-    if skill_md_writer is not None:
-        bundle_adapters["skill_md"] = skill_md_writer
-    if claude_skill_writer is not None:
-        bundle_adapters["claude_skill"] = claude_skill_writer
-    from agenthandover_worker.procedure_verifier import ProcedureVerifier
-    procedure_verifier = ProcedureVerifier(knowledge_base, runtime_validator=runtime_validator)
-    bundle_compiler = BundleCompiler(
-        kb=knowledge_base,
-        lifecycle=lifecycle_manager,
-        verifier=procedure_verifier,
-        adapters=bundle_adapters,
-    )
-
-    # Phase 4: Start query API server (if enabled in config)
-    query_api_server = None
-    try:
-        if cfg.knowledge.query_api_enabled:
-            from agenthandover_worker.query_api import TOKEN_FILE, QueryAPIServer
-            _api_port = cfg.knowledge.query_api_port
-            query_api_server = QueryAPIServer(
-                knowledge_base=knowledge_base,
-                port=_api_port,
-                activity_searcher=activity_searcher,
-                execution_monitor=execution_monitor,
-                procedure_verifier=procedure_verifier,
-                bundle_compiler=bundle_compiler,
-                procedure_curator=procedure_curator,
-                runtime_validator=runtime_validator,
-                ops_telemetry=ops_telemetry,
-                vector_kb=vector_kb,
-                token_path=_status_dir() / TOKEN_FILE,
-            )
-            query_api_server.start()
-            logger.info(
-                "Query API server started on 127.0.0.1:%d (localhost-only; POST "
-                "requires the X-AgentHandover-Token header from %s). "
-                "Set knowledge.query_api_enabled = false in config.toml to disable.",
-                _api_port, TOKEN_FILE,
-            )
-        else:
-            logger.info("Query API server disabled (knowledge.query_api_enabled = false)")
-    except Exception:
-        logger.debug("Query API server not started", exc_info=True)
-
-    # Read SOP review config
-    sop_auto_approve = cfg.sop.auto_approve
-    logger.info("SOP auto_approve: %s", sop_auto_approve)
-
-    # Initialize scheduler gate (GAP 5)
-    idle_gate = IdleJobGate(SchedulerConfig(**cfg.idle_jobs.scheduler_kwargs()))
-
-    # Cumulative counters for status reporting
-    started_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    total_events_processed: int = 0
-    total_sops_generated: int = 0
-    last_pipeline_duration_ms: int | None = None
-    total_v2_annotations: int = 0
-    total_v2_diffs: int = 0
-    v2_schema_ok: bool = False  # set after first DB check
-
-    # Task 5: Idle progress tracking
-    last_idle_log_time = time.monotonic()
-    # (unprocessed, pending VLM) counts of the last poll logged at INFO.
-    last_logged_poll_counts: tuple[int, int] | None = None
-
-    # Passive discovery timer — every 2 hours (7200s), seeded when the
-    # main loop starts.
-    _PASSIVE_DISCOVERY_INTERVAL = 7200
-    total_passive_sops: int = 0
-
-    # Passive model use's hourly and daily budget, and why passive
-    # annotation is paused (if it is).
-    annotation_budget = AnnotationBudget.from_config(vlm_cfg)
-    annotation_paused_reason: str | None = None
-    # Annotation first, then Skills, one model loaded at a time.
-    model_scheduler = ModelScheduler(
-        OllamaClient(vlm_cfg.ollama_host),
-        annotation_model=vlm_cfg.annotation_model,
-        sop_model=vlm_cfg.sop_model,
-    )
-    model_scheduler.register(sop_generator, behavioral_synthesizer, llm_reasoner)
-
-    # Write initial status file after DB connect
-    _vlm_stats = vlm_queue.get_stats()
-    _write_worker_status(
-        started_at=started_at,
-        events_processed_today=total_events_processed,
-        sops_generated=total_sops_generated,
-        last_pipeline_duration_ms=last_pipeline_duration_ms,
-        consecutive_errors=0,
-        vlm_available=vlm_available,
-        vlm_queue_pending=_vlm_stats.pending_jobs,
-        vlm_jobs_today=_vlm_stats.jobs_today,
-        vlm_dropped_today=_vlm_stats.dropped_count,
-        vlm_mode=vlm_mode_str,
-        vlm_provider=vlm_provider_str or None,
-        v2_annotation_enabled=v2_annotation_enabled,
-        v2_annotations_today=total_v2_annotations,
-        v2_diffs_today=total_v2_diffs,
-    )
-
-    with WorkerDB(args.db_path) as db:
+        _log_model_profiles(cfg.vlm)
+        ctx.vlm_worker, ctx.vlm_available = _start_vlm_worker(cfg.vlm)
+        ctx.query_api_server = _start_query_api(ctx)
+        export.heartbeat(ctx)
         logger.info("Connected to database, entering main loop")
-        _sweep_orphan_screenshots(db, screenshots_dir)
-
-        # Initialize evidence extractor now that DB is available
-        from agenthandover_worker.evidence_extractor import EvidenceExtractor
-        evidence_extractor = EvidenceExtractor(kb=knowledge_base, db=db)
-
-        # Check v2 schema ONCE before the main loop so focus session
-        # dispatch can use the v2 path on the very first iteration.
-        # Without this, v2_schema_ok starts False, focus dispatch falls
-        # to v1 path, clears the signal, and v2 never processes it.
-        if scene_annotator is not None:
-            v2_schema_ok = _check_v2_schema(db)
-            if v2_schema_ok:
-                logger.info(
-                    "v2 schema detected — scene annotation pipeline active"
-                )
-            else:
-                logger.info(
-                    "v2 schema not found — scene annotation disabled "
-                    "(run daemon to apply migration)"
-                )
-
-        current_interval = args.poll_interval
-        consecutive_errors = 0
-        event_guard = EventRetryGuard(max_batch=100)
-
-        # Timers start now; once-per-day jobs are keyed on the local date
-        # they last ran, persisted so a restart does not rerun them.
-        _last_passive_discovery = time.monotonic()
-        _last_recognition = time.monotonic()
-        daily_jobs_date = db.get_state(DAILY_JOBS_STATE_KEY) or ""
-        annotation_budget.load(db.get_state(ANNOTATION_BUDGET_STATE_KEY))
-        saved_budget_json = annotation_budget.to_json()
-
-        # App and CLI requests arrive through the trigger spool; each kind
-        # maps to one handler.
-        export_kwargs = dict(
-            openclaw_writer=sop_writer,
-            skill_md_writer=skill_md_writer,
-            claude_skill_writer=claude_skill_writer,
-            index_generator=index_generator,
-            procedure_writer=procedure_writer,
-            kb_export_adapter=kb_export_adapter,
-        )
-        def _merge_job(trigger: dict) -> None:
-            _process_merge_trigger(trigger, procedure_curator=procedure_curator)
-            # Written again: the tick that took the trigger wrote the
-            # curation queue before the merge ran.
-            _write_curation_queue(procedure_curator)
-
-        # A retry regenerates a Skill and a merge asks the model to settle
-        # conflicts: both run on the inference thread (P0, model_work).
-        # The other handlers run on the control thread; the model part of
-        # an approval (embedding, style analysis) is queued the same way.
-        trigger_handlers: dict[str, Callable[[dict], None]] = {
-            "retry": lambda t: model_work(
-                f"retry:{uuid.uuid4().hex}",
-                lambda: _process_retry_triggers(
-                    t, db,
-                    focus_processor=focus_processor,
-                    sop_generator=sop_generator,
-                    screenshots_dir=screenshots_dir,
-                    sop_auto_approve=sop_auto_approve,
-                    **export_kwargs,
-                ),
-            ),
-            "approve": lambda t: _process_approval_triggers(
-                t, db, vector_kb=vector_kb, **export_kwargs,
-            ),
-            "failed-query": lambda t: _process_failed_query_trigger(t, db),
-            "search-query": lambda t: _process_search_trigger(t, activity_searcher),
-            "recall-query": lambda t: _process_recall_trigger(t, activity_searcher),
-            "trust-accept": lambda t: _process_trust_accept_trigger(
-                t, trust_advisor, constraint_manager,
-            ),
-            "trust-dismiss": lambda t: _process_trust_dismiss_trigger(t, trust_advisor),
-            "staleness-reviewed": lambda t: _process_staleness_reviewed_trigger(
-                t, staleness_detector, knowledge_base,
-            ),
-            "lifecycle-promote": lambda t: _process_lifecycle_promote_trigger(
-                t,
-                lifecycle_manager=lifecycle_manager,
-                db=db,
-                approve=lambda slug: _approve_sop(
-                    db, slug, vector_kb=vector_kb, **export_kwargs,
-                ),
-                knowledge_base=knowledge_base,
-                # With --adapter claude-skill the primary writer is the
-                # Claude Skill writer.
-                claude_skill_writer=(
-                    claude_skill_writer
-                    or (sop_writer if args.adapter == "claude-skill" else None)
-                ),
-            ),
-            "merge": lambda t: model_work(
-                f"merge:{uuid.uuid4().hex}", lambda: _merge_job(t),
-            ),
-            "drift-reviewed": lambda t: _process_drift_reviewed_trigger(
-                t, procedure_curator=procedure_curator,
-            ),
-            "lifecycle-dismiss": lambda t: _process_lifecycle_dismiss_trigger(
-                t, procedure_curator=procedure_curator,
-            ),
-            "export": lambda t: _check_export_trigger(
-                t,
-                openclaw_writer=sop_writer,
-                sops_dir=args.sops_dir,
-                procedure_writer=procedure_writer,
-            ),
-            "micro-answer": lambda t: _process_micro_answer_trigger(t, db, knowledge_base),
-        }
-        assert set(trigger_handlers) == set(trigger_spool.KINDS)
-        trigger_spool.migrate_legacy(_status_dir())
-
-        # Force-write sops-index.json at startup so the SwiftUI app
-        # immediately sees the latest data (including any new fields).
-        _write_sops_index(db, knowledge_base, force=True)
-
-        # Model work runs on the inference thread (inference_runner), one
-        # job at a time, highest priority first; this loop submits the jobs
-        # and keeps its heartbeat, triggers and event pipeline going while
-        # a model call runs.  A focus recording (P0) goes before its tail
-        # (P1) and passive work (P2); each job starts its model phase
-        # (model_scheduler.py), and the runner ends the generation phase
-        # (unloads the SOP model) when its queue runs empty.
-        runner = InferenceRunner(on_idle=model_scheduler.end_generation).start()
-        # True when the control thread's last poll found no events and no
-        # VLM jobs (the user is away): passive discovery may run early.
-        control_idle = False
-
-        def _focus_job() -> None:
-            """P0: a stopped focus recording, or its answered questions."""
-            nonlocal total_sops_generated
-            # Frames first: the recording's keyframes are annotated before
-            # its Skill switches Ollama to the generation model.
-            model_scheduler.begin_annotation()
-            model_scheduler.plan_generation(
-                urgent=_focus_work_ready(_status_dir(), db) is not None,
-                due={}, take_batched=False,
+        start(ctx)
+        ctx.runner = InferenceRunner(on_idle=ctx.model_scheduler.end_generation).start()
+        if ctx.vector_kb is not None:
+            ctx.runner.submit(
+                "startup-embedding", P2,
+                lambda: _startup_embedding_job(ctx.knowledge_base, ctx.vector_kb),
             )
-            # Completed focus recordings, never batched or held for
-            # memory: the v2 VLM pipeline when available (semantic SOPs
-            # from screen annotations; its keyframes are annotated
-            # before the SOP call switches to the generation model),
-            # else v1 (episode builder + translator + one template).
-            if focus_processor is not None and v2_schema_ok:
-                focus_sops = _process_focus_sessions_v2(
-                    db,
-                    focus_processor=focus_processor,
-                    openclaw_writer=sop_writer,
-                    skill_md_writer=skill_md_writer,
-                    claude_skill_writer=claude_skill_writer,
-                    index_generator=index_generator,
-                    screenshots_dir=screenshots_dir,
-                    sop_auto_approve=sop_auto_approve,
-                    procedure_writer=procedure_writer,
-                    kb_export_adapter=kb_export_adapter,
-                    behavioral_synthesizer=behavioral_synthesizer,
-                    knowledge_base=knowledge_base,
-                    vector_kb=vector_kb,
-                    weekly_question_budget=cfg.knowledge.weekly_question_budget,
-                )
-            else:
-                focus_sops = _process_focus_sessions(
-                    db,
-                    episode_builder=episode_builder,
-                    clipboard_linker=clipboard_linker,
-                    translator=translator,
-                    scorer=scorer,
-                    vlm_queue=vlm_queue,
-                    sop_enhancer=sop_enhancer,
-                    openclaw_writer=sop_writer,
-                    skill_md_writer=skill_md_writer,
-                    claude_skill_writer=claude_skill_writer,
-                    index_generator=index_generator,
-                    sop_auto_approve=sop_auto_approve,
-                    procedure_writer=procedure_writer,
-                    kb_export_adapter=kb_export_adapter,
-                )
-            if focus_sops > 0:
-                total_sops_generated += focus_sops
-                logger.info(
-                    "Focus recording: generated %d SOP(s)!", focus_sops
-                )
-                _write_sops_index(db, knowledge_base)
-
-        def _focus_tail_job() -> None:
-            """P1: the last recording's keyframes its Skill did not need."""
-            model_scheduler.begin_annotation()
-            focus_processor.annotate_remaining(db)
-
-        def _passive_annotation_job() -> None:
-            """P2: fallback VLM jobs, then passive frames and frame diffs
-            (the annotation phase)."""
-            nonlocal v2_schema_ok, annotation_paused_reason
-            nonlocal total_v2_annotations, total_v2_diffs
-            pending_vlm = db.get_pending_vlm_jobs(limit=10)
-            # Process pending VLM jobs only in idle window
-            if pending_vlm and vlm_worker is not None:
-                gate_result = idle_gate.check()
-                if gate_result.can_run:
-                    with charged_to(annotation_budget):
-                        vlm_completed_events = _process_vlm_jobs(
-                            db, pending_vlm, vlm_worker, vlm_queue
-                        )
-                    # VLM reconciliation: reset events with completed VLM
-                    # boosts so the pipeline re-evaluates them with higher
-                    # confidence scores.
-                    if vlm_completed_events:
-                        db.mark_events_unprocessed(vlm_completed_events)
-                        logger.info(
-                            "VLM reconciliation: %d events reset for re-scoring with boost",
-                            len(vlm_completed_events),
-                        )
-
-            model_scheduler.begin_annotation()
-            # --- v2 Scene Annotation Pipeline ---
-            # Process unannotated screenshots and compute frame diffs.
-            # Schema is checked once before the main loop; this fallback
-            # re-checks if the daemon applies migration after worker start.
-            if scene_annotator is not None and not v2_schema_ok:
-                v2_schema_ok = _check_v2_schema(db)
-                if v2_schema_ok:
-                    logger.info(
-                        "v2 schema now available — scene annotation pipeline activated"
-                    )
-
-            if scene_annotator is not None and v2_schema_ok:
-                # Passive frames older than a day are given up on.
-                for expired in db.expire_annotation_backlog(
-                    max_age_hours=ANNOTATION_BACKLOG_MAX_AGE_HOURS,
-                ):
-                    scene_annotator.discard_screenshot(expired, screenshots_dir)
-                # Passive annotation runs on AC, with the screen locked,
-                # or after two idle minutes, within the hourly and
-                # daily budget.  Focus recordings are held by neither
-                # (their keyframes above, their SOP in the generation
-                # phase).
-                annotation_budget.roll(datetime.now())
-                allowed, why = idle_gate.passive_annotation_allowed()
-                ann_stats = {
-                    "annotated": 0, "skipped": 0, "failed": 0,
-                    "blocked": 0, "deferred": 0, "budget_exhausted": False,
-                }
-                if allowed:
-                    ann_stats = _process_annotations(
-                        db, scene_annotator, screenshots_dir,
-                        privacy_checker=privacy_checker,
-                        activity_classifier=activity_classifier,
-                        budget=annotation_budget,
-                    )
-                if not allowed:
-                    reason = why
-                elif ann_stats["budget_exhausted"]:
-                    reason = annotation_budget.pause_reason()
-                else:
-                    reason = None
-                if reason != annotation_paused_reason:
-                    logger.info(
-                        "Passive annotation %s",
-                        f"paused: {reason}" if reason else "resumed",
-                    )
-                annotation_paused_reason = reason
-                total_v2_annotations += ann_stats["annotated"]
-
-                if ann_stats["annotated"] > 0 or ann_stats["blocked"] > 0:
-                    logger.info(
-                        "v2 annotation: %d annotated, %d skipped, %d failed, %d blocked",
-                        ann_stats["annotated"],
-                        ann_stats["skipped"],
-                        ann_stats["failed"],
-                        ann_stats["blocked"],
-                    )
-
-                if ops_telemetry is not None and ann_stats["annotated"] > 0:
-                    try:
-                        ops_telemetry.record_batch(PipelineMetrics(
-                            annotation_count=ann_stats["annotated"],
-                            classification_count=ann_stats["annotated"],
-                        ))
-                    except Exception:
-                        pass
-
-                # Refresh FTS5 search index so newly annotated events
-                # appear in search/recall results.
-                if ann_stats["annotated"] > 0 and activity_searcher is not None:
-                    try:
-                        added = activity_searcher.refresh_index()
-                        if added > 0:
-                            logger.debug(
-                                "FTS5 index refreshed: %d new entries", added,
-                            )
-                    except Exception:
-                        logger.debug(
-                            "FTS5 index refresh failed", exc_info=True,
-                        )
-
-            if frame_differ is not None and v2_schema_ok:
-                diff_stats = _process_diffs(
-                    db, frame_differ, budget=annotation_budget,
-                )
-                total_v2_diffs += diff_stats["diffs"]
-
-                if diff_stats["diffs"] > 0 or diff_stats["failed"] > 0:
-                    logger.info(
-                        "v2 frame diff: %d action diffs, %d edge cases, %d failed",
-                        diff_stats["diffs"],
-                        diff_stats["edge_cases"],
-                        diff_stats["failed"],
-                    )
-
-        def _passive_generation_job() -> None:
-            """P2: passive discovery and the once-a-day jobs (the
-            generation phase: SOP generation, synthesis and the daily model
-            jobs, on the SOP model)."""
-            nonlocal total_sops_generated, total_passive_sops
-            nonlocal _last_passive_discovery, daily_jobs_date
-            # Queued after the passive annotation job, so the frames of this
-            # tick are annotated first.  Passive discovery is due every 2
-            # hours, or when the user has been idle for 5+ minutes.
-            should_segment = False
-            if (
-                task_segmenter is not None
-                and sop_generator is not None
-                and v2_schema_ok
-            ):
-                _now_mono_pd = time.monotonic()
-                should_segment = (
-                    _now_mono_pd - _last_passive_discovery
-                    >= _PASSIVE_DISCOVERY_INTERVAL
-                )
-                # Also run during extended idle (no unprocessed events
-                # for several cycles = user is away)
-                if not should_segment and control_idle:
-                    # Check idle gate — passive discovery during idle window
-                    pd_gate = idle_gate.check()
-                    if pd_gate.can_run and (
-                        _now_mono_pd - _last_passive_discovery >= 300
-                    ):
-                        should_segment = True
-
-                # Skip passive discovery if a focus session is pending
-                # (focus gets absolute priority)
-                _focus_pending = Path(
-                    _status_dir()
-                ).joinpath("focus-session.json").exists()
-                if _focus_pending:
-                    should_segment = False
-
-            today_local = datetime.now().date().isoformat()
-            gen_plan = model_scheduler.plan_generation(
-                urgent=False,
-                due={
-                    "passive_discovery": should_segment,
-                    "daily": today_local != daily_jobs_date,
-                },
-            )
-
-            # --- v2 Passive Discovery (periodic) ---
-            if should_segment and gen_plan.allows("passive_discovery"):
-                try:
-                    with charged_to(annotation_budget):
-                        pd_sops = _process_passive_discovery(
-                            db,
-                            knowledge_base=knowledge_base,
-                            segmenter=task_segmenter,
-                            sop_generator=sop_generator,
-                            openclaw_writer=sop_writer,
-                            skill_md_writer=skill_md_writer,
-                            claude_skill_writer=claude_skill_writer,
-                            index_generator=index_generator,
-                            sop_auto_approve=sop_auto_approve,
-                            procedure_writer=procedure_writer,
-                            kb_export_adapter=kb_export_adapter,
-                            continuity_tracker=continuity_tracker,
-                            variant_detector=variant_detector,
-                            evidence_normalizer=evidence_normalizer,
-                            weekly_question_budget=cfg.knowledge.weekly_question_budget,
-                        )
-                    if pd_sops > 0:
-                        total_passive_sops += pd_sops
-                        total_sops_generated += pd_sops
-                        logger.info(
-                            "Passive discovery: generated %d SOP(s)!",
-                            pd_sops,
-                        )
-                        _write_sops_index(db, knowledge_base)
-                except Exception:
-                    logger.warning(
-                        "Passive discovery failed",
-                        exc_info=True,
-                    )
-                _last_passive_discovery = _now_mono_pd
-
-            # --- Once-per-day jobs: the first tick of each local day,
-            # keyed on the date persisted when they last ran. ---
-            run_daily = gen_plan.allows("daily")
-
-            # The v1 miner's episode store is unused (WP-F5): drop it.
-            if run_daily:
-                try:
-                    db.drop_episode_store()
-                except Exception:
-                    logger.debug("Episode store drop failed", exc_info=True)
-
-            # --- Phase 2+: Daily batch + staleness (once per day) ---
-            # Process *yesterday* (the local calendar day) — today is
-            # still in progress and would produce an incomplete summary.
-            yesterday_str = (
-                datetime.now().astimezone() - timedelta(days=1)
-            ).strftime("%Y-%m-%d")
-            if run_daily:
-                try:
-                    # Daily batch: aggregate yesterday's (complete) events
-                    day_events = db.get_annotated_events_for_date(yesterday_str)
-                    if day_events:
-                        _daily_summary = daily_processor.process_day(
-                            yesterday_str, day_events
-                        )
-                        logger.info(
-                            "Daily batch: %d tasks, %.1f active hours",
-                            _daily_summary.task_count,
-                            _daily_summary.active_hours,
-                        )
-                        # Embed daily summary for semantic search
-                        _embed_in_vector_kb(
-                            vector_kb, "daily_summary", yesterday_str,
-                            f"Daily summary for {yesterday_str}: "
-                            f"{_daily_summary.task_count} tasks, "
-                            f"{_daily_summary.active_hours:.1f} active hours. "
-                            + " ".join(
-                                t.get("intent", "")
-                                for t in getattr(_daily_summary, "tasks", [])
-                                if t.get("intent")
-                            )[:2000],
-                        )
-                        # Update profile + patterns periodically
-                        summaries_count = len(
-                            knowledge_base.list_daily_summaries(limit=5)
-                        )
-                        if summaries_count >= 3:
-                            profile_builder.update_profile()
-                            # Embed updated profile
-                            try:
-                                profile = knowledge_base.get_profile()
-                                if profile:
-                                    import json as _json
-                                    _embed_in_vector_kb(
-                                        vector_kb, "profile", "user",
-                                        _json.dumps(profile, default=str)[:4000],
-                                    )
-                            except Exception:
-                                logger.debug("Profile embedding failed", exc_info=True)
-                            # Refresh activity classifier with updated profile
-                            if activity_classifier is not None:
-                                try:
-                                    activity_classifier._profile = knowledge_base.get_profile()
-                                except Exception:
-                                    logger.debug("Failed to refresh classifier profile", exc_info=True)
-                            patterns = pattern_detector.detect_recurrence()
-                            if patterns:
-                                pattern_detector.update_triggers(patterns)
-                            chains = pattern_detector.detect_chains()
-                            if chains:
-                                pattern_detector.update_chains(chains)
-                            # Correction-to-guardrail learning
-                            try:
-                                all_procs = knowledge_base.list_procedures()
-                                guardrail_count = 0
-                                for proc in all_procs:
-                                    _cs = proc.get("id", proc.get("slug", ""))
-                                    if not _cs:
-                                        continue
-                                    _guardrails = correction_detector.analyze_correction_patterns(_cs)
-                                    if _guardrails:
-                                        correction_detector.apply_guardrails_to_procedure(
-                                            _cs, _guardrails,
-                                        )
-                                        guardrail_count += len(_guardrails)
-                                if guardrail_count:
-                                    logger.info(
-                                        "Correction learning: %d guardrail(s) applied",
-                                        guardrail_count,
-                                    )
-                            except Exception:
-                                logger.debug(
-                                    "Correction-to-guardrail learning failed",
-                                    exc_info=True,
-                                )
-                            # Phase 4: Session linking + trust evaluation + digest
-                            try:
-                                session_linker.analyze_daily_summaries()
-                            except Exception:
-                                logger.debug("Session linking failed", exc_info=True)
-                            try:
-                                suggestions = trust_advisor.evaluate_all()
-                                if suggestions:
-                                    logger.info(
-                                        "Trust advisor: %d new suggestion(s)",
-                                        len(suggestions),
-                                    )
-                            except Exception:
-                                logger.debug("Trust evaluation failed", exc_info=True)
-
-                            # --- Behavioral re-synthesis trigger ---
-                            try:
-                                all_procs_for_synth = knowledge_base.list_procedures()
-                                synth_count = 0
-                                # Pre-load daily summaries once for all procedures
-                                _synth_daily = [
-                                    knowledge_base.get_daily_summary(d)
-                                    for d in knowledge_base.list_daily_summaries(limit=7)
-                                ]
-                                _synth_daily = [s for s in _synth_daily if s is not None]
-
-                                for proc_info in all_procs_for_synth:
-                                    p_slug = proc_info.get("id", proc_info.get("slug", ""))
-                                    if not p_slug:
-                                        continue
-                                    proc = knowledge_base.get_procedure(p_slug)
-                                    if proc is None:
-                                        continue
-                                    if proc.get("lifecycle_state") == "archived":
-                                        continue
-                                    if not behavioral_synthesizer.should_synthesize(proc):
-                                        continue
-
-                                    # The recorded instances as rich per-frame
-                                    # dicts (verbatim text and list picks), with
-                                    # the session ids the selection criteria cite
-                                    # (focus_processor.recorded_observations).
-                                    _synth_obs, _synth_ids = recorded_observations(db, proc)
-
-                                    insights = behavioral_synthesizer.synthesize(
-                                        p_slug, proc, _synth_obs,
-                                        daily_summaries=_synth_daily,
-                                        instance_ids=_synth_ids,
-                                    )
-                                    if insights.strategy or insights.guardrails:
-                                        # Into the procedure as saved now:
-                                        # an approval may have moved it
-                                        # during the model call.
-                                        proc = knowledge_base.get_procedure(p_slug) or proc
-                                        updated = behavioral_synthesizer.merge_insights_into_procedure(
-                                            proc, insights,
-                                        )
-                                        knowledge_base.save_procedure(updated)
-                                        synth_count += 1
-                                if synth_count:
-                                    logger.info(
-                                        "Behavioral synthesis: %d procedure(s) updated",
-                                        synth_count,
-                                    )
-                            except Exception:
-                                logger.debug(
-                                    "Behavioral re-synthesis failed", exc_info=True,
-                                )
-
-                            # --- Pre-expiry evidence extraction ---
-                            try:
-                                extracted = evidence_extractor.extract_all_pending()
-                                if extracted:
-                                    logger.info(
-                                        "Evidence extraction: %d procedure(s) processed",
-                                        extracted,
-                                    )
-                            except Exception:
-                                logger.debug(
-                                    "Pre-expiry evidence extraction failed",
-                                    exc_info=True,
-                                )
-
-                        # Seed default constraints if constraints file is empty.
-                        # Runs on every daily batch (outside the summaries >= 3
-                        # gate) so constraints are available from day one.  The
-                        # inner guard ensures the write happens at most once.
-                        try:
-                            existing_constraints = knowledge_base.get_constraints()
-                            if not existing_constraints.get("global"):
-                                knowledge_base.update_constraints({
-                                    "global": {
-                                        "default_trust_level": "observe",
-                                        "require_approval_for_destructive": True,
-                                        "max_autonomous_actions_per_hour": 10,
-                                    },
-                                    "per_procedure": existing_constraints.get(
-                                        "per_procedure", {}
-                                    ),
-                                })
-                                logger.info("Default global constraints seeded")
-                        except Exception:
-                            logger.debug(
-                                "Constraint seeding failed", exc_info=True
-                            )
-                        # Ask what the day's evidence raised that no pass
-                        # asked yet (the questions agent runs queued), so
-                        # the digest lists them with the other open cards.
-                        _ask_micro_questions(
-                            db, knowledge_base, now=datetime.now(timezone.utc),
-                            weekly_budget=cfg.knowledge.weekly_question_budget,
-                        )
-                        # Generate daily digest
-                        try:
-                            digest_generator = DigestGenerator(knowledge_base, db=db)
-                            digest = digest_generator.generate(yesterday_str)
-                            digest_generator.save_digest(digest)
-                            logger.info("Daily digest generated for %s", yesterday_str)
-                        except Exception:
-                            logger.debug("Digest generation failed", exc_info=True)
-                except Exception:
-                    logger.debug("Daily batch failed", exc_info=True)
-
-                # Workflow observations: segment and observation TTLs,
-                # the promoted workflows' recurrence and value.
-                workflow_mining.run_daily(
-                    db, knowledge_base, now=datetime.now(timezone.utc),
-                )
-
-                # Preserve OCR text from soon-to-expire events
-                try:
-                    pcount, pitems = db.preserve_ocr_text(retention_days=14)
-                    if pcount:
-                        logger.info("Preserved %d texts before expiry", pcount)
-                    # Embed preserved texts in vector KB
-                    if pitems and vector_kb is not None:
-                        try:
-                            vk_items = [
-                                ("preserved_text", f"{eid}:{src}", txt[:2000])
-                                for eid, src, txt in pitems
-                            ]
-                            vector_kb.upsert_batch(vk_items)
-                        except Exception:
-                            logger.debug("Preserved text embedding failed", exc_info=True)
-                except Exception:
-                    logger.debug("OCR text preservation failed", exc_info=True)
-
-            # Staleness check
-            if run_daily:
-                try:
-                    reports = staleness_detector.check_all()
-                    stale_count = sum(
-                        1 for r in reports if r.status != "current"
-                    )
-                    if stale_count > 0:
-                        logger.info(
-                            "Staleness check: %d/%d procedures need attention",
-                            stale_count, len(reports),
-                        )
-                    # Persist staleness status back into procedure JSON
-                    # so the SwiftUI MicroReviewView can read it.
-                    for report in reports:
-                        try:
-                            proc = knowledge_base.get_procedure(report.slug)
-                            if proc is not None:
-                                staleness = proc.get("staleness", {})
-                                staleness["status"] = report.status
-                                staleness["signals"] = [
-                                    {
-                                        "type": s.type,
-                                        "detail": s.detail,
-                                        "first_seen": s.first_seen,
-                                    }
-                                    for s in report.signals
-                                ]
-                                staleness["recommended_action"] = report.recommended_action
-                                proc["staleness"] = staleness
-                                knowledge_base.save_procedure(proc)
-                        except Exception:
-                            logger.debug(
-                                "Failed to persist staleness for %s",
-                                report.slug,
-                                exc_info=True,
-                            )
-                except Exception:
-                    logger.debug("Staleness check failed", exc_info=True)
-
-                # Lifecycle: auto-demote stale procedures
-                if features.lifecycle_management:
-                    try:
-                        transitions = lifecycle_manager.apply_auto_transitions()
-                        if transitions:
-                            logger.info("Lifecycle: %d auto-transition(s)", len(transitions))
-                    except Exception:
-                        logger.debug("Lifecycle auto-transitions failed", exc_info=True)
-                    # Write what the gate now lets through (approved
-                    # since the last pass); drafts are never written.
-                    try:
-                        bundle_compiler.compile_all()
-                    except Exception:
-                        logger.warning("Bundle compile failed", exc_info=True)
-
-                # Phase 5: Curation queue refresh
-                try:
-                    with charged_to(annotation_budget):
-                        curation_summary = procedure_curator.curate()
-                    if curation_summary.total_queue_items > 0:
-                        logger.info(
-                            "Curation: %d item(s) (%d merges, %d upgrades, %d stale, %d drift)",
-                            curation_summary.total_queue_items,
-                            curation_summary.merge_candidates,
-                            curation_summary.upgrade_candidates,
-                            curation_summary.stale_procedures,
-                            curation_summary.drift_reports,
-                        )
-                except Exception:
-                    logger.debug("Curation batch failed", exc_info=True)
-
-                # Write curation-queue.json for SwiftUI app
-                _write_curation_queue(procedure_curator)
-
-                _run_daily_maintenance(
-                    vector_kb=vector_kb,
-                    activity_searcher=activity_searcher,
-                    annotation_cache=annotation_cache,
-                )
-                db.set_state(DAILY_JOBS_STATE_KEY, today_local)
-                daily_jobs_date = today_local
-
-        def _startup_embedding_job() -> None:
-            """P2: embed the knowledge base's procedures (idempotent: skips
-            unchanged ones)."""
-            try:
-                embedded = 0
-                for proc in knowledge_base.list_procedures():
-                    full = knowledge_base.get_procedure(proc.get("id", ""))
-                    if full:
-                        _embed_procedure(vector_kb, full)
-                        embedded += 1
-                if embedded:
-                    logger.info("Embedded %d existing procedure(s) in vector KB", embedded)
-            except Exception:
-                logger.debug("Startup procedure embedding failed", exc_info=True)
-
-        def _heartbeat() -> None:
-            """worker-status.json, written every tick outside the state lock
-            so a long model call never stops it (also after an error: the
-            app and doctor see a worker that is alive but failing, not a
-            dead one)."""
-            try:
-                _write_heartbeat()
-            except Exception:
-                logger.debug("Failed to write worker status", exc_info=True)
-
-        def _write_heartbeat() -> None:
-            """The pending VLM count is
-            the database's (the in-memory queue only tracks enqueue-side
-            stats; completions from _process_vlm_jobs are not reflected)."""
-            _vlm_stats = vlm_queue.get_stats()
-            try:
-                db_vlm_pending = db.count_pending_vlm_jobs()
-            except Exception:
-                db_vlm_pending = _vlm_stats.pending_jobs
-            inference = runner.status()
-            if v2_schema_ok:
-                try:
-                    backlog = db.count_passive_unannotated()
-                    inference["annotation_backlog"] = backlog
-                    # The daemon keeps fewer passive frames meanwhile.
-                    inference["lower_capture_cadence"] = (
-                        annotation_budget.asks_lower_capture(backlog)
-                    )
-                except Exception:
-                    logger.debug("Annotation backlog count failed", exc_info=True)
-            _write_worker_status(
-                started_at=started_at,
-                events_processed_today=total_events_processed,
-                sops_generated=total_sops_generated,
-                last_pipeline_duration_ms=last_pipeline_duration_ms,
-                consecutive_errors=max(
-                    consecutive_errors, runner.consecutive_failures(),
-                ),
-                vlm_available=vlm_available,
-                vlm_queue_pending=db_vlm_pending,
-                vlm_jobs_today=_vlm_stats.jobs_today,
-                vlm_dropped_today=_vlm_stats.dropped_count,
-                vlm_mode=vlm_mode_str,
-                vlm_provider=vlm_provider_str or None,
-                v2_annotation_enabled=v2_annotation_enabled,
-                v2_annotations_today=total_v2_annotations,
-                v2_diffs_today=total_v2_diffs,
-                annotation_paused_reason=annotation_paused_reason,
-                annotation_budget=annotation_budget.status(),
-                model_schedule=model_scheduler.status(),
-                inference=inference,
-            )
-
-        if vector_kb is not None:
-            runner.submit("startup-embedding", P2, _startup_embedding_job)
-
         while not shutdown_flag[0]:
-            # Events handed to run_pipeline and not yet marked processed;
-            # an error while this is non-empty counts against them.
-            inflight_event_ids: list[str] = []
-            backoff: float | None = None
-            # The inference thread holds the state while it runs Python
-            # between model calls; if that takes long, this tick only
-            # writes the heartbeat.
-            if not STATE_LOCK.acquire(
-                timeout=None if args.once else CONTROL_LOCK_WAIT_SECONDS,
-            ):
-                logger.debug("Control tick skipped: the inference thread holds the state")
-                _heartbeat()
-                time.sleep(current_interval)
-                continue
-            try:
-                # Reset vector KB embedding budget each cycle
-                if vector_kb is not None:
-                    vector_kb.reset_cycle_budget()
-
-                # App and CLI requests first, oldest first
-                triggers_consumed = trigger_spool.drain(
-                    _status_dir(), trigger_handlers,
-                )
-
-                # A consumed trigger (merge, dismiss, promote, ...) may have
-                # changed the curation queue; nothing else between daily
-                # curation passes does.
-                if triggers_consumed:
-                    _write_curation_queue(procedure_curator)
-
-                # Close a recording that was never stopped, so its rows get
-                # processed instead of staying pending forever.
-                _sweep_stale_focus_session(_status_dir(), focus_max_session_hours)
-
-                unprocessed = db.get_unprocessed_events(
-                    limit=event_guard.batch_limit
-                )
-                pending_vlm = db.get_pending_vlm_jobs(limit=10)
-
-                if unprocessed or pending_vlm:
-                    poll_counts = (len(unprocessed), len(pending_vlm))
-                    logger.log(
-                        _poll_log_level(poll_counts, last_logged_poll_counts),
-                        "Poll: %d unprocessed events, %d pending VLM jobs",
-                        *poll_counts,
-                    )
-                    last_logged_poll_counts = poll_counts
-                    current_interval = _next_poll_interval(
-                        current_interval, args.poll_interval,
-                        busy=True, triggers_consumed=triggers_consumed,
-                    )
-                    # Reset idle log timer
-                    last_idle_log_time = time.monotonic()
-                else:
-                    logger.debug("Poll: nothing to do")
-                    last_logged_poll_counts = None
-                    current_interval = _next_poll_interval(
-                        current_interval, args.poll_interval,
-                        busy=False, triggers_consumed=triggers_consumed,
-                    )
-
-                    # Task 5: Periodic idle progress message
-                    now_mono = time.monotonic()
-                    if now_mono - last_idle_log_time >= _IDLE_LOG_INTERVAL_SECONDS:
-                        logger.info(
-                            "Watching for activity... (%d events today, %d SOPs generated)",
-                            total_events_processed,
-                            total_sops_generated,
-                        )
-                        last_idle_log_time = now_mono
-
-                if unprocessed:
-                    # Core pipeline ALWAYS runs — episodes, translation,
-                    # SOP mining, and export happen immediately so users
-                    # see SOPs as soon as patterns are detected.
-                    inflight_event_ids = [
-                        ev["id"] for ev in unprocessed if "id" in ev
-                    ]
-                    pipeline_start = time.monotonic()
-                    summary = run_pipeline(
-                        unprocessed,
-                        episode_builder=episode_builder,
-                        clipboard_linker=clipboard_linker,
-                        pruner=pruner,
-                        translator=translator,
-                        scorer=scorer,
-                        vlm_queue=vlm_queue,
-                        db=db,
-                    )
-                    pipeline_elapsed_ms = int((time.monotonic() - pipeline_start) * 1000)
-                    last_pipeline_duration_ms = pipeline_elapsed_ms
-                    logger.info("Pipeline summary: %s", summary)
-
-                    total_events_processed += summary["events_in"]
-                    logger.info(
-                        "Processed %d events into %d episodes.",
-                        summary["events_in"],
-                        summary["episodes"],
-                    )
-
-                    # Mark processed events so they are not re-read (GAP 4)
-                    if inflight_event_ids:
-                        db.mark_events_processed(inflight_event_ids)
-                    event_guard.succeeded(inflight_event_ids)
-                    inflight_event_ids = []
-
-                    # Persist in-memory VLM queue jobs to the DB so they survive restarts
-                    if summary["vlm_enqueued"] > 0:
-                        _persist_vlm_jobs(db, vlm_queue)
-
-                # --- Model work, handed to the inference thread ---
-                control_idle = not unprocessed and not pending_vlm
-                if _focus_job_due(_status_dir()):
-                    runner.submit("focus", P0, _focus_job)
-                if (
-                    focus_processor is not None
-                    and v2_schema_ok
-                    and focus_processor.has_remaining
-                ):
-                    runner.submit("focus-tail", P1, _focus_tail_job)
-                runner.submit("passive-annotation", P2, _passive_annotation_job)
-                runner.submit("passive-generation", P2, _passive_generation_job)
-
-                # Live recognition (model-free): tag the session in
-                # progress with the Skill it begins, record it at its end.
-                if v2_schema_ok and (
-                    time.monotonic() - _last_recognition
-                    >= workflow_mining.RECOGNIZE_INTERVAL_SECONDS
-                ):
-                    try:
-                        workflow_mining.recognize(
-                            db, knowledge_base, now=datetime.now(timezone.utc),
-                        )
-                    except Exception:
-                        logger.warning("Live recognition failed", exc_info=True)
-                    _last_recognition = time.monotonic()
-
-                # What passive model use spent survives a restart.
-                if annotation_budget.to_json() != saved_budget_json:
-                    saved_budget_json = annotation_budget.to_json()
-                    db.set_state(ANNOTATION_BUDGET_STATE_KEY, saved_budget_json)
-
-                # Refresh sops-index.json (throttled to every 5s)
-                _write_sops_index(db, knowledge_base)
-
-                # Any iteration that gets here without raising is healthy,
-                # whether or not it had events to process.
-                consecutive_errors = 0
-
-            except Exception:
-                consecutive_errors += 1
-                logger.error(
-                    "Error in main loop (consecutive: %d)",
-                    consecutive_errors,
-                    exc_info=True,
-                )
-                to_quarantine = event_guard.failed(inflight_event_ids)
-                if to_quarantine:
-                    db.quarantine_events(to_quarantine)
-                    logger.error(
-                        "Quarantined event %s: the pipeline failed on it "
-                        "alone repeatedly",
-                        ", ".join(to_quarantine),
-                    )
-                if consecutive_errors == ERROR_THRESHOLD:
-                    logger.critical(
-                        "%d consecutive errors; backing off (up to 5 minutes "
-                        "between attempts) and staying up",
-                        ERROR_THRESHOLD,
-                    )
-                backoff = error_backoff_seconds(consecutive_errors)
-            finally:
-                STATE_LOCK.release()
-
-            _heartbeat()
+            tick = stages.tick(
+                ctx, lock_timeout=None if args.once else CONTROL_LOCK_WAIT_SECONDS,
+            )
             if args.once:
                 # One iteration, including the model work it submitted.
-                runner.wait_idle()
-                _heartbeat()
+                ctx.runner.wait_idle()
+                export.heartbeat(ctx)
                 break
-            if backoff is not None:
-                interruptible_sleep(backoff, lambda: shutdown_flag[0])
+            if tick.backoff is not None:
+                interruptible_sleep(tick.backoff, lambda: shutdown_flag[0])
             else:
-                time.sleep(current_interval)
-
-        # A model call in progress cannot be interrupted: the inference
-        # thread is a daemon thread and does not hold up the exit.
-        if not runner.stop():
-            logger.info("Inference job still running at shutdown; not waiting for it")
-
-    # Stop query API server if running
-    if query_api_server is not None:
-        try:
-            query_api_server.stop()
-            logger.info("Query API server stopped")
-        except Exception:
-            pass
-
-    # Remove PID file and status file on clean shutdown.  A --once run
-    # keeps worker-status.json: it records that iteration, and readers
-    # treat it as not running because the PID is gone.
-    try:
-        pid_file.unlink(missing_ok=True)
-    except Exception:
-        pass
-    if not args.once:
-        _remove_worker_status()
-    _restore_signal_handlers()
-
+                time.sleep(ctx.current_interval)
+    finally:
+        _shutdown(ctx, pid_file, restore_signals, once=args.once)
     logger.info("Worker shut down cleanly")
 
 
