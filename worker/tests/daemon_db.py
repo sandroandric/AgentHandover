@@ -66,6 +66,19 @@ def create_daemon_db(path: Path) -> Path:
     return path
 
 
+def kb_db(root: Path) -> Path:
+    """The daemon database a test's ``KnowledgeBase(root=root)`` keeps its
+    procedures in: ``.<name>.events.db`` beside the knowledge directory,
+    created on first use, so every ``KnowledgeBase`` a test builds on the
+    same root shares one store and different roots do not."""
+    root = Path(root)
+    path = root.parent / f".{root.name}.events.db"
+    if not path.is_file():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        create_daemon_db(path)
+    return path
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 

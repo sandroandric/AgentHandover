@@ -41,6 +41,7 @@ from agenthandover_worker.skill_render import (
     serialize_frontmatter,
 )
 from fixtures.vlm_answers import generated_sop_template
+from daemon_db import kb_db
 
 GOLDEN_DIR = Path(__file__).parent / "fixtures" / "skill_packets"
 
@@ -158,7 +159,7 @@ def test_focus_approve_and_mcp_read_the_same_packet(tmp_path: Path):
 
     proc = focus_procedure()
     kb_root = tmp_path / "knowledge"
-    kb = KnowledgeBase(root=kb_root)
+    kb = KnowledgeBase(root=kb_root, db_path=kb_db(kb_root))
     kb.ensure_structure()
     kb.save_procedure(proc)
 
@@ -191,7 +192,7 @@ def test_codex_agents_md_uses_the_codex_packet(tmp_path: Path, monkeypatch):
 
     proc = focus_procedure()
     kb_root = tmp_path / "knowledge"
-    kb = KnowledgeBase(root=kb_root)
+    kb = KnowledgeBase(root=kb_root, db_path=kb_db(kb_root))
     kb.ensure_structure()
     kb.save_procedure(proc)
     monkeypatch.chdir(tmp_path)
@@ -422,7 +423,7 @@ def test_footer_health_and_package_version_agree(tmp_path: Path):
         f"(procedure schema {PROCEDURE_SCHEMA_VERSION})*"
     )
 
-    kb = KnowledgeBase(root=tmp_path / "kb")
+    kb = KnowledgeBase(root=tmp_path / "kb", db_path=kb_db(tmp_path / "kb"))
     kb.ensure_structure()
     server = QueryAPIServer(kb, port=0)
     server.start()
@@ -453,7 +454,7 @@ def test_two_ticks_keep_both_skills_in_every_catalogue(tmp_path: Path):
     from agenthandover_worker.openclaw_writer import OpenClawWriter
 
     kb_root = tmp_path / "knowledge"
-    kb = KnowledgeBase(root=kb_root)
+    kb = KnowledgeBase(root=kb_root, db_path=kb_db(kb_root))
     kb.ensure_structure()
     openclaw = OpenClawWriter(workspace_dir=tmp_path / "openclaw")
     commands = tmp_path / "commands"

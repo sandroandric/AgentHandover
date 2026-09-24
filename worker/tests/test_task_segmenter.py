@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 import pytest
+from daemon_db import kb_db
 
 from agenthandover_worker.task_segmenter import (
     AnnotatedFrame,
@@ -750,7 +751,7 @@ class TestProcessPassiveDiscovery:
             # evidence extracted from earlier observations.
             from agenthandover_worker.knowledge_base import KnowledgeBase
             from agenthandover_worker.procedure_schema import sop_to_procedure
-            kb = KnowledgeBase(root=Path(tempfile.mkdtemp()) / "knowledge")
+            kb = KnowledgeBase(root=Path(tempfile.mkdtemp()) / "knowledge", db_path=kb_db(Path(tempfile.mkdtemp()) / "knowledge"))
             kb.ensure_structure()
             prior = sop_to_procedure(generated_sop_template(
                 "check_domain_availability", mode="passive",
@@ -845,7 +846,7 @@ class TestProcessPassiveDiscovery:
                 sop={}, success=False, deferred=True,
                 error="VLM connection failed: timed out waiting for llama-server to start",
             )
-            kb = KnowledgeBase(root=Path(tempfile.mkdtemp()) / "knowledge")
+            kb = KnowledgeBase(root=Path(tempfile.mkdtemp()) / "knowledge", db_path=kb_db(Path(tempfile.mkdtemp()) / "knowledge"))
             kb.ensure_structure()
             mock_writer = MagicMock()
 
@@ -920,7 +921,7 @@ class TestProcessPassiveDiscovery:
             mock_index = MagicMock()
 
             from agenthandover_worker.knowledge_base import KnowledgeBase
-            kb = KnowledgeBase(root=Path(tempfile.mkdtemp()) / "knowledge")
+            kb = KnowledgeBase(root=Path(tempfile.mkdtemp()) / "knowledge", db_path=kb_db(Path(tempfile.mkdtemp()) / "knowledge"))
             kb.ensure_structure()
 
             sops = _process_passive_discovery(

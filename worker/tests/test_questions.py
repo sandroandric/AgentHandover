@@ -27,7 +27,7 @@ from agenthandover_worker.focus_questioner import (
 )
 from agenthandover_worker.knowledge_base import KnowledgeBase
 from agenthandover_worker.ledger import derive_knowledge
-from daemon_db import create_daemon_db
+from daemon_db import create_daemon_db, kb_db
 
 NOW = datetime(2026, 9, 21, 9, 0, tzinfo=timezone.utc)
 
@@ -149,7 +149,7 @@ def db(tmp_path: Path):
 
 @pytest.fixture()
 def kb(tmp_path: Path) -> KnowledgeBase:
-    base = KnowledgeBase(root=tmp_path / "knowledge")
+    base = KnowledgeBase(root=tmp_path / "knowledge", db_path=kb_db(tmp_path / "knowledge"))
     base.ensure_structure()
     return base
 

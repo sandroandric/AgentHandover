@@ -39,7 +39,7 @@ from agenthandover_worker.scene_annotator import (
     SceneAnnotator,
 )
 from agenthandover_worker.scheduler import AnnotationBudget, charged_to
-from daemon_db import create_daemon_db
+from daemon_db import create_daemon_db, kb_db
 
 
 def _iso(dt: datetime) -> str:
@@ -527,7 +527,7 @@ def _write_procedures(kb: KnowledgeBase, count: int) -> None:
 class TestNoRepeatedWork:
 
     def test_second_list_with_no_change_parses_nothing(self, tmp_path):
-        kb = KnowledgeBase(root=tmp_path / "kb")
+        kb = KnowledgeBase(root=tmp_path / "kb", db_path=kb_db(tmp_path / "kb"))
         kb.ensure_structure()
         _write_procedures(kb, 60)
         loads = MagicMock(side_effect=json.load)
@@ -547,7 +547,7 @@ class TestNoRepeatedWork:
     def test_second_sops_index_refresh_opens_nothing_and_parses_nothing(
         self, events_db, tmp_path,
     ):
-        kb = KnowledgeBase(root=tmp_path / "kb")
+        kb = KnowledgeBase(root=tmp_path / "kb", db_path=kb_db(tmp_path / "kb"))
         kb.ensure_structure()
         _write_procedures(kb, 60)
         with WorkerDB(events_db) as db:

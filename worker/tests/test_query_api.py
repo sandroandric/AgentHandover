@@ -15,6 +15,7 @@ import pytest
 
 from agenthandover_worker.knowledge_base import KnowledgeBase
 from agenthandover_worker.query_api import TOKEN_HEADER, QueryAPIServer
+from daemon_db import kb_db
 
 
 # ---------------------------------------------------------------------------
@@ -73,7 +74,7 @@ def _get_raw(port: int, path: str) -> urllib.request.Request:
 @pytest.fixture()
 def kb(tmp_path: Path) -> KnowledgeBase:
     """Create a KnowledgeBase rooted in a temp directory."""
-    kb = KnowledgeBase(root=tmp_path / "knowledge")
+    kb = KnowledgeBase(root=tmp_path / "knowledge", db_path=kb_db(tmp_path / "knowledge"))
     kb.ensure_structure()
     return kb
 
@@ -800,7 +801,7 @@ class TestBundleEndpoint:
         from agenthandover_worker.procedure_schema import sop_to_procedure
         from agenthandover_worker.procedure_verifier import ProcedureVerifier
 
-        kb = KnowledgeBase(root=tmp_path / "kb")
+        kb = KnowledgeBase(root=tmp_path / "kb", db_path=kb_db(tmp_path / "kb"))
         kb.ensure_structure()
         for slug, state in (("approved", "agent_ready"), ("drafted", "draft")):
             proc = sop_to_procedure({

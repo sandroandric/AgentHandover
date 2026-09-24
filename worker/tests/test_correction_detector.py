@@ -20,6 +20,7 @@ from agenthandover_worker.correction_detector import (
 )
 from agenthandover_worker.knowledge_base import KnowledgeBase
 from agenthandover_worker.llm_reasoning import LLMReasoner, ReasoningResult
+from daemon_db import kb_db
 
 
 # ---------------------------------------------------------------------------
@@ -105,7 +106,7 @@ def _make_correction(
 @pytest.fixture()
 def kb(tmp_path):
     """Create a KnowledgeBase rooted in a temp directory."""
-    kb = KnowledgeBase(root=tmp_path / "knowledge")
+    kb = KnowledgeBase(root=tmp_path / "knowledge", db_path=kb_db(tmp_path / "knowledge"))
     kb.ensure_structure()
     return kb
 

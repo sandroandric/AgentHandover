@@ -24,7 +24,7 @@ from agenthandover_worker.activity_search import (
     _iso_to_epoch,
     _parse_annotation,
 )
-from daemon_db import insert_event
+from daemon_db import insert_event, kb_db
 
 
 # ---------------------------------------------------------------------------
@@ -1207,7 +1207,7 @@ class TestQueryApiThread:
         searcher.refresh_index()  # main thread uses the connection first
 
         srv = QueryAPIServer(
-            KnowledgeBase(root=tmp_path / "kb"), port=0,
+            KnowledgeBase(root=tmp_path / "kb", db_path=kb_db(tmp_path / "kb")), port=0,
             activity_searcher=searcher,
         )
         srv.start()

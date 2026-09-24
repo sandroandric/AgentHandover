@@ -24,6 +24,7 @@ from agenthandover_worker.evidence_normalizer import (
 from agenthandover_worker.knowledge_base import KnowledgeBase
 from agenthandover_worker.procedure_schema import sop_to_procedure
 from agenthandover_worker.variant_detector import VariantDetector
+from daemon_db import kb_db
 
 
 # ------------------------------------------------------------------
@@ -66,7 +67,7 @@ def _make_procedure(slug: str, steps: list[dict], episode_count: int = 1,
 
 @pytest.fixture()
 def kb(tmp_path: Path) -> KnowledgeBase:
-    kb = KnowledgeBase(root=tmp_path / "knowledge")
+    kb = KnowledgeBase(root=tmp_path / "knowledge", db_path=kb_db(tmp_path / "knowledge"))
     kb.ensure_structure()
     return kb
 

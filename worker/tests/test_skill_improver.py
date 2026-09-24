@@ -10,13 +10,14 @@ from agenthandover_worker.execution_monitor import ExecutionMonitor
 from agenthandover_worker.knowledge_base import KnowledgeBase
 from agenthandover_worker.ledger import unknown_slots
 from agenthandover_worker.skill_improver import SkillImprover, execution_confidence
+from daemon_db import kb_db
 
 SLUG = "test-skill"
 
 
 @pytest.fixture
 def kb(tmp_path: Path) -> KnowledgeBase:
-    kb = KnowledgeBase(root=tmp_path / "knowledge")
+    kb = KnowledgeBase(root=tmp_path / "knowledge", db_path=kb_db(tmp_path / "knowledge"))
     kb.ensure_structure()
     kb.save_procedure({
         "id": SLUG,

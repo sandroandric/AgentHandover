@@ -18,6 +18,7 @@ from agenthandover_worker.procedure_schema import sop_to_procedure
 from agenthandover_worker.query_api import TOKEN_HEADER, QueryAPIServer
 from agenthandover_worker.staleness_detector import StalenessDetector
 from agenthandover_worker.trust_advisor import TrustAdvisor
+from daemon_db import kb_db
 
 
 # ---------------------------------------------------------------------------
@@ -93,7 +94,7 @@ def _save_proc(kb: KnowledgeBase, slug: str, apps: list[str], actions: list[str]
 @pytest.fixture()
 def kb(tmp_path: Path) -> KnowledgeBase:
     """Create a KnowledgeBase rooted in a temp directory."""
-    kb = KnowledgeBase(root=tmp_path / "knowledge")
+    kb = KnowledgeBase(root=tmp_path / "knowledge", db_path=kb_db(tmp_path / "knowledge"))
     kb.ensure_structure()
     return kb
 

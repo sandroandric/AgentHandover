@@ -12,6 +12,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+from daemon_db import kb_db
 
 
 # ---------------------------------------------------------------------------
@@ -182,7 +183,7 @@ class TestSearchSkillsMode:
         from agenthandover_worker.knowledge_base import KnowledgeBase
         from agenthandover_worker.mcp_server import build_mcp_server
 
-        kb = KnowledgeBase(root=tmp_path / "knowledge")
+        kb = KnowledgeBase(root=tmp_path / "knowledge", db_path=kb_db(tmp_path / "knowledge"))
         kb.ensure_structure()
         kb.save_procedure({
             "id": "reddit-marketing", "title": "Reddit Community Marketing",
@@ -291,7 +292,7 @@ class TestKeywordFallback:
         from agenthandover_worker.knowledge_base import KnowledgeBase
         from agenthandover_worker.mcp_server import build_mcp_server
 
-        kb = KnowledgeBase(root=tmp_path / "knowledge")
+        kb = KnowledgeBase(root=tmp_path / "knowledge", db_path=kb_db(tmp_path / "knowledge"))
         kb.ensure_structure()
         kb.save_procedure({
             "id": "x-replyu", "title": "x replyu", "short_title": "Reply to Health Thread",

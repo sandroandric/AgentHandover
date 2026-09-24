@@ -35,6 +35,7 @@ from agenthandover_worker.knowledge_base import KnowledgeBase
 from agenthandover_worker.procedure_schema import sop_to_procedure
 from agenthandover_worker.vector_kb import VectorKB, VectorKBConfig
 from fixtures.vlm_answers import generated_sop_template
+from daemon_db import kb_db
 
 SLUG = "check-domain-availability"
 QUERY = "find out whether a web domain name can still be registered"
@@ -50,7 +51,7 @@ def _approved_skill(kb_root: Path) -> dict:
         "lifecycle_state": "agent_ready",
         "constraints": {"trust_level": "suggest", "guardrails": []},
     })
-    kb = KnowledgeBase(root=kb_root)
+    kb = KnowledgeBase(root=kb_root, db_path=kb_db(kb_root))
     kb.ensure_structure()
     kb.save_procedure(proc)
     return kb.get_procedure(SLUG)

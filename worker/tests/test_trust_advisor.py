@@ -9,6 +9,7 @@ import pytest
 
 from agenthandover_worker.execution_monitor import ExecutionMonitor
 from agenthandover_worker.knowledge_base import KnowledgeBase
+from daemon_db import kb_db
 from agenthandover_worker.trust_advisor import (
     TRUST_LEVELS,
     TrustAdvisor,
@@ -24,7 +25,7 @@ from agenthandover_worker.trust_advisor import (
 @pytest.fixture()
 def kb(tmp_path: Path) -> KnowledgeBase:
     """Create a KnowledgeBase in a temp directory."""
-    kb = KnowledgeBase(root=tmp_path / "knowledge")
+    kb = KnowledgeBase(root=tmp_path / "knowledge", db_path=kb_db(tmp_path / "knowledge"))
     kb.ensure_structure()
     return kb
 

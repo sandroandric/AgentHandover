@@ -25,6 +25,7 @@ import pytest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock
+from daemon_db import kb_db
 
 
 # ---- Fixtures ----
@@ -33,7 +34,7 @@ from unittest.mock import MagicMock
 def kb(tmp_path):
     """Create a KnowledgeBase with a temp root."""
     from agenthandover_worker.knowledge_base import KnowledgeBase
-    kb = KnowledgeBase(root=tmp_path)
+    kb = KnowledgeBase(root=tmp_path, db_path=kb_db(tmp_path))
     kb.ensure_structure()
     return kb
 

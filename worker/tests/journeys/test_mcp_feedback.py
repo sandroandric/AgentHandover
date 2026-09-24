@@ -19,6 +19,8 @@ Not covered here: a regeneration through the focus-recording pipeline
 from __future__ import annotations
 
 import json
+import sqlite3
+from contextlib import closing
 
 import anyio
 import pytest
@@ -124,7 +126,9 @@ def test_deviation_lands_on_its_step_and_survives_regeneration(
 
     # The worker (a different process in production) reads the same run.
     assert journey.trust_advisor._get_execution_stats(SLUG)["total"] == 1
-    assert (kb_root / "observations" / "runs.db").is_file()
+    with closing(sqlite3.connect(journey.db_path)) as conn:
+        assert conn.execute("SELECT count(*) FROM runs").fetchone()[0] == 1
+    assert not (kb_root / "observations" / "runs.db").exists()
 
     # Regeneration: the worker writes the Skill again from a new template.
     journey.procedure_writer.write_procedure(

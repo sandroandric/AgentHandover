@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from agenthandover_worker.knowledge_base import KnowledgeBase
+from daemon_db import kb_db
 from agenthandover_worker.execution_monitor import (
     ExecutionMonitor,
     ExecutionStatus,
@@ -45,7 +46,7 @@ def _make_procedure(slug: str = "deploy-app", steps: list[dict] | None = None) -
 @pytest.fixture()
 def kb(tmp_path: Path) -> KnowledgeBase:
     """Create a KnowledgeBase rooted in a temp directory."""
-    kb = KnowledgeBase(root=tmp_path / "knowledge")
+    kb = KnowledgeBase(root=tmp_path / "knowledge", db_path=kb_db(tmp_path / "knowledge"))
     kb.ensure_structure()
     return kb
 
@@ -522,8 +523,10 @@ class TestPersistence:
         eid = monitor.start_execution("deploy-app")
         monitor.complete_execution(eid)
 
-        path = kb_with_proc.root / "observations" / "runs.db"
+        # The daemon's database, beside the procedures.
+        path = kb_with_proc.db_path
         assert monitor.db_path == path
+        assert not (kb_with_proc.root / "observations" / "runs.db").exists()
         conn = sqlite3.connect(str(path))
         try:
             rows = conn.execute("SELECT execution_id, status FROM runs").fetchall()
@@ -531,6 +534,31 @@ class TestPersistence:
             conn.close()
         assert rows == [(eid, "completed")]
         assert not (kb_with_proc.root / "observations" / "executions.json").exists()
+
+    def test_imports_runs_db_of_a_development_build_once(
+        self, kb_with_proc: KnowledgeBase
+    ) -> None:
+        """Runs kept in ``observations/runs.db`` move into the database;
+        the file is renamed, not deleted."""
+        old = kb_with_proc.root / "observations" / "runs.db"
+        old.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(old)
+        conn.executescript(
+            "CREATE TABLE runs (execution_id TEXT PRIMARY KEY, procedure_slug TEXT NOT NULL,"
+            " agent_id TEXT NOT NULL, status TEXT NOT NULL, started_at TEXT NOT NULL,"
+            " completed_at TEXT, error TEXT, steps_json TEXT NOT NULL,"
+            " deviations_json TEXT NOT NULL, outcomes_json TEXT NOT NULL, metadata_json TEXT);"
+            "INSERT INTO runs VALUES ('run-1', 'deploy-app', 'agent', 'completed',"
+            " '2026-09-01T10:00:00Z', '2026-09-01T10:05:00Z', NULL, '[]', '[]', '[]', NULL);"
+        )
+        conn.commit()
+        conn.close()
+
+        history = ExecutionMonitor(kb_with_proc).get_history()
+        assert [r.execution_id for r in history] == ["run-1"]
+        assert not old.exists()
+        assert old.with_name("runs.db.imported").is_file()
+        assert [r.execution_id for r in ExecutionMonitor(kb_with_proc).get_history()] == ["run-1"]
 
     def test_load_empty_kb(self, kb: KnowledgeBase) -> None:
         """Monitor starts fine with no prior history file."""

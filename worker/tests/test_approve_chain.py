@@ -29,6 +29,7 @@ from agenthandover_worker.openclaw_writer import OpenClawWriter
 from agenthandover_worker.procedure_schema import sop_to_procedure
 from agenthandover_worker.procedure_writer import ProcedureWriter
 from fixtures.vlm_answers import generated_sop_template
+from daemon_db import kb_db
 
 SLUG = "check-domain-availability"
 
@@ -39,7 +40,7 @@ class Env:
         self.state = tmp_path / "state"
         self.state.mkdir()
         self.db = db
-        self.kb = KnowledgeBase(root=self.home / ".agenthandover" / "knowledge")
+        self.kb = KnowledgeBase(root=self.home / ".agenthandover" / "knowledge", db_path=kb_db(self.home / ".agenthandover" / "knowledge"))
         self.kb.ensure_structure()
         self.lm = LifecycleManager(self.kb)
         self.procedure_writer = ProcedureWriter(
