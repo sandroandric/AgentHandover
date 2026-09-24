@@ -92,7 +92,9 @@ def trigger_handlers(ctx: Any) -> dict[str, Callable[[dict], None]]:
     A retry regenerates a Skill and a merge asks the model to settle
     conflicts: both run on the inference thread (P0, ``model_work``).  The
     other handlers run on the control thread; the model part of an
-    approval (embedding, style analysis) is queued the same way.
+    approval (embedding, style analysis) and a review card's free-text
+    step answer (its revision, ``questions.revise_step_answer``) are
+    queued the same way.
     """
     db = ctx.db
     export_kwargs = ctx.export_kwargs()
@@ -159,6 +161,6 @@ def trigger_handlers(ctx: Any) -> dict[str, Callable[[dict], None]]:
             procedure_writer=ctx.procedure_writer,
         ),
         "micro-answer": lambda t: wm._process_micro_answer_trigger(
-            t, db, ctx.knowledge_base, now=ctx.now(),
+            t, db, ctx.knowledge_base, now=ctx.now(), sop_generator=ctx.sop_generator,
         ),
     }

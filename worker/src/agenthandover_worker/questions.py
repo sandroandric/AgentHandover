@@ -15,10 +15,12 @@ them.  Three kinds:
   [Pasted it from somewhere else]).  A choice decides the step in code
   (:func:`apply_step_answer`: restore what the model wrote, or keep the
   grounded step); any other answer is left to the focus answers'
-  one revision call (``focus_questioner.answer_revision_prompt``), or, on
-  a review card (no model call from the review queue), kept on its step
-  for the packet to show.  Either way the step cites the answer (``evidence.user_answer``), so the
-  ledger's ``steps`` slot carries an ``answer`` pointer next to its frames;
+  one revision call (``focus_questioner.answer_revision_prompt``); on a
+  review card the same revision runs as a P0 job on the inference thread
+  (:func:`revise_step_answer`), and the answer is kept on its step
+  whatever the model does.  Either way the step cites the answer
+  (``evidence.user_answer``), so the ledger's ``steps`` slot carries an
+  ``answer`` pointer next to its frames;
 - a **slot question** per ``unknown`` or ``hypothesis`` slot of a
   procedure (``What starts this task?``), its choices drawn from what the
   runs showed: the recurring lead-in or start time, the commit that ended
@@ -79,8 +81,9 @@ from agenthandover_worker.step_grounding import (
 
 if TYPE_CHECKING:
     from agenthandover_worker.db import WorkerDB
-    from agenthandover_worker.focus_questioner import FocusQuestion
+    from agenthandover_worker.focus_questioner import FocusQAResult, FocusQuestion
     from agenthandover_worker.knowledge_base import KnowledgeBase
+    from agenthandover_worker.sop_generator import SOPGenerator
 
 logger = logging.getLogger(__name__)
 
@@ -905,10 +908,19 @@ def apply_answer(
     state_dir: Path,
     *,
     now: datetime,
+    reviser: "SOPGenerator | None" = None,
 ) -> bool:
     """A ``micro-answer`` trigger from a review card: ``{"question_id",
     "answer", "name"}`` (a blank answer skips the question).  Returns True
-    when an open question was closed."""
+    when an open question was closed.
+
+    A step question answered with one of its choices is applied in code
+    (:func:`apply_step_answer`).  Any other answer is recorded on its step,
+    and it revises the step through *reviser* (``SOPGenerator.revise``),
+    as the focus window's typed answers do: :func:`revise_step_answer`,
+    queued as a P0 job on the inference thread (``model_work``), never
+    called here, because the trigger runs on the control thread.  With no
+    *reviser* (the v2 pipeline is off), the answer is only recorded."""
     qid = str(trigger.get("question_id") or "")
     row = next((r for r in db.get_micro_questions(status="open") if r["question_id"] == qid), None)
     if row is None:
@@ -926,7 +938,98 @@ def apply_answer(
         return False
     db.close_micro_question(qid, status="answered", answer=answer, at=now)
     write_cards(db, state_dir)
+    if (
+        question.kind == KIND_STEP and reviser is not None
+        and choice_index(question.choices, answer) is None
+    ):
+        from agenthandover_worker.inference_runner import P0, model_work
+
+        model_work(
+            f"step-answer-revision:{qid}",
+            lambda: revise_step_answer(kb, question, answer, reviser),
+            P0,
+        )
     return True
+
+
+def _step_answer_qa(proc: dict, question: Question, answer: str) -> "FocusQAResult | None":
+    """The card's answer as the focus window's typed answer to one step
+    question, about its steps as they now stand; None when the flag is no
+    longer on the procedure (its step changed since it was asked)."""
+    from agenthandover_worker.focus_questioner import (
+        ANSWER_TYPED,
+        FocusQAResult,
+        FocusQuestion,
+    )
+
+    indexes = step_question_indexes(proc, question.id)
+    if not indexes:
+        return None
+    return FocusQAResult(
+        questions=[FocusQuestion(
+            question=question.question, category=question.slot or STEP_SLOT,
+            context=question.context, default="", step_indexes=indexes,
+            id=question.id, choices=list(question.choices),
+        )],
+        answers={0: answer},
+        sources={0: ANSWER_TYPED},
+    )
+
+
+def revise_step_answer(
+    kb: "KnowledgeBase", question: Question, answer: str, reviser: "SOPGenerator",
+) -> list[dict]:
+    """Revise the Skill's steps with a review card's free-text answer to
+    step question *question*: the focus window's one revision call
+    (``focus_questioner.answer_revision_prompt``, ``SOPGenerator.revise``)
+    and its rules (``apply_answer_revisions``: the question's steps and
+    their neighbours, typed text kept, duplicated neighbours dropped).
+    Runs on the inference thread.  Returns the applied revisions.
+
+    The answer was recorded before this ran (:func:`_apply_slot`).  When
+    the model is unavailable, its answer is unusable, or the steps changed
+    while it was answering, the steps stay as they are and the answer stays
+    recorded."""
+    from agenthandover_worker.focus_questioner import (
+        answer_revision_prompt,
+        apply_answer_revisions,
+    )
+
+    proc = kb.get_procedure(question.subject)
+    qa = _step_answer_qa(proc, question, answer) if proc is not None else None
+    prompt = answer_revision_prompt(proc, qa) if qa is not None else None
+    if prompt is None:
+        logger.info("Step question %s: no step left to revise; the answer stays recorded",
+                    question.id)
+        return []
+    try:
+        response = reviser.revise(prompt)
+    except ConnectionError as exc:
+        logger.warning(
+            "Step question %s: the answer could not revise the steps (model "
+            "unavailable: %s); it stays recorded", question.id, exc,
+        )
+        return []
+    except (ValueError, TimeoutError, RuntimeError) as exc:
+        logger.warning(
+            "Step question %s: the answer revision was unusable (%s); steps unchanged",
+            question.id, exc,
+        )
+        return []
+    # The model call let go of the state lock: the procedure is read again,
+    # and a revision numbered on steps that changed meanwhile is not applied.
+    fresh = kb.get_procedure(question.subject)
+    if fresh is None or fresh.get("steps") != proc.get("steps"):
+        logger.warning(
+            "Step question %s: the steps changed during the revision; steps "
+            "unchanged, the answer stays recorded", question.id,
+        )
+        return []
+    applied = apply_answer_revisions(fresh, qa, response)
+    if applied:
+        kb.save_procedure(fresh)
+        logger.info("Step question %s: the card's answer revised the steps", question.id)
+    return applied
 
 
 def _apply_label(
@@ -982,8 +1085,8 @@ def _apply_slot(kb: "KnowledgeBase", question: Question, answer: str) -> bool:
         })
         if question.kind == KIND_STEP:
             # A choice decides the step here.  Any other answer is recorded
-            # on the step it is about; the one model call that revises
-            # steps from typed answers belongs to the focus Q&A window.
+            # on the step it is about; ``apply_answer`` then queues its
+            # revision for the inference thread (``revise_step_answer``).
             apply_step_answer(
                 proc, question.id, answer,
                 clarification=len(clarifications) - 1, question=question.question,

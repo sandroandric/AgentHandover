@@ -2851,15 +2851,17 @@ def _ask_micro_questions(
 
 def _process_micro_answer_trigger(
     trigger: dict, db: "WorkerDB", knowledge_base: "KnowledgeBase",
-    *, now: datetime | None = None,
+    *, now: datetime | None = None, sop_generator: "SOPGenerator | None" = None,
 ) -> None:
     """Handle a ``micro-answer`` trigger: a review card answered (or
     skipped) in the app (``questions.apply_answer``), at *now* (default:
-    the wall clock)."""
+    the wall clock).  A free-text answer to a step question is revised by
+    *sop_generator* on the inference thread."""
     from agenthandover_worker import questions
 
     questions.apply_answer(
         trigger, db, knowledge_base, _status_dir(), now=now or datetime.now(timezone.utc),
+        reviser=sop_generator,
     )
 
 

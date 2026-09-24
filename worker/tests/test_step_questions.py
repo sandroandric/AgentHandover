@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import copy
 import json
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -31,6 +32,7 @@ from agenthandover_worker.focus_questioner import (
     parse_qa_result_from_file,
     write_focus_questions,
 )
+from agenthandover_worker.inference_runner import InferenceRunner, model_wait
 from agenthandover_worker.knowledge_base import KnowledgeBase
 from agenthandover_worker.ledger import derive_knowledge
 from agenthandover_worker.procedure_schema import sop_to_procedure, validate_procedure
@@ -461,3 +463,189 @@ def test_a_free_text_card_answer_is_kept_on_its_step(db, kb, tmp_path: Path) -> 
     assert saved["steps"][0]["action"] == "Open Safari"
     assert saved["steps"][0]["evidence"]["user_answer"]["answer"] == answer
     assert f"The user answered: {answer}" in render_packet(saved, target="claude-skill")
+
+
+# ---------------------------------------------------------------------------
+# A review card's free-text answer revises its step on the inference thread
+# ---------------------------------------------------------------------------
+
+CARD_ANSWER = "I typed the domain list again under it, then the source line"
+REVISION_KEY = "step-answer-revision:"
+
+
+class _Reviser:
+    """``SOPGenerator.revise`` as the worker calls it: waits for the model
+    (``model_wait`` lets go of the state lock), on whatever thread it is
+    called from, which it records.  It answers with *response* once *go*
+    is set, or raises *error*."""
+
+    def __init__(self, response: dict | None = None, error: Exception | None = None,
+                 during=None) -> None:
+        self.response = response or {}
+        self.error = error
+        self.during = during
+        self.go = threading.Event()
+        self.go.set()
+        self.calls: list[tuple[str, int]] = []
+
+    def revise(self, prompt: str) -> dict:
+        self.calls.append((prompt, threading.get_ident()))
+        with model_wait("fake revise"):
+            assert self.go.wait(10)
+            if self.during is not None:
+                self.during()
+        if self.error is not None:
+            raise self.error
+        return self.response
+
+
+@pytest.fixture()
+def runner():
+    """The worker's two threads: this test's thread is the control thread."""
+    started = InferenceRunner().start()
+    yield started
+    started.stop()
+
+
+def _typed_line_card(db, kb, tmp_path: Path) -> qs.Question:
+    """The live run's Skill in the knowledge base, with its typed-line
+    question (step 4, which the model had left out) open as a review card."""
+    proc = _live_run_procedure()
+    kb.save_procedure(proc)
+    [card] = _by_kind(proc)["added"]
+    qs.record_asked(db, [card], channel=qs.CHANNEL_CARD, now=NOW)
+    qs.write_cards(db, tmp_path)
+    return card
+
+
+def test_a_free_text_card_answer_queues_one_revision_job_that_revises_the_step(
+    db, kb, tmp_path: Path, runner: InferenceRunner,
+) -> None:
+    card = _typed_line_card(db, kb, tmp_path)
+    slug = card.subject
+    before = kb.get_procedure(slug)
+    assert before["steps"][2]["input"] == iana.LINE_1
+    # The answer's revision replaces step 4 by two steps: the domain list
+    # typed again (the untouched step 3 before it types the same, so it is
+    # dropped), and the source line cut short (it keeps the typed line).
+    reviser = _Reviser({"revisions": [{
+        "answer": 1, "replaces": [4],
+        "steps": [
+            {"action": "Type the domain list", "input": iana.LINE_1, "verify": ""},
+            {"action": "Type the source line", "input": "Source: IANA", "verify": ""},
+        ],
+    }]})
+    reviser.go.clear()
+
+    assert qs.apply_answer({"question_id": card.id, "answer": CARD_ANSWER},
+                           db, kb, tmp_path, now=NOW, reviser=reviser)
+    # Recorded at once, on the control thread; the model call is one P0 job.
+    [row] = db.get_micro_questions(status="answered")
+    assert row["question_id"] == card.id
+    status = runner.status()
+    assert status["depth"] == 1
+    assert (status["running"] or status["queued"][0]) == f"P0 {REVISION_KEY}{card.id}"
+    recorded = kb.get_procedure(slug)
+    assert recorded["steps"][3]["evidence"]["user_answer"]["answer"] == CARD_ANSWER
+
+    reviser.go.set()
+    assert runner.wait_idle(10)
+    [(prompt, thread)] = reviser.calls
+    assert thread != threading.get_ident()
+    assert f"1. Question (about steps 4): {card.question}" in prompt
+    assert f"Answer: {CARD_ANSWER}" in prompt
+    assert runner.status()["completed"] == 1 and runner.status()["failed"] == 0
+
+    saved = kb.get_procedure(slug)
+    assert [s.get("input") for s in saved["steps"]] == ["", "", iana.LINE_1, iana.LINE_2]
+    assert saved["steps"][2]["action"] == "Type the domain list"
+    for step in saved["steps"][2:]:
+        assert step["evidence"]["source"] == "user_answer"
+        assert step["evidence"]["user_answer"]["answer"] == CARD_ANSWER
+    [clarification] = [c for c in saved["agent_clarifications"] if c.get("question_id") == card.id]
+    assert saved["steps"][3]["evidence"]["user_answer"]["clarification"] == (
+        saved["agent_clarifications"].index(clarification)
+    )
+
+
+def test_a_choice_card_answer_makes_no_model_call(
+    db, kb, tmp_path: Path, runner: InferenceRunner,
+) -> None:
+    card = _typed_line_card(db, kb, tmp_path)
+    reviser = _Reviser()
+    assert qs.apply_answer({"question_id": card.id, "answer": qs.LEAVE_IT_OUT},
+                           db, kb, tmp_path, now=NOW, reviser=reviser)
+    assert runner.wait_idle(10)
+    assert reviser.calls == []
+    assert runner.status()["completed"] == 0 and runner.status()["depth"] == 0
+    assert iana.LINE_2 not in json.dumps(kb.get_procedure(card.subject)["steps"])
+
+
+def test_the_model_unavailable_leaves_the_card_answer_recorded(
+    db, kb, tmp_path: Path, runner: InferenceRunner,
+) -> None:
+    from agenthandover_worker.ollama import OllamaUnavailable
+
+    card = _typed_line_card(db, kb, tmp_path)
+    before = kb.get_procedure(card.subject)["steps"]
+    reviser = _Reviser(error=OllamaUnavailable("the generation model could not be loaded"))
+    assert qs.apply_answer({"question_id": card.id, "answer": CARD_ANSWER},
+                           db, kb, tmp_path, now=NOW, reviser=reviser)
+    assert runner.wait_idle(10)
+    assert len(reviser.calls) == 1
+    # Handled in the job: no failure, no backoff, nothing lost.
+    assert runner.status()["failed"] == 0
+    saved = kb.get_procedure(card.subject)
+    assert [s["action"] for s in saved["steps"]] == [s["action"] for s in before]
+    assert saved["steps"][3]["evidence"]["user_answer"]["answer"] == CARD_ANSWER
+    assert any(c.get("question_id") == card.id and c["answer"] == CARD_ANSWER
+               for c in saved["agent_clarifications"])
+    assert [r["question_id"] for r in db.get_micro_questions(status="answered")] == [card.id]
+    assert f"The user answered: {CARD_ANSWER}" in render_packet(saved, target="claude-skill")
+
+
+def test_steps_changed_during_the_revision_are_not_revised(
+    db, kb, tmp_path: Path, runner: InferenceRunner,
+) -> None:
+    """The model call lets go of the state lock: an edit saved meanwhile
+    (an approval, another answer) wins, and the revision numbered on the
+    old steps is not applied."""
+    card = _typed_line_card(db, kb, tmp_path)
+
+    def edit() -> None:
+        proc = kb.get_procedure(card.subject)
+        proc["steps"][0]["action"] = "Open Safari"
+        kb.save_procedure(proc)
+
+    reviser = _Reviser({"revisions": [{
+        "answer": 1, "replaces": [4],
+        "steps": [{"action": "Type the source line", "input": iana.LINE_2, "verify": ""}],
+    }]}, during=edit)
+    assert qs.apply_answer({"question_id": card.id, "answer": CARD_ANSWER},
+                           db, kb, tmp_path, now=NOW, reviser=reviser)
+    assert runner.wait_idle(10)
+    saved = kb.get_procedure(card.subject)
+    assert saved["steps"][0]["action"] == "Open Safari"
+    assert "source" not in saved["steps"][3]["evidence"]
+    assert saved["steps"][3]["evidence"]["user_answer"]["answer"] == CARD_ANSWER
+
+
+def test_the_control_thread_passes_the_sop_generator_to_the_micro_answer(
+    db, kb, tmp_path: Path,
+) -> None:
+    """The trigger handler (``stages.control``) hands the worker's SOP
+    generator to ``questions.apply_answer`` as its reviser."""
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from agenthandover_worker.stages import control
+
+    reviser = object()
+    ctx = SimpleNamespace(
+        db=db, knowledge_base=kb, now=lambda: NOW, sop_generator=reviser,
+        export_kwargs=lambda: {},
+    )
+    with patch("agenthandover_worker.questions.apply_answer") as apply, \
+            patch("agenthandover_worker.main._status_dir", return_value=tmp_path):
+        control.trigger_handlers(ctx)["micro-answer"]({"question_id": "q", "answer": "a"})
+    assert apply.call_args.kwargs["reviser"] is reviser
