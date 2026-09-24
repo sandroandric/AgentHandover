@@ -259,7 +259,7 @@ def content_lines(
                 by + bh <= wy + band
                 and len(line.split()) <= _TOOLBAR_LABEL_MAX_WORDS
             )
-            ruler_bottom = wy + band * (TOOLBAR_BAND_POINTS + _RULER_POINTS) / TOOLBAR_BAND_POINTS
+            ruler_bottom = wy + band * (1 + _RULER_POINTS / TOOLBAR_BAND_POINTS)
             in_document = not outside and by >= ruler_bottom
         if is_numeric_line(line):
             is_chrome = is_ruler_line(line) or not in_document
