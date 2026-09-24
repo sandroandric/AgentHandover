@@ -108,6 +108,10 @@ TOOLBAR_BAND_POINTS = 60
 # A toolbar label has at most this many words; a longer line in the band
 # is content (a web page's own header, a document's first line).
 _TOOLBAR_LABEL_MAX_WORDS = 4
+# A text ruler sits right below the toolbar (TextEdit's is about 25 points
+# tall), its tick labels OCR'd one by one: a number is in the document
+# only below the toolbar band and this much more.
+_RULER_POINTS = 30
 
 # Words that make up menus, font and format controls: a line made only of
 # them (a font popup's "Helvetica Regular", a menu bar's "File Edit
@@ -150,6 +154,31 @@ def is_chrome_line(line: str, app: str = "") -> bool:
     app_words = {w.lower() for w in _WORD_RE.findall(app)}
     controls = [w for w in words if not w[0].isdigit() and w not in app_words]
     return bool(controls) and all(_is_chrome_word(w) for w in controls)
+
+
+# A line of numbers and separators only: a toolbar's point size ("12"),
+# line spacing ("1.0") or zoom ("100%"), a ruler's ticks.  OCR reads these
+# differently from frame to frame.
+_NUMERIC_LINE_RE = re.compile(r"[\d\s.,:;|/+%·•–—-]*\d[\d\s.,:;|/+%·•–—-]*")
+_NUMBER_RE = re.compile(r"\d+(?:[.,]\d+)?")
+
+
+def is_numeric_line(line: str) -> bool:
+    """True when *line* is only numbers and separators ("12", "1.0",
+    "0 2 4 6 8 10"); "Invoice 4471" and "3 items" are not."""
+    return bool(_NUMERIC_LINE_RE.fullmatch(line.strip()))
+
+
+def is_ruler_line(line: str) -> bool:
+    """A numeric line of rising tick labels: three or more numbers that
+    never fall ("0 2 4 6 8 10 12"), or four or more with one fall (OCR
+    dropping or misreading a tick).  A phone number or a date
+    ("555 123 4567", "2026 09 24") falls, so it is not a ruler."""
+    if not is_numeric_line(line):
+        return False
+    numbers = [float(n.replace(",", ".")) for n in _NUMBER_RE.findall(line)]
+    falls = sum(b < a for a, b in zip(numbers, numbers[1:]))
+    return (len(numbers) >= 3 and falls == 0) or (len(numbers) >= 4 and falls <= 1)
 
 
 def _ocr_boxes(event: dict) -> dict[str, list]:
@@ -195,10 +224,18 @@ def content_lines(
     Dock) and a short label entirely inside the window's title and toolbar
     band (tabs, the address bar, font popups).
 
-    The diff prompt drops only the chrome words (``geometry=False``): the
-    address bar and tab titles are how the model sees a typed URL or a
-    switched tab.  The claimed edits are checked against the document's
-    text with the geometry (:func:`ground_text_changes`)."""
+    A line of numbers only (:func:`is_numeric_line`: a toolbar's "12" or
+    "1.0", which OCR reads differently from frame to frame) is chrome
+    unless the frame's geometry places it in the document area (inside
+    the window, below its toolbar band and a text ruler's height),
+    whatever *geometry* says; a line of a ruler's ticks
+    (:func:`is_ruler_line`) is chrome wherever it is.
+
+    The diff prompt drops only the chrome words and numbers
+    (``geometry=False``): the address bar and tab titles are how the
+    model sees a typed URL or a switched tab.  The claimed edits are
+    checked against the document's text with the geometry
+    (:func:`ground_text_changes`)."""
     lines = [
         line.strip() for line in str(annotation.get("_screen_text") or "").splitlines()
         if line.strip()
@@ -206,13 +243,13 @@ def content_lines(
     app = str(annotation.get("app") or "")
     if event is not None:
         app = app or display_name(parse_json_field(event, "window_json").get("app_id"))
-    boxes = _ocr_boxes(event) if event is not None and geometry else {}
+    boxes = _ocr_boxes(event) if event is not None else {}
     window = _window_frame(event) if event is not None and boxes else None
     content: list[str] = []
     chrome: list[str] = []
     for line in lines:
         bbox = boxes.get(line)
-        outside = in_band = False
+        outside = in_band = in_document = False
         if window is not None and bbox is not None:
             wx, wy, ww, wh, band = window
             bx, by, bw, bh = bbox
@@ -222,7 +259,13 @@ def content_lines(
                 by + bh <= wy + band
                 and len(line.split()) <= _TOOLBAR_LABEL_MAX_WORDS
             )
-        (chrome if outside or in_band or is_chrome_line(line, app) else content).append(line)
+            ruler_bottom = wy + band * (1 + _RULER_POINTS / TOOLBAR_BAND_POINTS)
+            in_document = not outside and by >= ruler_bottom
+        if is_numeric_line(line):
+            is_chrome = is_ruler_line(line) or not in_document
+        else:
+            is_chrome = (geometry and (outside or in_band)) or is_chrome_line(line, app)
+        (chrome if is_chrome else content).append(line)
     return content, chrome
 
 
