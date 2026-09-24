@@ -73,6 +73,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Obse
     /// are back.
     private var setupForExistingInstall = false
     private var focusQAWindow: NSWindow?
+    private var modelDownloadWindow: NSWindow?
 
     /// Single shared AppState used by onboarding, menu bar, and all windows.
     @MainActor let sharedAppState = AppState()
@@ -177,6 +178,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Obse
             if launch == .observe {
                 MainActor.assumeIsolated { startObserving() }
             }
+            checkModelUpgrade()
         }
     }
 
@@ -337,11 +339,83 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Obse
         window.orderFrontRegardless()
     }
 
-    /// The Q&A window closed: back to a menu bar app unless another window
-    /// is open.
+    /// After an upgrade, a config on earlier default models (see
+    /// `ModelUpgrade`): switch when the new models are pulled, else ask to
+    /// download them unless the user said "Not now" for this version.
+    private func checkModelUpgrade() {
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let plan = ModelUpgrade.loadPlan()
+            let decision = ModelUpgrade.decide(
+                plan: plan,
+                installed: plan == nil ? nil : ModelUpgrade.installedModels(),
+                declinedVersion: UserDefaults.standard.string(forKey: ModelUpgrade.declinedVersionKey),
+                appVersion: ModelUpgrade.appVersion
+            )
+            launchLog.notice("model upgrade: \(String(describing: decision), privacy: .public)")
+            switch decision {
+            case .none:
+                break
+            case .applySilently:
+                ModelUpgrade.apply()
+            case .ask(let missing):
+                DispatchQueue.main.async {
+                    MainActor.assumeIsolated { self?.showModelDownload(plan: plan, missing: missing) }
+                }
+            }
+        }
+    }
+
+    /// The menu's "AI model missing" row: the upgrade's models when a
+    /// switch waits for them, else the configured models the worker
+    /// reported missing.  Called on the main thread (the menu).
+    func showModelDownload() {
+        let reported = MainActor.assumeIsolated { sharedAppState.workerStatus?.missing_models ?? [] }
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let plan = ModelUpgrade.loadPlan()
+            let upgradeMissing = plan.flatMap { plan in
+                ModelUpgrade.installedModels().map { OllamaModels.missing(plan.models, installed: $0) }
+            } ?? []
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    if !upgradeMissing.isEmpty {
+                        self?.showModelDownload(plan: plan, missing: upgradeMissing)
+                    } else if !reported.isEmpty {
+                        self?.showModelDownload(plan: nil, missing: reported)
+                    }
+                }
+            }
+        }
+    }
+
+    @MainActor
+    private func showModelDownload(plan: ModelUpgradePlan?, missing: [String]) {
+        NSApp.setActivationPolicy(.regular)
+        NSApp.activate(ignoringOtherApps: true)
+        if let window = modelDownloadWindow {
+            window.makeKeyAndOrderFront(nil)
+            return
+        }
+        let view = ModelDownloadView(plan: plan, missing: missing, close: { [weak self] in
+            self?.modelDownloadWindow?.close()
+            self?.sharedAppState.refreshStatus()
+        })
+        let window = NSWindow(contentViewController: NSHostingController(rootView: view))
+        window.title = "AgentHandover Models"
+        window.styleMask = [.titled, .closable]
+        window.center()
+        window.isReleasedWhenClosed = false
+        window.delegate = self
+        modelDownloadWindow = window
+        window.makeKeyAndOrderFront(nil)
+        window.orderFrontRegardless()
+    }
+
+    /// The Q&A or the models window closed: back to a menu bar app unless
+    /// another window is open.
     func windowWillClose(_ notification: Notification) {
-        guard let window = notification.object as? NSWindow, window === focusQAWindow else { return }
-        focusQAWindow = nil
+        guard let window = notification.object as? NSWindow,
+              window === focusQAWindow || window === modelDownloadWindow else { return }
+        if window === focusQAWindow { focusQAWindow = nil } else { modelDownloadWindow = nil }
         let others = NSApp.windows.contains {
             $0 !== window && $0.isVisible && $0.styleMask.contains(.titled)
         }

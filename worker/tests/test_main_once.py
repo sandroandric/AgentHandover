@@ -165,10 +165,14 @@ def test_vector_kb_and_matcher_reach_their_consumers(
 
 def test_startup_migrates_a_config_on_an_earlier_tier_default(
     once_home: Path, tmp_db_path: Path, tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """main() moves a [vlm] block still on the 16 GB tier's pre-WP-F6
     models to its current ones before it reads the config, once, with a
-    backup beside it."""
+    backup beside it.  The switch waits for Ollama to serve the new models
+    (test_model_upgrade.py asks a fake Ollama); here /api/tags lists them,
+    and every other Ollama host stays a closed port."""
+    monkeypatch.setattr(worker_main, "served_models", lambda _text: ["qwen3.5:4b"])
     config = worker_main._status_dir() / "config.toml"
     if worker_main._platform.system() != "Darwin":
         config = once_home / ".config" / "agenthandover" / "config.toml"

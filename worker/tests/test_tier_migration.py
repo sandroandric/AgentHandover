@@ -1,6 +1,7 @@
 """Tier migration: a config still on a tier's earlier default models
 (``model_profiles.PREVIOUS_TIER_DEFAULTS``) moves to the tier's current
-ones, at install (``migrate-vlm``) and at worker startup; a block the user
+ones at worker startup, once Ollama serves them (the installer's
+``migrate-vlm`` asks no Ollama and keeps them); a block the user
 customised is never touched.
 
 The shared fixtures in ``tests/fixtures/vlm_block`` pin the edit to the
@@ -30,9 +31,12 @@ MIGRATED_RECOMMENDED = FIXTURES.joinpath("recommended-migrated.toml").read_text(
 OLD_STANDARD = FIXTURES.joinpath("standard-previous.toml").read_text(encoding="utf-8")
 MIGRATED_STANDARD = FIXTURES.joinpath("standard-migrated.toml").read_text(encoding="utf-8")
 
+# What Ollama's /api/tags lists on a Mac with every tier's models pulled.
+SERVED = frozenset(m for t in mp.TIERS for m in t.models)
+
 
 def _unchanged(text: str) -> str:
-    new, changed, reason = mp.migrate_vlm_block(text)
+    new, changed, reason = mp.migrate_vlm_block(text, SERVED)
     assert not changed, reason
     assert new == text
     return reason
@@ -94,7 +98,7 @@ def test_apply_appends_to_a_config_without_vlm():
 
 
 def test_old_recommended_block_moves_to_qwen_byte_for_byte():
-    new, changed, reason = mp.migrate_vlm_block(OLD_RECOMMENDED)
+    new, changed, reason = mp.migrate_vlm_block(OLD_RECOMMENDED, SERVED)
     assert changed
     assert new == MIGRATED_RECOMMENDED
     # Only the sop_model line differs; every other byte is kept.
@@ -112,7 +116,7 @@ def test_old_standard_block_moves_to_the_2b_annotator_byte_for_byte():
     """WP-F8: an 8 GB config the installer or onboarding wrote with
     qwen3.5:4b for both roles now annotates with qwen3.5:2b-q4_K_M; only
     the annotation_model line changes."""
-    new, changed, reason = mp.migrate_vlm_block(OLD_STANDARD)
+    new, changed, reason = mp.migrate_vlm_block(OLD_STANDARD, SERVED)
     assert changed
     assert new == MIGRATED_STANDARD
     diff = [
@@ -148,7 +152,7 @@ def test_a_customised_standard_block_is_left_alone(label, text, reason):
 
 
 def test_migration_is_idempotent():
-    once, changed, _ = mp.migrate_vlm_block(OLD_RECOMMENDED)
+    once, changed, _ = mp.migrate_vlm_block(OLD_RECOMMENDED, SERVED)
     assert changed
     reason = _unchanged(once)
     assert reason == 'already the current models of tier "recommended"'
@@ -174,7 +178,7 @@ def test_extra_vlm_keys_and_sections_survive():
         "[privacy]\n"
         "read_app_state = true\n"
     )
-    new, changed, _ = mp.migrate_vlm_block(text)
+    new, changed, _ = mp.migrate_vlm_block(text, SERVED)
     assert changed
     # The managed keys go right after the header, as every writer puts
     # them; the hand-set keys and the other section are kept verbatim.
@@ -195,7 +199,7 @@ def test_extra_vlm_keys_and_sections_survive():
 
 def test_block_without_mode_is_local_and_migrates():
     text = OLD_RECOMMENDED.replace('mode = "local"\n', "")
-    new, changed, _ = mp.migrate_vlm_block(text)
+    new, changed, _ = mp.migrate_vlm_block(text, SERVED)
     assert changed
     # The rewritten block states the mode, as every writer does.
     assert new == MIGRATED_RECOMMENDED
@@ -203,7 +207,7 @@ def test_block_without_mode_is_local_and_migrates():
 
 def test_crlf_and_no_trailing_newline_are_kept():
     text = '[vlm]\r\nmode = "local"\r\ntier = "recommended"\r\nannotation_model = "qwen3.5:4b"\r\nsop_model = "gemma4:12b-it-qat"\r\nkeep = 1'
-    new, changed, _ = mp.migrate_vlm_block(text)
+    new, changed, _ = mp.migrate_vlm_block(text, SERVED)
     assert changed
     assert new.endswith("keep = 1")
     assert "sop_model" in new and "gemma4" not in new
@@ -224,7 +228,8 @@ def test_crlf_and_no_trailing_newline_are_kept():
      'already the current models of tier "performance"'),
     ("no tier key",
      OLD_RECOMMENDED.replace('tier = "recommended"\n', ""),
-     "[vlm] names no tier"),
+     "[vlm] names no tier and qwen3.5:4b + gemma4:12b-it-qat is not a default of 0.4.0 "
+     "(set by hand)"),
     ("sop_model left to the tier",
      OLD_RECOMMENDED.replace('sop_model = "gemma4:12b-it-qat"\n', ""),
      "[vlm] does not pin both models (the tier supplies the rest)"),
@@ -276,7 +281,7 @@ def test_file_is_backed_up_then_rewritten(tmp_path):
     cfg = tmp_path / "config.toml"
     cfg.write_text(OLD_RECOMMENDED, encoding="utf-8")
     cfg.chmod(0o600)
-    changed, reason, backup = mp.migrate_vlm_file(cfg, now=NOW)
+    changed, reason, backup = mp.migrate_vlm_file(cfg, now=NOW, served=SERVED)
     assert changed and "gemma4:12b-it-qat -> qwen3.5:4b" in reason
     assert backup == tmp_path / "config.toml.20260923-201500.bak"
     assert backup.read_text(encoding="utf-8") == OLD_RECOMMENDED
@@ -293,7 +298,7 @@ def test_no_backup_and_no_write_when_unchanged(tmp_path):
     cfg = tmp_path / "config.toml"
     cfg.write_text(MIGRATED_RECOMMENDED, encoding="utf-8")
     before = cfg.stat()
-    changed, reason, backup = mp.migrate_vlm_file(cfg, now=NOW)
+    changed, reason, backup = mp.migrate_vlm_file(cfg, now=NOW, served=SERVED)
     assert (changed, backup) == (False, None)
     assert reason == 'already the current models of tier "recommended"'
     assert [p.name for p in tmp_path.iterdir()] == ["config.toml"]
@@ -304,8 +309,8 @@ def test_no_backup_and_no_write_when_unchanged(tmp_path):
 def test_second_run_is_a_no_op_and_writes_no_second_backup(tmp_path):
     cfg = tmp_path / "config.toml"
     cfg.write_text(OLD_RECOMMENDED, encoding="utf-8")
-    assert mp.migrate_vlm_file(cfg, now=NOW)[0]
-    assert mp.migrate_vlm_file(cfg, now=NOW)[0] is False
+    assert mp.migrate_vlm_file(cfg, now=NOW, served=SERVED)[0]
+    assert mp.migrate_vlm_file(cfg, now=NOW, served=SERVED)[0] is False
     assert len(list(tmp_path.glob("config.toml.*.bak"))) == 1
 
 
@@ -314,7 +319,7 @@ def test_backup_name_does_not_overwrite_an_earlier_one(tmp_path):
     cfg.write_text(OLD_RECOMMENDED, encoding="utf-8")
     earlier = tmp_path / "config.toml.20260923-201500.bak"
     earlier.write_text("earlier backup\n", encoding="utf-8")
-    _, _, backup = mp.migrate_vlm_file(cfg, now=NOW)
+    _, _, backup = mp.migrate_vlm_file(cfg, now=NOW, served=SERVED)
     assert backup == tmp_path / "config.toml.20260923-201500-2.bak"
     assert earlier.read_text(encoding="utf-8") == "earlier backup\n"
 
@@ -325,7 +330,7 @@ def test_a_symlinked_config_is_written_through(tmp_path):
     real.write_text(OLD_RECOMMENDED, encoding="utf-8")
     link = tmp_path / "config.toml"
     link.symlink_to(real)
-    changed, _, backup = mp.migrate_vlm_file(link, now=NOW)
+    changed, _, backup = mp.migrate_vlm_file(link, now=NOW, served=SERVED)
     assert changed
     assert link.is_symlink()
     assert real.read_text(encoding="utf-8") == MIGRATED_RECOMMENDED
@@ -342,25 +347,30 @@ def _migrate_vlm(path: Path) -> subprocess.CompletedProcess:
     )
 
 
-def test_migrate_vlm_command_migrates_and_says_why(tmp_path):
+def test_migrate_vlm_command_keeps_the_models_and_says_why(tmp_path):
+    """The installer asks no Ollama, so it cannot know the new models are
+    pulled: it keeps the old ones and says what the switch waits for."""
     cfg = tmp_path / "config.toml"
     cfg.write_text(OLD_RECOMMENDED, encoding="utf-8")
     proc = _migrate_vlm(cfg)
     assert proc.returncode == 0, proc.stderr
-    lines = proc.stdout.splitlines()
-    assert len(lines) == 1
-    assert lines[0].startswith(f"Migrated [vlm] in {cfg}: tier \"recommended\": "
-                               "sop_model gemma4:12b-it-qat -> qwen3.5:4b")
-    backups = list(tmp_path.glob("config.toml.*.bak"))
-    assert len(backups) == 1 and f"backup: {backups[0]}" in lines[0]
-    assert cfg.read_text(encoding="utf-8") == MIGRATED_RECOMMENDED
+    assert proc.stdout == (
+        f"Kept [vlm] in {cfg} as it is: tier \"recommended\": "
+        "sop_model gemma4:12b-it-qat -> qwen3.5:4b (qwen3.5:4b + gemma4:12b-it-qat was "
+        "the tier's earlier default; it now runs qwen3.5:4b + qwen3.5:4b); the switch "
+        "waits until Ollama serves qwen3.5:4b (the app offers the download; or: "
+        "agenthandover setup --tier recommended)\n"
+    )
+    assert cfg.read_text(encoding="utf-8") == OLD_RECOMMENDED
+    assert list(tmp_path.glob("config.toml.*.bak")) == []
 
+    cfg.write_text(MIGRATED_RECOMMENDED, encoding="utf-8")
     again = _migrate_vlm(cfg)
     assert again.returncode == 0
     assert again.stdout == (
         f"Kept [vlm] in {cfg} as it is: already the current models of tier \"recommended\"\n"
     )
-    assert len(list(tmp_path.glob("config.toml.*.bak"))) == 1
+    assert list(tmp_path.glob("config.toml.*.bak")) == []
 
 
 def test_migrate_vlm_command_without_a_config(tmp_path):
@@ -388,7 +398,8 @@ def test_migrate_vlm_command_fails_cleanly_on_an_unreadable_config(tmp_path):
 # --- worker startup --------------------------------------------------------
 
 
-def test_worker_startup_migrates_with_one_info_line(tmp_path, caplog):
+def test_worker_startup_migrates_with_one_info_line(tmp_path, caplog, monkeypatch):
+    monkeypatch.setattr(worker_main, "served_models", lambda text: sorted(SERVED))
     cfg = tmp_path / "config.toml"
     cfg.write_text(OLD_RECOMMENDED, encoding="utf-8")
     with caplog.at_level(logging.INFO, logger="agenthandover_worker"):

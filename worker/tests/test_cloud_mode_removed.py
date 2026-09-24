@@ -96,11 +96,18 @@ def test_a_remote_block_on_a_tiers_earlier_models_gets_both_migrations():
         'mode = "local"\n',
         'mode = "remote"\nprovider = "openai"\nmodel = "gpt-4.1-mini"\napi_key_env = "OPENAI_API_KEY"\n',
     )
-    new, changed, reason = mp.migrate_vlm_block(remote)
+    new, changed, reason = mp.migrate_vlm_block(remote, served=["qwen3.5:4b"])
     assert changed
     assert new == migrated
     assert reason.startswith('cloud mode was removed in 0.5.0: mode "remote" (provider openai')
     assert '; tier "recommended": sop_model gemma4:12b-it-qat -> qwen3.5:4b' in reason
+
+    # Without the new model (or without asking Ollama, as the installer):
+    # only the cloud part, the models stay.
+    for served in (None, ["gemma4:12b-it-qat"]):
+        new, changed, reason = mp.migrate_vlm_block(remote, served=served)
+        assert changed and new == old, served
+        assert "the switch waits until" in reason
 
 
 def test_a_remote_block_with_only_the_cloud_keys():

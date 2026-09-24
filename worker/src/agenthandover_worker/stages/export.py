@@ -76,4 +76,5 @@ def _write_heartbeat(ctx: Any) -> None:
         reasoning_paused_reason=ctx.reasoning_budget.pause_reason(),
         model_schedule=ctx.model_scheduler.status(),
         inference=inference,
+        missing_models=ctx.missing_models,
     )

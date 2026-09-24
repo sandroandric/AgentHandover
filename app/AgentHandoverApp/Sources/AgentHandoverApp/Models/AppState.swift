@@ -162,6 +162,9 @@ struct WorkerStatusFile: Codable {
     let last_pipeline_duration_ms: UInt64?
     let consecutive_errors: UInt32
     let vlm_available: Bool
+    /// The configured models Ollama does not serve; absent when Ollama did
+    /// not answer (and in the early "starting" status).
+    let missing_models: [String]?
 }
 
 @MainActor

@@ -231,10 +231,12 @@ if ! as_user "${VENV}/bin/python" -m agenthandover_worker.model_profiles \
         write-tiers "${DATA_DIR}/tiers.json"; then
     warn "could not write ${DATA_DIR}/tiers.json; onboarding cannot list the model tiers"
 fi
-# An upgrade: a [vlm] block still on its tier's earlier default models
-# (model_profiles.PREVIOUS_TIER_DEFAULTS) moves to the tier's current ones,
-# after a timestamped backup; a block the user customised is kept. The
-# worker repeats this at startup, for upgrades by other means.
+# An upgrade: a cloud-mode [vlm] block (removed in 0.5.0) becomes local,
+# after a timestamped backup. A block on earlier default models (a tier's
+# PREVIOUS_TIER_DEFAULTS, or the pair 0.4.0 wrote without a tier) keeps
+# them here: this script asks no Ollama, and switching to models that are
+# not pulled would stop processing. The worker switches at startup once
+# Ollama serves the new ones; the app offers their download.
 if [ "${CONFIG_CREATED}" -eq 0 ]; then
     if ! as_user "${VENV}/bin/python" -m agenthandover_worker.model_profiles \
             migrate-vlm "${DATA_DIR}/config.toml"; then

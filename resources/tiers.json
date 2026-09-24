@@ -61,5 +61,29 @@
       "ab_sop_model": "gemma4:26b-a4b-it-qat",
       "previous_defaults": []
     }
+  ],
+  "untiered_defaults": [
+    {
+      "annotation_model": "qwen3.5:2b",
+      "sop_model": "qwen3.5:4b",
+      "tiers": [
+        "standard"
+      ]
+    },
+    {
+      "annotation_model": "gemma4:12b-it-qat",
+      "sop_model": "gemma4:12b-it-qat",
+      "tiers": [
+        "recommended",
+        "performance"
+      ]
+    },
+    {
+      "annotation_model": "gemma4:31b-it-qat",
+      "sop_model": "gemma4:31b-it-qat",
+      "tiers": [
+        "max_quality"
+      ]
+    }
   ]
 }

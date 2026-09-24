@@ -40,7 +40,7 @@ from agenthandover_worker.inference_runner import (
     P2, STATE_LOCK, InferenceRunner, model_wait, model_work,
 )
 from agenthandover_worker.negative_demo import NegativeDemoPruner
-from agenthandover_worker.model_profiles import migrate_vlm_file
+from agenthandover_worker.model_profiles import migrate_vlm_file, served_models, upgrade_plan
 from agenthandover_worker.ops_telemetry import COMPUTE, MODEL_USAGE
 from agenthandover_worker.export_adapter import SOPExportAdapter
 from agenthandover_worker.openclaw_writer import OpenClawWriter
@@ -688,23 +688,36 @@ def _status_dir() -> Path:
 
 
 def _migrate_vlm_config(path: Path | None = None) -> bool:
-    """Move config.toml's ``[vlm]`` block off a tier's earlier default
-    models (``model_profiles.migrate_vlm_file``: backup first, atomic
-    write, only when it changes).  One INFO line when it changes
-    something; a failure is a warning and never stops the worker.
-    Returns whether the file changed."""
+    """Move config.toml's ``[vlm]`` block off earlier default models
+    (``model_profiles.migrate_vlm_file``: backup first, atomic write, only
+    when it changes), but only to models Ollama serves: when there is a
+    switch to make, ``/api/tags`` at ``[vlm] ollama_host`` is asked, and a
+    missing model keeps the current ones (one WARNING naming it; the app
+    offers the download).  One INFO line when it changes something; a
+    failure is a warning and never stops the worker.  Returns whether the
+    file changed."""
     target = config_path() if path is None else path
     if not target.is_file():
         return False
     try:
-        changed, reason, backup = migrate_vlm_file(target)
+        text = target.read_text(encoding="utf-8")
+        plan, _ = upgrade_plan(text)
+        served = served_models(text) if plan is not None else None
+        changed, reason, backup = migrate_vlm_file(target, served=served)
+        # The switch still waits when the file has a plan after the run.
+        waits = plan is not None and not (
+            changed and upgrade_plan(target.read_text(encoding="utf-8"))[0] is None
+        )
     except (OSError, UnicodeDecodeError) as exc:
         logger.warning(
             "Could not check the [vlm] models in %s against the tier table: %s", target, exc,
         )
         return False
+    level = logging.WARNING if waits else logging.INFO
     if changed:
-        logger.info("Migrated [vlm] in %s: %s; backup: %s", target, reason, backup)
+        logger.log(level, "Migrated [vlm] in %s: %s; backup: %s", target, reason, backup)
+    elif waits:
+        logger.log(level, "Kept the [vlm] models in %s: %s", target, reason)
     return changed
 
 
@@ -748,8 +761,13 @@ def _write_worker_status(
     reasoning_paused_reason: str | None = None,
     model_schedule: dict | None = None,
     inference: dict | None = None,
+    missing_models: list[str] | None = None,
 ) -> None:
     """Atomically write worker-status.json (tmp + fsync + rename).
+
+    ``missing_models`` (written when Ollama answered) lists the configured
+    annotation and Skills models it does not serve; the app's menu offers
+    their download while ``vlm_available`` is false.
 
     ``inference`` is the inference thread's queue
     (``InferenceRunner.status``) with ``annotation_backlog``, the passive
@@ -776,6 +794,8 @@ def _write_worker_status(
         "consecutive_errors": consecutive_errors,
         "vlm_available": vlm_available,
     }
+    if missing_models is not None:
+        status["missing_models"] = missing_models
     if v2_annotation_enabled:
         status["v2_annotation_enabled"] = True
         status["v2_annotations_today"] = v2_annotations_today
@@ -4050,6 +4070,20 @@ def _vlm_backend_available(vlm_cfg) -> bool:
     return available
 
 
+def _missing_vlm_models(vlm_cfg) -> list[str] | None:
+    """``missing_models`` in ``worker-status.json``: the annotation and
+    Skills models Ollama does not serve at ``[vlm] ollama_host``; None
+    when it does not answer."""
+    from agenthandover_worker.model_profiles import missing_models
+    from agenthandover_worker.ollama import OllamaClient
+
+    try:
+        served = OllamaClient(vlm_cfg.ollama_host).tags()
+    except Exception:
+        return None
+    return missing_models(dict.fromkeys([vlm_cfg.annotation_model, vlm_cfg.sop_model]), served)
+
+
 def _start_query_api(ctx) -> "object | None":
     """The localhost query API server, when ``[knowledge]
     query_api_enabled``; None otherwise or when it could not start."""
@@ -4176,8 +4210,7 @@ def main(argv: list[str] | None = None) -> None:
     from agenthandover_worker.context import build_context, start
     from agenthandover_worker.stages import export
 
-    # A config still on a tier's earlier default models moves to the tier's
-    # current ones, then one read of config.toml for the run.
+    # The upgrade's model switch (once Ollama serves the models), then one read.
     _migrate_vlm_config()
     cfg = load_config()
     if args.adapter is None:
@@ -4192,6 +4225,7 @@ def main(argv: list[str] | None = None) -> None:
     try:
         _log_model_profiles(cfg.vlm)
         ctx.vlm_available = _vlm_backend_available(cfg.vlm)
+        ctx.missing_models = _missing_vlm_models(cfg.vlm)
         ctx.query_api_server = _start_query_api(ctx)
         export.heartbeat(ctx)
         logger.info("Connected to database, entering main loop")

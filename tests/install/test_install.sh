@@ -9,10 +9,12 @@
 #              so the probe must skip it and pick a 3.11+ one
 #   upgrade    second install over it, with a stub "app" process running
 #              that preinstall must stop; then a broken venv is rebuilt
-#   tiers      upgrades over a config on the 16 GB tier's pre-WP-F6 models
-#              and on the 8 GB tier's pre-WP-F8 models:
-#              doctor warns, postinstall migrates it with one backup, and a
-#              customised block is kept
+#   tiers      upgrades over the config v0.4.0 left (Gemma 4 12B, no tier
+#              key), the same after its cloud setup, and a 16 GB tier block
+#              on pre-WP-F6 models: doctor warns, postinstall keeps the
+#              models (it asks no Ollama; the worker and the app switch
+#              once they are pulled), turns cloud mode local with one
+#              backup, and keeps a customised block
 #   tcc        upgrades over a stand-in app: an unchanged code signature
 #              keeps the grants; a changed one resets Accessibility and
 #              Screen Recording as the install user
@@ -392,14 +394,64 @@ check "postinstall rebuilt the venv" contains "${WORK}/rebuild-post.log" "Existi
 check "rebuilt venv imports the worker" "${P}/lib/venv/bin/python" -c "import agenthandover_worker, mcp"
 
 # ---------------------------------------------------------------------------
-# tiers: an upgrade over a config on a tier's earlier default models
+# tiers: an upgrade over a config on earlier default models
 # ---------------------------------------------------------------------------
 echo ""
-echo "== upgrade over a config on the 16 GB tier's pre-WP-F6 models =="
-# The [vlm] block onboarding wrote for "recommended" before WP-F6, with a
-# hand-set key: an Ollama host on a closed port, so doctor contacts none.
+echo "== upgrade over a config v0.4.0 left, and over earlier 0.5 tier defaults =="
+# The installer asks no Ollama, so it cannot know the new models are
+# pulled: it keeps the models (the worker switches at startup once Ollama
+# serves them; the app offers the download), and only turns cloud mode local.
 CFG="${DD}/config.toml"
 cp "${CFG}" "${WORK}/config.standard"
+V040="${REPO_ROOT}/tests/fixtures/vlm_block/v0.4.0-onboarding.toml"
+
+# 1. The file v0.4.0's installer and onboarding wrote on a 16/24 GB Mac,
+#    byte for byte: [vlm] with Gemma 4 12B for both roles and no tier key.
+cp "${V040}" "${CFG}"
+run_doctor "${P}" "${WORK}/doctor-v040.log"
+check "doctor warns that config.toml pins 0.4.0's models" contains "${WORK}/doctor-v040.log" \
+    "WARN Config pins 0.4.0's models (gemma4:12b-it-qat + gemma4:12b-it-qat)"
+check "doctor names the fix" contains "${WORK}/doctor-v040.log" "Fix: agenthandover setup --tier "
+run_script "${P}" postinstall "${GOOD_PY}" "${WORK}/v040-post.log"
+rc=$?
+check "postinstall exits 0" test "${rc}" -eq 0
+[ "${rc}" -eq 0 ] || sed 's/^/    | /' "${WORK}/v040-post.log"
+check "postinstall keeps the models and says what the switch waits for" \
+    contains "${WORK}/v040-post.log" \
+    "(gemma4:12b-it-qat + gemma4:12b-it-qat was 0.4.0's default; it now runs"
+check "postinstall names the download the switch waits for" \
+    contains "${WORK}/v040-post.log" "; the switch waits until Ollama serves qwen3.5:4b"
+check "the v0.4.0 config is kept byte for byte" cmp -s "${V040}" "${CFG}"
+check "no backup of a kept config" bash -c '! ls "$1"/config.toml.*.bak >/dev/null 2>&1' _ "${DD}"
+
+# 2. The same file after v0.4.0's cloud setup (writeRemoteVLMConfig put the
+#    cloud keys after the models): cloud mode goes, the models stay.
+{ cat "${V040}"; printf '\nmode = "remote"\nprovider = "openai"\nmodel = "gpt-4.1-mini"\napi_key_env = "OPENAI_API_KEY"\n'; } > "${CFG}"
+cp "${CFG}" "${WORK}/config.v040-cloud"
+run_script "${P}" postinstall "${GOOD_PY}" "${WORK}/v040-cloud-post.log"
+rc=$?
+check "postinstall exits 0" test "${rc}" -eq 0
+[ "${rc}" -eq 0 ] || sed 's/^/    | /' "${WORK}/v040-cloud-post.log"
+check "postinstall turns cloud mode local" contains "${WORK}/v040-cloud-post.log" \
+    "Migrated [vlm] in ${CFG}: cloud mode was removed in 0.5.0: mode \"remote\" (provider openai"
+"${GOOD_PY}" -c 'import sys; t = open(sys.argv[1]).read(); sys.stdout.write(t.replace("[vlm]\n", "[vlm]\nmode = \"local\"\n") + "\n")' \
+    "${V040}" > "${WORK}/config.v040-local"
+check "only the cloud keys change; the models and every other byte are kept" \
+    cmp -s "${WORK}/config.v040-local" "${CFG}"
+TIER_BACKUPS=("${DD}"/config.toml.*.bak)
+check "one timestamped backup, holding the cloud config" bash -c \
+    '[ "$#" -eq 2 ] && [ -f "$2" ] && cmp -s "$1" "$2"' _ "${WORK}/config.v040-cloud" "${TIER_BACKUPS[@]}"
+check "the install marker is not the backup" test -f "${DD}/config.toml.bak"
+run_doctor "${P}" "${WORK}/doctor-v040-local.log"
+check "doctor no longer warns about cloud mode" \
+    bash -c '! grep -qF "cloud mode" "$1"' _ "${WORK}/doctor-v040-local.log"
+check "doctor still warns about 0.4.0's models" contains "${WORK}/doctor-v040-local.log" \
+    "WARN Config pins 0.4.0's models (gemma4:12b-it-qat + gemma4:12b-it-qat)"
+rm -f "${DD}"/config.toml.*.bak
+
+# 3. The [vlm] block onboarding wrote for "recommended" before WP-F6, with a
+#    hand-set key: an Ollama host on a closed port, so doctor contacts none.
+cp "${WORK}/config.standard" "${CFG}"
 "${GOOD_PY}" - "${CFG}" <<'PY'
 import pathlib, sys
 p = pathlib.Path(sys.argv[1])
@@ -421,51 +473,18 @@ run_script "${P}" postinstall "${GOOD_PY}" "${WORK}/tier-post.log"
 rc=$?
 check "postinstall exits 0" test "${rc}" -eq 0
 [ "${rc}" -eq 0 ] || sed 's/^/    | /' "${WORK}/tier-post.log"
-check "postinstall says what it migrated and why" contains "${WORK}/tier-post.log" \
-    "Migrated [vlm] in ${CFG}: tier \"recommended\": sop_model gemma4:12b-it-qat -> qwen3.5:4b"
-check "only sop_model changed; every other byte of config.toml kept" bash -c \
-    'sed "s/^sop_model = \"gemma4:12b-it-qat\"\$/sop_model = \"qwen3.5:4b\"/" "$1" | cmp -s - "$2"' \
-    _ "${WORK}/config.old-tier" "${CFG}"
-check "config [vlm] block is the worker's recommended block" bash -c \
-    '"$1" -m agenthandover_worker.model_profiles vlm-block recommended > "$3/vlm.recommended" \
-     && grep -A4 "^\[vlm\]$" "$2" | cmp -s - "$3/vlm.recommended"' \
-    _ "${P}/lib/venv/bin/python" "${CFG}" "${WORK}"
-TIER_BACKUPS=("${DD}"/config.toml.*.bak)
-check "one timestamped backup, holding the old config" bash -c \
-    '[ "$#" -eq 2 ] && [ -f "$2" ] && cmp -s "$1" "$2"' _ "${WORK}/config.old-tier" "${TIER_BACKUPS[@]}"
-check "the install marker is not the backup" test -f "${DD}/config.toml.bak"
-run_doctor "${P}" "${WORK}/doctor-new-tier.log"
-check "doctor no longer warns about the tier's models" \
-    bash -c '! grep -qF "earlier models" "$1"' _ "${WORK}/doctor-new-tier.log"
-run_script "${P}" postinstall "${GOOD_PY}" "${WORK}/tier-post2.log"
-check "a second upgrade keeps the migrated block" contains "${WORK}/tier-post2.log" \
-    "Kept [vlm] in ${CFG} as it is: already the current models of tier \"recommended\""
-TIER_BACKUPS=("${DD}"/config.toml.*.bak)
-check "a second upgrade writes no second backup" test "${#TIER_BACKUPS[@]}" -eq 1
+check "postinstall keeps the tier's earlier models and says why" contains "${WORK}/tier-post.log" \
+    "Kept [vlm] in ${CFG} as it is: tier \"recommended\": sop_model gemma4:12b-it-qat -> qwen3.5:4b"
+check "the old-tier config is kept byte for byte" cmp -s "${WORK}/config.old-tier" "${CFG}"
+check "no backup of a kept config" bash -c '! ls "$1"/config.toml.*.bak >/dev/null 2>&1' _ "${DD}"
 
-# A block the user chose: another Skills model stays, and no backup.
-rm -f "${DD}"/config.toml.*.bak
-sed -i '' 's/^sop_model = "qwen3.5:4b"$/sop_model = "gemma4:31b-it-qat"/' "${CFG}"
+# A block the user chose: another Skills model stays, and says why.
+sed -i '' 's/^sop_model = "gemma4:12b-it-qat"$/sop_model = "gemma4:31b-it-qat"/' "${CFG}"
 cp "${CFG}" "${WORK}/config.custom"
 run_script "${P}" postinstall "${GOOD_PY}" "${WORK}/tier-post3.log"
 check "a customised block is kept byte for byte" cmp -s "${WORK}/config.custom" "${CFG}"
 check "postinstall says why it kept it" contains "${WORK}/tier-post3.log" "(set by hand)"
 check "no backup of a kept config" bash -c '! ls "$1"/config.toml.*.bak >/dev/null 2>&1' _ "${DD}"
-
-# WP-F8: the fresh-install block of the 8 GB tier before WP-F8 (qwen3.5:4b
-# annotated) moves to the 2B annotator: back to the current standard block.
-sed 's/^annotation_model = "qwen3.5:2b-q4_K_M"$/annotation_model = "qwen3.5:4b"/' \
-    "${WORK}/config.standard" > "${CFG}"
-check "the old standard block differs from the current one" \
-    bash -c '! cmp -s "$1" "$2"' _ "${WORK}/config.standard" "${CFG}"
-run_script "${P}" postinstall "${GOOD_PY}" "${WORK}/tier-post4.log"
-check "postinstall migrates the old standard block" contains "${WORK}/tier-post4.log" \
-    "Migrated [vlm] in ${CFG}: tier \"standard\": annotation_model qwen3.5:4b -> qwen3.5:2b-q4_K_M"
-check "the migrated config is the current standard config byte for byte" \
-    cmp -s "${WORK}/config.standard" "${CFG}"
-TIER_BACKUPS=("${DD}"/config.toml.*.bak)
-check "one backup of the old standard config" test "${#TIER_BACKUPS[@]}" -eq 1
-rm -f "${DD}"/config.toml.*.bak
 cp "${WORK}/config.standard" "${CFG}"
 
 # ---------------------------------------------------------------------------
