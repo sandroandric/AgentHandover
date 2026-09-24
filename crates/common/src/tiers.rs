@@ -93,6 +93,12 @@ impl TierTable {
         }
         out
     }
+
+    /// The download, in GB, of `models` by the table's sizes (a model the
+    /// table has no size for counts as nothing).
+    pub fn download_gb(&self, models: &[&str]) -> f64 {
+        models.iter().filter_map(|m| self.model_sizes_gb.get(*m)).sum()
+    }
 }
 
 /// The compiled-in tier table.
@@ -223,9 +229,26 @@ mod tests {
 
     #[test]
     fn annotator_is_the_small_model_on_every_tier() {
-        assert!(table().tiers.iter().all(|t| t.annotation_model == "qwen3.5:4b"));
+        // WP-F8: the 8 GB tier annotates with the 2B; every other with the 4B.
+        let ann: Vec<(&str, &str)> = table()
+            .tiers
+            .iter()
+            .map(|t| (t.id.as_str(), t.annotation_model.as_str()))
+            .collect();
+        assert_eq!(
+            ann,
+            [("standard", "qwen3.5:2b-q4_K_M"), ("recommended", "qwen3.5:4b"),
+             ("performance", "qwen3.5:4b"), ("max_quality", "qwen3.5:4b")]
+        );
         let standard = table().get("standard").unwrap();
-        assert_eq!(table().models(standard), ["qwen3.5:4b", "nomic-embed-text"]);
+        assert_eq!(
+            table().models(standard),
+            ["qwen3.5:2b-q4_K_M", "qwen3.5:4b", "nomic-embed-text"]
+        );
+        // 1.9 + 3.4 + 0.27 GB.
+        let download = table().download_gb(&table().models(standard));
+        assert!((download - 5.57).abs() < 1e-9, "{download}");
+        assert_eq!(table().download_gb(&["custom:1b"]), 0.0);
     }
 
     #[test]
@@ -275,6 +298,16 @@ mod tests {
         );
     }
 
+    /// WP-F8: a config on the 8 GB tier's pre-WP-F8 models (qwen3.5:4b
+    /// for both) becomes standard-migrated.toml, as the worker migrates it.
+    #[test]
+    fn apply_matches_the_standard_migration_fixture() {
+        let tier = table().get("standard").unwrap();
+        let once = apply_vlm_block(&fixture("standard-previous.toml"), tier);
+        assert_eq!(once, fixture("standard-migrated.toml"));
+        assert_eq!(apply_vlm_block(&once, tier), once);
+    }
+
     #[test]
     fn previous_defaults_come_from_tiers_json() {
         let recommended = table().get("recommended").unwrap();
@@ -288,7 +321,15 @@ mod tests {
         assert!(recommended.is_previous_default("qwen3.5:4b", "gemma4:12b-it-qat"));
         assert!(!recommended.is_previous_default("qwen3.5:4b", "qwen3.5:4b"));
         assert!(!recommended.is_previous_default("qwen3.5:4b", "gemma4:31b-it-qat"));
-        for id in ["standard", "performance", "max_quality"] {
+        let standard = table().get("standard").unwrap();
+        assert_eq!(
+            standard.previous_defaults,
+            [ModelPair { annotation_model: "qwen3.5:4b".into(), sop_model: "qwen3.5:4b".into() }]
+        );
+        assert!(standard.is_previous_default("qwen3.5:4b", "qwen3.5:4b"));
+        assert!(!standard.is_previous_default("qwen3.5:2b-q4_K_M", "qwen3.5:4b"));
+        assert!(!standard.is_previous_default("qwen3.5:4b", "gemma4:12b-it-qat"));
+        for id in ["performance", "max_quality"] {
             assert!(table().get(id).unwrap().previous_defaults.is_empty(), "{id}");
         }
     }

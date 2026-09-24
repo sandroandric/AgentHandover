@@ -1050,6 +1050,48 @@ mod tests {
         }
     }
 
+    /// WP-F8: an 8 GB config still annotating with qwen3.5:4b warns; the
+    /// migrated block (qwen3.5:2b-q4_K_M) and a customised one do not.
+    #[test]
+    fn a_config_on_the_standard_tiers_earlier_models_warns() {
+        let old = "[vlm]\nmode = \"local\"\ntier = \"standard\"\n\
+                   annotation_model = \"qwen3.5:4b\"\nsop_model = \"qwen3.5:4b\"\n";
+        let findings = tier_migration_findings(old);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(
+            findings[0].title,
+            "Config pins the Standard tier's earlier models (qwen3.5:4b + qwen3.5:4b)"
+        );
+        assert_eq!(
+            findings[0].lines,
+            [
+                "The Standard tier now runs qwen3.5:2b-q4_K_M + qwen3.5:4b; the upgrade did not \
+                 update config.toml.",
+                "Fix: agenthandover setup --tier standard",
+            ]
+        );
+        for config in [
+            old.replace("annotation_model = \"qwen3.5:4b\"", "annotation_model = \"qwen3.5:2b-q4_K_M\""),
+            old.replace("sop_model = \"qwen3.5:4b\"", "sop_model = \"gemma4:12b-it-qat\""),
+            old.replace("\"standard\"", "\"recommended\""),
+        ] {
+            assert!(tier_migration_findings(&config).is_empty(), "{config}");
+        }
+    }
+
+    /// Doctor's memory need for the shipped 8 GB tier: the larger of its two
+    /// models (qwen3.5:4b, 3.4 GB; the 2B is 1.9 GB), the embedding model
+    /// and the margin, since the worker loads them one at a time.
+    #[test]
+    fn the_standard_tiers_memory_need_is_the_skill_model() {
+        let t = tiers::table();
+        let standard = t.get("standard").unwrap();
+        assert_eq!(
+            machine::need_bytes(t, &[], &standard.annotation_model, &standard.sop_model),
+            4_670_000_000
+        );
+    }
+
     #[test]
     fn missing_file_and_missing_pid() {
         assert_eq!(heartbeat_verdict(None, now(), |_| true).0, HeartbeatLevel::Info);
