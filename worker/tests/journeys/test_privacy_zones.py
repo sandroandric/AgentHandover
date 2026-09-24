@@ -9,9 +9,10 @@ send zero capture requests).
 
 This journey drives the second line, the worker, the way a user meets it:
 
-1. The user blocks ``1password*`` in config.toml (with comments), then runs
-   ``agenthandover-setup-vlm --remote`` to switch to a cloud VLM.  The
-   zone block and every comment survive the command byte for byte.
+1. The user blocks ``1password*`` in config.toml (with comments) while
+   on 0.4.x cloud mode, then upgrades: the worker's startup migration
+   turns the ``[vlm]`` block local (cloud mode was removed in 0.5.0).
+   The zone block and every comment survive the rewrite byte for byte.
 2. Frames that reached the database anyway (written by an older daemon or
    before the zone was configured) are settled without a model: the
    1Password frame is marked ``privacy_blocked`` and its JPEG is deleted,
@@ -22,17 +23,14 @@ This journey drives the second line, the worker, the way a user meets it:
 
 from __future__ import annotations
 
-import builtins
 import json
 import os
 import sqlite3
-import sys
 import time
 import tomllib
 from pathlib import Path
 
 from agenthandover_worker import main as wm
-from agenthandover_worker import setup_vlm
 from agenthandover_worker.config import load_config
 
 ZONES = """\
@@ -44,14 +42,11 @@ metadata_only = ["Messages"]   # chats: app and time only
 """
 
 
-def _run_setup_vlm_remote(monkeypatch) -> None:
-    """``agenthandover-setup-vlm --remote`` as a user answers it: consent,
-    provider 1 (OpenAI), use the key already in the environment."""
-    answers = iter(["y", "1", "y"])
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-journey-not-a-real-key")
-    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
-    monkeypatch.setattr(builtins, "input", lambda prompt="": next(answers))
-    setup_vlm.main(["--remote"])
+# What 0.4.x onboarding wrote for cloud mode over the tier block.
+CLOUD_KEYS = (
+    'mode = "remote"\nprovider = "openai"\nmodel = "gpt-4.1-mini"\n'
+    'api_key_env = "OPENAI_API_KEY"\n'
+)
 
 
 def _frames(db_path: Path) -> list[tuple[str, dict]]:
@@ -102,18 +97,23 @@ def _status(db_path: Path, frame_id: str) -> tuple[str, str | None]:
         conn.close()
 
 
-def test_blocked_frames_leave_no_file_even_after_setup_vlm(
-    temp_home, events_db, worker, monkeypatch,
+def test_blocked_frames_leave_no_file_even_after_the_cloud_mode_upgrade(
+    temp_home, events_db, worker,
 ) -> None:
-    # 1. Zones configured by hand, then setup-vlm --remote mid-journey.
+    # 1. Zones configured by hand on 0.4.x cloud mode, then the upgrade.
     config_file = temp_home.config_file
-    config_file.write_text(config_file.read_text(encoding="utf-8") + "\n" + ZONES,
-                           encoding="utf-8")
-    _run_setup_vlm_remote(monkeypatch)
+    local = config_file.read_text(encoding="utf-8")
+    assert local.startswith("[vlm]\n")
+    config_file.write_text(
+        local.replace("[vlm]\n", "[vlm]\n" + CLOUD_KEYS, 1) + "\n" + ZONES, encoding="utf-8",
+    )
+    assert wm._migrate_vlm_config() is True
 
     after = config_file.read_text(encoding="utf-8")
-    assert after.endswith(ZONES), "the zone block and its comments survive byte for byte"
-    assert tomllib.loads(after)["vlm"]["mode"] == "remote"
+    assert after == local.replace("[vlm]\n", '[vlm]\nmode = "local"\n', 1) + "\n" + ZONES, (
+        "only the cloud keys change; the zone block and its comments survive byte for byte"
+    )
+    assert tomllib.loads(after)["vlm"]["mode"] == "local"
     assert load_config().privacy_zones["blocked"] == ["1password*"]
 
     # 2. Frames that reached the database anyway.

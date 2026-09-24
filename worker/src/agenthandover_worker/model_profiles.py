@@ -775,7 +775,92 @@ def apply_vlm_block(config: str, tier: Tier) -> str:
     return out
 
 
+# The ``[vlm]`` keys of cloud mode, removed in 0.5.0 (``mode`` stays: the
+# tier writers put ``mode = "local"`` there).
+REMOTE_VLM_KEYS = ("mode", "provider", "model", "api_key_env")
+
+
+def remote_to_local(config_text: str) -> tuple[str, str | None]:
+    """*config_text* with a cloud-mode ``[vlm]`` block made local, and the
+    reason; ``(config_text, None)`` when there is nothing to change.
+
+    Cloud mode (``mode = "remote"`` with ``provider``, ``model`` and
+    ``api_key_env``) was removed in 0.5.0.  It never changed which local
+    models annotate and write Skills, so the block keeps its ``tier`` and
+    model keys: the lines of the four cloud keys go, ``mode = "local"``
+    goes right after the ``[vlm]`` header, and every other line and
+    section is kept byte for byte.  The result must read, as TOML, as the
+    old ``[vlm]`` minus the cloud keys plus ``mode = "local"`` with every
+    other section the same; otherwise nothing changes (doctor then says
+    the config is still in cloud mode).
+    """
+    lines = _config_lines(config_text)
+    header = next((i for i, line in enumerate(lines) if line.strip() == "[vlm]"), None)
+    if header is None:
+        return config_text, None
+    try:
+        before = tomllib.loads(config_text)
+    except tomllib.TOMLDecodeError:
+        return config_text, None
+    vlm = before.get("vlm")
+    if not isinstance(vlm, dict) or vlm.get("mode", "local") == "local":
+        return config_text, None
+
+    end = next(
+        (i for i in range(header + 1, len(lines)) if lines[i].strip().startswith("[")),
+        len(lines),
+    )
+
+    def cloud_key(line: str) -> bool:
+        key, sep, _ = line.strip().partition("=")
+        return bool(sep) and key.strip() in REMOTE_VLM_KEYS
+
+    newline = "\r\n" if lines[header].endswith("\r\n") else "\n"
+    header_line = lines[header] if lines[header].endswith("\n") else lines[header] + newline
+    new_text = "".join(
+        lines[:header]
+        + [header_line, f'mode = "local"{newline}']
+        + [line for line in lines[header + 1:end] if not cloud_key(line)]
+        + lines[end:]
+    )
+    try:
+        after = tomllib.loads(new_text)
+    except tomllib.TOMLDecodeError:
+        return config_text, None
+    expected = {
+        **before,
+        "vlm": {
+            "mode": "local",
+            **{k: v for k, v in vlm.items() if k not in REMOTE_VLM_KEYS},
+        },
+    }
+    if after != expected:
+        return config_text, None
+    cloud = ", ".join(
+        f"{key} {vlm[key]}" for key in ("provider", "model") if isinstance(vlm.get(key), str)
+    )
+    return new_text, (
+        f'cloud mode was removed in 0.5.0: mode "{vlm.get("mode")}"'
+        + (f" ({cloud})" if cloud else "")
+        + ' -> "local"; the local models keep running as before'
+    )
+
+
 def migrate_vlm_block(config_text: str) -> tuple[str, bool, str]:
+    """Upgrade config.toml's ``[vlm]`` block: a cloud-mode block becomes
+    local (:func:`remote_to_local`), then a block still on a tier's earlier
+    default models moves to the tier's current ones
+    (:func:`_migrate_tier_models`).  Returns ``(new_text, changed,
+    reason)``.
+    """
+    text, remote_reason = remote_to_local(config_text)
+    new_text, changed, reason = _migrate_tier_models(text)
+    if remote_reason is None:
+        return new_text, changed, reason
+    return new_text, True, remote_reason + (f"; {reason}" if changed else "")
+
+
+def _migrate_tier_models(config_text: str) -> tuple[str, bool, str]:
     """Move a config still on a tier's earlier default models to the
     tier's current ones.  Returns ``(new_text, changed, reason)``.
 
