@@ -42,3 +42,17 @@ def test_write_detection_does_not_record_reads(monkeypatch):
     home_sandbox._audit("shutil.copyfile", ("/etc/hosts", target))
     home_sandbox._audit("sqlite3.connect", (target,))
     assert len(recorded) == 5
+
+
+def test_only_the_named_output_file_is_allowed(monkeypatch):
+    """``AH_CASSETTE_LOG`` may name a file under the real home (a
+    developer's scratch directory): writing it is the run's own output,
+    not a leak, while its neighbours stay violations.  Before this, the
+    session-end guard failed and pytest reported it as an error on the
+    last test of the run."""
+    log = home_sandbox.REAL_HOME / "scratch" / "usage.jsonl"
+    assert home_sandbox._is_violation(str(log))
+    monkeypatch.setattr(home_sandbox, "_output_files", frozenset({log}))
+    assert not home_sandbox._is_violation(str(log))
+    assert home_sandbox._is_violation(str(log.parent / "other.jsonl"))
+    assert home_sandbox._is_violation(str(log.parent))

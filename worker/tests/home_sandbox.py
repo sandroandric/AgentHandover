@@ -9,8 +9,10 @@ developer's real ``~/.claude/skills`` and
 every write the test process makes under the real home directory (via a
 ``sys`` audit hook), so the session-end check can fail the run if any
 code path bypasses ``HOME``.  Writes inside the repository checkout and
-inside the sandbox are allowed; everything else under the real home is
-a violation.
+inside the sandbox are allowed, and so is the one file a developer names
+as the run's own output (``AH_CASSETTE_LOG``, the journeys' cassette usage
+log, which may sit anywhere); everything else under the real home is a
+violation.
 
 Both the repository-root ``conftest.py`` and ``worker/tests/conftest.py``
 call ``install()`` from ``pytest_configure``, so the sandbox is active
@@ -42,8 +44,13 @@ _MUTATING_EVENTS = {
     "sqlite3.connect",
 }
 
+# Environment variables naming a file the developer asked the run to write
+# (read once at install): the cassette usage log of ``journeys/cassette.py``.
+OUTPUT_FILE_ENVS = ("AH_CASSETTE_LOG",)
+
 _sandbox: Path | None = None
 _violations: list[str] = []
+_output_files: frozenset[Path] = frozenset()
 
 
 def _as_path(arg: object) -> str | None:
@@ -60,7 +67,7 @@ def _is_violation(path: str) -> bool:
     p = Path(os.path.realpath(path))
     if not p.is_relative_to(REAL_HOME):
         return False
-    if p.is_relative_to(REPO_ROOT):
+    if p.is_relative_to(REPO_ROOT) or p in _output_files:
         return False
     return _sandbox is None or not p.is_relative_to(_sandbox)
 
@@ -89,9 +96,13 @@ def _audit(event: str, args: tuple) -> None:
 
 def install() -> Path:
     """Point ``HOME`` at a temporary directory (idempotent); return it."""
-    global _sandbox
+    global _sandbox, _output_files
     if _sandbox is not None:
         return _sandbox
+    _output_files = frozenset(
+        Path(os.path.realpath(os.environ[var]))
+        for var in OUTPUT_FILE_ENVS if os.environ.get(var)
+    )
     _sandbox = Path(tempfile.mkdtemp(prefix="agenthandover-test-home-")).resolve()
     os.environ["HOME"] = str(_sandbox)
     # Tools that honour XDG before HOME must not escape the sandbox either.
