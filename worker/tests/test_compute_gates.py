@@ -607,6 +607,17 @@ class TestBacklogAndState:
             "old": "skipped", "fresh": "pending", "old-focus": "pending",
         }
 
+    def test_backlog_age_is_measured_from_the_given_now(self, events_db):
+        """The worker passes its clock (a journey's is virtual): frames a
+        day older than *that* now expire, whatever the real time is."""
+        now = datetime(2026, 1, 10, 12, 0, tzinfo=timezone.utc)
+        _insert(events_db, "old", now - timedelta(hours=25))
+        _insert(events_db, "fresh", now - timedelta(hours=23))
+        with WorkerDB(events_db) as db:
+            expired = db.expire_annotation_backlog(max_age_hours=24, now=now)
+        assert [r["id"] for r in expired] == ["old"]
+        assert _statuses(events_db) == {"old": "skipped", "fresh": "pending"}
+
     def test_worker_state_round_trip(self, events_db):
         with WorkerDB(events_db) as db:
             assert db.get_state("daily_jobs_date") is None

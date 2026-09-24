@@ -283,3 +283,27 @@ def test_first_start_imports_a_v040_knowledge_base_once(
     _run_once(tmp_db_path, tmp_path)
 
     assert [p["id"] for p in kb.list_procedures()] == ["file-expenses"]
+
+
+def test_main_only_builds_the_context_and_loops() -> None:
+    """WP-S1: the loop's work lives in ``stages`` (the journey driver runs
+    the same ``stages.tick``); ``main()`` builds the context and loops, in
+    under 100 lines, and never calls a stage's processor itself."""
+    import ast
+    import inspect
+
+    source = inspect.getsource(worker_main)
+    fn = next(
+        node for node in ast.parse(source).body
+        if isinstance(node, ast.FunctionDef) and node.name == "main"
+    )
+    assert fn.end_lineno - fn.lineno + 1 < 100
+    called = {
+        node.func.attr if isinstance(node.func, ast.Attribute) else getattr(node.func, "id", "")
+        for node in ast.walk(fn) if isinstance(node, ast.Call)
+    }
+    assert "tick" in called and "build_context" in called
+    assert not called & {
+        "run_pipeline", "_process_annotations", "_process_passive_discovery",
+        "_process_focus_sessions_v2", "drain",
+    }

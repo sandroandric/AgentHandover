@@ -118,3 +118,104 @@ def test_cassette_fixture_points_the_worker_at_the_cassette(cassette, temp_home)
     assert cfg.vlm.ollama_host == tape.host != before
     assert os.environ["OLLAMA_HOST"] == tape.host
     assert cfg.knowledge.query_api_enabled is False
+
+
+def test_run_tick_is_the_production_tick(events_db, worker, clock, monkeypatch) -> None:
+    """run_tick() runs stages.tick and the stages main() runs, in the loop's
+    order: the control tick under the state lock, the heartbeat, then
+    (inline, without an inference thread) the model jobs by priority."""
+    from agenthandover_worker import stages
+    from agenthandover_worker.stages import annotate, control, daily, export, ingest, segment
+
+    calls: list[str] = []
+
+    def spy(module, name: str, label: str) -> None:
+        real = getattr(module, name)
+
+        def wrapper(*args, **kwargs):
+            calls.append(label)
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(module, name, wrapper)
+
+    spy(stages, "tick", "tick")
+    for module, label in (
+        (control, "control"), (ingest, "ingest"), (export, "export"),
+        (annotate, "annotate"), (segment, "segment"), (daily, "daily"),
+    ):
+        spy(module, "run", label)
+    spy(control, "submit_model_jobs", "submit")
+    spy(control, "recognize", "recognize")
+    spy(export, "heartbeat", "heartbeat")
+
+    fixture = events_db("focus_dailynews", rebase_to=clock.now())
+    journey = worker(fixture)
+    result = journey.run_tick()
+
+    assert calls == [
+        "tick", "control", "ingest", "submit", "recognize", "export", "heartbeat",
+        "annotate", "segment", "daily", "heartbeat",
+    ]
+    assert result["pipeline"]["events_in"] == 100
+    # The once-per-day pass is off in journeys: no cassette holds it.
+    assert result["generation_plan"] is not None
+    assert not result["generation_plan"].allows("daily")
+    assert journey.ctx.daily_jobs_date == ""
+
+
+def test_run_tick_reraises_what_the_tick_logged_and_counted(
+    events_db, worker, clock, monkeypatch,
+) -> None:
+    """main() logs a failed tick, counts it and backs off; the driver
+    raises it so the journey fails at its cause."""
+    from agenthandover_worker.stages import ingest
+
+    fixture = events_db("focus_dailynews", rebase_to=clock.now())
+    journey = worker(fixture)
+
+    def broken(ctx, tick):
+        raise RuntimeError("ingest broke")
+
+    monkeypatch.setattr(ingest, "run", broken)
+    with pytest.raises(RuntimeError, match="ingest broke"):
+        journey.run_tick()
+    assert journey.ctx.consecutive_errors == 1
+    assert journey.status()["consecutive_errors"] == 1
+
+
+def test_tick_skips_while_the_inference_thread_holds_the_state(
+    events_db, worker, clock, temp_home,
+) -> None:
+    """A tick that cannot get the state lock in time writes only the
+    heartbeat: the trigger waits for the next tick."""
+    import threading
+
+    from agenthandover_worker import stages
+    from agenthandover_worker.inference_runner import STATE_LOCK
+
+    fixture = events_db("focus_dailynews", rebase_to=clock.now())
+    journey = worker(fixture)
+    trigger_spool.write_trigger(temp_home.data_dir, "search-query", {"query": ""})
+    status_file = temp_home.data_dir / "worker-status.json"
+    status_file.unlink(missing_ok=True)
+
+    held, release = threading.Event(), threading.Event()
+
+    def hold() -> None:
+        with STATE_LOCK:
+            held.set()
+            release.wait(10)
+
+    holder = threading.Thread(target=hold)
+    holder.start()
+    try:
+        assert held.wait(10)
+        tick = stages.tick(journey.ctx, lock_timeout=0.05)
+    finally:
+        release.set()
+        holder.join()
+
+    assert tick.skipped and tick.error is None and tick.jobs == []
+    assert status_file.is_file()
+    assert len(trigger_spool.pending(temp_home.data_dir)) == 1
+    assert journey.run_tick()["triggers_consumed"] == 1
