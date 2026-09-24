@@ -342,3 +342,75 @@ def test_a_skill_is_recognised_while_it_runs(tmp_path: Path) -> None:
                    if set(json.loads(o["event_ids_json"])) & set(tuesday["event_ids"])]
         assert [o["obs_id"] for o in holding] == [obs["obs_id"]]
         assert holding[0]["promoted_slug"] == STRIPE
+
+
+def test_labelling_cards_are_the_ground_truth_replay_scores_against(mined, tmp_path: Path) -> None:
+    """J-passive's labelling card (WP-L4), model-free on the same fixture:
+    each discovered workflow gets one card; the answer reaches
+    ``workflow_observations``, a "no" takes the workflow out of the review
+    queue, and ``replay --labels answers`` scores against the answers."""
+    from agenthandover_worker import questions as qs
+    from journeys.replay import Candidate, labels_from_answers, score
+
+    db, labels, end = mined
+    unit_of = _unit_of(labels)
+    kb = KnowledgeBase(root=tmp_path / "kb")
+    kb.ensure_structure()
+    state = tmp_path / "state"
+
+    asked = qs.refresh(db, kb, state, now=end)
+    cards = {}
+    for card in asked:
+        assert card.kind == qs.KIND_LABEL
+        units = Counter(
+            unit_of.get(eid, "noise")
+            for o in db.get_workflow_observations(obs_ids=card.obs_ids)
+            for eid in json.loads(o["event_ids_json"])
+        )
+        assert len(units) == 1, units  # one card per workflow, never a mix
+        cards[next(iter(units))] = card
+    assert set(cards) == {STRIPE, EXPENSES}
+    # The app reads the open cards from micro-questions.json.
+    written = json.loads((state / qs.MICRO_QUESTIONS_FILE).read_text(encoding="utf-8"))
+    assert sorted(c["id"] for c in written["questions"]) == sorted(q.id for q in asked)
+
+    assert qs.apply_answer(
+        {"question_id": cards[STRIPE].id, "answer": "Yes", "name": "Stripe payouts"},
+        db, kb, state, now=end,
+    )
+    assert qs.apply_answer(
+        {"question_id": cards[EXPENSES].id, "answer": "No"}, db, kb, state, now=end,
+    )
+
+    stripe_rows = db.get_workflow_observations(obs_ids=cards[STRIPE].obs_ids)
+    assert len(stripe_rows) == 15
+    assert {(r["user_label"], r["user_is_routine"]) for r in stripe_rows} == {
+        ("Stripe payouts", 1),
+    }
+    # "No": the expense report leaves the review queue.
+    queue = wm.review_candidates(db, now=end)
+    assert [set(_routine_of(c, unit_of)) for c in queue] == [{STRIPE}]
+
+    product = labels_from_answers(Path(db._get_writable_path()))
+    assert [(r["slug"], len(r["instances"])) for r in product["routines"]] == [
+        ("Stripe payouts", 15),
+    ]
+    assert len(product["one_off_tasks"]) == 4
+
+    def candidate(observations: list[dict]) -> Candidate:
+        return Candidate(
+            sop_id=observations[0]["obs_id"], slug="", title="",
+            source_id=observations[0]["workflow_key"], generated_at=end.isoformat(),
+            segments=[json.loads(o["event_ids_json"]) for o in observations],
+        )
+
+    start = end - timedelta(days=22)
+    precision, recall, chimeras, _ = score([candidate(queue[0].observations)], product, start)
+    assert (precision, recall, chimeras) == (1.0, 1.0, 0)
+    # Had the expense report been drafted, the answers would count it a
+    # false positive.
+    expenses = db.get_workflow_observations(obs_ids=cards[EXPENSES].obs_ids)
+    precision, _, _, _ = score(
+        [candidate(queue[0].observations), candidate(expenses)], product, start,
+    )
+    assert precision == 0.5

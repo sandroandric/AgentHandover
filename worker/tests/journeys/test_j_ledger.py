@@ -3,9 +3,12 @@
 Skeleton: J-focus's recording plus two more runs of the same routine (one
 skipping an item, one diverging) and a micro-question skipped through the
 app's answer file.  The ledger's schema (``proc["knowledge"]``, see
-``agenthandover_worker/ledger.py``) landed with WP-L1; the learners that
-fill it (WP-L2..L4) and the two extra run fixtures have not, so the test
-fails at the missing fixture until then.
+``agenthandover_worker/ledger.py``) landed with WP-L1 and its learners
+with WP-L2..L4 (the micro-questions are the ledger's since WP-L4: the
+focus run's questions are what ``tick_until_skill`` skips; unit pin
+``test_questions.py::test_a_skipped_question_leaves_its_slot_as_it_was``);
+the two extra run fixtures have not, so the test fails at the missing
+fixture until then.
 """
 
 from __future__ import annotations
@@ -20,8 +23,8 @@ RUNS = ("focus_dailynews", "focus_dailynews_skip", "focus_dailynews_diverge")
 
 @needs_focus_sop_recording
 @pytest.mark.xfail(strict=True, reason=(
-    "waits on WP-L4 (micro-questions), the focus_dailynews_skip / "
-    "focus_dailynews_diverge fixtures, and a decision on WP-M5's branch rule "
+    "waits on the focus_dailynews_skip / focus_dailynews_diverge fixtures "
+    "(WP-F9) and a decision on WP-M5's branch rule "
     "(two agreeing detours make a branch; this journey has one diverging run)"
 ))
 def test_three_runs_fill_the_ledger_with_evidence(
@@ -53,7 +56,8 @@ def test_three_runs_fill_the_ledger_with_evidence(
     for slot in ("trigger", "verification"):
         assert knowledge[slot]["status"] == "hypothesis"
         assert len({e["id"] for e in knowledge[slot]["evidence"] if e["kind"] == "instance"}) == 3
-    # The micro-question was skipped (WP-L4): no slot claims a user answer.
+    # The micro-questions were skipped (WP-L4): no slot claims a user
+    # answer.
     assert not any(
         e["kind"] == "answer" for entry in knowledge.values() for e in entry["evidence"]
     )
