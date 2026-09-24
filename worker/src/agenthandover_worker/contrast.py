@@ -13,8 +13,8 @@ Two halves:
   for DOM rows the position in the list).
 * :func:`criteria_hypotheses` compares chosen with skipped entries across
   the recorded instances of a procedure and returns the criteria the
-  observations support: a numeric threshold (``at least 100 points``,
-  ``at most 2 hours old``) or a keyword the chosen entries share.  Each
+  observations support: a numeric threshold (``have at least 100 points``,
+  ``are at most 2 hours old``) or a keyword the chosen entries share.  Each
   carries its support (choices it explains), its counter-examples and an
   ``instance`` evidence pointer per run it was seen in.  The behavioral
   synthesizer only phrases these; it never adds criteria of its own, and
@@ -235,18 +235,19 @@ def _age(minutes: float) -> str:
 
 
 def _phrase(key: str, op: str, value: float) -> str:
-    """The criterion in words, e.g. ``at least 120 points``."""
+    """The criterion as a predicate of an entry ("entries that ..."), e.g.
+    ``have at least 120 points``."""
     bound = "at least" if op == ">=" else "at most"
     if key == "age_minutes":
-        return f"{bound} {_age(value)} old"
+        return f"are {bound} {_age(value)} old"
     if key == "price":
-        return f"price {bound} {value:g}"
+        return f"cost {bound} {value:g}"
     if key == "position":
-        return (f"among the first {value:g} entries of the list" if op == "<="
-                else f"at position {value:g} or later in the list")
+        return (f"are among the first {value:g} entries of the list" if op == "<="
+                else f"are at position {value:g} or later in the list")
     if key == "%":
-        return f"{bound} {value:g}%"
-    return f"{bound} {value:g} {key}s"
+        return f"show {bound} {value:g}%"
+    return f"have {bound} {value:g} {key}s"
 
 
 def _evidence(ids: list[str]) -> list[dict]:
@@ -318,7 +319,7 @@ def _keywords(choices: list[tuple[str, list[dict], list[dict]]]) -> list[tuple[i
         if len(hits) < MIN_SUPPORT or chosen_count <= counter:
             continue
         found.append((chosen_count - counter, {
-            "criterion": f'mentions "{word}"',
+            "criterion": f'mention "{word}"',
             "attribute": "keyword", "op": "contains", "value": word,
             "support": len(hits), "counter": counter,
             "evidence": _evidence([h[0] for h in hits]),
@@ -336,7 +337,7 @@ def criteria_hypotheses(instances: list[dict]) -> list[dict]:
 
     Returns at most :data:`MAX_CRITERIA` dicts, strongest first::
 
-        {"criterion": "at least 120 points",   # default wording
+        {"criterion": "have at least 120 points",   # entries that ...
          "attribute": "point", "op": ">=", "value": 120.0,
          "support": 3,      # picks whose list it separates
          "counter": 1,      # skipped entries that also meet it

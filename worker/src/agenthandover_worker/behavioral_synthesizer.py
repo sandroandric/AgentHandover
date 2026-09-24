@@ -213,7 +213,7 @@ def _criteria_context(hypotheses: list[dict]) -> str:
     for i, h in enumerate(hypotheses, 1):
         examples = "; ".join(f'"{e}"' for e in h.get("examples") or [])
         lines.append(
-            f"  C{i}: chose entries {h['criterion']} (in {h['support']} choices; "
+            f"  C{i}: chosen entries {h['criterion']} (in {h['support']} choices; "
             f"{h['counter']} skipped entries also matched)"
             + (f"; chosen: {examples}" if examples else "")
         )
@@ -235,7 +235,7 @@ def phrase_criteria(hypotheses: list[dict], worded: list[dict]) -> list[dict]:
         text = by_id.get(f"C{i}") or ""
         out.append({
             **h,
-            "criterion": text[:200] if text else f"chosen entries are {h['criterion']}",
+            "criterion": text[:200] if text else f"entries that {h['criterion']}",
             "basis": h["criterion"],
             "confidence": round(h["support"] / (h["support"] + h["counter"]), 2),
         })

@@ -220,7 +220,7 @@ _RUNS = [
 class TestCriteriaHypotheses:
     def test_a_threshold_that_separates_picks_from_skips_cites_every_run(self):
         [best, *_] = criteria_hypotheses(_RUNS)
-        assert best["criterion"] == "at least 250 points"
+        assert best["criterion"] == "have at least 250 points"
         assert (best["attribute"], best["op"], best["value"]) == ("point", ">=", 250)
         assert best["support"] == 3 and best["counter"] == 0
         assert best["evidence"] == [{"kind": "instance", "id": f"sess-{i}"} for i in (1, 2, 3)]
@@ -237,7 +237,7 @@ class TestCriteriaHypotheses:
             for i in (1, 2)
         ]
         [age] = criteria_hypotheses(runs)
-        assert age["criterion"] == "at most 2 hours old"
+        assert age["criterion"] == "are at most 2 hours old"
         assert age["counter"] == 0
 
     def test_a_keyword_the_picks_share_and_the_skips_do_not(self):
@@ -250,7 +250,7 @@ class TestCriteriaHypotheses:
             }),
         ]
         [keyword] = criteria_hypotheses(runs)
-        assert keyword["criterion"] == 'mentions "postgres"'
+        assert keyword["criterion"] == 'mention "postgres"'
         assert keyword["support"] == 2 and keyword["counter"] == 0
 
     def test_one_pick_or_runs_without_an_id_teach_nothing(self):
@@ -266,8 +266,8 @@ class TestCriteriaHypotheses:
         ]
         [points] = criteria_hypotheses([{"id": "s1", "lists": frames}])
         # Two distinct picks; "B" was picked, so it is never a skip
-        # that "at least 150 points" fails to explain.
-        assert points["criterion"] == "at least 150 points"
+        # that "have at least 150 points" fails to explain.
+        assert points["criterion"] == "have at least 150 points"
         assert (points["support"], points["counter"]) == (2, 0)
 
     def test_a_criterion_that_admits_more_skips_than_it_rejects_is_dropped(self):
@@ -333,7 +333,7 @@ class TestSynthesizerWordsCriteria:
         assert "SELECTION CRITERIA HYPOTHESES" not in plain
         hypotheses = criteria_hypotheses(contrast_instances(_observations(), ["a", "b", "c"]))
         shown = synth._build_prompt(proc, _observations(), hypotheses=hypotheses)
-        assert "C1: chose entries at least 250 points (in 3 choices; 0 skipped" in shown
+        assert "C1: chosen entries have at least 250 points (in 3 choices; 0 skipped" in shown
         assert "Do not add criteria that are not listed here." in shown
         # Only the block is added.
         assert shown.replace(shown[shown.index("\n\nSELECTION CRITERIA"):shown.index(
@@ -353,7 +353,7 @@ class TestSynthesizerWordsCriteria:
         assert "SELECTION CRITERIA HYPOTHESES" in call.call_args.kwargs["prompt"]
         [criterion] = insights.selection_criteria
         assert criterion["criterion"] == "Stories with at least 250 points"
-        assert criterion["basis"] == "at least 250 points"
+        assert criterion["basis"] == "have at least 250 points"
         assert criterion["status"] == "hypothesis"
         assert criterion["confidence"] == 1.0
 
@@ -371,7 +371,7 @@ class TestSynthesizerWordsCriteria:
     def test_unworded_hypotheses_keep_their_computed_wording(self):
         hypotheses = criteria_hypotheses(_RUNS)
         [first, *_] = phrase_criteria(hypotheses, [{"criterion": "made up"}])
-        assert first["criterion"] == "chosen entries are at least 250 points"
+        assert first["criterion"] == "entries that have at least 250 points"
 
     def test_merge_marks_decisions_as_a_contrast_hypothesis_citing_three_runs(self):
         """The unit-level pin of J-ledger's selection-criteria assertion."""
