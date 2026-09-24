@@ -66,6 +66,10 @@ if TYPE_CHECKING:
 LEAD_IN_SECONDS = 300
 # The window after the commit in which the user checks the result.
 VERIFY_SECONDS = 60
+# A click, navigation or form submission this soon before the run's first
+# frame is the action that frame shows: part of the run, not its lead-in.
+RUN_INPUT_SLACK_SECONDS = 10
+_INPUT_KINDS = frozenset(("ClickIntent", "NavigationChange", "FormSubmit"))
 # A lead-in item, a start time or a check is recurring when at least this
 # many runs, and this share of all runs, show it.
 MIN_INSTANCES = 3
@@ -109,7 +113,10 @@ def _norm(text: str) -> str:
 
 
 def _first_part(title: str) -> str:
-    return _TITLE_PARTS.split(title, maxsplit=1)[0].strip()
+    """The title's leading part ("Subject" of "Subject - account - Gmail");
+    "" for a title that is only a URL (it names no message or event)."""
+    part = _TITLE_PARTS.split(title, maxsplit=1)[0].strip()
+    return "" if "://" in part else part
 
 
 # ---------------------------------------------------------------------------
@@ -204,7 +211,7 @@ def _commit(event: dict) -> dict | None:
                 anchor.get("name"), anchor.get("id"),
             ) if _clean(v)
         ), "form")
-        return {"kind": "submit", "label": label}
+        return {"kind": "form", "label": label}
     label = ""
     if kind == "ClickIntent":
         target = parse_json_field(event, "metadata_json").get("target")
@@ -240,9 +247,14 @@ def instance_signals(events: list[dict], *, start: datetime, end: datetime) -> d
         key=lambda pair: pair[0],
     )
     lead_from = start - timedelta(seconds=LEAD_IN_SECONDS)
+    # The input that led to the run's first frame (a frame is captured
+    # after the click or navigation it shows) belongs to the run.
+    own_start = start - timedelta(seconds=RUN_INPUT_SLACK_SECONDS)
     lead_in: list[dict] = []
     seen: set[tuple[str, str, str]] = set()
     for when, event in reversed([p for p in timed if lead_from <= p[0] < start]):
+        if when >= own_start and _kind(event)[0] in _INPUT_KINDS:
+            continue
         item = _lead_in_item(event)
         if item is None:
             continue
@@ -468,7 +480,7 @@ def _done(instances: dict[str, dict]) -> dict | None:
     where = f" on {done['place']}" if done.get("place") else (
         f" in {done['app']}" if done.get("app") else ""
     )
-    if done.get("kind") == "submit":
+    if done.get("kind") == "form":
         description = f"Done when the form is submitted (\"{done['label']}\"){where}"
     else:
         description = f"Done when \"{done['label']}\" is clicked{where}"
