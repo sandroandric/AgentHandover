@@ -23,8 +23,11 @@ code; what differs from ``main()`` is only what the driver passes in:
   on the machine running it;
 * no service is started: no fallback VLM worker (its detection probes the
   local Ollama), no query API server, no startup embedding job;
-* the once-per-day pass is off (``WorkerContext.run_daily_jobs``): no
-  cassette holds its model calls yet;
+* the once-per-day pass (``stages.daily``) runs only when the journey
+  asks for it (``run_daily_jobs=True``, as ``main()`` always runs it):
+  on the first tick of each day of the journey clock it processes the day
+  before, and its model calls (session links, embeddings) must be in the
+  journey's cassette;
 * without :meth:`JourneyWorker.start_inference` there is no inference
   thread: ``run_tick()`` runs the tick's model jobs itself after the
   control tick, in the runner's priority order and under the state lock
@@ -113,6 +116,7 @@ class JourneyWorker:
         clock: Clock,
         adapter: str = "openclaw",
         free_memory: Callable[[], int | None] = lambda: 64 * GB,
+        run_daily_jobs: bool = False,
     ) -> None:
         if adapter not in ADAPTERS:
             raise ValueError(f"adapter {adapter!r} is not driven by journeys")
@@ -137,7 +141,7 @@ class JourneyWorker:
                 "free_disk": lambda: 100 * GB,
             },
         )
-        self.ctx.run_daily_jobs = False
+        self.ctx.run_daily_jobs = run_daily_jobs
         start(self.ctx)
 
     def __getattr__(self, name: str) -> Any:

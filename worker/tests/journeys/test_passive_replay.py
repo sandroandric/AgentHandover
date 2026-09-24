@@ -9,7 +9,6 @@ import os
 from collections import Counter
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -27,7 +26,7 @@ from journeys.fixture_loader import (
     read_manifest,
     read_rows,
 )
-from journeys.replay import Candidate, _daily_batch, replay, score
+from journeys.replay import Candidate, _day_checks, replay, score
 
 NAME = "passive_3weeks"
 
@@ -132,58 +131,67 @@ def test_score_verdicts_and_metrics() -> None:
 
 
 CASSETTE = CASSETTE_DIR / f"{NAME}.jsonl"
-# The task_segmenter.label_cluster calls the replay makes since the reasoner
-# has its own daily budget: the VLM fallback queue it used to share filled
-# with 50 jobs a day, and every later label_cluster call was skipped (312 in
-# the three weeks).  The first answers decide the later clusters' labels,
-# so recording these can reveal more; record with AH_RECORD=1 on the test
+# The calls the replay makes that the cassette lacks since it runs the
+# worker's own daily pass (stages.daily), found with AH_RECORD=1
+# AH_RECORD_UPSTREAM at a closed port: the ones whose request depends on no
+# other missing answer (5,860 distinct requests at the closed port).
+# Recording them unblocks the session linker's other embeddings (it embeds
+# each intent once; at a closed port it retried every pair) and its YES/NO
+# checks (they depend on the vectors); record with AH_RECORD=1 on the test
 # Mac until the replay misses nothing.
-REASONER_BUDGET_MISSING_KEYS: tuple[str, ...] = (
-    "05b9464377fa4cbad4e96859210ddb15eb0dc28c8955ea38719687c1d3bb2eb4",
-    "093565a4af05ae432c3bac734b809a11a79972cbe4ed0e33c79c13e7190603a4",
-    "0a8395ace2eabd7aff0280c2173198abd3bde984cdd404e19a8f8dbd5883e4b7",
-    "131e1a805ed0bb011ffe7700abd25fabd50f210243df582d617b9c6f90ae23ff",
-    "2a694763f7c0cfc9fd96ed0b1b7e7735dda0a15d81395a86e74e55422dd8cc64",
-    "2c158d54b6a63add0323f4f3715fc77b29c5f479b0f17ac4af551bf4feedd0cb",
-    "38bd97cf32187d11ffbf0318e4cd39533f941710f4826108773c08400459c7ba",
-    "3fd872b8e44566ee7355c0c1f5058a26c599a575832a018a7b8f7a4bbb093770",
-    "406ec3685f01dc7b8576c210840cf09bf1764d08228ba4e4ff1a17789ba96421",
-    "49e99de1d39eec6eaa01882feee8ce7f62b7419ae8d3c293582428127109b21a",
-    "4b1491ba6cab783c4ec0ceb25c95831ce95305e3a701ade3ca5e0d6ce596062a",
-    "4b3f62dbeb48bce950dc5c8da0c2d7e175507e3d3630b4f92b7252ff643b5272",
-    "674ef39acdabe00454ac1116367751ac828d462c240afd9695a9e5c674a7e41e",
-    "6a7ea7f62a68c4d52f8f6c67c166e52e26b34e3b40d1152e0702a43424cd93f3",
-    "76084a9545b7b675db7a80659566d338ccd10170fde8f9c6b3e80ae24494ca92",
-    "7fb3f1d49dbd46aa24c4796fde8c41930bb44a1990b3b20f3ec7cb094ad052e4",
-    "856367ef546baa77bd95710b31c1bae6d334a26fb83754bee119669bc8d98f34",
-    "988564cf2b7f24343d9da09cda5524dce1d32ea2eb8c8dce70cbe8b79c21438b",
-    "b13947f952dba85a87686a3f887552e9afa8341aedca82af0aaf8884339e3142",
-    "b91282e5c1eea8829424acc26af9d32c2a9a4418b2e43775e49960059fdc2be6",
-    "b9f1f827abb58da73dd2cea6701025bf8b93d098b6923d33c741f0b6262aca13",
-    "cc5603c1f05ccf9c6898e1a966f5b568d127f988da5e422c0418d81fba05872b",
-    "d5b2aae170c6dc18ebd516f724360ac0fdd2bf43efe44f1ffbfaa92011a42c49",
-    "d71e2db84768ee2305a053827e587268e08c7594872324c09f751969f733ec75",
-    "d9a0ab93445fe69bda6fb84633a81e445dd51c56d6c7c6e646c55c9bc6e17e3e",
-    "eb61daab954f162da3fb1f4766715230ae02d236cfc012a52169aa4e22984dcf",
+DAILY_PASS_MISSING_KEYS: tuple[str, ...] = (
+    # The daily summary's embedding, one per day with work.
+    "c8fc20b77844f04cd4f85e7b8bf38307e9b696045b329fd10515608ac16a0da3",  # 2026-08-31
+    "1ee5d88c81a32ba356951a14a890bf5387ff5b7bae5ba035420a9a33fd5c5da3",  # 2026-09-01
+    "ba64b47a097a9f3adcb5c95fdcbd8d07194d58a3bb928a25395b388ae6746313",  # 2026-09-02
+    "d9600a55ffffdecd5e17019a858be4e753499dec6aac68fee40dcd5c88218a99",  # 2026-09-03
+    "034105419c8d12db13b40e4ee1628f2aaf02faf623dbb5e5fa88f74f97b5eb8b",  # 2026-09-04
+    "74410f4a07c147c131349fbd5b5e366edb054d37bde1cac04c62f62e906a2690",  # 2026-09-07
+    "5c3440624e5bb8874cc7f8da96c91b3e4e8c900df9fb1d413a795290084c0c68",  # 2026-09-08
+    "f720cd90f0e4ec7a829cb5cf5ab437c6f178c01a9aa403143406dbd37a41496c",  # 2026-09-09
+    "32b2ce96027da9a8f2f28c304d8fb648b2efa83787f1ddb8cf82f5460b1bc660",  # 2026-09-10
+    "e7d7b2292eb2fae335d16c7e569069aebfd2d193e8eeb8869f0052fc6d38f86b",  # 2026-09-11
+    "6d8626e0f1609575c06f2ec727a405654b1b619ef0f498e1224536ed08caf1f8",  # 2026-09-14
+    "29e607e87c3e73567ec314bfbbfc935ba9af1d6d7621538e80fba92a9daee0fa",  # 2026-09-15
+    "5caf1fb4dc0a3834e8f7b8067ede5477d8fef09b03096abc4afb209424a8b769",  # 2026-09-16
+    "ec62ca70fe0ab296d8549e7eb0f59e1e4c7954f9050e48d477b2e2732dfb09aa",  # 2026-09-17
+    "76bfe871abb86b57e4b25636494aa518917fa44276e3f9ef7263e67cea553c87",  # 2026-09-18
+    # The profile's embedding, from the third summary on (no procedure is
+    # approved in the replay, so it carries no voice profile).
+    "b3d99754909c847b4c5ed40c36cdb5a2dcfae8e9334cadd55cea61134ed86d1e",  # 2026-09-02
+    "3c6d501fd93162728acfb723d18cdc59f476039e26319382accecac7e7f81995",  # 2026-09-03
+    "791b20e2e8f00120b60e97b43650190bf5181e060393df94e13b714b991a6cac",  # 2026-09-04
+    "1daf3a0681117c619361711da31af8d0a9db097916d64fa1e1fd1204c31deba7",  # 2026-09-07
+    "31d1d551e73bb5c0809a3a82eac2478d679e9b7a7bcaab2f8b8b6de83d9a52f6",  # 2026-09-08
+    "95c8476235dcb8ecc61a15680905a1e1061b731202f60b5c57494df5283af51d",  # 2026-09-09
+    "26ac105e0a62cc5d3f57b2bb83e006f579c518f7219a7470ea973012e593bd97",  # 2026-09-10
+    "1714af954f356a4c4cf5180bda4d824dcdee7ec795f9bfa82dcb3121d947c153",  # 2026-09-11
+    "8b6518a3da480abe5d7804a55aeb31e19e83e4dd6a1b88385d8e12b386403291",  # 2026-09-14
+    "ac2afb49de4766ed27ba01e8fc06890b836c80aa33482336ed1ec0b5d3897840",  # 2026-09-15
+    "86511cbc66dd6600c4d08a66bc2c2f0bfa4b2079098660693d04f0218e7c5d83",  # 2026-09-16
+    "5fe84b91b7dd60ff7104659f5675eb77ea676ab38601d15be26e5ae13ec364e9",  # 2026-09-17
+    "192aaf0f39f1a1240a4259b91dc4431e311ead21e6accfdb8e78e66d2be7a5fb",  # 2026-09-18
+    # The session linker's first intent embedding (day 3).
+    "783426732123516105e760924f9131a055e04ba39190a7b17a0805d68a9a8a85",
 )
 _ENTRIES = load_entries(CASSETTE) if CASSETTE.exists() else {}
-needs_label_recording = pytest.mark.skipif(
-    any(key not in _ENTRIES for key in REASONER_BUDGET_MISSING_KEYS)
+needs_daily_recording = pytest.mark.skipif(
+    any(key not in _ENTRIES for key in DAILY_PASS_MISSING_KEYS)
     and os.environ.get("AH_RECORD") != "1",
     reason=(
-        f"cassettes/{NAME}.jsonl lacks the cluster-label calls the reasoner's "
-        "own budget no longer skips: "
-        + ", ".join(k for k in REASONER_BUDGET_MISSING_KEYS if k not in _ENTRIES)
+        f"cassettes/{NAME}.jsonl lacks the daily pass's model calls: "
+        + ", ".join(k for k in DAILY_PASS_MISSING_KEYS if k not in _ENTRIES)
         + " (and the calls they unblock); record with AH_RECORD=1 on the test Mac"
     ),
 )
 
 
-@needs_label_recording
+@needs_daily_recording
 def test_replay_on_passive_3weeks() -> None:
-    """Three weeks through run_tick on the virtual clock, models from the
-    cassette: the routines are found, nothing else is, no chimera, and
-    every day's digest has content."""
+    """Three weeks through run_tick on the virtual clock, with the worker's
+    daily pass, models from the cassette: the routines are found, nothing
+    else is, no chimera, and every weekday's digest has content.
+    (Discovery alone is pinned now by test_j_passive.py's drafts test.)"""
     manifest = read_manifest(NAME)
     start = datetime.fromisoformat(manifest["recorded_start"]).replace(
         hour=0, minute=0, second=0, microsecond=0)
@@ -196,26 +204,19 @@ def test_replay_on_passive_3weeks() -> None:
         vlm={"tier": "recommended"},
     )
     assert report.failures(min_recall=1.0, min_precision=0.9, max_chimeras=0) == []
+    assert len(report.days) == 15  # every weekday of the three weeks
 
 
-class _Day:
-    """``_daily_batch``'s collaborators for one day: its events, and its
-    summary with one task per entry of *minutes*."""
-
-    def __init__(self, kb, minutes: list[int]) -> None:
-        self.kb = kb
-        self.minutes = minutes
-
-    def get_annotated_events_for_date(self, date: str) -> list[dict]:
-        return [{"id": "e1"}]
-
-    def process_day(self, date: str, events: list[dict]) -> SimpleNamespace:
-        tasks = [
-            {"intent": f"Task {n}", "duration_minutes": m, "apps": ["Slack"]}
-            for n, m in enumerate(self.minutes)
-        ]
-        self.kb.save_daily_summary(date, {"tasks": tasks})
-        return SimpleNamespace(active_hours=sum(self.minutes) / 60, tasks=tasks)
+def _save_day(kb: KnowledgeBase, day: str, minutes: list[int]) -> None:
+    """What the daily pass saves for *day*: its summary, with one task per
+    entry of *minutes*, then the production digest of it."""
+    tasks = [
+        {"intent": f"Task {n}", "duration_minutes": m, "apps": ["Slack"]}
+        for n, m in enumerate(minutes)
+    ]
+    kb.save_daily_summary(day, {"tasks": tasks, "active_hours": sum(minutes) / 60})
+    digests = DigestGenerator(kb)
+    digests.save_digest(digests.generate(day))
 
 
 @pytest.mark.parametrize(("minutes", "failures"), [
@@ -231,7 +232,20 @@ def test_the_digest_check_asks_what_the_digest_promises(
     without it is not reported for its missing highlight."""
     kb = KnowledgeBase(root=tmp_path / "knowledge", db_path=kb_db(tmp_path / "knowledge"))
     kb.ensure_structure()
-    day = _Day(kb, minutes)
-    (check,) = _daily_batch(day, day, DigestGenerator(kb), date(2026, 8, 31))
+    _save_day(kb, "2026-08-31", minutes)
+    (check,) = _day_checks(kb, date(2026, 8, 31))
     assert check.failures == failures
     assert (check.highlights > 0) == (sum(minutes) > 0)
+
+
+def test_a_day_without_its_digest_fails_the_check(tmp_path: Path) -> None:
+    """A summary without a digest is the daily pass stopping between them
+    (as it did on every day with work while it read ``TaskBoundary``
+    records as dicts); a day without a summary had no work and is not
+    checked."""
+    kb = KnowledgeBase(root=tmp_path / "knowledge", db_path=kb_db(tmp_path / "knowledge"))
+    kb.ensure_structure()
+    kb.save_daily_summary("2026-08-31", {"tasks": [{"duration_minutes": 30}], "active_hours": 0.5})
+    (check,) = _day_checks(kb, date(2026, 8, 31))
+    assert check.failures == ["no digest was saved"]
+    assert _day_checks(kb, date(2026, 9, 1)) == []

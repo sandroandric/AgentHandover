@@ -11,9 +11,11 @@ The replay is the worker as ``main()`` runs it, driven by the journey driver
 * one ``run_tick()`` per ``--step`` of virtual time: the event pipeline, and
   passive discovery on its 2-hour cadence over the 24 hours before the
   virtual now;
-* after each midnight, the daily batch's summary and digest for the day
-  that ended (``DailyBatchProcessor.process_day`` with the production
-  ``ProcedureMatcher``, then ``DigestGenerator``), as ``main()`` does;
+* the worker's own once-per-day pass (``stages.daily``, in the same
+  ``run_tick()``), on the first tick of each day: the daily batch for the
+  day that ended (summary, learning from the summaries, questions,
+  digest), workflow observations, staleness, curation, maintenance, as
+  ``main()`` runs it (``--no-daily`` leaves it off);
 * models answer from an Ollama cassette (``--cassette``, recorded once with
   ``--record``) or a live Ollama (``--ollama``).  Config is the production
   default apart from the host and any ``--vlm`` keys.
@@ -25,9 +27,10 @@ events span two or more work units (routines or one-off tasks), a *true
 positive* when they span exactly one and it is a routine.  Precision is true
 positives over candidates, recall the share of routines with a true
 positive, and days-to-discovery the time from a routine's first instance to
-its first true positive.  Each day's digest must have content: active hours
-above zero and close to the daily summary's, task minutes above zero, and
-(the day having recorded work) at least one highlight.
+its first true positive.  Each day the daily pass processed must have a
+saved digest with content: active hours above zero and close to the daily
+summary's, task minutes above zero, and (the day having recorded work) at
+least one highlight.
 
 Usage (from ``worker/tests``)::
 
@@ -55,9 +58,9 @@ import tempfile
 from collections import Counter
 from contextlib import ExitStack, contextmanager
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, time, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
-from typing import Iterator
+from typing import Any, Callable, Iterator
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # worker/tests
@@ -118,6 +121,8 @@ class ReplayReport:
     chimeras: int
     days: list[DayCheck]
     model_seconds: float | None = None
+    # The worker's daily pass ran (``replaying(daily_jobs=...)``).
+    daily_jobs: bool = True
 
     def failures(self, min_recall: float, min_precision: float, max_chimeras: int) -> list[str]:
         out = []
@@ -127,7 +132,7 @@ class ReplayReport:
             out.append(f"precision {self.precision:.2f} < {min_precision}")
         if self.chimeras > max_chimeras:
             out.append(f"{self.chimeras} chimera candidate(s) > {max_chimeras}")
-        if not self.days:
+        if self.daily_jobs and not self.days:
             out.append("no daily summary was produced")
         for day in self.days:
             out += [f"{day.date}: {msg}" for msg in day.failures]
@@ -306,7 +311,15 @@ def _parse(ts: str) -> datetime:
 # ---------------------------------------------------------------------------
 
 
-def replay(
+def replay(**kwargs: Any) -> ReplayReport:
+    """Replay [start, end) and score it; see the module docstring and
+    :func:`replaying` for the arguments."""
+    with replaying(**kwargs) as run:
+        return run.report
+
+
+@contextmanager
+def replaying(
     *,
     source_db: Path | None = None,
     fixture: str | None = None,
@@ -319,8 +332,17 @@ def replay(
     ollama: str | None = None,
     vlm: dict | None = None,
     step: timedelta = timedelta(minutes=15),
-) -> ReplayReport:
-    """Replay [start, end) and score it; see the module docstring."""
+    daily_jobs: bool = True,
+    on_tick: Callable[[JourneyWorker], None] | None = None,
+) -> Iterator["Replay"]:
+    """Replay [start, end) and score it; the :class:`Replay` it yields
+    holds the report and the worker, open until the ``with`` block ends
+    (a journey asserts on its knowledge base and database there).
+
+    *daily_jobs* False leaves the once-per-day pass off: passive discovery
+    alone, and no daily checks.  *on_tick* is called with the worker after
+    every tick: what the user does in the app meanwhile (a trigger it
+    writes is consumed by the next tick)."""
     if (source_db is None) == (fixture is None):
         raise ValueError("give exactly one of source_db and fixture")
     if (cassette is None) == (ollama is None):
@@ -336,9 +358,6 @@ def replay(
         home = stack.enter_context(throwaway_home(host, vlm))
 
         from agenthandover_worker import main as wm
-        from agenthandover_worker import workflow_mining
-        from agenthandover_worker.daily_digest import DigestGenerator
-        from agenthandover_worker.daily_processor import DailyBatchProcessor
 
         data_dir = wm._status_dir()
         if fixture is not None:
@@ -353,11 +372,8 @@ def replay(
             knowledge_dir=home / ".agenthandover" / "knowledge",
             sops_dir=home / ".openclaw" / "workspace" / "memory" / "apprentice",
             clock=clock,
+            run_daily_jobs=daily_jobs,
         ))
-        daily = DailyBatchProcessor(
-            knowledge_base=worker.knowledge_base, matcher=worker.procedure_matcher,
-        )
-        digests = DigestGenerator(worker.knowledge_base, db=worker.db)
 
         write = sqlite3.connect(str(db_path))
         stack.callback(write.close)
@@ -377,7 +393,6 @@ def replay(
         candidates: list[Candidate] = []
         days: list[DayCheck] = []
         ticks = passive_runs = 0
-        last_day = start.date()
         while clock.now() < end:
             now = clock.now()
             due = [r for r in pending if _parse(r[ts_col]) <= now]
@@ -388,21 +403,24 @@ def replay(
 
             promoted_before = _promoted_observations(write)
             sops_before = _passive_sop_ids(write)
+            daily_before = worker.ctx.daily_jobs_date
             result = worker.run_tick()
             ticks += 1
             if result["passive_sops"] is not None:
                 passive_runs += 1
                 candidates += _new_candidates(write, promoted_before, sops_before, now)
-
-            if now.date() != last_day:
-                days += _daily_batch(worker.db, daily, digests, now.date() - timedelta(days=1))
-                workflow_mining.run_daily(worker.db, worker.knowledge_base, now=now)
-                last_day = now.date()
+            if worker.ctx.daily_jobs_date != daily_before:
+                # The worker's daily pass ran on this tick, for the day
+                # before its local day (stages.daily).
+                ran_on = date.fromisoformat(worker.ctx.daily_jobs_date)
+                days += _day_checks(worker.knowledge_base, ran_on - timedelta(days=1))
+            if on_tick is not None:
+                on_tick(worker)
             clock.advance(step)
 
         failed = _count(write, "SELECT COUNT(*) FROM failed_generations WHERE source = 'passive'")
         precision, recall, chimeras, routines = score(candidates, labels, start)
-        return ReplayReport(
+        report = ReplayReport(
             start=start.isoformat(),
             end=end.isoformat(),
             ticks=ticks,
@@ -415,7 +433,18 @@ def replay(
             chimeras=chimeras,
             days=days,
             model_seconds=round(tape.model_seconds(), 1) if tape is not None else None,
+            daily_jobs=daily_jobs,
         )
+        yield Replay(report=report, worker=worker)
+
+
+@dataclass
+class Replay:
+    """A finished replay: its report and the worker it ran (open inside
+    :func:`replaying`'s ``with`` block)."""
+
+    report: ReplayReport
+    worker: JourneyWorker
 
 
 def _count(conn: sqlite3.Connection, sql: str) -> int:
@@ -472,35 +501,37 @@ def _new_candidates(
     return out
 
 
-def _daily_batch(db, daily, digests, day) -> list[DayCheck]:
-    """``main()``'s daily batch for *day*: summary, then digest; the checks."""
-    date = day.isoformat()
-    events = db.get_annotated_events_for_date(date)
-    if not events:
+def _day_checks(knowledge_base, day: date) -> list[DayCheck]:
+    """The checks on what the worker's daily pass saved for *day*: its
+    summary and its digest.  A day without a summary had no annotated
+    events (``stages.daily`` skips it) and is not checked."""
+    from agenthandover_worker.daily_digest import DigestGenerator
+
+    date_str = day.isoformat()
+    summary = knowledge_base.get_daily_summary(date_str)
+    if summary is None:
         return []
-    summary = daily.process_day(date, events)
-    digest = digests.generate(date)
-    digests.save_digest(digest)
-    tasks = [t if isinstance(t, dict) else asdict(t) for t in summary.tasks]
-    task_minutes = sum(t.get("duration_minutes", 0) for t in tasks)
+    digest = DigestGenerator(knowledge_base).get_digest(date_str)
+    task_minutes = sum(t.get("duration_minutes", 0) for t in summary.get("tasks", []))
+    active_hours = summary.get("active_hours", 0.0)
     failures = []
-    if digest.active_hours <= 0:
+    if digest is None:
+        failures.append("no digest was saved")
+    elif digest.active_hours <= 0:
         failures.append("digest active_hours is 0")
-    elif abs(digest.active_hours - summary.active_hours) > ACTIVE_HOURS_TOLERANCE * summary.active_hours:
-        failures.append(
-            f"digest active_hours {digest.active_hours} vs summary {summary.active_hours}"
-        )
+    elif abs(digest.active_hours - active_hours) > ACTIVE_HOURS_TOLERANCE * active_hours:
+        failures.append(f"digest active_hours {digest.active_hours} vs summary {active_hours}")
     # The digest's rule (``DigestGenerator._work_highlights``): a day with
     # recorded work, a task of a minute or more, has a highlight.
-    if task_minutes > 0 and not digest.highlights:
+    if digest is not None and task_minutes > 0 and not digest.highlights:
         failures.append("digest has no highlights")
     if task_minutes <= 0:
         failures.append("task durations sum to 0 minutes")
     return [DayCheck(
-        date=date,
-        summary_active_hours=summary.active_hours,
-        digest_active_hours=digest.active_hours,
-        highlights=len(digest.highlights),
+        date=date_str,
+        summary_active_hours=active_hours,
+        digest_active_hours=digest.active_hours if digest is not None else 0.0,
+        highlights=len(digest.highlights) if digest is not None else 0,
         task_minutes=round(task_minutes, 1),
         failures=failures,
     )]
@@ -538,6 +569,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--vlm", action="append", default=[], metavar="KEY=VALUE",
                         help="a [vlm] config key to set (repeatable), e.g. sop_model=qwen3.5:4b")
     parser.add_argument("--step-minutes", type=int, default=15)
+    parser.add_argument("--no-daily", action="store_true",
+                        help="leave the worker's once-per-day pass off (passive discovery only)")
     parser.add_argument("--min-recall", type=float, default=1.0)
     parser.add_argument("--min-precision", type=float, default=0.9)
     parser.add_argument("--max-chimeras", type=int, default=0)
@@ -566,6 +599,7 @@ def main(argv: list[str] | None = None) -> int:
         source_db=args.db, fixture=args.fixture, labels=labels, start=start, end=end,
         cassette=args.cassette, record=args.record, upstream=args.upstream,
         ollama=args.ollama, step=timedelta(minutes=args.step_minutes),
+        daily_jobs=not args.no_daily,
         vlm=dict(item.split("=", 1) for item in args.vlm),
     )
     if args.json is not None:

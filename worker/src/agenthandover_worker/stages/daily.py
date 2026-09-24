@@ -40,7 +40,7 @@ def run(ctx: Any, tick: Any) -> bool:
     try:
         _daily_batch(ctx, yesterday_str)
     except Exception:
-        logger.debug("Daily batch failed", exc_info=True)
+        logger.warning("Daily batch failed", exc_info=True)
 
     # Workflow observations: segment and observation TTLs, the promoted
     # workflows' recurrence and value.
@@ -109,11 +109,8 @@ def _daily_batch(ctx: Any, day: str) -> None:
         f"Daily summary for {day}: "
         f"{summary.task_count} tasks, "
         f"{summary.active_hours:.1f} active hours. "
-        + " ".join(
-            t.get("intent", "")
-            for t in getattr(summary, "tasks", [])
-            if t.get("intent")
-        )[:2000],
+        # ``DailySummary.tasks`` holds ``TaskBoundary`` records.
+        + " ".join(t.intent for t in summary.tasks if t.intent)[:2000],
     )
     if len(kb.list_daily_summaries(limit=5)) >= 3:
         _learn_from_summaries(ctx)
@@ -160,10 +157,7 @@ def _learn_from_summaries(ctx: Any) -> None:
     try:
         profile = kb.get_profile()
         if profile:
-            wm._embed_in_vector_kb(
-                ctx.vector_kb, "profile", "user",
-                json.dumps(profile, default=str)[:4000],
-            )
+            wm._embed_in_vector_kb(ctx.vector_kb, "profile", "user", _profile_text(profile))
     except Exception:
         logger.debug("Profile embedding failed", exc_info=True)
     # The activity classifier reads the updated profile.
@@ -218,6 +212,14 @@ def _learn_from_summaries(ctx: Any) -> None:
             logger.info("Evidence extraction: %d procedure(s) processed", extracted)
     except Exception:
         logger.debug("Pre-expiry evidence extraction failed", exc_info=True)
+
+
+def _profile_text(profile: dict) -> str:
+    """The profile's content for its embedding: without ``updated_at``,
+    the wall-clock time of the save, which says nothing to a search and
+    made the text (and the embedding call) new on every daily pass."""
+    content = {k: v for k, v in profile.items() if k != "updated_at"}
+    return json.dumps(content, default=str)[:4000]
 
 
 def _resynthesize(ctx: Any) -> None:
