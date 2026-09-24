@@ -80,6 +80,15 @@ are marked *(not yet recorded)*.
   focus path's Skill steps, for a task description and overview).
 
 ### Fixed
+- **The daily pass runs to its end again.** It read the day's tasks
+  (`TaskBoundary` records) as dicts and stopped on every day with work,
+  logged only at DEBUG, so the app's daily digest was never written, and
+  the profile, patterns, session links, trust suggestions, behavioural
+  re-synthesis, default constraints and the day's questions never ran from
+  it. A failed daily batch now logs a warning. The profile's embedding no
+  longer includes its save time, which made it a new embedding call every
+  day. Proof: `test_daily_processor.py`; the three-week replay and
+  J-passive now run the worker's own daily pass *(not yet recorded)*.
 - **Cluster labels and synthesis no longer stop for the day** after 50
   rejected translations. The fallback queue was also the daily budget of the
   LLM reasoner and the behavioral synthesizer, so its 50 jobs a day skipped

@@ -394,6 +394,26 @@ def test_record_mode_appends_only_new_entries(tmp_path, fake_ollama):
     assert len(path.read_text().splitlines()) == 2
 
 
+def test_record_mode_against_a_closed_port_lists_every_missing_request(
+    tmp_path, fake_ollama,
+):
+    """``AH_RECORD_UPSTREAM`` at a closed port: recorded entries replay,
+    every request without one is a miss, and nothing is written."""
+    path = tmp_path / "journey.jsonl"
+    known = {"model": "m", "prompt": "known", "stream": False}
+    unknown = {"model": "m", "prompt": "unknown", "stream": False}
+    with Cassette(path, record=True, upstream=fake_ollama.host) as rec:
+        _post(rec.host, "/api/generate", known)
+    before = path.read_text()
+    tape = Cassette(path, record=True, upstream="http://127.0.0.1:9")
+    with pytest.raises(AssertionError, match=request_key("/api/generate", unknown)):
+        with tape:
+            assert _post(tape.host, "/api/generate", known)[0] == 200
+            assert _post(tape.host, "/api/generate", unknown)[0] == 502
+    assert tape.misses == [request_key("/api/generate", unknown)]
+    assert path.read_text() == before
+
+
 def test_record_mode_is_the_default_when_ah_record_is_set(tmp_path, monkeypatch):
     monkeypatch.setenv("AH_RECORD", "1")
     monkeypatch.setenv("OLLAMA_HOST", "127.0.0.1:9")

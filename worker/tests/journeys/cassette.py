@@ -12,7 +12,10 @@ kept in ``cassette.misses``; leaving the ``with`` block then fails the test.
 Record (``AH_RECORD=1``): requests with no entry are proxied to a real Ollama
 (``AH_RECORD_UPSTREAM``, else ``OLLAMA_HOST``, else ``http://localhost:11434``)
 and the full JSON response is appended to the cassette.  Entries already in
-the file are replayed, so recording is incremental.
+the file are replayed, so recording is incremental.  A request the upstream
+cannot be reached for is a miss, as in replay: pointing ``AH_RECORD_UPSTREAM``
+at a closed port lists every request the cassette lacks without recording
+any.
 
 Both modes serve the stored response with the same serialisation, so a
 recorded answer and its replay are byte-identical.
@@ -352,8 +355,11 @@ class Cassette:
             with urllib.request.urlopen(req, timeout=3600) as resp:
                 response = json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
+            # Ollama's own error answer (e.g. a model it does not have):
+            # passed through, not recorded.
             return exc.code, exc.read()
         except urllib.error.URLError as exc:
+            self._unrecorded(key, path, material, f"upstream unreachable: {exc.reason}")
             return 502, _error(f"cassette upstream {self.upstream} unreachable: {exc}")
 
         entry = {
@@ -374,6 +380,18 @@ class Cassette:
             entry = self.entries[key]
             self.served.append(entry)
         return 200, encode_response(entry["response"])
+
+
+    def _unrecorded(self, key: str, path: str, material: dict, why: str) -> None:
+        """A request with no entry and no upstream to answer it: a miss,
+        as in replay (the test fails naming it)."""
+        with self._lock:
+            self.misses.append(key)
+        print(
+            f"CASSETTE MISS {key} {path} model={material.get('model', '')!r} "
+            f"cassette={self.path} (record: {why})",
+            file=sys.stderr,
+        )
 
 
 def _error(message: str) -> bytes:

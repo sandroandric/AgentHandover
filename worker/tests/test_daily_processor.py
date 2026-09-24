@@ -1066,3 +1066,84 @@ class TestMatchedProcedure:
         events[0]["timestamp"] = "2026-03-11T09:00:00Z"
         summary = processor.process_day("2026-03-11", events)
         assert summary.procedures_observed == ["file-expense-report"]
+
+
+# ---------------------------------------------------------------------------
+# Tests: the worker's daily pass over a summary (stages.daily)
+# ---------------------------------------------------------------------------
+
+class _RecordingVectorKB:
+    """Stands in for the vector KB: records what the daily pass embeds."""
+
+    def __init__(self) -> None:
+        self.upserts: list[tuple[str, str, str]] = []
+
+    def upsert(self, source_type: str, source_id: str, text: str) -> None:
+        self.upserts.append((source_type, source_id, text))
+
+
+class _DayOfEvents:
+    """The worker's database with *events* as the annotated day."""
+
+    def __init__(self, db, events: list[dict]) -> None:
+        self._db = db
+        self._events = events
+
+    def get_annotated_events_for_date(self, date: str) -> list[dict]:
+        return self._events
+
+    def __getattr__(self, name: str):
+        return getattr(self._db, name)
+
+
+class TestDailyStageBatch:
+    def test_the_summary_is_embedded_and_the_digest_saved(
+        self, kb: KnowledgeBase, tmp_db_path: Path,
+    ) -> None:
+        """``DailySummary.tasks`` holds ``TaskBoundary`` records: the daily
+        pass reads their intents for the summary's embedding and goes on
+        to the digest (it stopped at ``t.get`` before, on every day with
+        work, and the digest was never written)."""
+        from types import SimpleNamespace
+
+        from agenthandover_worker.daily_digest import DigestGenerator
+        from agenthandover_worker.db import WorkerDB
+        from agenthandover_worker.stages import daily
+
+        events = [
+            make_event("e1", "2026-03-10T09:00:00Z", "Chrome",
+                       "Filing expense report", "https://expensify.com/reports"),
+            make_event("e2", "2026-03-10T09:12:00Z", "Chrome",
+                       "Filing expense report", "https://expensify.com/reports"),
+        ]
+        vector_kb = _RecordingVectorKB()
+        with WorkerDB(tmp_db_path) as db:
+            ctx = SimpleNamespace(
+                knowledge_base=kb,
+                db=_DayOfEvents(db, events),
+                daily_processor=DailyBatchProcessor(kb),
+                vector_kb=vector_kb,
+                cfg=SimpleNamespace(knowledge=SimpleNamespace(weekly_question_budget=5)),
+                now=lambda: datetime(2026, 3, 11, 0, 5, tzinfo=timezone.utc),
+            )
+            daily._daily_batch(ctx, "2026-03-10")
+
+        ((source_type, source_id, text),) = vector_kb.upserts
+        assert (source_type, source_id) == ("daily_summary", "2026-03-10")
+        assert "Filing expense report" in text
+        digest = DigestGenerator(kb).get_digest("2026-03-10")
+        assert digest is not None
+        assert digest.stats["total_tasks"] == 2
+
+    def test_the_profile_embedding_is_its_content(self, kb: KnowledgeBase) -> None:
+        """The same profile saved twice embeds as the same text: the save's
+        wall-clock ``updated_at`` is not part of it."""
+        from agenthandover_worker.stages import daily
+
+        kb.update_profile({"tools": {"browser": "Google Chrome"}})
+        first = daily._profile_text(kb.get_profile())
+        kb.update_profile({"updated_at": "2020-01-01T00:00:00+00:00"})
+        second = kb.get_profile()
+        assert second["updated_at"] != "2020-01-01T00:00:00+00:00"  # the save's clock
+        assert daily._profile_text(second) == first
+        assert "Google Chrome" in first and "updated_at" not in first
