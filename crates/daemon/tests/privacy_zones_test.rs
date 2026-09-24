@@ -450,6 +450,38 @@ async fn an_allowed_window_keeps_its_frame() {
     assert!(compute.since_start.frames_gated_by_reason.is_empty());
 }
 
+/// Every kept frame says whether a key went down since the previous kept
+/// frame (`keys_since_prev_frame`, a timing bit: no key code, no text).
+async fn key_flags(seconds_since_last_key: fn() -> f64) -> Vec<Option<bool>> {
+    let mut h = harness_with(PrivacyZonesConfig::default(), true);
+    // Keep every frame: the fake capture server serves the same image.
+    h.config.dhash_threshold = 0;
+    h.config.seconds_since_last_key = seconds_since_last_key;
+    let served = fake_observation_server(
+        &h.config.observation_socket,
+        vec![
+            window_reply("pid:10:TextEdit", "notes.txt"),
+            window_reply("pid:12:Preview", "invoice.pdf"),
+            window_reply("pid:10:TextEdit", "notes.txt"),
+        ],
+    );
+    let events = run_loop(h.config, &h.root, Some(&served), Duration::from_millis(800)).await;
+    events
+        .iter()
+        .filter(|e| matches!(e.kind, EventKind::DwellSnapshot))
+        .map(|e| e.metadata.get("keys_since_prev_frame").and_then(|v| v.as_bool()))
+        .collect()
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn kept_frames_record_whether_a_key_was_pressed() {
+    assert_eq!(key_flags(|| 0.0).await, vec![Some(true), Some(true)], "typing throughout");
+    // The last key came an hour ago, before the observer started: not even
+    // the first frame has keyboard evidence.
+    assert_eq!(key_flags(|| 3600.0).await, vec![Some(false), Some(false)]);
+    assert_eq!(key_flags(|| f64::INFINITY).await, vec![Some(false), Some(false)]);
+}
+
 /// A macOS password prompt (`SecurityAgent`, owner of the "... wants to
 /// make changes" dialog) is blocked by default: with frames on offer, the
 /// switch into it fires no shutter and writes no frame row and no JPEG.

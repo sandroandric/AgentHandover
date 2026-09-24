@@ -42,6 +42,19 @@ impl IdleDetector {
         since(CGEventType::LeftMouseDown).min(since(CGEventType::RightMouseDown))
     }
 
+    /// Seconds since the last key press anywhere on the system, by the same
+    /// HID timestamp query: no key code, no text, no event tap, no Input
+    /// Monitoring permission. Only "was a key pressed since the previous
+    /// frame" is derived from it.
+    pub fn seconds_since_last_key(&self) -> f64 {
+        unsafe {
+            CGEventSourceSecondsSinceLastEventType(
+                CGEventSourceStateID::HIDSystemState,
+                CGEventType::KeyDown,
+            )
+        }
+    }
+
     pub fn is_idle(&self, threshold_seconds: f64) -> bool {
         self.seconds_since_last_input() >= threshold_seconds
     }
