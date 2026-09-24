@@ -1,7 +1,6 @@
 import SwiftUI
 
 struct FAQView: View {
-    @EnvironmentObject var appState: AppState
     @State private var expandedId: String?
 
     private let darkNavy = Color.primary
@@ -96,11 +95,7 @@ struct FAQView: View {
         )
     }
 
-    private var sections: [FAQSection] {
-        FAQContent.sections(
-            vlmMode: appState.vlmMode, provider: appState.vlmProvider, model: appState.vlmModel
-        )
-    }
+    private var sections: [FAQSection] { FAQContent.sections() }
 }
 
 // MARK: - Models
@@ -120,45 +115,20 @@ struct FAQItem: Identifiable {
 
 // MARK: - Content
 
-/// The FAQ's questions and answers.  Where the truth depends on the
-/// configured model mode (`[vlm] mode` in config.toml), the answer is
-/// written for that mode: "local" gets the on-device answer, "remote"
-/// names the provider, its model and where its API key is kept.
+/// The FAQ's questions and answers.  Every model runs on the Mac through
+/// Ollama (a configured `ollama_host` is still the user's own Ollama).
 enum FAQContent {
-    /// The sentence only local mode may say.
+    /// Where the models run.
     static let onDevice = "Screen annotation, Skill writing and questions all run on your Mac through Ollama, and nothing you do leaves your computer."
 
-    static func providerName(_ provider: String?) -> String {
-        guard let provider, !provider.isEmpty else { return "the cloud provider" }
-        return OnboardingView.RemoteProvider(rawValue: provider)?.displayName ?? provider
-    }
-
-    /// What cloud mode sends, and where its key lives (remote mode only).
-    static func cloudModeNote(provider: String?, model: String?) -> String {
-        let name = providerName(provider)
-        let modelText = (model?.isEmpty == false) ? "model \(model!)" : "its default model"
-        return "Cloud mode is on: with scene annotation turned off, AgentHandover sends \(name) (\(modelText)) the steps of a Skill it wrote from a recording, to add a task description and overview. Screen annotation, Skill writing and questions run on your Mac through Ollama, and screenshots stay on your Mac. The \(name) API key you entered is kept in the macOS Keychain (service com.agenthandover.app), not in a file."
-    }
-
-    static func sections(vlmMode: String, provider: String?, model: String?) -> [FAQSection] {
-        let remote = vlmMode == "remote"
-        let whereItRuns = remote ? cloudModeNote(provider: provider, model: model) : onDevice
-        let privacyAnswer: String
-        if remote {
-            privacyAnswer = "Mostly. \(cloudModeNote(provider: provider, model: model))\n\n"
-                + "- Screenshots are deleted once annotated; frames never annotated are deleted after 7 days.\n"
-                + "- API keys, tokens and passwords are redacted before anything is stored or sent to the local model.\n"
-                + "- Password managers, macOS password and permission prompts, and banking or login pages are never captured.\n\n"
-                + "To keep everything on your Mac, set mode = \"local\" under [vlm] in config.toml."
-        } else {
-            privacyAnswer = "Yes. \(onDevice)\n\n"
-                + "- Screenshots are read by the local model and deleted once annotated; frames never annotated are deleted after 7 days.\n"
-                + "- API keys, tokens and passwords are redacted before anything is stored or sent to the model.\n"
-                + "- Password managers, macOS password and permission prompts, and banking or login pages are never captured.\n"
-                + "- The only request the app makes on its own is its daily update check.\n"
-                + "- To remove everything: agenthandover uninstall --purge-data\n\n"
-                + "AgentHandover needs Accessibility and Screen Recording permissions to observe your screen."
-        }
+    static func sections() -> [FAQSection] {
+        let privacyAnswer = "Yes. \(onDevice)\n\n"
+            + "- Screenshots are read by the local model and deleted once annotated; frames never annotated are deleted after 7 days.\n"
+            + "- API keys, tokens and passwords are redacted before anything is stored or sent to the model.\n"
+            + "- Password managers, macOS password and permission prompts, and banking or login pages are never captured.\n"
+            + "- The only request the app makes on its own is its daily update check.\n"
+            + "- To remove everything: agenthandover uninstall --purge-data\n\n"
+            + "AgentHandover needs Accessibility and Screen Recording permissions to observe your screen."
         return [
             FAQSection(
                 id: "basics",
@@ -168,7 +138,7 @@ enum FAQContent {
                     FAQItem(
                         id: "what-is",
                         question: "What is AgentHandover?",
-                        answer: "AgentHandover watches how you work on your Mac, learns your workflows, and turns them into step-by-step Skills that AI agents (like Claude Code, Cursor, or Codex) can execute for you.\n\n\(whereItRuns)"
+                        answer: "AgentHandover watches how you work on your Mac, learns your workflows, and turns them into step-by-step Skills that AI agents (like Claude Code, Cursor, or Codex) can execute for you.\n\n\(onDevice)"
                     ),
                     FAQItem(
                         id: "focus-vs-observe",

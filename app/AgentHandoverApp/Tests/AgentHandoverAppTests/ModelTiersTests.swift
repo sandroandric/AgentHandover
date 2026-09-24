@@ -144,13 +144,13 @@ final class ModelTiersTests: XCTestCase {
         XCTAssertEqual(ModelTierTable.applyVLMBlock(block, to: ""), "\n" + block)
     }
 
-    /// The remote-model writer once stripped `model =` and `mode =` from
-    /// every section, deleting e.g. the embedding model.
-    func testRemoteBlockEditsOnlyTheVLMSection() {
+    /// Only `[vlm]` is edited: a `mode =` or `model =` in another section
+    /// belongs to that section (an earlier writer deleted the embedding
+    /// model this way).
+    func testTierBlockEditsOnlyTheVLMSection() {
         let config = """
         [vlm]
         mode = "local"
-        model = "old-remote"
         keep_alive = "30m"
 
         [embedding]
@@ -160,18 +160,14 @@ final class ModelTiersTests: XCTestCase {
         mode = "strict"
 
         """
-        let block = ModelTierTable.remoteVLMBlock(
-            provider: "openai", model: "gpt-5-mini", apiKeyEnv: "OPENAI_API_KEY"
-        )
-        let updated = ModelTierTable.applyVLMBlock(
-            block, to: config, managedKeys: ModelTierTable.remoteKeys
-        )
+        let block = ModelTierTable.vlmBlock(tierID: "standard", annotationModel: "a", sopModel: "s")
+        let updated = ModelTierTable.applyVLMBlock(block, to: config)
         XCTAssertEqual(updated, """
         [vlm]
-        mode = "remote"
-        provider = "openai"
-        model = "gpt-5-mini"
-        api_key_env = "OPENAI_API_KEY"
+        mode = "local"
+        tier = "standard"
+        annotation_model = "a"
+        sop_model = "s"
         keep_alive = "30m"
 
         [embedding]
@@ -182,10 +178,7 @@ final class ModelTiersTests: XCTestCase {
 
         """)
         // Saving twice leaves one copy of each key.
-        XCTAssertEqual(
-            ModelTierTable.applyVLMBlock(block, to: updated, managedKeys: ModelTierTable.remoteKeys),
-            updated
-        )
+        XCTAssertEqual(ModelTierTable.applyVLMBlock(block, to: updated), updated)
     }
 
     func testAnEmptyTableIsAnError() {

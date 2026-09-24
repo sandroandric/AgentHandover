@@ -118,6 +118,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Obse
         // relaunch included); only capture follows the pause.
         DispatchQueue.global(qos: .utility).async {
             ServiceController.startWorker()
+            // Cloud mode's API keys (0.4.x and earlier) are read by nothing now.
+            LegacyAPIKeys.removeOnce()
         }
 
         // Both grants back while the app runs: finish a setup that was only
