@@ -68,6 +68,14 @@ if [ "${NO_SERVICES}" != "1" ]; then
     rm -f /Library/LaunchDaemons/com.agenthandover.daemon.plist 2>/dev/null
 fi
 
+# Remove the trees the payload owns before it is laid down again. The
+# installer writes the new payload's files but never deletes the ones a
+# release dropped, and postinstall pip-installs the worker from this tree:
+# a module removed in a release (0.5.0's cloud backends) would be
+# reinstalled into the venv at every upgrade. The venv and the state files
+# beside these trees are not payload and stay.
+rm -rf "${LIB_DIR}/worker" "${LIB_DIR}/extension"
+
 # Remove the stale daemon launchd plist. Prior to v0.2.1 the build shipped
 # a com.agenthandover.daemon.plist pointing into the app bundle; the pkg
 # installer only replaces files in the new Bom, so it survives an upgrade

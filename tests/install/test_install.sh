@@ -130,9 +130,18 @@ chmod +x "${STUB_BIN}/tccutil"
 # Lay out what the .pkg payload puts on disk (see scripts/build-pkg.sh).
 make_prefix() {
     local p="${WORK}/$1"
-    mkdir -p "${p}/lib/launchd" "${p}/lib/worker" "${p}/lib/extension" "${p}/bin" \
-        "${p}/LaunchAgents" "${p}/home/Library/Application Support/Google/Chrome"
-    cp -R "${REPO_ROOT}/worker/src" "${p}/lib/worker/src"
+    mkdir -p "${p}/bin" "${p}/LaunchAgents" "${p}/home/Library/Application Support/Google/Chrome"
+    lay_payload "${p}"
+    if [ "${IS_ROOT}" -eq 1 ]; then chown -R "${INSTALL_USER}" "${p}/home"; fi
+    echo "${p}"
+}
+
+# lay_payload <prefix>: what the installer writes between preinstall and
+# postinstall (it adds and overwrites files, never deletes any).
+lay_payload() {
+    local p="$1"
+    mkdir -p "${p}/lib/launchd" "${p}/lib/worker" "${p}/lib/extension" "${p}/bin"
+    cp -R "${REPO_ROOT}/worker/src" "${p}/lib/worker/"
     cp "${REPO_ROOT}/worker/pyproject.toml" "${p}/lib/worker/"
     cp "${REPO_ROOT}/resources/launchd/com.agenthandover.worker.plist" "${p}/lib/launchd/"
     cp "${REPO_ROOT}/extension/manifest.json" "${p}/lib/extension/"
@@ -140,8 +149,6 @@ make_prefix() {
     cp "${CLI}" "${p}/bin/agenthandover"
     # A payload file left group-writable, as an old install might have.
     chmod 775 "${p}/lib/worker"
-    if [ "${IS_ROOT}" -eq 1 ]; then chown -R "${INSTALL_USER}" "${p}/home"; fi
-    echo "${p}"
 }
 
 # run_script <prefix> <preinstall|postinstall> <python candidates> <log>
@@ -285,6 +292,11 @@ echo "== fresh install (old Python first in the candidate list) =="
 P="$(make_prefix fresh)"
 run_script "${P}" preinstall "" "${WORK}/fresh-pre.log"
 check "preinstall exits 0" test $? -eq 0
+lay_payload "${P}"
+# A module this "older release" ships and the next one drops (as 0.5.0
+# dropped the cloud backends): the upgrade below must not keep it.
+DROPPED_MODULE="agenthandover_worker/dropped_in_next_release.py"
+echo '"""Shipped by the older release only."""' > "${P}/lib/worker/src/${DROPPED_MODULE}"
 run_script "${P}" postinstall "${OLD_PY} ${GOOD_PY}" "${WORK}/fresh-post.log"
 rc=$?
 check "postinstall exits 0" test "${rc}" -eq 0
@@ -351,6 +363,9 @@ PIP_LOG_BEFORE=$(wc -c < "${DD}/logs/pip-install.log")
 run_script "${P}" preinstall "" "${WORK}/upgrade-pre.log"
 check "preinstall exits 0" test $? -eq 0
 check "preinstall stopped the running app" bash -c "! pgrep -x ${STUB_NAME}"
+check "the older release installed its module into the venv" \
+    bash -c "ls '${P}'/lib/venv/lib/python*/site-packages/${DROPPED_MODULE}"
+lay_payload "${P}"
 chmod 777 "${P}/lib/worker"   # simulate an old install's loose permissions
 run_script "${P}" postinstall "${GOOD_PY}" "${WORK}/upgrade-post.log"
 rc=$?
@@ -358,6 +373,9 @@ check "upgrade postinstall exits 0" test "${rc}" -eq 0
 [ "${rc}" -eq 0 ] || sed 's/^/    | /' "${WORK}/upgrade-post.log"
 check "upgrade updated the worker in place" contains "${WORK}/upgrade-post.log" "Updating worker package"
 check "upgrade appended pip output to the log" test "$(wc -c < "${DD}/logs/pip-install.log")" -gt "${PIP_LOG_BEFORE}"
+check "upgrade removed the dropped module from the payload tree" test ! -e "${P}/lib/worker/src/${DROPPED_MODULE}"
+check "upgrade removed the dropped module from the venv" \
+    bash -c "! ls '${P}'/lib/venv/lib/python*/site-packages/${DROPPED_MODULE} 2>/dev/null"
 check_installed_prefix "${P}"
 
 echo ""
@@ -480,7 +498,8 @@ EOF
 upgrade_with_app() { # upgrade_with_app <exit code of the new app> <log prefix>
     rm -f "${TCCUTIL_LOG}"
     run_script "${P}" preinstall "" "${WORK}/$2-pre.log"
-    make_app "${P}" "$1"   # the payload lands between the two scripts
+    lay_payload "${P}"     # the payload lands between the two scripts
+    make_app "${P}" "$1"
     run_script "${P}" postinstall "${GOOD_PY}" "${WORK}/$2-post.log"
 }
 make_app "${P}" 1
