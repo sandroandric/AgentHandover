@@ -9,6 +9,10 @@ app's Q&A window shows them and writes the answers back, and on the next
 poll the worker merges them into the procedure (:func:`merge_answers`,
 then :func:`answer_revision_prompt` / :func:`apply_answer_revisions` for
 the typed answers that change steps).
+
+Each session's pending state waits in its own
+``focus-pending/<session_id>.json``; the app sees one session's questions
+at a time, oldest first (:func:`ask_focus_questions`).
 """
 
 from __future__ import annotations

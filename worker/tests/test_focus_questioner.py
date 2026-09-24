@@ -757,3 +757,14 @@ class TestParseQAResult:
         assert result is not None
         assert 0 in result.answers
         assert len(result.answers) == 1
+
+
+def test_the_worker_start_logs_a_queue_failure_and_goes_on(tmp_path: Path, monkeypatch, caplog) -> None:
+    from agenthandover_worker import focus_questioner, main
+
+    def broken(state_dir):
+        raise OSError("disk")
+
+    monkeypatch.setattr(focus_questioner, "restore_focus_queue", broken)
+    main._restore_focus_queue(tmp_path)
+    assert "Could not restore the focus Q&A queue" in caplog.text

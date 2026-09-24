@@ -4,8 +4,8 @@ the next tick merges that into the draft, and the person approves it.
 
 The model-driven half of J-focus (annotation, SOP generation, synthesis,
 question generation) needs the WP-T4 cassette; this journey starts from
-what that half leaves behind (``focus-pending.json`` and
-``focus-questions.json``, written with the worker's own functions, and a
+what that half leaves behind (the session's ``focus-pending/<id>.json``
+and ``focus-questions.json``, written with the worker's own functions, and a
 draft review record) and drives the rest through the worker's tick and
 trigger spool, the way the app does it.
 """
@@ -19,8 +19,11 @@ import yaml
 
 from agenthandover_worker import trigger_spool
 from agenthandover_worker.focus_questioner import (
+    FOCUS_PENDING_DIR,
     FOCUS_QUESTIONS_FILE,
     FocusQuestion,
+    ask_focus_questions,
+    read_focus_pending,
     write_focus_pending,
     write_focus_questions,
 )
@@ -226,3 +229,92 @@ def test_a_review_card_answered_in_the_app_reaches_the_ledger(
     assert [e["kind"] for e in entry["evidence"]] == ["answer"]
     left = json.loads((temp_home.data_dir / qs.MICRO_QUESTIONS_FILE).read_text(encoding="utf-8"))
     assert card["id"] not in [c["id"] for c in left["questions"]]
+
+
+def _asks(journey, state_dir, clock, session_id: str, slug: str, title: str) -> list:
+    """What ``_process_focus_sessions_v2`` does when a session pauses on
+    the ledger's questions: ask them (recorded as open micro-questions),
+    queue them with the session's own pending state, keep the draft.
+    Returns the asked questions."""
+    from agenthandover_worker.questions import ask_after_focus
+
+    proc = sop_to_procedure(generated_sop_template("check_domain_availability"))
+    proc.update({
+        "id": slug, "slug": slug, "title": title,
+        "source": "focus", "lifecycle_state": "draft", "goal": "",
+    })
+    questions = ask_after_focus(journey.db, proc, now=clock.now())
+    assert questions
+    ask_focus_questions(
+        state_dir, session_id, slug, questions, title=title,
+        sop_template=proc, procedure=proc,
+    )
+    journey.db.save_generated_sop(
+        slug=slug, title=title, source="focus", sop_template=proc,
+        confidence=proc["confidence_avg"], source_id=session_id, auto_approve=False,
+    )
+    return questions
+
+
+def _micro_status(db, ids: list[str]) -> set[str]:
+    return {r["status"] for r in db.get_micro_questions() if r["question_id"] in ids}
+
+
+def test_a_second_sessions_questions_wait_for_the_first(
+    events_db, worker, clock, temp_home, kb_root,
+) -> None:
+    """WP-F15, the live check's sequence: session A asks, session B finishes
+    and asks before A is answered.  The app keeps showing A (its answered
+    file is never overwritten); A's answers merge into A's own procedure,
+    then the app shows B, whose answers merge into B's."""
+    state_dir = temp_home.data_dir
+    fixture = events_db("focus_dailynews", rebase_to=clock.now())
+    journey = worker(fixture, adapter="claude-skill")
+    a_ids = [q.id for q in _asks(journey, state_dir, clock, "57352dfb", "check-domain-a", "Domain A")]
+    b_questions = _asks(journey, state_dir, clock, "62406a55", "check-domain-b", "Domain B")
+    b_ids = [q.id for q in b_questions]
+    # The live check's counts: three for A, then the week's last two for B.
+    assert (len(a_ids), len(b_ids)) == (3, 2)
+    shown = json.loads((state_dir / FOCUS_QUESTIONS_FILE).read_text(encoding="utf-8"))
+    assert shown["session_id"] == "57352dfb" and shown["status"] == "pending"
+    assert [q["id"] for q in shown["questions"]] == a_ids
+
+    # A tick with nothing answered changes nothing.
+    journey.run_tick()
+    assert json.loads((state_dir / FOCUS_QUESTIONS_FILE).read_text(encoding="utf-8")) == shown
+
+    _app_writes(state_dir, status="answered", answers={"0": "Answer for A"})
+    answered_a = (state_dir / FOCUS_QUESTIONS_FILE).read_bytes()
+    # B asks again (its session re-processed) while A's answers wait: the
+    # answered file stays A's.
+    b_proc = read_focus_pending(state_dir, "62406a55")["procedure"]
+    assert ask_focus_questions(
+        state_dir, "62406a55", "check-domain-b", b_questions, title="Domain B",
+        sop_template=b_proc, procedure=b_proc,
+    ) is False
+    assert (state_dir / FOCUS_QUESTIONS_FILE).read_bytes() == answered_a
+
+    assert journey.run_tick()["focus_sops"] == 0  # auto_approve is off: a draft
+    stored_a = json.loads((kb_root / "procedures" / "check-domain-a.json").read_text(encoding="utf-8"))
+    assert [c.get("question_id") for c in stored_a["agent_clarifications"]] == a_ids
+    assert stored_a["agent_clarifications"][0]["answer"] == "Answer for A"
+    assert not (kb_root / "procedures" / "check-domain-b.json").exists()
+    assert _micro_status(journey.db, a_ids) == {"answered", "skipped"}
+    assert _micro_status(journey.db, b_ids) == {"open"}
+
+    # The app now shows B's questions, with B's title.
+    shown = json.loads((state_dir / FOCUS_QUESTIONS_FILE).read_text(encoding="utf-8"))
+    assert (shown["session_id"], shown["title"], shown["status"]) == (
+        "62406a55", "Domain B", "pending",
+    )
+    assert [q["id"] for q in shown["questions"]] == b_ids
+
+    _app_writes(state_dir, status="answered", answers={"1": "Answer for B"})
+    assert journey.run_tick()["focus_sops"] == 0
+    stored_b = json.loads((kb_root / "procedures" / "check-domain-b.json").read_text(encoding="utf-8"))
+    assert [c.get("question_id") for c in stored_b["agent_clarifications"]] == b_ids
+    assert [c["answer"] for c in stored_b["agent_clarifications"]] == ["", "Answer for B"]
+    assert stored_b["title"] == "Domain B"
+    assert _micro_status(journey.db, b_ids) == {"answered", "skipped"}
+    assert not (state_dir / FOCUS_QUESTIONS_FILE).exists()
+    assert not list((state_dir / FOCUS_PENDING_DIR).iterdir())
