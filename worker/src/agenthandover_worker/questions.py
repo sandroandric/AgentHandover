@@ -263,7 +263,8 @@ def _rank_value(tier: int, order: int, value_score: float) -> float:
 
 def label_questions(db: "WorkerDB", *, now: datetime) -> list[Question]:
     """One labelling card per workflow group of the observation window
-    seen at least :data:`MIN_LABEL_OBSERVATIONS` times and never labelled."""
+    seen at least :data:`MIN_LABEL_OBSERVATIONS` times, never labelled and
+    not recorded in a focus session."""
     from agenthandover_worker.workflow_mining import about_hours, load_window
 
     win = load_window(db, now)
@@ -273,6 +274,9 @@ def label_questions(db: "WorkerDB", *, now: datetime) -> list[Question]:
         if len(observations) < MIN_LABEL_OBSERVATIONS:
             continue
         if any(o.get("labelled_at") for o in group.observations):
+            continue
+        # A workflow the user recorded on purpose is one they hand off.
+        if any(o.get("source") == "focus" for o in group.observations):
             continue
         value = win.value(group)
         apps = list(dict.fromkeys(

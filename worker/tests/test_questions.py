@@ -294,6 +294,14 @@ def test_a_labelling_card_per_new_workflow(db, kb, tmp_path: Path) -> None:
     assert qs.refresh(db, kb, tmp_path, now=NOW + timedelta(days=8)) == []
 
 
+def test_a_workflow_recorded_in_focus_gets_no_labelling_card(db) -> None:
+    _three_runs(db)
+    db.save_workflow_observation(
+        _observation("f0", "k1", NOW - timedelta(days=5), source="focus"),
+    )
+    assert qs.label_questions(db, now=NOW) == []
+
+
 def test_a_yes_label_names_the_workflow(db, kb, tmp_path: Path) -> None:
     _three_runs(db)
     qs.refresh(db, kb, tmp_path, now=NOW)
