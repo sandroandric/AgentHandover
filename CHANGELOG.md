@@ -7,6 +7,79 @@ and the project follows [Semantic Versioning](https://semver.org/) within the 0.
 (minor bumps may include breaking changes; the README's Changelog section has the
 prose version of every release).
 
+## [0.5.0]
+
+The release where the product does what the README says. Every claim below
+names the journey test that proves it (`worker/tests/journeys/`, replayed
+from recorded model output) or the measurement behind it (single runs on a
+16 GB test Mac with Ollama 0.34.2). Journeys still waiting on a recording
+are marked *(not yet recorded)*.
+
+### Changed
+- **Models.** 16 GB: `qwen3.5:4b` annotates and writes Skills (was Gemma 4
+  12B QAT). 8 GB: `qwen3.5:2b-q4_K_M` annotates, `qwen3.5:4b` writes Skills.
+  24/48 GB keep Gemma 4 12B/31B QAT for Skills. Measured head to head on a
+  recorded session's prompts: Skill in 153 s vs 230 s, 29.5 vs 12.1 tok/s,
+  18 vs 10 steps; the 8 GB pair was measured on the 16 GB Mac, not on an
+  8 GB one. Stop to questions on a live session: 50 min → ~2.5 min.
+  Proof: J-focus (golden packet), `agenthandover bench`.
+- **Memory-aware scheduling.** One model at a time on two-model tiers, a
+  memory/swap/disk check before loading, early deferral for a model that
+  does not load, one inference thread in priority order. Proof: J-phases
+  *(not yet recorded)*, J-ollama-down, `test_inference_runner.py`.
+- **Event-driven capture** of the focused window at one pixel per point,
+  with change detection before OCR. Proof: J-compute, `event_loop_test.rs`.
+- **Text-first annotation** with a cache and hourly/daily compute caps: on
+  the recorded busy hour, 10 model calls and 422 model-seconds (bound 600).
+  Proof: J-compute.
+- **Grounded Skill steps**: clipboard evidence for copy/paste, screen
+  evidence for scroll/save, exact typed lines, DOM anchors, frame citations
+  and recorded order. Proof: J-focus, J-focus-clipboard, J-focus-typed.
+- **Knowledge ledger, hand-off gate and budgeted questions** (up to 3 after
+  a recording, 5 a week; step questions quote the recording). The four-check
+  hand-off gate replaces the six readiness gates. Proof: J-approve, J-mcp,
+  J-ledger (the skip/diverge runs *not yet recorded*), J-focus-typed (answer
+  revision leg *not yet recorded*).
+- **Recognition of repeated workflows**: recurrence mining with at most 3
+  new drafts a week; a session or recording of an existing Skill becomes a
+  run and a branch. Proof: `test_workflow_observations.py`, J-ledger; the
+  three-week journey J-passive is *not yet recorded*.
+- **Agent runs feed Skills**: three runs as written confirm the steps; a
+  deviation on a guessed decision reopens it as a question. Proof: J-mcp,
+  `test_mcp_feedback.py`.
+- **Doctor checks the machine**: serving Ollama, duplicate installs,
+  memory/swap/disk headroom; an old Ollama fails only for Gemma 4 configs.
+  Proof: CLI unit tests; J-install *(runs on the test Mac only)*.
+- **Upgrades keep observation on**, reset stale permission grants after a
+  signature change, and migrate app-written model configs from earlier
+  defaults. Proof: `UpgradeLaunchTests`, `test_tier_migration.py`, J-install.
+- **Privacy**: redaction before storage and before every prompt, URL query
+  strings dropped, system password/permission prompts blocked, privacy zones
+  before and after the shutter, clipboard text off by default, app-state
+  reading opt-in. Proof: J-privacy, `privacy_zones_test.rs`,
+  `storage_redaction_test.rs`.
+- **The in-app FAQ** answers for the configured model mode: the on-device
+  sentence only in local mode; cloud mode names the provider, model and
+  Keychain entry. Proof: `FAQContentTests`.
+- **Docs are pinned to the code**: README's MCP, tier and CLI tables are
+  generated, every `agenthandover` command the README and FAQ mention must
+  exist, and `config.example.toml` lists only keys some code reads. Proof:
+  `tests/integration/test_docs.py`, `crates/cli/src/docs_tests.rs`.
+
+### Removed
+- The MLX and llama.cpp backends (they only served the fallback queue; the
+  pipeline always used Ollama), the legacy PrefixSpan miner, the LLM-written
+  focus questions, and config keys nothing read.
+
+### Fixed
+- The app read `model = …` in `[vlm]` as the mode, so it never recognised
+  cloud mode. A review card's free-text answer to a step question now revises
+  the step, and the revision survives a worker restart.
+
+### Corrections to 0.4.0
+- The Homebrew `ollama` formula runs the QAT tags (0.34.2 on the test Mac),
+  and the Gemma tiers need Ollama 0.34.0+, not 0.30.6.
+
 ## [0.4.0] — 2026-06-09
 
 New default local models — Google's QAT (Quantization-Aware Training) Gemma 4

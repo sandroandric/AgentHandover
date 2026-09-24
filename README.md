@@ -28,6 +28,7 @@
   <a href="#what-you-can-automate">Use Cases</a> &middot;
   <a href="#what-a-skill-looks-like">What a Skill Looks Like</a> &middot;
   <a href="#how-it-works">How It Works</a> &middot;
+  <a href="#v050">What's New</a> &middot;
   <a href="#connect-your-agent">Connect Your Agent</a> &middot;
   <a href="#install">Install</a> &middot;
   <a href="#privacy">Privacy</a> &middot;
@@ -54,7 +55,7 @@
 
 AgentHandover watches how you work on your Mac, turns your workflows into reusable **Skills**, and lets agents like **Claude Code**, **OpenClaw**, **Hermes**, **Codex**, or any MCP-compatible tool execute them the way you do it.
 
-Each Skill captures the *what*, the *why*, and the *how* — steps, strategy, decision logic, guardrails, and your writing voice. And they're **self-improving**: agents report back after every execution, successes boost confidence, deviations become new decision branches, failures trigger corrections.
+Each Skill captures the *what*, the *why*, and the *how* — steps, strategy, decision logic, guardrails, and your writing voice — and says plainly what it doesn't know yet. And they **learn from use**: agents report back after every run, runs that follow the steps confirm them, and a run that deviates where a decision was only a guess turns into a question for you.
 
 You already know how to do your work. Now your agents can too.
 
@@ -62,7 +63,7 @@ You already know how to do your work. Now your agents can too.
 
 Getting an AI agent to do real work today means writing prompts or hand-crafting skills — brittle, time-consuming, and stale the moment your process changes. Worse, those skills capture *what* you do, not *how* you decide.
 
-AgentHandover flips it. Instead of telling the agent how you work, you just work. The system watches, infers the strategy behind your clicks, and produces Skills with the *why* built in — selection criteria, guardrails, decision branches, your voice. Because agents report back after every execution, Skills get better the more they're used.
+AgentHandover flips it. Instead of telling the agent how you work, you just work. The system watches, infers the strategy behind your clicks, and produces Skills with the *why* built in — selection criteria, guardrails, decision branches, your voice. Because agents report back after every run, Skills get better the more they're used.
 
 Less time writing prompts. More time doing work that matters.
 
@@ -81,11 +82,11 @@ If it's a workflow you've done three times and will do again, it belongs in a Sk
 
 ## Quickstart
 
-1. **Install.** Download the latest `.pkg` from [Releases](https://github.com/sandroandric/AgentHandover/releases) and double-click. The onboarding app walks you through permissions and auto-downloads the best AI model for your Mac.
+1. **Install.** Download the latest `.pkg` from [Releases](https://github.com/sandroandric/AgentHandover/releases) and double-click. The onboarding app walks you through permissions, recommends models for your Mac's memory, and downloads them.
 2. **Record a task.** Click **Record** in the menu bar, name it (e.g. *"Daily Reddit marketing"*), perform it once, click **Stop**.
-3. **Answer 1-3 questions.** AgentHandover asks from the agent's perspective — *"What determines which posts you engage with?"*
+3. **Answer up to 3 questions.** AgentHandover asks about what the recording couldn't show — *"What starts this task?"*, *"When is it done?"*, or a step it isn't sure of.
 4. **Review and approve.** Open the Skill in the menu bar app, check the steps/strategy/guardrails, click **Approve for Agents**.
-5. **Connect your agent.** `agenthandover connect claude-code` (or `codex` / `openclaw`). One command.
+5. **Connect your agent.** `agenthandover connect claude-code` (or `codex` / `openclaw` / `hermes`). One command.
 6. **Run it.** In Claude Code, type `/reddit-community-marketing` (or just describe the task). The agent executes your workflow.
 
 That's the whole loop. Record once, hand off forever.
@@ -126,34 +127,34 @@ Tone: casual | Sentences: short and punchy | Uses emoji
 ~15 min daily - 9-10am                     Confidence: 89%
 ```
 
-Skills follow the same format as Claude Code's native skills -- same frontmatter, same markdown structure -- but go further. Hand-written skills say "do X then Y." AgentHandover Skills include the strategy behind the steps, selection criteria, guardrails, your voice, and evidence-backed confidence from real observations. No hand-written skill has that.
+Skills follow the same format as Claude Code's native skills -- same frontmatter, same markdown structure -- but go further. Hand-written skills say "do X then Y." AgentHandover Skills include the strategy behind the steps, selection criteria, guardrails, your voice, and evidence from real observations: every step cites the frames it came from, and anything the recording didn't settle is listed as an open question instead of guessed.
 
 ## How It Works
 
 ### Two ways to teach
 
-**Focus Recording** -- Click Record in the menu bar, name the task, perform it, click Stop. AgentHandover asks 1-3 targeted questions from the agent's perspective ("What determines which posts you engage with vs. skip?"), then generates a complete Skill. Best for workflows you want to hand off right now.
+**Focus Recording** -- Click Record in the menu bar, name the task, perform it, click Stop. AgentHandover writes the Skill, checks every step against the recording, and asks up to 3 questions about what it still doesn't know (what starts the task, when it's done, a step it couldn't confirm). The Skill is waiting as a draft a few minutes after you stop. Best for workflows you want to hand off right now.
 
-**Passive Discovery** -- Just work normally. AgentHandover recognizes recurring workflows across sessions using semantic similarity, accumulates observations, and when it has enough evidence, runs behavioral analysis to extract the strategy, decisions, and patterns behind your actions -- then generates a Skill automatically. You don't have to do anything.
+**Passive Discovery** -- Just work normally. AgentHandover groups your work into sessions, notices when the same task recurs, and drafts a Skill for the ones worth handing off (at most three new drafts a week). When you repeat a task you already have a Skill for, the session is recorded as another run of that Skill instead of a new one, and where you did it differently it becomes a branch. You don't have to do anything.
 
 ### You stay in control
 
-Every Skill starts as a draft in your menu bar app. Six gates must pass before an agent can execute:
+Every Skill starts as a draft in your menu bar app. An agent sees it only when all four checks of the hand-off gate pass (`ledger.handoff_gate`, applied by the MCP server, every connector and every export):
 
-| Gate | What it checks |
-|------|---------------|
-| **Lifecycle** | You reviewed and promoted it through each stage (Observed > Draft > Reviewed > Verified > Agent Ready) |
-| **Trust** | You authorized the agent to execute, not just observe |
-| **Freshness** | The Skill was observed recently -- stale Skills auto-demote |
-| **Preflight** | Required apps are running, no blocked domains |
-| **Evidence** | Enough observations, high confidence, no contradictions |
-| **Execution history** | Past success rate -- 3+ failures auto-demote |
+| Check | What it requires |
+|-------|------------------|
+| **Approved** | You clicked Approve for Agents (lifecycle `agent_ready`) |
+| **Known** | None of its required slots — goal, steps, done criteria — is unknown |
+| **Trusted** | Its trust level is above `observe` (approval grants the first level) |
+| **Fresh** | You did it recently: freshness halves every 30 days since it was last observed |
 
-The system suggests promotions based on evidence. You decide.
+An approved Skill that fails a check is listed by `list_ready_skills` as held back, with the reason. Nothing auto-promotes; the system only suggests.
 
 ## The Knowledge Base
 
 Everything AgentHandover learns lives in a local knowledge base on your machine. It's not a flat list of files -- it's an active intelligence layer that gets smarter the more you work.
+
+**Knowledge ledger** -- Every Skill tracks what it knows: each slot (goal, steps, done criteria, trigger, decisions, verification, inputs, exceptions, guardrails, voice, context) is *known*, a *hypothesis*, or *unknown*, with pointers to the frames, answers or agent runs behind it. Questions come from the unknowns, within a budget of 5 a week (`weekly_question_budget`), and no model writes them.
 
 **Vector store** -- Every observation is embedded (nomic-embed-text, 768d) so the system finds similar workflows by meaning, deduplicates Skills that describe the same task differently, and links activity across sessions. Optional image embeddings (SigLIP, 1152d) capture what your screen looked like.
 
@@ -161,25 +162,35 @@ Everything AgentHandover learns lives in a local knowledge base on your machine.
 
 **User profile** -- Aggregated across all workflows: your tools, working hours, communication patterns, and overall writing style. Agents read this to adapt to you.
 
-**Semantic search** -- Agents can search the knowledge base by meaning via the MCP server or REST API. "Find something about deploying" returns your staging deployment Skill even if it's titled "Push to Prod."
+**Semantic search** -- Agents can search the knowledge base by meaning via the MCP server or REST API. "Find something about deploying" returns your staging deployment Skill even if it's titled "Push to Prod." When the embedding model is busy or down, search falls back to matching the query's words in titles, descriptions, tags and steps.
 
 ## Execution Feedback Loop
 
-Most tools stop at "here's a procedure, good luck." AgentHandover closes the loop. When an agent executes a Skill, it reports back what happened -- and the Skill gets better.
+Most tools stop at "here's a procedure, good luck." AgentHandover closes the loop. When an agent executes a Skill, it reports back what happened -- and the Skill learns from it.
 
-**How it works**: Every Skill includes an execution protocol. The agent calls `report_execution_start` before beginning, `report_step_result` after each step, and `report_execution_complete` when done. AgentHandover processes the results:
+**How it works**: Every Skill includes an execution protocol. The agent calls `report_execution_start` before beginning, `report_step_result` after each step, and `report_execution_complete` when done. Every run is kept, and:
 
-- **Success** -- Confidence goes up. Freshness confirmed. Timing updated via exponential moving average.
-- **Deviation** -- The system tracks what the agent actually did vs. what was expected. After 2+ deviations on the same step, it suggests a decision branch.
-- **Failure** -- Confidence drops. After 3 failures in 7 days, the Skill auto-demotes from agent-ready.
+- **Completed** -- counts toward the Skill's execution confidence (kept apart from how well the Skill is grounded in what you did) and confirms it is still current. After 3 runs that follow the steps as written, the steps count as known.
+- **Deviated** -- what the agent did instead is kept as an observed alternative for that step. A deviation where a decision was only a hypothesis makes that decision unknown again and asks you about it.
+- **Failed** -- recorded with the error as a drift signal on the Skill.
 
-Skills don't just describe your workflows -- they learn from every execution and improve over time.
+Agent runs never rewrite your steps on their own: the Skill changes through your answers and your review.
 
 ### One-click agent pairing
 
-The menu bar app detects installed agents (Claude Code, Cursor, Windsurf, OpenClaw) and connects them with one click: Claude Code through `claude mcp add --scope user`, the others by adding the server to their MCP config file. The menu shows **Connected** only when the agent reports the server running (for Claude Code, `claude mcp list`).
+The menu bar app detects installed agents (Claude Code, Cursor, Windsurf, Codex, OpenClaw) and connects them with one click: Claude Code through `claude mcp add --scope user`, Codex through `codex mcp add`, the others by adding the server to their MCP config file. The menu shows **Connected** only when the agent reports the server (for Claude Code `claude mcp list`, for Codex `codex mcp list --json`).
 
 ## Connect Your Agent
+
+| Agent | Command | What it gets |
+|-------|---------|--------------|
+| Claude Code | `agenthandover connect claude-code` | Skills in `~/.claude/skills/`, plus the MCP server |
+| Codex | `agenthandover connect codex` | A marked block in `./AGENTS.md` |
+| OpenClaw | `agenthandover connect openclaw` | Skills synced to the OpenClaw workspace |
+| Hermes | `agenthandover connect hermes` | Skills in `~/.hermes/skills/agenthandover/` |
+| Anything MCP | `agenthandover connect mcp` | The MCP server config to paste |
+
+Every connector hands over only the Skills that pass the hand-off gate.
 
 ### MCP Server (recommended)
 
@@ -195,18 +206,26 @@ One config line, any agent. Works with Claude Code, Cursor, Windsurf, and any MC
 }
 ```
 
-Exposes 8 tools:
+It exposes these tools and resources (generated from the server):
 
+<!-- mcp-tools:start -->
 | Tool | What it does |
 |------|-------------|
-| `list_ready_skills` | Approved Skills that pass the hand-off gate (no required slot unknown, trust above observe, fresh), plus the approved ones held back and why |
-| `get_skill(slug)` | Full Skill with steps, strategy, voice, guardrails + execution protocol |
-| `search_skills(query)` | Semantic search -- find Skills by meaning |
-| `list_all_skills` | All Skills including drafts |
-| `get_user_profile` | User's tools, working hours, writing style |
-| `report_execution_start(slug)` | Tell AgentHandover you're starting to execute a Skill |
-| `report_step_result(id, step)` | Report each step's outcome (completed or deviated) |
-| `report_execution_complete(id)` | Report final status -- triggers Skill improvement |
+| `list_ready_skills()` | List the Skills an agent may run, and the approved ones held back. |
+| `list_all_skills()` | List ALL Skills with their lifecycle state. |
+| `get_skill(slug)` | Get a full Skill by slug. |
+| `search_skills(query)` | Semantic search — find Skills by meaning, not just keywords. |
+| `get_user_profile()` | Get the user's profile — tools, working hours, writing style. |
+| `report_execution_start(slug)` | Report that you are starting to execute a Skill. |
+| `report_step_result(execution_id, step_id)` | Report the result of a single step during Skill execution. |
+| `report_execution_complete(execution_id)` | Report that Skill execution is finished. |
+
+| Resource | What it is |
+|----------|-----------|
+| `agenthandover://procedures` | Index of all learned procedures with status. |
+| `agenthandover://profile` | User profile as readable text. |
+| `agenthandover://procedures/{slug}` | Full Skill as readable markdown. |
+<!-- mcp-tools:end -->
 
 ### Claude Code
 
@@ -214,7 +233,7 @@ Exposes 8 tools:
 agenthandover connect claude-code
 ```
 
-Installs every agent-ready Skill as a Claude Code Skill (`~/.claude/skills/<slug>/SKILL.md`) and registers the MCP server with `claude mcp add --scope user --transport stdio agenthandover -- /usr/local/bin/agenthandover-mcp`. Type `/reddit-community-marketing`, or describe the task and Claude Code picks the Skill. `/agenthandover-list` lists them.
+Installs every Skill that passes the hand-off gate as a Claude Code Skill (`~/.claude/skills/<slug>/SKILL.md`) and registers the MCP server with `claude mcp add --scope user --transport stdio agenthandover -- /usr/local/bin/agenthandover-mcp`. Type `/reddit-community-marketing`, or describe the task and Claude Code picks the Skill. `/agenthandover-list` lists them.
 
 ### Codex
 
@@ -230,7 +249,7 @@ Writes all agent-ready Skills, strategy, guardrails, and voice guidance into `./
 agenthandover connect openclaw
 ```
 
-Skills auto-sync to the OpenClaw workspace. Nothing to configure.
+With `[export] adapter` set to `openclaw` or `all` (a pkg install writes `all`), the worker writes approved Skills into the OpenClaw workspace (`~/.openclaw/workspace/memory/apprentice/`); the command checks the workspace and reports what is synced.
 
 ### Hermes
 
@@ -272,7 +291,9 @@ curl -X POST http://localhost:9477/search/semantic \
 
 Download the latest `.pkg` from [**Releases**](https://github.com/sandroandric/AgentHandover/releases) and double-click.
 
-The onboarding app walks you through: permissions, AI model downloads (auto-recommends the best model for your Mac's RAM), Chrome extension, and your first recording.
+The onboarding app walks you through: permissions, AI model downloads (it recommends a tier for your Mac's RAM and shows the memory each tier needs against what is free now), Chrome extension, and your first recording.
+
+Upgrading keeps your observing state: if you were observing before, capture resumes as soon as macOS permissions are in place, and setup opens only at a permission that is missing. The installer also moves a model configuration that the app or installer wrote for an earlier default to your tier's current models (after a timestamped backup); a `[vlm]` block you edited yourself is left alone.
 
 <details>
 <summary><strong>Developer / advanced install</strong></summary>
@@ -284,24 +305,37 @@ agenthandover doctor     # Verify prerequisites
 agenthandover start all  # Start daemon + worker
 ```
 
+`agenthandover doctor` checks permissions (through the app), services, the worker's environment, the browser extension, and your machine: which Ollama serves the port (and warns when Ollama is installed twice), its version against the minimum, and memory, swap and disk headroom for your tier.
+
 ### AI Models
 
-AgentHandover auto-detects your Mac's RAM during onboarding and recommends the best model tier; you can pick another tier or name your own models in onboarding or `config.toml`. A small Qwen 3.5 model annotates every screen (it answers within the per-frame budget). On 8 GB Macs that is Qwen 3.5 2B (`qwen3.5:2b-q4_K_M`, 1.9 GB): it stays loaded all day in ~2.3 GB instead of the 4B's ~3.8 GB, and on a recorded session's prompts its annotations were all valid, with the right app every time. Qwen 3.5 4B writes Skills and behavioural syntheses up to 16 GB (on 8 GB it wrote 18 correct steps where the 2B wrote 10; on a 16 GB Mac it wrote a Skill in 153 s against Gemma 4 12B's 230 s, 29.5 against 12.1 tokens/s, of comparable quality, and Gemma does not fit next to ordinary apps there), and annotates on 16 GB and up. From 24 GB a larger Gemma 4 model writes Skills, where quality matters and calls are rare. Where a tier has two models the worker loads one at a time: annotation first, then Skills.
+AgentHandover picks a tier from your Mac's RAM during onboarding; you can choose another tier, or name your own models, in onboarding or in `config.toml` (`[vlm] annotation_model` / `sop_model`). The table lives in one place (`TIERS` in `worker/src/agenthandover_worker/model_profiles.py`, installed as `tiers.json`); onboarding, `agenthandover setup --vlm [--tier ID]`, `agenthandover doctor` and the worker all read it. Every tier also pulls `nomic-embed-text` for search.
 
-| RAM | Tier | Screen annotation | Skill generation | Download |
-|-----|------|-------------------|------------------|----------|
-| 8 GB | Standard | Qwen 3.5 2B | Qwen 3.5 4B | ~6 GB |
-| 16 GB | Recommended | Qwen 3.5 4B | Qwen 3.5 4B | ~4 GB |
-| 24 GB | Performance | Qwen 3.5 4B | Gemma 4 12B QAT | ~11 GB |
-| 48 GB+ | Max Quality | Qwen 3.5 4B | Gemma 4 31B QAT | ~22 GB |
+<!-- tiers:start -->
+| RAM | Tier | Screen annotation | Skill writing | Download |
+|-----|------|-------------------|---------------|----------|
+| 8 GB | Standard | `qwen3.5:2b-q4_K_M` | `qwen3.5:4b` | ~5.6 GB |
+| 16 GB+ | Recommended | `qwen3.5:4b` | `qwen3.5:4b` | ~3.7 GB |
+| 24 GB+ | Performance | `qwen3.5:4b` | `gemma4:12b-it-qat` | ~10.9 GB |
+| 48 GB+ | Max Quality | `qwen3.5:4b` | `gemma4:31b-it-qat` | ~21.7 GB |
+<!-- tiers:end -->
 
-The table lives in one place (`TIERS` in `worker/src/agenthandover_worker/model_profiles.py`, installed as `tiers.json`); onboarding, `agenthandover setup --vlm [--tier ID]`, `agenthandover doctor` and the worker all read it. `agenthandover bench --tier ID --cassette FILE` measures a tier's models on a recorded session's prompts (tok/s and agreement with the recorded answers).
+Why these models (measured on a 16 GB test Mac with Ollama 0.34.2, replaying a recorded focus session's prompts; one sample each, so indicative):
 
-The Gemma 4 tiers (24 GB and up) use Google's QAT (Quantization-Aware Training) checkpoints — near-original quality at a much smaller footprint. They require **Ollama 0.34.0+** (install the [official app](https://ollama.com/download), or `brew install --cask ollama-app` — the Homebrew `ollama` *formula* does not bundle the GGUF runner). The Qwen tiers (8 and 16 GB) work on older Ollama. All models run fully local.
+- **A small model annotates every screen.** Text-first annotation reads the screen's OCR and page elements and looks at the image only when the text isn't enough; qwen3.5:4b annotated 11 frames in 24 s (~2.2 s a frame). gemma4:12b-it-qat took 40+ s per frame with the image.
+- **Qwen 3.5 4B writes Skills up to 16 GB.** Head to head, it wrote the Skill in 153 s at 29.5 tok/s with 18 steps, against Gemma 4 12B's 230 s at 12.1 tok/s with 10 steps, and asked the better question. With ordinary apps open, Gemma 12B did not fit next to it: one live session took 50 minutes from Stop to questions with the two models (the Q&A waited 30 min for a model that never loaded) and ~2.5 minutes with Qwen alone.
+- **8 GB Macs annotate with Qwen 3.5 2B** (`qwen3.5:2b-q4_K_M`, 1.9 GB): about 55 tok/s, 10/10 valid annotations with the right app 10/10, resident all day in ~2.3 GB instead of the 4B's ~3.8 GB. It is not good enough to write Skills (10 steps against the 4B's 18), so the 4B writes them, loaded one model at a time. This tier was measured on the 16 GB Mac, not on an 8 GB one.
+- **From 24 GB a Gemma 4 QAT model writes Skills**, where quality matters and calls are rare.
+
+`agenthandover bench --tier ID --cassette FILE` measures a tier's models on a recorded session's prompts (tok/s and agreement with the recorded answers), so you can check another model before you switch.
+
+The Gemma 4 tiers (24 GB and up) need **Ollama 0.34.0+**; the Qwen tiers work on older Ollama. `agenthandover doctor` fails an older Ollama only when a configured model is Gemma 4, and warns otherwise. All models run fully local.
+
+Where a tier's two models differ, the worker runs one at a time: annotation first, then Skills. Before loading the Skills model it checks free memory, swap and disk; when the model won't fit it defers the work instead of pushing the Mac into swap, and stops waiting on a model that doesn't load within a minute.
 
 ```bash
-# Or pull manually (Standard and Recommended tiers):
-ollama pull qwen3.5:4b          # Skill generation; screen annotation from 16 GB (~3.4 GB)
+# Or pull manually (Recommended tier):
+ollama pull qwen3.5:4b          # Screen annotation and Skills (~3.4 GB)
 ollama pull nomic-embed-text    # Semantic search (~274 MB)
 # Standard tier (8 GB) adds:
 ollama pull qwen3.5:2b-q4_K_M   # Screen annotation (~1.9 GB)
@@ -311,7 +345,11 @@ ollama pull gemma4:12b-it-qat   # Skill generation (~7.2 GB)
 
 ### Chrome extension
 
-Open `chrome://extensions` > Enable Developer Mode > Load unpacked > select the extension directory shown by `agenthandover doctor`.
+```bash
+agenthandover setup --extension
+```
+
+Installs the native-messaging host manifest, copies the extension's folder path to the clipboard and opens `chrome://extensions`: enable Developer Mode, click Load unpacked, and paste the path. `agenthandover doctor` shows the same folder.
 
 ### Homebrew (cask)
 
@@ -331,19 +369,19 @@ just package-pkg              # builds daemon + CLI + extension + app, then runs
 sudo installer -pkg target/AgentHandover-*.pkg -target /
 ```
 
-`scripts/build-pkg.sh` only packages: it takes the daemon and CLI prebuilt from `target/universal-release/` (`just build-daemon build-cli`), builds the app, builds the extension when `extension/dist` is missing, and copies the worker source. It signs the binaries and the package only when a Developer ID Application / Installer identity is in your keychain; otherwise the package is unsigned. The `justfile` has individual `just build-daemon`, `just build-cli`, etc. recipes if you need to rebuild a single component during development.
+`scripts/build-pkg.sh` only packages: it takes the daemon and CLI prebuilt from `target/universal-release/` (`just build-daemon build-cli`), builds the app, builds the extension when `extension/dist` is missing, and copies the worker source. It signs the binaries and the package only when a Developer ID Application / Installer identity is in your keychain; otherwise the package is unsigned. The `justfile` has individual `just build-daemon`, `just build-cli`, etc. recipes if you need to rebuild a single component during development. The version lives in each component's manifest; `python3 scripts/version.py check` verifies they agree and `set X.Y.Z` stamps them all.
 
 </details>
 
 ### Choose your AI model
 
-AgentHandover defaults to local models via Ollama (Qwen 3.5 4B on 8 and 16 GB Macs, with Gemma 4 QAT writing Skills from 24 GB): free, fast, private. Supported backends:
+AgentHandover runs its models locally through Ollama: free and private. Screen annotation, Skill writing, synthesis and questions always use Ollama.
 
-| Backend | Best for |
-|---------|----------|
-| **Ollama** (default) | Local, free, private |
-| **OpenAI-compatible** | Local servers (LM Studio, vLLM) |
-| **OpenAI / Anthropic / Google** | Highest quality (remote, opt-in) |
+| Backend | What it does |
+|---------|--------------|
+| **Ollama** (default, required) | Everything: annotation, Skills, questions, embeddings |
+| **OpenAI / Anthropic / Google** (remote, opt-in) | Only the fallback check of events the local pipeline cannot classify: their window title and details are sent to the provider |
+| **OpenAI-compatible local server** (LM Studio, vLLM) | The same fallback check, when `AGENTHANDOVER_VLM_BASE_URL` points at localhost |
 
 Switch via `config.toml` or `agenthandover setup --vlm`.
 
@@ -353,10 +391,10 @@ AgentHandover lives in your menu bar:
 
 - **Status** -- daemon and worker health
 - **Today's stats** -- events captured, annotations completed, Skills generated
-- **Attention items** -- Focus Q&A questions waiting, drafts ready for review
+- **Attention items** -- questions waiting, drafts ready for review
 - **Record** -- one click to start a focus recording
-- **Workflows** -- browse all Skills, approve drafts, see confidence and evidence
-- **Digest** -- daily summary of what was learned and what needs attention
+- **Workflows** -- browse all Skills, approve drafts, see what each Skill knows and what it doesn't
+- **Digest** -- daily summary of what was learned, and the questions still open
 
 Review the strategy, steps, and guardrails. Click "Approve for Agents" when it looks right. One click. No Skill reaches agents without your sign-off.
 
@@ -364,33 +402,39 @@ Review the strategy, steps, and guardrails. Click "Approve for Agents" when it l
 
 Everything runs on your machine:
 
-- **Local-first.** VLM inference via Ollama. Cloud APIs are opt-in with explicit consent.
-- **Screenshots are temporary.** Each frame is a JPEG of the focused window (or the display under it when no window resolves) at half its native pixel resolution, deleted after VLM annotation. Frames never annotated are deleted by the daily maintenance run once they are older than `job_ttl_days` (default 7). Only structured text survives. Image embeddings computed before deletion.
-- **Auto-redaction.** API keys, tokens, passwords, credit card numbers scrubbed before storage.
-- **Secure field exclusion.** Password and credit card inputs are never captured.
+- **Local-first.** Models run through Ollama on your Mac. Cloud mode is opt-in, with explicit consent, and sends only the fallback checks described above; the API key you enter in the app stays in the macOS Keychain.
+- **Screenshots are temporary.** Each frame is a JPEG of the focused window at half its native pixel resolution (one pixel per point on a Retina display), deleted after annotation. Frames never annotated are deleted by the daily maintenance run once they are older than `job_ttl_days` (default 7). Only structured text survives. Image embeddings, when you turn them on, are computed before deletion.
+- **Redaction where the data flows.** API keys, tokens, passwords (including "password is …" phrasings) and card numbers are scrubbed by the daemon before anything is stored, and again by the worker before any text goes into a model prompt. URLs keep their origin and path; query strings are dropped except for a short allow-list of harmless keys.
+- **Blocked by default.** Password managers, macOS password and Touch ID prompts, permission dialogs, the login window, Apple's Passwords app, and banking, payroll and login pages are never captured. Add your own apps, URLs and quiet hours as privacy zones (`[privacy.zones]`): the daemon checks them before it takes a frame and again after, and the worker once more on stored events.
+- **Secure field exclusion.** Password and credit card inputs are never captured, and form values are left out of browser snapshots unless you turn on `capture_input_values`.
+- **Clipboard.** A copy is recorded as an event; the copied text itself is kept only if you turn on `enable_clipboard_preview`.
+- **Reading app state is opt-in.** Reading the open document, page or message from Safari, Mail, Notes and a few other apps needs macOS's per-app Automation consent, so it is off until you turn it on in onboarding.
 - **Knowledge base is local.** Vector store, voice profiles, and all Skills live on your machine. Never uploaded.
 - **No encryption at rest of its own.** Screenshots, the event database and the knowledge base are stored as plain files under your home folder; turn on FileVault to encrypt them on disk.
-- **Configurable retention.** Raw events pruned at 14 days. Valuable evidence extracted and preserved permanently before expiry.
-- **No telemetry.** Nothing phones home. Ever.
+- **Configurable retention.** Raw events are deleted after 14 days (`retention_days_raw`); the Skills keep the evidence they cite.
+- **No telemetry.** AgentHandover sends no usage data and none of your content anywhere. The only request the app makes on its own is Sparkle's daily update check against `www.agenthandover.com/appcast.xml`; turn it off with `defaults write com.agenthandover.app SUEnableAutomaticChecks -bool false`.
 
 <details>
-<summary><strong>The 11-stage intelligence pipeline (technical)</strong></summary>
+<summary><strong>The pipeline (technical)</strong></summary>
 
-This is not a screen recorder with ChatGPT on top. AgentHandover runs an 11-stage pipeline that turns raw screen activity into agent-ready Skills:
+This is not a screen recorder with ChatGPT on top. AgentHandover runs a pipeline that turns raw screen activity into agent-ready Skills:
 
 | Stage | What it does |
 |-------|-------------|
-| **1. Screen capture** | Half-resolution screenshots, deduplicated by perceptual hashing (70% of frames are duplicates and get dropped) |
-| **2. VLM annotation** | Local AI model (Gemma 4 or Qwen 3.5) reads each frame -- what app, what URL, what you're doing, what you'll do next |
-| **3. Activity classification** | 8-class taxonomy separates work from noise. Your expense filing is "work." Your YouTube break is "entertainment." |
-| **4. Text embedding** | Every annotation embedded into a vector knowledge base (nomic-embed-text, 768d) for semantic matching |
-| **5. Image embedding** | Optional SigLIP embeddings (1152d) capture what your screen looked like -- find visually similar screens even when text differs |
-| **6. Semantic clustering** | Groups related activity by meaning, not keywords. "Deploy to staging" matches "push to stage environment." |
-| **7. Cross-session linking** | Connects the same workflow across days and interruptions using vector cosine similarity |
-| **8. Behavioral synthesis** | After 3+ observations: extracts strategy, selection criteria, content templates, guardrails, decision branches, and timing patterns -- now grounded in the user's profile (tools, role, accounts) |
-| **9. Voice analysis** | Captures your writing style from typed text -- formality, sentence length, vocabulary, emoji. Per workflow. Strengthens over sessions. |
-| **10. Skill generation** | Produces a canonical Skill with semantic dedup (won't create duplicates even if you describe the same workflow differently) |
-| **11. Human review** | You approve before any agent can execute. Six readiness gates must pass. Nothing auto-promotes. |
+| **1. Event-driven capture** | A frame of the focused window when something happens: an app or title switch, a navigation, a form submit, a click that changed the screen, a copy, or a slow heartbeat. Privacy zones are checked before the shutter, and a frame whose screen didn't change is dropped before OCR runs |
+| **2. Text-first annotation** | A small local model reads each frame's OCR text and page elements -- what app, what URL, what you're doing -- and looks at the image only when the text isn't enough. An annotation cache answers screens it has already seen for free |
+| **3. Compute caps** | Passive annotation stays within 60 frames and 10 model-minutes per hour and 1,500 frames and 60 minutes per day; focus recordings are exempt |
+| **4. Activity classification** | 8-class taxonomy separates work from noise. Your expense filing is "work." Your YouTube break is "entertainment." |
+| **5. Embeddings** | Every annotation embedded into a vector knowledge base (nomic-embed-text, 768d); optional SigLIP image embeddings (1152d) |
+| **6. Sessions and recurrence** | Groups activity into work sessions, links the same task across days, and measures how often and how regularly it recurs |
+| **7. Recognition** | A session or recording that matches an existing Skill becomes a run of it; where it differs, a branch |
+| **8. Skill generation** | Writes the Skill with semantic dedup (won't create duplicates even if you describe the same workflow differently) |
+| **9. Grounding** | Checks every step against the recording: frame citations, UI targets, order, the lines you typed, a copy or paste only where the clipboard shows one, a scroll or save only where the screen shows it. What it cannot confirm becomes a question |
+| **10. Behavioral synthesis** | Extracts strategy, selection criteria, guardrails, decision branches and timing -- grounded in the user's profile (tools, role, accounts) |
+| **11. Knowledge ledger** | Tracks what each Skill knows, as a hypothesis or not at all, with evidence; asks budgeted questions about the gaps |
+| **12. Human review** | You approve before any agent can execute, and the hand-off gate re-checks every time. Nothing auto-promotes. |
+
+Model work runs on one inference thread in priority order (a stopped recording first, passive work last), so the app and your answers are never stuck behind a long model call; when the backlog grows, the daemon captures less often.
 
 Every stage runs locally on your Mac. No cloud APIs required.
 
@@ -406,65 +450,88 @@ Every stage runs locally on your Mac. No cloud APIs required.
 Chrome Extension -----> Daemon (Rust) ---SQLite WAL---> Worker (Python)
   DOM snapshots           Screenshots                     |
   Click targets           OS events                       v
-  Form field IDs          Clipboard                  11-stage pipeline:
-                          Perceptual dedup           VLM annotation
-                                                     Activity classification
-                    Menu Bar App (SwiftUI)            Text + image embedding
-                    Status - Record - Workflows      Semantic clustering
-                    Digest - Focus Q&A               Behavioral synthesis
-                                                     Voice analysis
-                                                     Skill generation
+  Form field IDs          Clipboard                  Pipeline:
+                          Change detection           Text-first annotation
+                          Privacy zones              Activity classification
+                    Menu Bar App (SwiftUI)            Embeddings
+                    Status - Record - Workflows      Sessions + recurrence
+                    Digest - Questions               Skill generation
+                                                     Grounding
+                                                     Behavioral synthesis
+                                                     Knowledge ledger
                                                           |
                                                           v
                                               +------------------------+
                                               |    Knowledge Base      |
                                               |                        |
                                               |  Skills (v3 schema)    |
+                                              |  Knowledge ledger      |
                                               |  Vector store (768d)   |
                                               |  Image vectors (1152d) |
                                               |  Voice profiles        |
                                               |  User profile          |
-                                              |  Evidence + history    |
+                                              |  Evidence + runs       |
                                               +-----+------+-----------+
                                                     |      |
                                       +-------------+      +------------+
                                       v              v                  v
-                                MCP Server     Claude Code       OpenClaw SOPs
-                                (any agent)    /slash-commands    (auto-sync)
+                                MCP Server     Claude Code       OpenClaw
+                                (any agent)    Skills            Hermes
                                 Codex          REST API
                                 AGENTS.md      localhost:9477
 ```
 
 | Component | Language | Role |
 |-----------|----------|------|
-| **Daemon** | Rust | Always-on observer -- screenshots, OS events, clipboard, dedup |
-| **Worker** | Python | Intelligence -- 11-stage pipeline, vector KB, behavioral synthesis, voice analysis, lifecycle, export |
+| **Daemon** | Rust | Always-on observer -- screenshots, OS events, clipboard, change detection, privacy zones, redaction; owns the database schema |
+| **Worker** | Python | Intelligence -- the pipeline, vector KB, knowledge ledger, behavioral synthesis, voice analysis, lifecycle, export |
 | **Extension** | TypeScript | Chrome MV3 -- DOM snapshots, click targets, form field context, ARIA labels |
-| **CLI** | Rust | Service management, focus recording, agent connection |
-| **App** | SwiftUI | Menu bar -- status, recording, workflows, digest, Focus Q&A |
-| **MCP Server** | Python | Universal agent interface -- 5 tools + 3 resources via MCP protocol |
-| **Knowledge Base** | SQLite + JSON | Vector store, Skills, voice profiles, user profile, evidence |
+| **CLI** | Rust | Service management, doctor, focus recording, agent connection |
+| **App** | SwiftUI | Menu bar -- status, recording, workflows, digest, questions |
+| **MCP Server** | Python | Universal agent interface -- 8 tools + 3 resources via MCP protocol |
+| **Knowledge Base** | SQLite + JSON | Skills, vector store, voice profiles, user profile, evidence, runs |
 
 </details>
 
 <details>
 <summary><strong>CLI reference</strong></summary>
 
-| Command | Description |
-|---------|-------------|
-| `agenthandover status` | Service health and stats |
-| `agenthandover status --compute` | Last hour's cost: frames captured, kept and gated; capture and OCR time; model seconds per call type |
-| `agenthandover start all` | Start daemon + worker |
-| `agenthandover stop all` | Stop services |
-| `agenthandover focus start "title"` | Record a workflow |
-| `agenthandover focus stop` | Stop recording |
-| `agenthandover skills list` | List all Skills |
-| `agenthandover skills approve <slug>` | Approve for agents |
-| `agenthandover skills promote <slug> <state>` | Promote lifecycle |
-| `agenthandover connect <agent>` | Set up agent integration |
-| `agenthandover doctor` | Pre-flight health check |
-| `agenthandover watch` | Live dashboard |
-| `agenthandover logs worker -f` | Follow worker logs |
+Generated from the CLI's own definition (`agenthandover <command> --help` has the details):
+
+<!-- cli-table:start -->
+| Command | What it does | Options |
+|---------|--------------|---------|
+| `agenthandover status` | Show daemon and worker status | `--compute` |
+| `agenthandover start [SERVICE]` | Start services (daemon launched directly, worker via launchd) |  |
+| `agenthandover stop [SERVICE]` | Stop services (daemon via SIGTERM, worker via launchd) |  |
+| `agenthandover restart [SERVICE]` | Restart services |  |
+| `agenthandover logs [SERVICE]` | View service logs | `--follow` `--lines` |
+| `agenthandover config show` | Show current configuration |  |
+| `agenthandover config edit` | Open config file in $EDITOR |  |
+| `agenthandover config path` | Print the config file path |  |
+| `agenthandover skills list` | List all generated SOPs (exported + drafts) |  |
+| `agenthandover skills show <SLUG>` | Show a specific SOP by slug (works for exported and draft SOPs) |  |
+| `agenthandover skills dir` | Print the SOPs directory path |  |
+| `agenthandover skills drafts` | List draft SOPs awaiting review |  |
+| `agenthandover skills approve <SLUG_OR_ID>` | Approve a draft SOP (agents see it only once promoted to agent_ready) |  |
+| `agenthandover skills reject <SLUG_OR_ID>` | Reject a draft SOP |  |
+| `agenthandover skills promote <SLUG> <TO_STATE>` | Promote a procedure's lifecycle state (e.g., draft → reviewed → verified → agent_ready) |  |
+| `agenthandover skills failed` | List failed SOP generations |  |
+| `agenthandover skills retry <FAILURE_ID>` | Retry a failed SOP generation |  |
+| `agenthandover watch` | Live-updating status dashboard (refreshes every 2s) |  |
+| `agenthandover setup` | Interactive setup wizard | `--check` `--extension` `--vlm` `--tier` `--shell` `--shell-remove` |
+| `agenthandover doctor` | Run pre-flight checks | `--ollama-json` `--extension-json` |
+| `agenthandover uninstall` | Uninstall AgentHandover | `--purge-data` |
+| `agenthandover focus start <TITLE>` | Start recording a workflow demonstration |  |
+| `agenthandover focus stop` | Stop the active focus recording session |  |
+| `agenthandover focus finalize` | Answer the focus recording's pending questions in the terminal |  |
+| `agenthandover focus skip-questions` | Skip the pending questions (the Skill keeps them as not yet known) |  |
+| `agenthandover export` | Export SOPs in a specific format | `--format` `--sop` `--output` |
+| `agenthandover search <QUERY>` | Search activity annotations (full-text search) | `--date` `--app` `--limit` |
+| `agenthandover connect <AGENT> [OPTIONS]...` | Connect an AI agent (claude-code, codex, openclaw, hermes, mcp) |  |
+| `agenthandover bench [OPTIONS]...` | Model bake-off: replay a journey cassette's prompts against a tier's live models and report tok/s and a golden-diff score | `--tier` |
+| `agenthandover recall` | Recall what you were doing at a given time | `--date` `--app` `--start` `--end` |
+<!-- cli-table:end -->
 
 </details>
 
@@ -488,15 +555,15 @@ AgentHandover is early and unusually high-leverage for contributors. The prompt 
 
 ### Code contributions we'd love
 
-- **New agent connectors.** Follow the pattern in [`worker/src/agenthandover_worker/agent_connect.py`](worker/src/agenthandover_worker/agent_connect.py). Cursor, Windsurf, Cline, Aider, RooCode, and any agent that reads Claude Code-format skills or MCP are straightforward — the Hermes and Codex connectors are each under 150 lines.
-- **New VLM backends.** Supported today: Ollama, Anthropic, Google, OpenAI-compat in [`worker/src/agenthandover_worker/backends/`](worker/src/agenthandover_worker/backends/). LocalAI, LM Studio, vLLM, and any OpenAI-compatible endpoint are easy drop-ins.
-- **Prompt engineering.** The prompts in [`sop_generator.py`](worker/src/agenthandover_worker/sop_generator.py) and [`behavioral_synthesizer.py`](worker/src/agenthandover_worker/behavioral_synthesizer.py) drive the entire output quality. If you see a way to make them more precise, more robust, or better at handling your language, send a PR.
+- **New agent connectors.** Follow the pattern in [`worker/src/agenthandover_worker/agent_connect.py`](worker/src/agenthandover_worker/agent_connect.py). Cline, Aider, RooCode, and any agent that reads Claude Code-format skills or MCP are straightforward — the Hermes and Codex connectors are short, and every connector hands over only what passes `ledger.handoff_gate`.
+- **Model runtimes.** The pipeline talks to Ollama through one client ([`worker/src/agenthandover_worker/ollama.py`](worker/src/agenthandover_worker/ollama.py)); the cloud backends in [`backends/`](worker/src/agenthandover_worker/backends/) serve only the fallback queue. A second local runtime for annotation and Skills (with structured output) would be a real addition.
+- **Prompt engineering.** The prompts in [`sop_generator.py`](worker/src/agenthandover_worker/sop_generator.py) and [`behavioral_synthesizer.py`](worker/src/agenthandover_worker/behavioral_synthesizer.py) drive the entire output quality. If you see a way to make them more precise, more robust, or better at handling your language, send a PR; `agenthandover bench` and the recorded journey cassettes let you measure the change.
 - **Browser extension ports.** Chrome / Chromium / Brave / Edge / Arc / Comet are supported. Firefox and Safari are wide open.
-- **Privacy review.** This is a local-first tool that handles sensitive data. Extra eyes on [`crates/common/src/redaction.rs`](crates/common/src/redaction.rs) and the screenshot retention path ([`crates/storage/src/maintenance.rs`](crates/storage/src/maintenance.rs)) are genuinely wanted.
+- **Privacy review.** This is a local-first tool that handles sensitive data. Extra eyes on [`crates/common/src/redaction.rs`](crates/common/src/redaction.rs), the worker's prompt-side [`redaction.py`](worker/src/agenthandover_worker/redaction.py), the privacy zones and the screenshot retention path ([`crates/storage/src/maintenance.rs`](crates/storage/src/maintenance.rs)) are genuinely wanted.
 
 ### Getting started
 
-If you're not sure where to begin, open a [Discussion](https://github.com/sandroandric/AgentHandover/discussions) with a rough idea — it's faster to shape something together than to send a PR cold. Small PRs get reviewed quickly. If your contribution is non-trivial, running `just test` and `cargo test` before opening the PR saves a review round-trip.
+If you're not sure where to begin, open a [Discussion](https://github.com/sandroandric/AgentHandover/discussions) with a rough idea — it's faster to shape something together than to send a PR cold. Small PRs get reviewed quickly. If your contribution is non-trivial, running `just test` and `cargo test` before opening the PR saves a review round-trip. `tests/integration/test_docs.py` and the CLI's `docs_tests` keep this README's tables and commands in step with the code.
 
 Direct line for anything that doesn't fit: [sandro@sandric.co](mailto:sandro@sandric.co).
 
@@ -525,6 +592,25 @@ GitHub [Discussions](https://github.com/sandroandric/AgentHandover/discussions) 
 [sandro@sandric.co](mailto:sandro@sandric.co)
 
 ## Changelog
+
+### v0.5.0
+
+The release where the product does what this README says. Numbers are single measurements on a 16 GB test Mac (Ollama 0.34.2) unless stated.
+
+- **Right-sized models.** The 16 GB tier runs Qwen 3.5 4B for everything, and 8 GB Macs annotate with Qwen 3.5 2B (see [AI Models](#ai-models) for the head-to-head). On the same kind of focus session, Stop to questions went from 50 minutes with Gemma 4 12B (v0.4.0's 16 GB default) to ~2.5 minutes (later sessions took 3.5 and 5); the Skill was written in 60 s instead of 549 s.
+- **Memory-aware scheduling.** Where a tier has two models the worker loads one at a time, checks memory, swap and disk first, and defers instead of pushing the Mac into swap. Model work runs on one inference thread in priority order, so the app stays responsive during long calls.
+- **Event-driven capture.** Frames when something happens, of the focused window at one pixel per point (a 1324×940 pt Safari window is captured at 1324×940 px). Unchanged screens skip OCR and the model.
+- **Text-first annotation.** A small model reads OCR and page elements (~2.2 s a frame) and looks at the image only when needed; a cache answers screens already seen. On a recorded busy hour: 1,190 cache hits and 10 model calls instead of 896 and 304, and 422 model-seconds within the 600 s hourly budget.
+- **Privacy where the data flows.** Redaction before storage and before every prompt, URL query strings dropped, macOS password, Touch ID and permission prompts blocked, privacy zones checked before and after the shutter, clipboard text off by default, reading app state opt-in.
+- **Grounded Skill steps.** Every step is checked against the recording: a copy or paste needs clipboard evidence, a scroll or save needs screen evidence, typed lines are quoted exactly, clicks carry DOM anchors, steps keep the recorded order and cite their frames.
+- **Knowledge ledger and budgeted questions.** Each Skill tracks what it knows, guesses and doesn't know, with evidence. The four-check hand-off gate replaces the six gates. Questions come from the gaps (up to 3 after a recording, 5 a week) and no model writes them.
+- **Recognition of repeated workflows.** Passive mining measures recurrence and drafts at most 3 new Skills a week; doing a task you already have a Skill for becomes a run of it (a branch where you did it differently), not a duplicate.
+- **Agent runs feed Skills.** Three runs that follow the steps confirm them; a deviation on a guessed decision reopens it as a question.
+- **Doctor checks the machine.** The serving Ollama's version and install, duplicate installs, and memory, swap and disk headroom; an old Ollama fails only when a Gemma 4 model is configured.
+- **Upgrades keep observation on.** Setup reopens only at a missing permission, stale grants from a changed signature are reset, and model configs written for an earlier default move to the tier's current models.
+- **Agents.** `search_skills` answered in 17.5 s instead of 255 s while Ollama was busy (an 8 s embedding timeout and a keyword fallback). Claude Code pairs through `claude mcp add` with a real Connected check; Codex gets a marked `AGENTS.md` block.
+- **Removed.** The MLX and llama.cpp backends (they only ever served the fallback queue), the legacy pattern miner, the six gates, and config keys that nothing read.
+- **Corrections to v0.4.0's notes.** Homebrew's `ollama` 0.34.2 runs the QAT tags on the test Mac, and the Gemma tiers need Ollama 0.34.0+, not 0.30.6.
 
 ### v0.4.0 (2026-06-09)
 
