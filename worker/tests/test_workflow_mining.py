@@ -697,6 +697,74 @@ class TestSkillsAndObservations:
         assert wm.review_candidates(db, now=datetime(2026, 9, 20, tzinfo=timezone.utc)) == []
         assert {o["promoted_slug"] for o in db.get_workflow_observations()} == {"payout"}
 
+    def test_a_later_recording_of_the_skill_is_another_run_of_it(
+        self, db: WorkerDB, tmp_path: Path,
+    ) -> None:
+        kb = _kb(tmp_path, PAYOUT_SKILL)
+        first = _session_events("focus1", datetime(2026, 9, 1, 9, tzinfo=timezone.utc))
+        wm.record_focus_observation(db, first, "payout", "Reconcile payout")
+        again = _session_events("focus2", datetime(2026, 9, 8, 9, tzinfo=timezone.utc), steps=DETOUR)
+        now = datetime(2026, 9, 8, 10, tzinfo=timezone.utc)
+        # The same workflow (the aligner matches it), whatever it is called.
+        skill = wm.focus_skill(db, kb, again, "Payout, again", now=now)
+        assert skill is not None and skill["id"] == "payout"
+        obs_id = wm.record_focus_observation(
+            db, again, "payout", "Payout, again", instance_of=skill, session_id="session-2",
+        )
+        assert db.get_workflow_observations(obs_ids=[obs_id])[0]["promoted_slug"] == "payout"
+        # Its detour is a hypothesis on the Skill, cited by the session;
+        # the steps are the Skill's own.
+        [hyp] = skill["branch_hypotheses"]
+        assert (hyp["kind"], hyp["step_index"]) == ("detour", 2)
+        assert {"kind": "instance", "id": "session-2"} in hyp["evidence"]
+        assert skill["steps"] == PAYOUT_SKILL["steps"]
+        # On a retry, the recording's own observation (promoted to its
+        # Skill) is no match for it.
+        db.set_observations_promoted([obs_id], "fresh")
+        fresh = _kb(tmp_path / "retry", {"id": "fresh", "title": "Payout, again", "steps": []})
+        assert wm.focus_skill(db, fresh, again, "Payout, again", now=now) is None
+
+    def test_a_skill_without_observations_is_matched_by_its_steps(
+        self, db: WorkerDB, tmp_path: Path,
+    ) -> None:
+        kb = _kb(tmp_path, PAYOUT_SKILL)
+        events = _session_events("focus", datetime(2026, 9, 1, 9, tzinfo=timezone.utc))
+        now = datetime(2026, 9, 1, 10, tzinfo=timezone.utc)
+        assert wm.focus_skill(db, kb, events, "Anything", now=now)["id"] == "payout"
+
+    def test_a_named_routine_on_other_pages_of_the_same_sites_is_the_skill(
+        self, db: WorkerDB, tmp_path: Path,
+    ) -> None:
+        """A routine whose items change every run (the day's stories)
+        visits other pages of the same sites: named as the Skill, it is
+        that Skill; named otherwise, it is a new one."""
+        def morning(*stories: str) -> list[tuple[str, dict]]:
+            # Each story: open it, note it, back to it, back to the front page.
+            steps = [("https://news.ycombinator.com/", {})]
+            for story in stories:
+                steps += [(story, {}), ("", {"app": "Notes"}), (story, {}),
+                          ("https://news.ycombinator.com/", {})]
+            return steps + [("https://app.slack.com/client/T04ACME9/C05NEWS", {"typed": "digest"})]
+
+        digest = morning("https://blog.example.org/sqlite-wal", "https://research.example.com/guide",
+                         "https://github.com/example/cassette")
+        wm.record_focus_observation(
+            db, _session_events("day1", datetime(2026, 9, 15, 8, tzinfo=timezone.utc), steps=digest),
+            "daily-news", "Daily news digest",
+        )
+        kb = _kb(tmp_path, {"id": "daily-news", "title": "Daily news digest", "steps": []})
+        other_stories = morning("https://blog.example.org/backpressure",
+                                "https://research.example.com/articles/48213",
+                                "https://github.com/example/termreader")
+        day2 = _session_events("day2", datetime(2026, 9, 16, 8, tzinfo=timezone.utc), steps=other_stories)
+        now = datetime(2026, 9, 16, 9, tzinfo=timezone.utc)
+        assert not wm.same_workflow(
+            wm.collapse([wm.step_signature(_frame(loc, **kw)) for loc, kw in digest]),
+            wm.collapse([wm.step_signature(_frame(loc, **kw)) for loc, kw in other_stories]),
+        )
+        assert wm.focus_skill(db, kb, day2, " daily news  Digest", now=now)["id"] == "daily-news"
+        assert wm.focus_skill(db, kb, day2, "Research roundup", now=now) is None
+
     def test_a_focus_recording_needs_two_annotated_frames(self, db: WorkerDB) -> None:
         events = _session_events("focus", datetime(2026, 9, 1, 9, tzinfo=timezone.utc))[:1]
         assert wm.record_focus_observation(db, events, "payout") is None

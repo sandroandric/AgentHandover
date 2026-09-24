@@ -86,12 +86,6 @@ needs_extra_run_recordings = pytest.mark.skipif(
 
 @needs_focus_sop_recording
 @needs_extra_run_recordings
-@pytest.mark.xfail(strict=True, reason=(
-    "WP-M5 follow-up: a focus recording of an existing Skill is never "
-    "divergence-mined (workflow_mining.record_focus_observation promotes the "
-    "observation without branch_mining.mine_observations), and one detour "
-    "makes three agreeing divergences (test_one_detour_makes_one_branch)"
-))
 def test_runs_fill_the_ledger_with_evidence(
     events_db, worker, clock, temp_home, cassette,
 ) -> None:
