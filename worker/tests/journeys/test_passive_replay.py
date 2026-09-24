@@ -140,6 +140,8 @@ def test_replay_on_passive_3weeks() -> None:
         fixture=NAME, labels=read_labels(NAME),
         start=start, end=start + timedelta(days=21),
         cassette=CASSETTE, record=None,
-        vlm={"annotation_model": "qwen3.5:4b"},
+        # The tier the cassettes are recorded on (qwen3.5:4b for both roles),
+        # not the RAM tier of the machine running the test (conftest's rule).
+        vlm={"tier": "recommended"},
     )
     assert report.failures(min_recall=1.0, min_precision=0.9, max_chimeras=0) == []
