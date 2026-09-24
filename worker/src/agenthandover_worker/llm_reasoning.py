@@ -3,7 +3,8 @@
 Provides a single ``LLMReasoner`` class that all pipeline modules use
 for targeted Qwen calls.  Wraps Ollama with:
 
-- **Budget enforcement** via ``VLMFallbackQueue.can_dispatch()``
+- **Budget enforcement** via ``scheduler.ReasoningBudget`` (its own
+  daily cap, shared with the behavioral synthesizer)
 - **Response parsing** (strip thinking tags, extract JSON fences)
 - **Provenance tracking** (prompt hash, model, timestamp)
 - **Abstention detection** (``INSUFFICIENT_EVIDENCE`` keyword)
@@ -21,7 +22,6 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable, TYPE_CHECKING
@@ -32,7 +32,7 @@ from agenthandover_worker.model_scheduler import before_generation_call
 from agenthandover_worker.ollama import OllamaClient
 
 if TYPE_CHECKING:
-    from agenthandover_worker.vlm_queue import VLMFallbackQueue
+    from agenthandover_worker.scheduler import ReasoningBudget
 
 logger = logging.getLogger(__name__)
 
@@ -119,18 +119,19 @@ class LLMReasoner:
 
     Args:
         config: Model, host, timeout, and prediction settings.
-        vlm_queue: Optional budget queue.  When provided, each call
-            checks ``can_dispatch()`` before invoking Ollama and
-            records compute time via ``record_completion()`` after.
+        budget: Optional daily budget.  When provided, each call asks
+            ``budget.allow()`` before invoking Ollama (a refusal is the
+            result's error, "Over the daily reasoning budget") and charges
+            the call's seconds after.
     """
 
     def __init__(
         self,
         config: ReasoningConfig | None = None,
-        vlm_queue: "VLMFallbackQueue | None" = None,
+        budget: "ReasoningBudget | None" = None,
     ) -> None:
         self.config = config or ReasoningConfig()
-        self._queue = vlm_queue
+        self._budget = budget
         # Set by ``ModelScheduler.register``: switches Ollama to the
         # generation model before a call (see ``before_generation_call``).
         self.before_call: Callable[[], bool] | None = None
@@ -282,25 +283,22 @@ class LLMReasoner:
         """Budget-check, call Ollama, build base ReasoningResult."""
         prompt_hash = hashlib.sha256(prompt.encode()).hexdigest()[:12]
         now_iso = datetime.now(timezone.utc).isoformat()
-        try:
-            before_generation_call(self)
-        except ConnectionError as exc:
-            logger.warning("LLM reasoning deferred (%s): %s", caller, exc)
-            return ReasoningResult(
-                model=self.config.model, prompt_hash=prompt_hash,
-                generated_at=now_iso, error=f"Ollama connection failed: {exc}",
-            )
-
         base = ReasoningResult(
             model=self.config.model,
             prompt_hash=prompt_hash,
             generated_at=now_iso,
         )
-
-        # Budget check
-        if self._queue is not None and not self._queue.can_dispatch():
-            base.error = "Over daily VLM budget"
-            logger.debug("LLM reasoning skipped (%s): over budget", caller)
+        # The budget logs its first refusal of the day at INFO and publishes
+        # the pause (ReasoningBudget); each skip is only a debug line.
+        if self._budget is not None and not self._budget.allow(caller):
+            base.error = "Over the daily reasoning budget"
+            logger.debug("LLM reasoning skipped (%s): over the daily budget", caller)
+            return base
+        try:
+            before_generation_call(self)
+        except ConnectionError as exc:
+            logger.warning("LLM reasoning deferred (%s): %s", caller, exc)
+            base.error = f"Ollama connection failed: {exc}"
             return base
 
         # Call Ollama.  An answer cut off at num_predict is never parsed
@@ -319,6 +317,8 @@ class LLMReasoner:
                 raw_text, elapsed = self._call_ollama(prompt, system, think=False)
                 elapsed += exc.elapsed
         except TruncatedAnswer as exc:
+            if self._budget is not None:
+                self._budget.charge(exc.elapsed)
             base.error = f"Truncated answer: {exc}"
             logger.warning("LLM reasoning failed (%s): %s", caller, exc)
             return base
@@ -334,19 +334,8 @@ class LLMReasoner:
         base.success = True
         base.elapsed_seconds = elapsed
         base.value = raw_text
-
-        # Record compute time on budget queue
-        if self._queue is not None:
-            try:
-                job_id = f"reasoning-{uuid.uuid4().hex[:8]}"
-                self._queue.record_completion(
-                    job_id=job_id,
-                    compute_minutes=elapsed / 60.0,
-                    result={"caller": caller, "prompt_hash": prompt_hash},
-                )
-            except Exception:
-                logger.debug("Failed to record compute time", exc_info=True)
-
+        if self._budget is not None:
+            self._budget.charge(elapsed)
         return base
 
     def _call_ollama(
@@ -430,13 +419,12 @@ class LLMReasoner:
 CLASSIFIER_NUM_PREDICT = 16
 
 
-def annotation_reasoner(
-    model: str, ollama_host: str, vlm_queue: "VLMFallbackQueue | None" = None,
-) -> LLMReasoner:
+def annotation_reasoner(model: str, ollama_host: str) -> LLMReasoner:
     """The reasoner for calls made while frames are annotated (the activity
     classifier): on the annotation model with its ``ann_num_ctx``, so it
     neither loads the SOP model nor reloads the annotation model with
-    another context size between two frames."""
+    another context size between two frames.  It has no reasoning budget:
+    one call per annotated frame, which the annotation budget caps."""
     return LLMReasoner(
         config=ReasoningConfig(
             model=model,
@@ -445,5 +433,4 @@ def annotation_reasoner(
             think=False,
             num_ctx=get_profile(model).ann_num_ctx,
         ),
-        vlm_queue=vlm_queue,
     )

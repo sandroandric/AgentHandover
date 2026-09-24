@@ -1,6 +1,6 @@
-"""Annotate stage (inference thread): fallback VLM jobs, passive frames and
-frame diffs (P2, :func:`run`), and a focus recording's remaining keyframes
-(P1, :func:`run_focus_tail`).  Both run in the annotation phase
+"""Annotate stage (inference thread): passive frames and frame diffs (P2,
+:func:`run`), and a focus recording's remaining keyframes (P1,
+:func:`run_focus_tail`).  Both run in the annotation phase
 (``ModelScheduler.begin_annotation``).
 """
 
@@ -11,7 +11,6 @@ from typing import Any
 
 from agenthandover_worker import main as wm
 from agenthandover_worker.ops_telemetry import PipelineMetrics
-from agenthandover_worker.scheduler import charged_to
 
 logger = logging.getLogger("agenthandover_worker")
 
@@ -23,13 +22,10 @@ def run_focus_tail(ctx: Any, tick: Any) -> None:
 
 
 def run(ctx: Any, tick: Any) -> dict | None:
-    """P2: fallback VLM jobs (in the idle window), then passive frames
-    within the annotation budget, then frame diffs.  Returns the
-    annotation stats (None when the v2 pipeline is off), also recorded on
-    *tick* with the diff stats."""
+    """P2: passive frames within the annotation budget, then frame diffs.
+    Returns the annotation stats (None when the v2 pipeline is off), also
+    recorded on *tick* with the diff stats."""
     db = ctx.db
-    _run_vlm_jobs(ctx)
-
     ctx.model_scheduler.begin_annotation()
     # The schema is checked before the first tick; this re-checks it in
     # case the daemon applies the migration after the worker started.
@@ -53,25 +49,6 @@ def run(ctx: Any, tick: Any) -> dict | None:
                 diff_stats["failed"],
             )
     return tick.annotations
-
-
-def _run_vlm_jobs(ctx: Any) -> None:
-    """Pending fallback VLM jobs, only in the idle window; events whose
-    job completed are reset so the pipeline re-scores them with the boost."""
-    db = ctx.db
-    pending_vlm = db.get_pending_vlm_jobs(limit=10)
-    if not pending_vlm or ctx.vlm_worker is None:
-        return
-    if not ctx.idle_gate.check().can_run:
-        return
-    with charged_to(ctx.annotation_budget):
-        completed = wm._process_vlm_jobs(db, pending_vlm, ctx.vlm_worker, ctx.vlm_queue)
-    if completed:
-        db.mark_events_unprocessed(completed)
-        logger.info(
-            "VLM reconciliation: %d events reset for re-scoring with boost",
-            len(completed),
-        )
 
 
 def _annotate_passive_frames(ctx: Any) -> dict:

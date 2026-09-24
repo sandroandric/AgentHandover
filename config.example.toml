@@ -27,9 +27,8 @@ vacuum_min_free_gb = 5
 vacuum_safety_multiplier = 2.5
 
 [idle_jobs]
-# The idle-time gate: the fallback VLM queue runs, and passive discovery
-# runs early (instead of every 2 hours), only inside the window and when
-# all of these hold. Passive annotation has its own lighter rule (AC
+# The idle-time gate: passive discovery runs early (instead of every 2
+# hours) only inside the window and when all of these hold. Passive annotation has its own lighter rule (AC
 # power, a locked screen, or two minutes without input).
 require_ac_power = true
 min_battery_percent = 50
@@ -74,6 +73,8 @@ annotation_max_frames_per_day = 1500          # passive frames sent to the model
 annotation_max_compute_minutes_per_day = 60   # Ollama prompt + generation minutes per local day (focus exempt)
 annotation_max_frames_per_hour = 60           # passive frames sent to the model per rolling hour, cache hits free (focus exempt)
 annotation_max_compute_minutes_per_hour = 10  # Ollama minutes of passive model calls (annotation, diffs, discovery) per rolling hour
+reasoning_max_calls_per_day = 300             # LLM reasoner + behavioral synthesis calls per local day (cluster labels, links, curation)
+reasoning_max_compute_minutes_per_day = 90    # wall-clock minutes of those calls per local day
 
 [embedding]
 model = "nomic-embed-text"         # text embeddings (search_document:/search_query:/clustering: prefixes)

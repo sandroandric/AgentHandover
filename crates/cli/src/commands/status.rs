@@ -117,6 +117,21 @@ fn format_compute(daemon: Option<&serde_json::Value>, worker: Option<&serde_json
             if let Some(reason) = worker.get("annotation_paused_reason").and_then(|v| v.as_str()) {
                 out.push_str(&format!("    Paused:     {reason}\n"));
             }
+            if let Some(budget) = worker.get("reasoning_budget") {
+                let paused = worker
+                    .get("reasoning_paused_reason")
+                    .and_then(|v| v.as_str())
+                    .map(|reason| format!(" ({reason})"))
+                    .unwrap_or_default();
+                out.push_str(&format!(
+                    "    Reasoning:  {} / {} calls, {:.1} / {:.0} min today, {} skipped{paused}\n",
+                    u64_at(budget, "calls"),
+                    u64_at(budget, "max_calls"),
+                    f64_at(budget, "compute_minutes"),
+                    f64_at(budget, "max_compute_minutes"),
+                    u64_at(budget, "skipped"),
+                ));
+            }
         }
     }
     out
@@ -301,32 +316,7 @@ fn print_service_status(name: &str, status_file: &str, pid_name: &str) {
                     } else {
                         "local".to_string()
                     };
-
-                    // Show queue depth alongside availability
-                    let pending = value
-                        .get("vlm_queue_pending")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0);
-                    let jobs_today = value
-                        .get("vlm_jobs_today")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0);
-                    let dropped = value
-                        .get("vlm_dropped_today")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0);
-                    if pending > 0 || jobs_today > 0 {
-                        let mut parts = vec![format!("{} pending", pending)];
-                        if jobs_today > 0 {
-                            parts.push(format!("{} today", jobs_today));
-                        }
-                        if dropped > 0 {
-                            parts.push(format!("{} dropped", dropped));
-                        }
-                        format!("{} ({})", mode_info, parts.join(", ")).into()
-                    } else {
-                        format!("{}", mode_info).green()
-                    }
+                    mode_info.green()
                 } else {
                     "not installed".dimmed()
                 };
@@ -375,6 +365,9 @@ mod tests {
             "annotation_budget": {"frames": 12, "max_frames": 1500,
                                   "compute_minutes": 4.07, "max_compute_minutes": 60.0},
             "annotation_paused_reason": "annotation_budget_exhausted",
+            "reasoning_budget": {"calls": 300, "max_calls": 300, "compute_minutes": 41.26,
+                                 "max_compute_minutes": 90.0, "skipped": 7},
+            "reasoning_paused_reason": "reasoning_budget_exhausted",
             "compute": {"model_seconds": 9999.0, "last_hour": {
                 "model_seconds": 412.3,
                 "model_seconds_by_call_type": {"sop": 112.2, "annotation": 300.1},
@@ -396,6 +389,13 @@ mod tests {
         assert!(text.contains("Frame wall: le_1000 20, le_500 10"), "{text}");
         assert!(text.contains("Budget:     12 / 1500 frames, 4.1 / 60 min today"), "{text}");
         assert!(text.contains("Paused:     annotation_budget_exhausted"), "{text}");
+        assert!(
+            text.contains(
+                "Reasoning:  300 / 300 calls, 41.3 / 90 min today, 7 skipped \
+                 (reasoning_budget_exhausted)"
+            ),
+            "{text}"
+        );
         // Since-start totals are not the last hour.
         assert!(!text.contains("9999"), "{text}");
     }

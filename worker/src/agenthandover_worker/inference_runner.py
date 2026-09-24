@@ -20,8 +20,8 @@ threads:
     (the procedure's embedding and style analysis, :func:`model_work`);
   - :data:`P1`: the focus recording's tail (the keyframes its Skill did
     not need, ``FocusProcessor.annotate_remaining``);
-  - :data:`P2`: passive work (fallback VLM jobs, passive annotation and
-    frame diffs, then passive discovery and the daily jobs).
+  - :data:`P2`: passive work (passive annotation and frame diffs, then
+    passive discovery and the daily jobs).
 
   A job that is queued or running is not queued again (jobs are keyed), and
   a job that raised waits :func:`~agenthandover_worker.loop_guard.error_backoff_seconds`

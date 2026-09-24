@@ -15,7 +15,7 @@ import pytest
 
 from agenthandover_worker.db import WorkerDB
 
-from daemon_db import insert_episode, insert_event, insert_vlm_job
+from daemon_db import insert_episode, insert_event
 
 
 # ------------------------------------------------------------------
@@ -177,63 +177,6 @@ class TestGetEpisodes:
 
 
 # ------------------------------------------------------------------
-# 5. Pending VLM jobs
-# ------------------------------------------------------------------
-
-
-class TestGetPendingVlmJobs:
-    """Insert VLM jobs with mixed statuses; only pending returned."""
-
-    def test_returns_only_pending(
-        self, tmp_db_path: Path, write_conn: sqlite3.Connection
-    ) -> None:
-        ev1 = insert_event(write_conn)
-        ev2 = insert_event(write_conn)
-        ev3 = insert_event(write_conn)
-
-        insert_vlm_job(write_conn, event_id=ev1, status="pending", priority=0.8)
-        insert_vlm_job(write_conn, event_id=ev2, status="completed", priority=0.9)
-        insert_vlm_job(write_conn, event_id=ev3, status="pending", priority=0.3)
-
-        with WorkerDB(tmp_db_path) as db:
-            jobs = db.get_pending_vlm_jobs()
-
-        assert len(jobs) == 2
-        for job in jobs:
-            assert job["status"] == "pending"
-
-    def test_ordered_by_priority_descending(
-        self, tmp_db_path: Path, write_conn: sqlite3.Connection
-    ) -> None:
-        ev1 = insert_event(write_conn)
-        ev2 = insert_event(write_conn)
-        ev3 = insert_event(write_conn)
-
-        insert_vlm_job(write_conn, event_id=ev1, priority=0.2, vlm_id="low")
-        insert_vlm_job(write_conn, event_id=ev2, priority=0.9, vlm_id="high")
-        insert_vlm_job(write_conn, event_id=ev3, priority=0.5, vlm_id="mid")
-
-        with WorkerDB(tmp_db_path) as db:
-            jobs = db.get_pending_vlm_jobs()
-
-        assert jobs[0]["id"] == "high"
-        assert jobs[1]["id"] == "mid"
-        assert jobs[2]["id"] == "low"
-
-    def test_respects_limit(
-        self, tmp_db_path: Path, write_conn: sqlite3.Connection
-    ) -> None:
-        for _ in range(5):
-            ev = insert_event(write_conn)
-            insert_vlm_job(write_conn, event_id=ev)
-
-        with WorkerDB(tmp_db_path) as db:
-            jobs = db.get_pending_vlm_jobs(limit=2)
-
-        assert len(jobs) == 2
-
-
-# ------------------------------------------------------------------
 # 6. Context manager
 # ------------------------------------------------------------------
 
@@ -276,10 +219,6 @@ class TestEmptyDatabase:
     def test_no_episodes(self, tmp_db_path: Path) -> None:
         with WorkerDB(tmp_db_path) as db:
             assert db.get_episodes() == []
-
-    def test_no_vlm_jobs(self, tmp_db_path: Path) -> None:
-        with WorkerDB(tmp_db_path) as db:
-            assert db.get_pending_vlm_jobs() == []
 
 
 # ------------------------------------------------------------------

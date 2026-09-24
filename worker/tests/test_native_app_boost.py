@@ -1,4 +1,4 @@
-"""Tests for native app context detection and VLM priority boost."""
+"""Tests for native app context detection."""
 
 from __future__ import annotations
 
@@ -131,20 +131,3 @@ class TestNativeAppFlag:
         score = scorer.score(tr, context)
         assert score.native_app is False
         assert "native_app_context" not in score.reasons
-
-
-class TestVLMPriorityBoost:
-    def test_boost_applied_for_native(self) -> None:
-        """VLM priority should be boosted for native app events."""
-        base_priority = 0.5
-        boost = ConfidenceScorer.NATIVE_APP_VLM_BOOST
-        boosted = min(base_priority + boost, 1.0)
-        assert boosted == 0.65
-        assert boost == 0.15
-
-    def test_boost_does_not_exceed_one(self) -> None:
-        """Boosted priority should be capped at 1.0."""
-        base_priority = 0.95
-        boost = ConfidenceScorer.NATIVE_APP_VLM_BOOST
-        boosted = min(base_priority + boost, 1.0)
-        assert boosted == 1.0

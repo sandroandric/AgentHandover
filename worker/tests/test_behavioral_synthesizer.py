@@ -315,6 +315,32 @@ class TestSynthesize:
         assert insights.goal == "Sends a daily HN digest email to self at jane@example.com"
         assert "jane@example.com" in insights.goal
 
+    def test_the_reasoning_budget_is_charged_and_honoured(self):
+        """Synthesis shares the reasoner's daily budget: each call is
+        charged, and once the day's calls are spent it is skipped without
+        a model call."""
+        from datetime import datetime, timezone
+
+        from agenthandover_worker.scheduler import ReasoningBudget
+
+        day = datetime(2026, 9, 24, tzinfo=timezone.utc)
+        budget = ReasoningBudget(1, 3600.0, clock=lambda: day)
+        synth = BehavioralSynthesizer(SynthesizerConfig(min_observations=1), budget=budget)
+        answer = json.dumps({"goal": "Sends the digest", "confidence": 0.8})
+        with patch(
+            "agenthandover_worker.behavioral_synthesizer._call_ollama_text",
+            return_value=(answer, 4.0),
+        ) as call:
+            first = synth.synthesize("digest", _make_procedure(), _make_observations(1))
+            second = synth.synthesize(
+                "digest", _make_procedure(), _make_observations(1), force=True,
+            )
+        assert first.goal == "Sends the digest"
+        assert call.call_count == 1
+        assert second.goal == ""
+        assert budget.status()["calls"] == 1
+        assert budget.status()["skipped"] == 1
+
     def test_prompt_requires_concrete_goal(self):
         """The synthesis prompt body must ask for a concrete goal with \
 examples of what acceptable vs abstract answers look like."""

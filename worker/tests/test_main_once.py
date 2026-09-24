@@ -76,6 +76,10 @@ def test_once_runs_one_iteration_and_cleans_up(
     assert status["consecutive_errors"] == 0
     assert "annotation_paused_reason" in status
     assert status["annotation_budget"]["max_frames"] == 1500
+    # The reasoner's own daily budget, open; no fallback queue counts.
+    assert status["reasoning_budget"]["max_calls"] == 300
+    assert status["reasoning_paused_reason"] is None
+    assert "vlm_queue_pending" not in status
     # The model work ran on the inference thread and --once waited for it:
     # nothing queued or running, nothing failed; the thread is stopped.
     inference = status["inference"]

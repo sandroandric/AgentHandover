@@ -1,8 +1,9 @@
 """Tests for the main.py pipeline orchestration.
 
-Covers run_pipeline() with episode building, pruning, translation,
-confidence scoring and VLM auto-enqueue.  It produces no SOP: the v1
-PrefixSpan miner that ran here every poll was removed (WP-F5).
+Covers run_pipeline() with episode building, pruning and translation.  It
+produces no SOP (the v1 PrefixSpan miner that ran here every poll was
+removed, WP-F5) and queues nothing (the VLM fallback jobs rejected
+translations queued fed only their own re-scoring).
 """
 
 from __future__ import annotations
@@ -18,12 +19,12 @@ import pytest
 
 from agenthandover_worker.clipboard_linker import ClipboardLinker
 from agenthandover_worker.confidence import ConfidenceScorer
+from agenthandover_worker.context import WorkerContext
 from agenthandover_worker.db import WorkerDB
 from agenthandover_worker.episode_builder import EpisodeBuilder
 from agenthandover_worker.main import run_pipeline
 from agenthandover_worker.negative_demo import NegativeDemoPruner
 from agenthandover_worker.translator import SemanticTranslator
-from agenthandover_worker.vlm_queue import VLMFallbackQueue
 from daemon_db import kb_db
 
 
@@ -68,8 +69,6 @@ def _build_pipeline_components(tmp_path: Path) -> dict:
         "clipboard_linker": ClipboardLinker(),
         "pruner": NegativeDemoPruner(),
         "translator": SemanticTranslator(),
-        "scorer": ConfidenceScorer(),
-        "vlm_queue": VLMFallbackQueue(),
     }
 
 
@@ -186,69 +185,51 @@ class TestPipelineTranslation:
 
 
 # ------------------------------------------------------------------
-# 5. VLM auto-enqueue for low-confidence translations
+# 5. Rejected translations queue nothing
 # ------------------------------------------------------------------
 
 
-class TestPipelineVLMEnqueue:
-    def test_low_confidence_enqueues_vlm(self, tmp_path: Path) -> None:
-        """Events with no DOM anchors should either be accepted via native
-        app thresholds (with app_context fallback) or enqueued for VLM.
+def _unknown_events(n: int, base: datetime) -> list[dict]:
+    """*n* events of an unknown kind with no window or metadata: every
+    translation the scorer rejects (unknown intent, confidence 0.0)."""
+    return [
+        {
+            "id": str(uuid.uuid4()),
+            "timestamp": _ts(base + timedelta(seconds=i)),
+            "kind_json": json.dumps({"UnknownEvent": {}}),
+            "window_json": json.dumps({}),
+            "metadata_json": json.dumps({}),
+            "display_topology_json": "[]",
+            "primary_display_id": "main",
+            "processed": 0,
+        }
+        for i in range(n)
+    ]
 
-        Since the translator's ``_try_app_context()`` provides a fallback
-        anchor (confidence ~0.15) and native app thresholds are lower
-        (FLAG=0.15), events with a valid ``app_id`` in ``window_json``
-        will typically get ``accept_flagged`` rather than ``reject``.
 
-        Events with NO app context at all (empty window_json) should
-        still be rejected and VLM-enqueued.
-        """
-        base = datetime(2026, 2, 16, 10, 0, 0, tzinfo=timezone.utc)
-        # Events WITH app_id: the app_context fallback anchor provides
-        # enough confidence for native-app accept_flagged.
-        events_with_app = [
-            _make_event(
-                app_id="com.apple.Safari",
-                kind="ClickIntent",
-                timestamp=_ts(base),
-            ),
-            _make_event(
-                app_id="com.apple.Safari",
-                kind="ClickIntent",
-                timestamp=_ts(base + timedelta(seconds=1)),
-            ),
-        ]
+class TestRejectedTranslationsQueueNothing:
+    """The VLM fallback job a rejected translation used to queue fed only a
+    confidence boost that decided whether another job was queued; its
+    queue was also the reasoner's daily budget, so 50 of them stopped
+    cluster labelling for the day.  No queue, no score, no job."""
 
-        components = _build_pipeline_components(tmp_path)
-        summary = run_pipeline(events_with_app, **components)
+    def test_sixty_rejected_translations_are_only_counted(self, tmp_path: Path) -> None:
+        import inspect
 
-        # Events with app_id get app_context anchor → accept_flagged
-        # (not rejected), so VLM enqueue may be 0.
-        assert summary["translations"] >= 1, "Should have at least one translation"
+        events = _unknown_events(60, datetime(2026, 9, 23, 9, 0, 0, tzinfo=timezone.utc))
+        translations = SemanticTranslator().translate_batch(events)
+        assert len(translations) == 60
+        scorer = ConfidenceScorer()
+        assert {scorer.score(tr, {}).decision for tr in translations} == {"reject"}
 
-    def test_no_app_context_enqueues_vlm(self, tmp_path: Path) -> None:
-        """Events with truly empty context should be rejected and VLM-enqueued."""
-        base = datetime(2026, 2, 16, 10, 0, 0, tzinfo=timezone.utc)
-        # Events with unknown intent → always rejected (confidence=0.0)
-        events = [
-            {
-                "id": str(uuid.uuid4()),
-                "timestamp": _ts(base),
-                "kind_json": json.dumps({"UnknownEvent": {}}),
-                "window_json": json.dumps({}),
-                "metadata_json": json.dumps({}),
-                "display_topology_json": "[]",
-                "primary_display_id": "main",
-                "processed": 0,
-            },
-        ]
+        # Nothing to queue into: no queue, no scorer, no database.
+        params = set(inspect.signature(run_pipeline).parameters)
+        assert not {"vlm_queue", "scorer", "db"} & params
+        assert "vlm_queue" not in WorkerContext.__dataclass_fields__
 
-        components = _build_pipeline_components(tmp_path)
-        summary = run_pipeline(events, **components)
-
-        # Unknown intent → rejected with score 0.0 → should attempt VLM
-        # enqueue (though the event has no useful context for VLM either)
-        assert summary["translations"] >= 1, "Should have at least one translation"
+        summary = run_pipeline(events, **_build_pipeline_components(tmp_path))
+        assert summary["translations"] == 60
+        assert "vlm_enqueued" not in summary
 
 
 # ------------------------------------------------------------------
@@ -263,7 +244,7 @@ class TestPipelineSummaryKeys:
 
         expected_keys = {
             "events_in", "episodes", "positive_events", "negative_events",
-            "translations", "vlm_enqueued",
+            "translations",
         }
         assert set(summary.keys()) == expected_keys
 
@@ -298,9 +279,7 @@ class TestPassiveBatchMinesNothing:
 
         with WorkerDB(tmp_db_path) as db:
             for _ in range(3):  # three ticks over the same store
-                summary = run_pipeline(
-                    events, db=db, **_build_pipeline_components(tmp_path),
-                )
+                summary = run_pipeline(events, **_build_pipeline_components(tmp_path))
                 assert summary["translations"] >= 1
             assert db.get_generated_sops() == []
         assert not (tmp_path / "state").exists()
@@ -326,184 +305,6 @@ class TestPipelineMixedEvents:
 
         assert summary["events_in"] == 4
         assert summary["translations"] >= 1
-
-
-# ---------------------------------------------------------------------------
-# Regression: _process_vlm_jobs → record_completion wiring
-# ---------------------------------------------------------------------------
-
-
-class TestProcessVLMJobsReconciliation:
-    """Verify _process_vlm_jobs calls vlm_queue.record_completion on success
-    and marks in-memory jobs as FAILED on rejection/error.
-
-    This is a regression guard for the mark_completed → record_completion
-    rename (was AttributeError at runtime, silently marking all VLM jobs
-    as failed).
-    """
-
-    def test_success_path_calls_record_completion(self):
-        """On VLM success, in-memory queue job must move to COMPLETED."""
-        from unittest.mock import MagicMock, patch
-        from agenthandover_worker.main import _process_vlm_jobs
-        from agenthandover_worker.vlm_queue import (
-            VLMFallbackQueue,
-            VLMJob,
-            VLMJobStatus,
-        )
-
-        # Set up a mock DB that returns a valid event
-        db = MagicMock()
-        db.get_event_by_id.return_value = {
-            "kind_json": '{"DwellSnapshot": {}}',
-            "window_json": '{"title": "Test Page"}',
-        }
-
-        # Set up a mock VLM worker that returns a successful response
-        response = MagicMock()
-        response.success = True
-        response.target_description = "Submit button"
-        response.suggested_selector = "#submit"
-        response.confidence_boost = 0.15
-        response.reasoning = "Clearly a submit button"
-        response.inference_time_seconds = 1.2
-
-        vlm_worker = MagicMock()
-        vlm_worker.process_job.return_value = response
-
-        # Set up a real VLM queue with a job in it
-        vlm_queue = VLMFallbackQueue()
-        job = VLMJob(
-            job_id="job-001",
-            event_id="evt-001",
-            episode_id="",
-            semantic_step_index=0,
-            confidence_score=0.4,
-            priority_score=0.8,
-        )
-        vlm_queue.enqueue(job)
-        assert job.status == VLMJobStatus.PENDING
-
-        # Process the job
-        pending_jobs = [{"id": "job-001", "event_id": "evt-001"}]
-        _process_vlm_jobs(db, pending_jobs, vlm_worker, vlm_queue)
-
-        # The in-memory job should now be COMPLETED
-        assert job.status == VLMJobStatus.COMPLETED
-        assert job.result is not None
-        assert job.result["confidence_boost"] == 0.15
-
-        # DB should also be marked as completed
-        db.mark_vlm_job_completed.assert_called_once()
-
-    def test_budget_exhaustion_defers_job(self):
-        """Budget errors should defer (keep PENDING), not mark FAILED."""
-        from unittest.mock import MagicMock
-        from agenthandover_worker.main import _process_vlm_jobs
-        from agenthandover_worker.vlm_queue import (
-            VLMFallbackQueue,
-            VLMJob,
-            VLMJobStatus,
-        )
-
-        db = MagicMock()
-        db.get_event_by_id.return_value = {
-            "kind_json": '{"DwellSnapshot": {}}',
-            "window_json": '{"title": "Test"}',
-        }
-
-        response = MagicMock()
-        response.success = False
-        response.error = "Budget exhausted"
-
-        vlm_worker = MagicMock()
-        vlm_worker.process_job.return_value = response
-
-        vlm_queue = VLMFallbackQueue()
-        job = VLMJob(
-            job_id="job-002",
-            event_id="evt-002",
-            episode_id="",
-            semantic_step_index=0,
-            confidence_score=0.3,
-            priority_score=0.7,
-        )
-        vlm_queue.enqueue(job)
-
-        pending_jobs = [{"id": "job-002", "event_id": "evt-002"}]
-        _process_vlm_jobs(db, pending_jobs, vlm_worker, vlm_queue)
-
-        # Budget errors are deferred — job stays PENDING for retry after reset
-        assert job.status == VLMJobStatus.PENDING
-        db.mark_vlm_job_failed.assert_not_called()
-
-    def test_non_budget_failure_marks_in_memory_failed(self):
-        """Non-budget VLM errors should mark the job as FAILED."""
-        from unittest.mock import MagicMock
-        from agenthandover_worker.main import _process_vlm_jobs
-        from agenthandover_worker.vlm_queue import (
-            VLMFallbackQueue,
-            VLMJob,
-            VLMJobStatus,
-        )
-
-        db = MagicMock()
-        db.get_event_by_id.return_value = {
-            "kind_json": '{"DwellSnapshot": {}}',
-            "window_json": '{"title": "Test"}',
-        }
-
-        response = MagicMock()
-        response.success = False
-        response.error = "Model inference failed: OOM"
-
-        vlm_worker = MagicMock()
-        vlm_worker.process_job.return_value = response
-
-        vlm_queue = VLMFallbackQueue()
-        job = VLMJob(
-            job_id="job-003",
-            event_id="evt-003",
-            episode_id="",
-            semantic_step_index=0,
-            confidence_score=0.3,
-            priority_score=0.7,
-        )
-        vlm_queue.enqueue(job)
-
-        pending_jobs = [{"id": "job-003", "event_id": "evt-003"}]
-        _process_vlm_jobs(db, pending_jobs, vlm_worker, vlm_queue)
-
-        assert job.status == VLMJobStatus.FAILED
-        db.mark_vlm_job_failed.assert_called_once_with("job-003")
-
-    def test_without_vlm_queue_still_works(self):
-        """Passing vlm_queue=None should not crash (backward compat)."""
-        from unittest.mock import MagicMock
-        from agenthandover_worker.main import _process_vlm_jobs
-
-        db = MagicMock()
-        db.get_event_by_id.return_value = {
-            "kind_json": '{"DwellSnapshot": {}}',
-            "window_json": '{"title": "Test"}',
-        }
-
-        response = MagicMock()
-        response.success = True
-        response.target_description = "OK button"
-        response.suggested_selector = "#ok"
-        response.confidence_boost = 0.1
-        response.reasoning = "OK"
-        response.inference_time_seconds = 0.5
-
-        vlm_worker = MagicMock()
-        vlm_worker.process_job.return_value = response
-
-        pending_jobs = [{"id": "job-003", "event_id": "evt-003"}]
-        # Should not raise — vlm_queue defaults to None
-        _process_vlm_jobs(db, pending_jobs, vlm_worker)
-
-        db.mark_vlm_job_completed.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
@@ -835,7 +636,7 @@ class TestMainFunctionScoping:
         Caught 4 latent shadow imports during v0.2.3 investigation:
           - datetime/timezone in _process_drift_reviewed_trigger
           - OpenClawWriter in _check_export_trigger
-          - VLMFallbackQueue in main
+          - VLMFallbackQueue in main (the class is gone since)
 
         All 4 were fixed in v0.2.3 by deleting the redundant inner imports.
         This test ensures none of them come back and no new ones sneak in.

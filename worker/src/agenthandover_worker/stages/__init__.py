@@ -14,9 +14,9 @@ thread, in this order:
 The model jobs run on the inference thread (``inference_runner``), one at a
 time, highest priority first: P0 :func:`synthesize.run` (a stopped focus
 recording, or its answered questions), P1 :func:`annotate.run_focus_tail`,
-P2 :func:`annotate.run` (fallback VLM jobs, passive annotation, frame
-diffs) and P2 the generation job (:func:`segment.run`, passive discovery,
-then :func:`daily.run`, the once-per-day pass).  Control stages never call
+P2 :func:`annotate.run` (passive annotation, frame diffs) and P2 the
+generation job (:func:`segment.run`, passive discovery, then
+:func:`daily.run`, the once-per-day pass).  Control stages never call
 a model; model stages run only as those jobs.
 
 Every stage is ``run(ctx, tick)``: it reads and updates the
@@ -42,7 +42,6 @@ class Tick:
 
     triggers_consumed: int = 0
     unprocessed: int = 0
-    pending_vlm: int = 0
     # Events handed to run_pipeline and not yet marked processed; an error
     # while this is non-empty counts against them.
     inflight_event_ids: list[str] = field(default_factory=list)

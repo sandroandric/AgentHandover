@@ -79,7 +79,7 @@ def run(ctx: Any, tick: Any) -> int | None:
 
 def _passive_discovery_due(ctx: Any, now_mono: float) -> bool:
     """Due every 2 hours, or 5 minutes after the last run while the user is
-    away (no events, no VLM jobs) inside the idle window; never while a
+    away (no events) inside the idle window; never while a
     focus recording is pending (focus goes first)."""
     if ctx.task_segmenter is None or ctx.sop_generator is None or not ctx.v2_schema_ok:
         return False

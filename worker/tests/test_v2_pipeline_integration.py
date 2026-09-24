@@ -638,12 +638,10 @@ class TestV2DoesNotBreakV1:
     def test_run_pipeline_still_works(self, tmp_path: Path):
         """run_pipeline continues to work normally with v2 imports added."""
         from agenthandover_worker.clipboard_linker import ClipboardLinker
-        from agenthandover_worker.confidence import ConfidenceScorer
         from agenthandover_worker.episode_builder import EpisodeBuilder
         from agenthandover_worker.main import run_pipeline
         from agenthandover_worker.negative_demo import NegativeDemoPruner
         from agenthandover_worker.translator import SemanticTranslator
-        from agenthandover_worker.vlm_queue import VLMFallbackQueue
 
         summary = run_pipeline(
             [],
@@ -651,8 +649,6 @@ class TestV2DoesNotBreakV1:
             clipboard_linker=ClipboardLinker(),
             pruner=NegativeDemoPruner(),
             translator=SemanticTranslator(),
-            scorer=ConfidenceScorer(),
-            vlm_queue=VLMFallbackQueue(),
         )
 
         assert summary["events_in"] == 0

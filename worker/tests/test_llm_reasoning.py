@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -11,14 +12,27 @@ from agenthandover_worker.llm_reasoning import (
     LLMReasoner,
     ReasoningConfig,
     ReasoningResult,
+    TruncatedAnswer,
 )
+from agenthandover_worker.scheduler import ReasoningBudget
 
 
-def _make_reasoner(queue=None):
+def _make_reasoner(budget=None):
     return LLMReasoner(
         config=ReasoningConfig(model="test-model", ollama_host="http://test:11434"),
-        vlm_queue=queue,
+        budget=budget,
     )
+
+
+def _budget(max_calls: int = 100, max_minutes: float = 60.0) -> ReasoningBudget:
+    day = datetime(2026, 9, 24, 10, 0, tzinfo=timezone.utc)
+    return ReasoningBudget(max_calls, max_minutes * 60.0, clock=lambda: day)
+
+
+def _spent_budget() -> ReasoningBudget:
+    budget = _budget(max_calls=1)
+    budget.charge(1.0)
+    return budget
 
 
 def _mock_ollama(return_value):
@@ -61,11 +75,11 @@ class TestReasonJSON:
         assert result.value == {"answer": 42}
 
     def test_returns_failure_when_over_budget(self):
-        queue = MagicMock()
-        queue.can_dispatch.return_value = False
-        result = _make_reasoner(queue=queue).reason_json("prompt")
+        with patch.object(LLMReasoner, "_call_ollama") as call:
+            result = _make_reasoner(budget=_spent_budget()).reason_json("prompt")
         assert not result.success
-        assert "budget" in result.error.lower()
+        assert result.error == "Over the daily reasoning budget"
+        call.assert_not_called()
 
     def test_returns_failure_on_connection_error(self):
         with patch.object(
@@ -135,9 +149,7 @@ class TestReasonText:
         assert result.value is None
 
     def test_over_budget(self):
-        queue = MagicMock()
-        queue.can_dispatch.return_value = False
-        result = _make_reasoner(queue=queue).reason_text("prompt")
+        result = _make_reasoner(budget=_spent_budget()).reason_text("prompt")
         assert not result.success
 
 
@@ -191,20 +203,32 @@ class TestReasonYesNo:
 
 class TestBudgetTracking:
 
-    def test_compute_time_recorded_on_queue(self):
-        queue = MagicMock()
-        queue.can_dispatch.return_value = True
+    def test_each_call_is_charged_to_the_budget(self):
+        budget = _budget()
         with _mock_ollama(('{"ok": true}', 3.5)):
-            _make_reasoner(queue=queue).reason_json("prompt")
-        queue.record_completion.assert_called_once()
-        args = queue.record_completion.call_args
-        # compute_minutes should be ~3.5/60
-        assert 0.05 < args.kwargs.get("compute_minutes", args[1].get("compute_minutes", 0)) < 0.1 \
-            or 0.05 < (args[1] if len(args) > 1 and isinstance(args[1], float) else 0)
+            _make_reasoner(budget=budget).reason_json("prompt")
+            _make_reasoner(budget=budget).reason_json("prompt")
+        assert (budget.calls, budget.compute_seconds) == (2, 7.0)
 
-    def test_no_queue_no_error(self):
+    def test_a_truncated_answer_is_charged_too(self):
+        budget = _budget()
+        with patch.object(
+            LLMReasoner, "_call_ollama", side_effect=TruncatedAnswer("cut", 12.0),
+        ):
+            result = _make_reasoner(budget=budget).reason_text("prompt")
+        assert not result.success
+        assert (budget.calls, budget.compute_seconds) == (1, 12.0)
+
+    def test_a_refused_call_does_not_switch_models(self):
+        """Over budget, the reasoner asks the model scheduler for nothing."""
+        reasoner = _make_reasoner(budget=_spent_budget())
+        reasoner.before_call = MagicMock(return_value=True)
+        reasoner.reason_text("prompt")
+        reasoner.before_call.assert_not_called()
+
+    def test_no_budget_no_error(self):
         with _mock_ollama(('{"ok": true}', 1.0)):
-            result = _make_reasoner(queue=None).reason_json("prompt")
+            result = _make_reasoner(budget=None).reason_json("prompt")
         assert result.success
 
 
@@ -245,12 +269,6 @@ class TestEdgeCases:
         with _mock_ollama(("", 0.1)):
             result = _make_reasoner().reason_json("prompt")
         assert not result.success
-
-    def test_none_queue_allows_dispatch(self):
-        """No queue means no budget enforcement — always proceed."""
-        with _mock_ollama(('{"ok": true}', 1.0)):
-            result = _make_reasoner(queue=None).reason_json("prompt")
-        assert result.success
 
     def test_generic_exception_handled(self):
         with patch.object(

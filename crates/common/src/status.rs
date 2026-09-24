@@ -135,15 +135,6 @@ pub struct WorkerStatus {
     pub last_pipeline_duration_ms: Option<u64>,
     pub consecutive_errors: u32,
     pub vlm_available: bool,
-    /// Number of VLM jobs currently pending in the queue.
-    #[serde(default)]
-    pub vlm_queue_pending: u64,
-    /// Number of VLM jobs dispatched today (UTC).
-    #[serde(default)]
-    pub vlm_jobs_today: u64,
-    /// Number of VLM jobs dropped today due to backpressure.
-    #[serde(default)]
-    pub vlm_dropped_today: u64,
     /// VLM operating mode: "local" or "remote".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vlm_mode: Option<String>,

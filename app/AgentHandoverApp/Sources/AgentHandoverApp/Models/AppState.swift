@@ -162,9 +162,6 @@ struct WorkerStatusFile: Codable {
     let last_pipeline_duration_ms: UInt64?
     let consecutive_errors: UInt32
     let vlm_available: Bool
-    let vlm_queue_pending: UInt64?
-    let vlm_jobs_today: UInt64?
-    let vlm_dropped_today: UInt64?
     let vlm_mode: String?
     let vlm_provider: String?
 }
@@ -242,15 +239,6 @@ final class AppState: ObservableObject {
 
     var workerVersion: String {
         workerStatus?.version ?? "unknown"
-    }
-
-    var vlmQueuePending: UInt64 {
-        workerStatus?.vlm_queue_pending ?? 0
-    }
-
-    /// True when VLM queue has significant backlog (>50 pending jobs).
-    var vlmBacklogged: Bool {
-        vlmQueuePending > 50
     }
 
     // MARK: - Polling
@@ -555,7 +543,6 @@ final class AppState: ObservableObject {
             hasIssues: !accessibilityGranted
                 || !screenRecordingGranted
                 || (workerStatus?.consecutive_errors ?? 0) > 0
-                || vlmBacklogged
                 || captureStallStatus != nil
         )
         if newHealth != .starting, startedAt != nil {

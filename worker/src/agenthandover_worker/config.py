@@ -83,6 +83,12 @@ class VlmConfig:
     # passive model call (annotation, frame diffs, passive discovery).
     annotation_max_frames_per_hour: int = 60
     annotation_max_compute_minutes_per_hour: float = 10.0
+    # Daily budget of the LLM reasoner (cluster labels, session links,
+    # corrections, curation) and the behavioral synthesizer: model calls,
+    # and their wall-clock minutes.  When either is spent, both wait for
+    # the next local day (``reasoning_paused_reason`` in worker-status.json).
+    reasoning_max_calls_per_day: int = 300
+    reasoning_max_compute_minutes_per_day: float = 90.0
 
     @property
     def reasoner_model(self) -> str:
@@ -269,6 +275,8 @@ _POSITIVE = {
     ("vlm", "annotation_max_compute_minutes_per_day"),
     ("vlm", "annotation_max_frames_per_hour"),
     ("vlm", "annotation_max_compute_minutes_per_hour"),
+    ("vlm", "reasoning_max_calls_per_day"),
+    ("vlm", "reasoning_max_compute_minutes_per_day"),
     ("focus", "max_session_hours"),
     ("embedding", "retention_days"),
     ("embedding", "max_rows"),

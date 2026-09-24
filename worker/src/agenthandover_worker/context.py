@@ -2,17 +2,17 @@
 
 :func:`build_context` builds what ``main()`` used to build inline, from one
 ``load_config()`` read (``config.py``): the knowledge base, the model
-clients, the pipelines and writers, the passive annotation budget and the
-model scheduler, and opens the daemon's database.  :func:`start` then does
-the one-time work before the first tick (orphan screenshots, the v2 schema
-check, the loop's timers and persisted state, the trigger handlers, the
-Skills index).  The stages (``stages/``) read and update the context; the
+clients, the pipelines and writers, the passive annotation budget, the
+reasoning budget and the model scheduler, and opens the daemon's database.
+:func:`start` then does the one-time work before the first tick (orphan
+screenshots, the v2 schema check, the loop's timers and persisted state,
+the trigger handlers, the Skills index).  The stages (``stages/``) read and update the context; the
 loop's counters and timers live on it, so ``main()`` and the journey driver
 run the same :func:`agenthandover_worker.stages.tick`.
 
-Services a journey must not start (the VLM fallback worker, which probes
-the local Ollama, and the query API server, which binds a port) are
-started by ``main()`` and set on the context afterwards.
+Services a journey must not start (the VLM backend check, which probes the
+local Ollama, and the query API server, which binds a port) are started by
+``main()`` and set on the context afterwards.
 
 Time comes from the context: :attr:`WorkerContext.now` (aware UTC),
 :meth:`WorkerContext.local_now` (the user's wall time, for the local day)
@@ -45,11 +45,15 @@ from agenthandover_worker.negative_demo import NegativeDemoPruner
 from agenthandover_worker.ollama import OllamaClient, OllamaError
 from agenthandover_worker.openclaw_writer import OpenClawWriter
 from agenthandover_worker.scene_annotator import AnnotationConfig, SceneAnnotator
-from agenthandover_worker.scheduler import AnnotationBudget, IdleJobGate, SchedulerConfig
+from agenthandover_worker.scheduler import (
+    AnnotationBudget,
+    IdleJobGate,
+    ReasoningBudget,
+    SchedulerConfig,
+)
 from agenthandover_worker.sop_generator import SOPGenerator, SOPGeneratorConfig
 from agenthandover_worker.task_segmenter import SegmenterConfig, TaskSegmenter
 from agenthandover_worker.translator import SemanticTranslator
-from agenthandover_worker.vlm_queue import VLMFallbackQueue
 
 logger = logging.getLogger("agenthandover_worker")
 
@@ -76,7 +80,7 @@ class WorkerContext:
 
     knowledge_base: Any
     ops_telemetry: Any
-    vlm_queue: Any
+    reasoning_budget: Any
     llm_reasoner: Any
     vector_kb: Any
     lifecycle_manager: Any
@@ -134,7 +138,6 @@ class WorkerContext:
     run_daily_jobs: bool = True
 
     # Set by main() after the build (services a journey does not start).
-    vlm_worker: Any = None
     vlm_available: bool = False
     query_api_server: Any = None
     # The inference thread; None in the journey driver's inline mode.
@@ -158,15 +161,16 @@ class WorkerContext:
     consecutive_errors: int = 0
     event_guard: Any = None
     last_idle_log_time: float = 0.0
-    # (unprocessed, pending VLM) counts of the last poll logged at INFO.
-    last_logged_poll_counts: tuple[int, int] | None = None
-    # True when the control thread's last poll found no events and no VLM
-    # jobs (the user is away): passive discovery may run early.
+    # The unprocessed-event count of the last poll logged at INFO.
+    last_logged_poll_count: int | None = None
+    # True when the control thread's last poll found no events (the user
+    # is away): passive discovery may run early.
     control_idle: bool = False
     last_passive_discovery: float = 0.0
     last_recognition: float = 0.0
     daily_jobs_date: str = ""
     saved_budget_json: str = ""
+    saved_reasoning_budget_json: str = ""
 
     @property
     def v2_annotation_enabled(self) -> bool:
@@ -273,11 +277,14 @@ def build_context(
         [k for k, v in vars(features).items() if not v] or "all enabled",
     )
 
-    # The shared reasoner, before the modules that take it.
-    vlm_queue = VLMFallbackQueue()
+    # The shared reasoner, before the modules that take it, and the daily
+    # budget it shares with the behavioral synthesizer (on the local day).
+    reasoning_budget = ReasoningBudget.from_config(
+        vlm_cfg, clock=lambda: now().astimezone(local_tz),
+    )
     llm_reasoner = LLMReasoner(
         config=ReasoningConfig(model=vlm_cfg.reasoner_model, ollama_host=host),
-        vlm_queue=vlm_queue,
+        budget=reasoning_budget,
     )
     vector_kb = _vector_kb(cfg, db_path)
 
@@ -290,7 +297,7 @@ def build_context(
             profile=knowledge_base.get_profile(),
             policy=UserPolicy(knowledge_base),
             # It classifies frames in the annotation phase: annotation model.
-            llm_reasoner=annotation_reasoner(vlm_cfg.annotation_model, host, vlm_queue),
+            llm_reasoner=annotation_reasoner(vlm_cfg.annotation_model, host),
         )
     execution_monitor = ExecutionMonitor(knowledge_base)
     trust_advisor = TrustAdvisor(knowledge_base, execution_monitor=execution_monitor)
@@ -299,7 +306,7 @@ def build_context(
     evidence_normalizer = EvidenceNormalizer(variant_detector=variant_detector)
     behavioral_synthesizer = BehavioralSynthesizer(
         config=SynthesizerConfig(model=vlm_cfg.sop_model, ollama_host=host),
-        vlm_queue=vlm_queue,
+        budget=reasoning_budget,
         knowledge_base=knowledge_base,
     )
     procedure_curator = None
@@ -365,7 +372,7 @@ def build_context(
         screenshots_dir=wm._status_dir() / "screenshots",
         knowledge_base=knowledge_base,
         ops_telemetry=OpsTelemetry(knowledge_base),
-        vlm_queue=vlm_queue,
+        reasoning_budget=reasoning_budget,
         llm_reasoner=llm_reasoner,
         vector_kb=vector_kb,
         lifecycle_manager=lifecycle_manager,
@@ -470,6 +477,8 @@ def start(ctx: WorkerContext) -> None:
     ctx.daily_jobs_date = db.get_state(wm.DAILY_JOBS_STATE_KEY) or ""
     ctx.annotation_budget.load(db.get_state(wm.ANNOTATION_BUDGET_STATE_KEY))
     ctx.saved_budget_json = ctx.annotation_budget.to_json()
+    ctx.reasoning_budget.load(db.get_state(wm.REASONING_BUDGET_STATE_KEY))
+    ctx.saved_reasoning_budget_json = ctx.reasoning_budget.to_json()
 
     ctx.trigger_handlers = control.trigger_handlers(ctx)
     assert set(ctx.trigger_handlers) == set(trigger_spool.KINDS)

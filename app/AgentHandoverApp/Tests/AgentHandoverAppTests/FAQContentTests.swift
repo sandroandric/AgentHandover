@@ -19,6 +19,9 @@ final class FAQContentTests: XCTestCase {
             XCTAssertTrue(answer.contains("Anthropic"), id)
             XCTAssertTrue(answer.contains("claude-sonnet-4-6-20260320"), id)
             XCTAssertTrue(answer.contains("Keychain (service com.agenthandover.app)"), id)
+            // The VLM fallback check of unclassified events is gone: cloud
+            // mode no longer sends window titles.
+            XCTAssertFalse(answer.contains("window title"), id)
         }
     }
 

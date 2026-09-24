@@ -5,7 +5,7 @@ class TestValidConfig:
         assert ConfigValidator().validate({}) == []
 
     def test_valid_vlm_section(self):
-        config = {"vlm": {"annotation_model": "qwen3.5:2b", "max_jobs_per_day": 50}}
+        config = {"vlm": {"annotation_model": "qwen3.5:2b", "tier": "standard"}}
         assert ConfigValidator().validate(config) == []
 
 class TestVlmValidation:
@@ -13,10 +13,6 @@ class TestVlmValidation:
         issues = ConfigValidator().validate({"vlm": {"annotation_model": ""}})
         assert len(issues) == 1
         assert issues[0].severity == "warning"
-
-    def test_invalid_max_jobs(self):
-        issues = ConfigValidator().validate({"vlm": {"max_jobs_per_day": -1}})
-        assert len(issues) == 1
 
 class TestKnowledgeValidation:
     def test_invalid_port(self):

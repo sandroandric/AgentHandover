@@ -1,8 +1,8 @@
 """Export stage (control thread): what each tick publishes.
 
-:func:`run`, under ``STATE_LOCK``: the passive annotation budget's
-persisted state (what passive model use spent survives a restart) and
-``sops-index.json`` for the app (throttled to every 5 s).
+:func:`run`, under ``STATE_LOCK``: the persisted state of the passive
+annotation budget and the reasoning budget (what model use spent survives
+a restart) and ``sops-index.json`` for the app (throttled to every 5 s).
 :func:`heartbeat`, outside it: ``worker-status.json``, written every tick
 so a long model call never stops it (also after an error: the app and
 ``doctor`` see a worker that is alive but failing, not a dead one).
@@ -23,6 +23,10 @@ def run(ctx: Any, tick: Any) -> None:
     if budget_json != ctx.saved_budget_json:
         ctx.saved_budget_json = budget_json
         ctx.db.set_state(wm.ANNOTATION_BUDGET_STATE_KEY, budget_json)
+    reasoning_json = ctx.reasoning_budget.to_json()
+    if reasoning_json != ctx.saved_reasoning_budget_json:
+        ctx.saved_reasoning_budget_json = reasoning_json
+        ctx.db.set_state(wm.REASONING_BUDGET_STATE_KEY, reasoning_json)
     wm._write_sops_index(ctx.db, ctx.knowledge_base)
 
 
@@ -36,16 +40,9 @@ def heartbeat(ctx: Any) -> None:
 
 def _write_heartbeat(ctx: Any) -> None:
     """The running totals, the passive annotation budget and why passive
-    annotation is paused, the model schedule and the inference thread's
-    queue.  The pending VLM count is the database's (the in-memory queue
-    only tracks enqueue-side stats; completions from
-    ``_process_vlm_jobs`` are not reflected)."""
+    annotation is paused, the reasoning budget and whether it is spent,
+    the model schedule and the inference thread's queue."""
     db = ctx.db
-    vlm_stats = ctx.vlm_queue.get_stats()
-    try:
-        db_vlm_pending = db.count_pending_vlm_jobs()
-    except Exception:
-        db_vlm_pending = vlm_stats.pending_jobs
     runner = ctx.runner
     inference = None
     if runner is not None:
@@ -71,9 +68,6 @@ def _write_heartbeat(ctx: Any) -> None:
             runner.consecutive_failures() if runner is not None else 0,
         ),
         vlm_available=ctx.vlm_available,
-        vlm_queue_pending=db_vlm_pending,
-        vlm_jobs_today=vlm_stats.jobs_today,
-        vlm_dropped_today=vlm_stats.dropped_count,
         vlm_mode=vlm_cfg.mode,
         vlm_provider=vlm_cfg.provider or None,
         v2_annotation_enabled=ctx.v2_annotation_enabled,
@@ -81,6 +75,8 @@ def _write_heartbeat(ctx: Any) -> None:
         v2_diffs_today=ctx.total_v2_diffs,
         annotation_paused_reason=ctx.annotation_paused_reason,
         annotation_budget=ctx.annotation_budget.status(),
+        reasoning_budget=ctx.reasoning_budget.status(),
+        reasoning_paused_reason=ctx.reasoning_budget.pause_reason(),
         model_schedule=ctx.model_scheduler.status(),
         inference=inference,
     )

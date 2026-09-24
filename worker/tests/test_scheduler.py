@@ -2,17 +2,21 @@
 
 Covers the IdleJobGate condition checks, time-window logic (including
 midnight-crossing), multiple-blocker accumulation, relaxed configs,
-parse_time_window string parsing, and GateResult structure.
+parse_time_window string parsing, GateResult structure, and the reasoning
+budget (ReasoningBudget).
 """
 
 from __future__ import annotations
 
-from datetime import time
+import logging
+from datetime import datetime, time, timedelta, timezone
 
 from agenthandover_worker.scheduler import (
+    REASONING_BUDGET_REASON,
     GateResult,
     IdleJobGate,
     IdleScheduler,
+    ReasoningBudget,
     SchedulerConfig,
     SystemConditions,
 )
@@ -630,3 +634,90 @@ class TestParsers:
         assert parse_screen_locked(root([{"CGSSessionScreenIsLocked": True}])) is True
         assert parse_screen_locked(root([{"kCGSSessionOnConsoleKey": True}])) is False
         assert parse_screen_locked(b"not a plist") is False
+
+
+class _DayClock:
+    """A settable local wall clock for :class:`ReasoningBudget`."""
+
+    def __init__(self) -> None:
+        self.now = datetime(2026, 9, 24, 9, 0, tzinfo=timezone.utc)
+
+    def __call__(self) -> datetime:
+        return self.now
+
+
+class TestReasoningBudget:
+    def _budget(self, clock, calls=3, minutes=10.0) -> ReasoningBudget:
+        return ReasoningBudget(max_calls=calls, max_compute_seconds=minutes * 60.0, clock=clock)
+
+    def test_the_call_cap_closes_the_day(self) -> None:
+        budget = self._budget(_DayClock(), calls=2)
+        for _ in range(2):
+            assert budget.allow("task_segmenter.label_cluster")
+            budget.charge(1.0)
+        assert budget.pause_reason() == REASONING_BUDGET_REASON
+        assert not budget.allow("task_segmenter.label_cluster")
+        assert budget.status()["skipped"] == 1
+
+    def test_the_compute_cap_closes_the_day(self) -> None:
+        budget = self._budget(_DayClock(), calls=100, minutes=1.0)
+        assert budget.allow("session_linker")
+        budget.charge(61.0)
+        assert not budget.allow("session_linker")
+        assert budget.status()["compute_minutes"] == 1.02
+
+    def test_the_next_local_day_starts_over_and_reports_the_skips(self, caplog) -> None:
+        clock = _DayClock()
+        budget = self._budget(clock, calls=1)
+        budget.charge(1.0)
+        with caplog.at_level(logging.INFO, logger="agenthandover_worker.scheduler"):
+            assert not budget.allow("a")
+            assert not budget.allow("b")
+            clock.now += timedelta(days=1)
+            assert budget.allow("c")
+        assert budget.pause_reason() is None
+        assert budget.status() == {
+            "date": "2026-09-25", "calls": 0, "max_calls": 1,
+            "compute_minutes": 0.0, "max_compute_minutes": 10.0, "skipped": 0,
+        }
+        infos = [r.getMessage() for r in caplog.records if r.levelno == logging.INFO]
+        # One line when the day's budget ran out, one at the reset.
+        assert len(infos) == 2
+        assert infos[0].startswith("Reasoning budget reached (1/1 calls")
+        assert "starting with a" in infos[0]
+        assert "2 model call(s) skipped" in infos[1] and "2026-09-24" in infos[1]
+
+    def test_the_day_is_the_clocks_local_date(self) -> None:
+        clock = _DayClock()
+        tz = timezone(timedelta(hours=-7))
+        clock.now = datetime(2026, 9, 25, 3, 0, tzinfo=timezone.utc).astimezone(tz)
+        budget = self._budget(clock)
+        assert budget.status()["date"] == "2026-09-24"
+
+    def test_counters_survive_a_restart(self) -> None:
+        clock = _DayClock()
+        budget = self._budget(clock, calls=2)
+        budget.charge(30.0)
+        budget.charge(30.0)
+        assert not budget.allow("x")
+        restarted = self._budget(clock, calls=2)
+        restarted.load(budget.to_json())
+        assert restarted.pause_reason() == REASONING_BUDGET_REASON
+        assert restarted.status()["calls"] == 2
+        assert restarted.status()["skipped"] == 1
+
+    def test_a_saved_day_that_is_over_is_not_restored(self) -> None:
+        clock = _DayClock()
+        budget = self._budget(clock, calls=1)
+        budget.charge(1.0)
+        clock.now += timedelta(days=1)
+        restarted = self._budget(clock, calls=1)
+        restarted.load(budget.to_json())
+        assert restarted.allow("x")
+
+    def test_unreadable_state_starts_empty(self) -> None:
+        budget = self._budget(_DayClock())
+        budget.load("{not json")
+        assert budget.status()["calls"] == 0
+        budget.load(None)
+        assert budget.allow("x")

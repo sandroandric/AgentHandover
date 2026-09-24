@@ -1,8 +1,8 @@
 """AgentHandover apprentice worker entry-point.
 
 Provides the main loop that reads from the daemon's SQLite database
-and drives episode building, semantic translation, confidence scoring,
-VLM fallback enqueuing, SOP induction, formatting, and export.
+and drives episode building, semantic translation, SOP induction,
+formatting, and export.
 """
 
 from __future__ import annotations
@@ -16,7 +16,6 @@ import subprocess
 import sys
 import tempfile
 import time
-import uuid
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -27,7 +26,7 @@ from agenthandover_worker import workflow_mining
 from agenthandover_worker.clipboard_linker import ClipboardLinker
 from agenthandover_worker.event_helpers import focused_field, parse_json_field
 from agenthandover_worker.config import EXPORT_ADAPTERS, config_path, load_config
-from agenthandover_worker.confidence import ConfidenceScorer, is_native_app_context
+from agenthandover_worker.confidence import ConfidenceScorer
 from agenthandover_worker.db import WorkerDB
 from agenthandover_worker.episode_builder import EpisodeBuilder
 from agenthandover_worker.evidence_tracker import ObservationEvidence, append_observation
@@ -56,7 +55,6 @@ from agenthandover_worker.scheduler import (
     charged_to,
 )
 from agenthandover_worker.translator import SemanticTranslator
-from agenthandover_worker.vlm_queue import VLMFallbackQueue, VLMJob
 from agenthandover_worker.loop_guard import (
     interruptible_sleep,
 )
@@ -71,7 +69,6 @@ from agenthandover_worker.paths import DEFAULT_DB_PATH, KNOWLEDGE_BASE_DIR, data
 
 DEFAULT_SOPS_DIR = Path.home() / ".openclaw" / "workspace" / "memory" / "apprentice"
 POLL_INTERVAL_SECONDS = 2.0
-VLM_REJECT_THRESHOLD = 0.60
 
 # Single source of truth: read from the package metadata (pyproject.toml
 # → dist-info). See agenthandover_worker/__init__.py for the fallback
@@ -403,9 +400,11 @@ def _process_annotations(
 
 
 # worker_state keys: the local date the once-per-day jobs last ran, and
-# passive annotation's budget counters for the current local day.
+# the budget counters for the current local day (passive annotation's and
+# the reasoner's).
 DAILY_JOBS_STATE_KEY = "daily_jobs_date"
 ANNOTATION_BUDGET_STATE_KEY = "annotation_budget"
+REASONING_BUDGET_STATE_KEY = "reasoning_budget"
 
 # Passive frames still pending after this long are given up on.
 ANNOTATION_BACKLOG_MAX_AGE_HOURS = 24.0
@@ -704,14 +703,11 @@ def _log_handlers(log_dir: Path, *, stderr_is_tty: bool) -> list[logging.Handler
     return handlers
 
 
-def _poll_log_level(
-    counts: tuple[int, int], last_logged: tuple[int, int] | None,
-) -> int:
-    """INFO for a poll whose (unprocessed events, pending VLM jobs) counts
-    changed since the last one logged, DEBUG for a repeat.  A job the
-    worker cannot finish kept the same line at INFO every 2 s (~43k
-    lines a day)."""
-    return logging.INFO if counts != last_logged else logging.DEBUG
+def _poll_log_level(unprocessed: int, last_logged: int | None) -> int:
+    """INFO for a poll whose unprocessed-event count changed since the last
+    one logged, DEBUG for a repeat: the same line at INFO every 2 s is
+    ~43k lines a day."""
+    return logging.INFO if unprocessed != last_logged else logging.DEBUG
 
 
 def _status_dir() -> Path:
@@ -771,9 +767,6 @@ def _write_worker_status(
     last_pipeline_duration_ms: int | None,
     consecutive_errors: int,
     vlm_available: bool,
-    vlm_queue_pending: int = 0,
-    vlm_jobs_today: int = 0,
-    vlm_dropped_today: int = 0,
     vlm_mode: str | None = None,
     vlm_provider: str | None = None,
     v2_annotations_today: int = 0,
@@ -781,6 +774,8 @@ def _write_worker_status(
     v2_annotation_enabled: bool = False,
     annotation_paused_reason: str | None = None,
     annotation_budget: dict | None = None,
+    reasoning_budget: dict | None = None,
+    reasoning_paused_reason: str | None = None,
     model_schedule: dict | None = None,
     inference: dict | None = None,
 ) -> None:
@@ -795,6 +790,10 @@ def _write_worker_status(
     (``annotation_budget_exhausted`` for the day,
     ``annotation_hourly_budget_exhausted`` for the rolling hour,
     ``on_battery_user_active``), or is None while it runs.
+
+    ``reasoning_budget`` is the LLM reasoner's and behavioral synthesizer's
+    daily budget (``ReasoningBudget.status``); ``reasoning_paused_reason``
+    is ``reasoning_budget_exhausted`` while it is spent, None otherwise.
     """
     status = {
         "pid": os.getpid(),
@@ -806,9 +805,6 @@ def _write_worker_status(
         "last_pipeline_duration_ms": last_pipeline_duration_ms,
         "consecutive_errors": consecutive_errors,
         "vlm_available": vlm_available,
-        "vlm_queue_pending": vlm_queue_pending,
-        "vlm_jobs_today": vlm_jobs_today,
-        "vlm_dropped_today": vlm_dropped_today,
     }
     if vlm_mode:
         status["vlm_mode"] = vlm_mode
@@ -821,6 +817,9 @@ def _write_worker_status(
         status["annotation_paused_reason"] = annotation_paused_reason
         if annotation_budget is not None:
             status["annotation_budget"] = annotation_budget
+    if reasoning_budget is not None:
+        status["reasoning_budget"] = reasoning_budget
+        status["reasoning_paused_reason"] = reasoning_paused_reason
     if model_schedule is not None:
         # Which model writes Skills, and why generation waits (memory, a
         # failed load), on a tier with two models.
@@ -1243,16 +1242,13 @@ def run_pipeline(
     clipboard_linker: ClipboardLinker,
     pruner: NegativeDemoPruner,
     translator: SemanticTranslator,
-    scorer: ConfidenceScorer,
-    vlm_queue: VLMFallbackQueue,
-    db: "WorkerDB | None" = None,
 ) -> dict:
-    """Build, prune, translate and score a batch of events (steps D->E).
+    """Build, prune and translate a batch of events (steps D->E).
 
-    Translations the scorer rejects are queued for the VLM fallback.  No
-    SOP comes out of this path: the v1 PrefixSpan miner that used to run
+    No SOP comes out of this path: the v1 PrefixSpan miner that used to run
     here on every poll is gone (WP-F5), and passive recurrence belongs to
-    ``workflow_mining``.
+    ``workflow_mining``.  Nothing is queued either: the VLM fallback jobs
+    rejected translations used to queue fed only their own re-scoring.
 
     Returns a summary dict with counts for monitoring.
     """
@@ -1262,7 +1258,6 @@ def run_pipeline(
         "positive_events": 0,
         "negative_events": 0,
         "translations": 0,
-        "vlm_enqueued": 0,
     }
 
     if not events:
@@ -1279,11 +1274,6 @@ def run_pipeline(
         all_episode_events.extend(ep.events)
     clipboard_links = clipboard_linker.find_links(all_episode_events)
     logger.debug("Found %d clipboard links", len(clipboard_links))
-
-    # Build a set of paste event IDs that have clipboard provenance
-    paste_ids_with_provenance: set[str] = set()
-    for link in clipboard_links:
-        paste_ids_with_provenance.add(link.paste_event_id)
 
     # Step D3: Prune negative demonstrations per episode
     positive_episodes_events: list[list[dict]] = []
@@ -1311,83 +1301,15 @@ def run_pipeline(
     # Episodes are independent — translate in parallel
     if len(positive_episodes_events) > 1:
         with ThreadPoolExecutor(max_workers=min(4, len(positive_episodes_events))) as pool:
-            translation_batches = list(pool.map(
+            for translations in pool.map(
                 translator.translate_batch, positive_episodes_events
-            ))
-        for translations in translation_batches:
-            all_translations.extend(translations)
+            ):
+                all_translations.extend(translations)
     elif positive_episodes_events:
-        translation_batches = [translator.translate_batch(positive_episodes_events[0])]
-        all_translations.extend(translation_batches[0])
-    else:
-        translation_batches = []
-
-    # Score each episode's translations and handle VLM fallback
-    for translations in translation_batches:
-        for idx, tr in enumerate(translations):
-            # Build scoring context from PREVIOUS step's post_state so the
-            # context match score reflects an independent expectation rather
-            # than trivially matching pre_state against itself.
-            context: dict = {}
-            if idx > 0:
-                prev_tr = translations[idx - 1]
-                prev_post = prev_tr.post_state if hasattr(prev_tr, "post_state") else {}
-                if prev_post.get("window_title"):
-                    context["expected_title"] = prev_post["window_title"]
-                if prev_post.get("url"):
-                    context["expected_url"] = prev_post["url"]
-                if prev_post.get("app_id"):
-                    context["expected_app"] = prev_post["app_id"]
-
-            # Check clipboard provenance
-            raw_event_id = tr.raw_event_id
-            if raw_event_id in paste_ids_with_provenance:
-                context["clipboard_link"] = True
-
-            # Check dwell snapshot provenance
-            if tr.intent == "read":
-                context["dwell_snapshot"] = True
-
-            # Apply VLM confidence boost if a completed VLM job exists
-            # for this event (reconciliation after VLM processing)
-            if db is not None:
-                vlm_boost = db.get_completed_vlm_boost(tr.raw_event_id)
-                if vlm_boost > 0.0:
-                    context["vlm_boost"] = vlm_boost
-
-            conf = scorer.score(tr, context)
-
-            # Auto-enqueue VLM job for rejected translations —
-            # but skip if there's already a completed VLM job for this event
-            # (avoid infinite re-enqueue loops)
-            has_vlm = db is not None and db.has_completed_vlm_job(tr.raw_event_id)
-            if conf.decision == "reject" and conf.total < VLM_REJECT_THRESHOLD and not has_vlm:
-                priority = vlm_queue.compute_priority(
-                    conf.total,
-                    tr.intent,
-                    datetime.now(timezone.utc),
-                )
-                # Boost priority for native app events (less context available)
-                if conf.native_app:
-                    priority = min(priority + ConfidenceScorer.NATIVE_APP_VLM_BOOST, 1.0)
-
-                job = VLMJob(
-                    job_id=str(uuid.uuid4()),
-                    event_id=tr.raw_event_id,
-                    episode_id="",
-                    semantic_step_index=idx,
-                    confidence_score=conf.total,
-                    priority_score=priority,
-                )
-                if vlm_queue.enqueue(job):
-                    summary["vlm_enqueued"] += 1
+        all_translations.extend(translator.translate_batch(positive_episodes_events[0]))
 
     summary["translations"] = len(all_translations)
-    logger.info(
-        "Translated %d events, enqueued %d VLM jobs",
-        len(all_translations),
-        summary["vlm_enqueued"],
-    )
+    logger.info("Translated %d events", len(all_translations))
 
     return summary
 
@@ -1399,7 +1321,6 @@ def _process_focus_sessions(
     clipboard_linker: ClipboardLinker,
     translator: SemanticTranslator,
     scorer: "ConfidenceScorer",
-    vlm_queue: "VLMFallbackQueue",
     sop_enhancer: object | None,
     openclaw_writer: "SOPExportAdapter",
     skill_md_writer: "SOPExportAdapter | None" = None,
@@ -3975,152 +3896,6 @@ def _check_export_trigger(
         logger.warning("Export trigger: unsupported format '%s'", fmt)
 
 
-def _persist_vlm_jobs(db: "WorkerDB", vlm_queue: VLMFallbackQueue) -> None:
-    """Persist in-memory VLM queue jobs to the database."""
-    from agenthandover_worker.vlm_queue import VLMJobStatus
-
-    persisted = 0
-    for job in vlm_queue._jobs:
-        if job.status == VLMJobStatus.PENDING:
-            ttl_str = (
-                job.ttl_expires_at.strftime("%Y-%m-%dT%H:%M:%SZ")
-                if job.ttl_expires_at
-                else ""
-            )
-            if db.enqueue_vlm_job(
-                job_id=job.job_id,
-                event_id=job.event_id,
-                priority=job.priority_score,
-                ttl_expires_at=ttl_str,
-            ):
-                persisted += 1
-    if persisted:
-        logger.info("Persisted %d VLM jobs to database", persisted)
-
-
-def _process_vlm_jobs(
-    db: "WorkerDB",
-    pending_jobs: list[dict],
-    vlm_worker: object,
-    vlm_queue: "VLMFallbackQueue | None" = None,
-) -> list[str]:
-    """Process pending VLM jobs from the database using the VLM worker.
-
-    For each job:
-    1. Fetch the associated event for context
-    2. Build a VLMRequest with event metadata
-    3. Call vlm_worker.process_job() (not .infer() — that's the backend API)
-    4. Store the result and mark as completed/failed
-    5. Return event IDs for successful completions (for reconciliation)
-    """
-    from agenthandover_worker.vlm_worker import VLMRequest
-
-    import json as _json
-
-    completed_event_ids: list[str] = []
-
-    for job_row in pending_jobs:
-        job_id = job_row.get("id", "")
-        event_id = job_row.get("event_id", "")
-
-        try:
-            # Fetch the event to get screenshot/DOM context
-            event = db.get_event_by_id(event_id)
-            if event is None:
-                logger.warning("VLM job %s: event %s not found, marking failed", job_id, event_id)
-                db.mark_vlm_job_failed(job_id)
-                continue
-
-            # Parse event metadata for VLMRequest fields
-            kind_json = event.get("kind_json", "{}")
-            window_json = event.get("window_json")
-
-            kind_data = {}
-            try:
-                kind_data = _json.loads(kind_json) if kind_json else {}
-            except (ValueError, TypeError):
-                pass
-
-            window_data = {}
-            try:
-                window_data = _json.loads(window_json) if window_json else {}
-            except (ValueError, TypeError):
-                pass
-
-            # Extract event type from kind data
-            event_type = "unknown"
-            if isinstance(kind_data, dict):
-                # kind_json is an enum variant like {"DwellSnapshot": {...}}
-                event_type = next(iter(kind_data), "unknown")
-
-            # Build VLMRequest with available context
-            request = VLMRequest(
-                job_id=job_id,
-                dom_context=window_json or None,
-                target_description=window_data.get("title", ""),
-                event_type=event_type,
-            )
-
-            # process_job() handles prompt building, injection defense,
-            # budget checks, and backend dispatch
-            response = vlm_worker.process_job(request)  # type: ignore[union-attr]
-
-            if response.success:
-                result_dict = {
-                    "target_description": response.target_description,
-                    "suggested_selector": response.suggested_selector,
-                    "confidence_boost": response.confidence_boost,
-                    "reasoning": response.reasoning,
-                    "inference_time_seconds": response.inference_time_seconds,
-                }
-                db.mark_vlm_job_completed(
-                    job_id, result_json=_json.dumps(result_dict)
-                )
-                # Reconcile in-memory queue so backpressure stays accurate
-                if vlm_queue is not None:
-                    try:
-                        compute_min = response.inference_time_seconds / 60.0
-                        vlm_queue.record_completion(job_id, compute_min, result_dict)
-                    except KeyError:
-                        pass  # job may not exist in memory (DB-only)
-                completed_event_ids.append(event_id)
-                logger.info(
-                    "VLM job %s completed (%.1fs, boost=%.2f)",
-                    job_id,
-                    response.inference_time_seconds,
-                    response.confidence_boost,
-                )
-            else:
-                # Budget exhaustion is transient — leave job as pending so it
-                # gets retried after the daily budget resets.
-                if response.error and "budget" in response.error.lower():
-                    logger.info(
-                        "VLM job %s deferred: %s (will retry after budget reset)",
-                        job_id,
-                        response.error,
-                    )
-                    # All remaining jobs are also over budget; stop this cycle.
-                    break
-
-                logger.warning(
-                    "VLM job %s rejected: %s", job_id, response.error
-                )
-                db.mark_vlm_job_failed(job_id)
-                # Reconcile in-memory queue for failed jobs too
-                if vlm_queue is not None:
-                    for mem_job in vlm_queue._jobs:
-                        if mem_job.job_id == job_id:
-                            from agenthandover_worker.vlm_queue import VLMJobStatus
-                            mem_job.status = VLMJobStatus.FAILED
-                            break
-
-        except Exception:
-            logger.warning("VLM job %s failed", job_id, exc_info=True)
-            db.mark_vlm_job_failed(job_id)
-
-    return completed_event_ids
-
-
 def _wait_for_db(db_path: Path, shutdown_flag: list[bool]) -> bool:
     """Wait up to _DB_RETRY_MAX_SECONDS for the daemon to create the DB.
 
@@ -4258,19 +4033,16 @@ def _log_model_profiles(vlm_cfg) -> None:
         logger.debug("Model profile detection failed", exc_info=True)
 
 
-def _start_vlm_worker(vlm_cfg) -> tuple:
-    """The fallback VLM worker, remote (a cloud API) or local (a detected
-    backend): ``(worker or None, available)``."""
-    from agenthandover_worker.vlm_worker import VLMBackend, VLMConfig, VLMWorker
+def _vlm_backend_available(vlm_cfg) -> bool:
+    """Whether the configured VLM backend, remote (a cloud API) or local (a
+    detected backend), can be built: ``vlm_available`` in
+    ``worker-status.json``.  The backend is not kept: no worker job uses it
+    (the SOP text enhancer builds its own, ``sop_enhancer.create_llm_backend``)."""
+    from agenthandover_worker.vlm_worker import VLMBackend, VLMConfig, create_backend
 
     provider = vlm_cfg.provider
     if vlm_cfg.mode == "remote" and provider:
-        logger.info(
-            "VLM mode: remote (provider=%s). "
-            "⚠️  Screenshots will be sent to %s cloud API for analysis.",
-            provider,
-            provider,
-        )
+        logger.info("VLM mode: remote (provider=%s)", provider)
         remote_backend = {
             "openai": VLMBackend.OPENAI_COMPAT,
             "anthropic": VLMBackend.ANTHROPIC,
@@ -4278,7 +4050,7 @@ def _start_vlm_worker(vlm_cfg) -> tuple:
         }.get(provider)
         if remote_backend is None:
             logger.error("Unknown VLM provider: %s", provider)
-            return None, False
+            return False
         try:
             api_key_env = vlm_cfg.api_key_env
             # The env var (shell profiles), else the macOS Keychain (set by
@@ -4292,7 +4064,7 @@ def _start_vlm_worker(vlm_cfg) -> tuple:
                         "(set by onboarding) for provider=%s",
                         provider,
                     )
-            worker = VLMWorker(config=VLMConfig(
+            create_backend(VLMConfig(
                 backend=remote_backend,
                 mode="remote",
                 provider=provider,
@@ -4301,21 +4073,19 @@ def _start_vlm_worker(vlm_cfg) -> tuple:
                 api_key_env=api_key_env or None,
             ))
             logger.info(
-                "VLM worker initialized: remote/%s/%s", provider, vlm_cfg.model or "(default)",
+                "VLM backend available: remote/%s/%s", provider, vlm_cfg.model or "(default)",
             )
-            return worker, True
+            return True
         except Exception:
-            logger.warning("Failed to initialize remote VLM worker", exc_info=True)
-            return None, False
+            logger.warning("Failed to initialize the remote VLM backend", exc_info=True)
+            return False
 
     from agenthandover_worker.setup_vlm import check_vlm_available
 
     vlm_status = check_vlm_available()
     if not any(vlm_status.values()):
-        logger.info(
-            "VLM not installed. For better native app observation, run: agenthandover-setup-vlm"
-        )
-        return None, False
+        logger.info("VLM not installed (agenthandover-setup-vlm sets one up)")
+        return False
     logger.info("VLM backend(s) detected — attempting initialization")
     try:
         backend_type = None
@@ -4339,25 +4109,25 @@ def _start_vlm_worker(vlm_cfg) -> tuple:
         if backend_type is None:
             logger.warning(
                 "VLM backend(s) detected but none usable (check config). "
-                "VLM features disabled."
+                "VLM unavailable."
             )
-            return None, False
+            return False
         # [vlm] model, else the annotation model (the config loader fills
         # that from the tier table when unset).
         config_model = vlm_cfg.model or vlm_cfg.annotation_model
         vlm_kwargs: dict = {"backend": backend_type}
         if config_model:
             vlm_kwargs["model_name"] = config_model
-        worker = VLMWorker(config=VLMConfig(**vlm_kwargs))
+        create_backend(VLMConfig(**vlm_kwargs))
         logger.info(
-            "VLM worker initialized (%s, model=%s) — enhanced native app observation enabled",
+            "VLM backend available (%s, model=%s)",
             backend_type.value,
             config_model or "(default)",
         )
-        return worker, True
+        return True
     except Exception:
-        logger.warning("Failed to initialize VLM worker", exc_info=True)
-        return None, False
+        logger.warning("Failed to initialize the VLM backend", exc_info=True)
+        return False
 
 
 def _start_query_api(ctx) -> "object | None":
@@ -4501,7 +4271,7 @@ def main(argv: list[str] | None = None) -> None:
     )
     try:
         _log_model_profiles(cfg.vlm)
-        ctx.vlm_worker, ctx.vlm_available = _start_vlm_worker(cfg.vlm)
+        ctx.vlm_available = _vlm_backend_available(cfg.vlm)
         ctx.query_api_server = _start_query_api(ctx)
         export.heartbeat(ctx)
         logger.info("Connected to database, entering main loop")
