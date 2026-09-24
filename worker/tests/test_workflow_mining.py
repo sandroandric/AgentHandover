@@ -877,6 +877,81 @@ class TestSkillsAndObservations:
         wm.review_candidates(db, now=now, kb=kb)
         assert len(kb.get_procedure("payout")["branch_hypotheses"]) == 2
 
+    def _draft(self, db: WorkerDB, promoted: list[dict]) -> str:
+        """The payout routine in the review queue as passive discovery
+        leaves it: a draft template citing the observations it came from."""
+        template = {
+            "slug": "payout", "title": PAYOUT_SKILL["title"],
+            "steps": [
+                {"step": s["action"], "app": s["app"], "parameters": {"location": s["location"]}}
+                for s in PAYOUT_SKILL["steps"]
+            ],
+            "episode_count": len(promoted),
+            "observations": wm.observation_pointers(promoted),
+        }
+        return db.save_generated_sop(
+            "payout", PAYOUT_SKILL["title"], "passive", template, auto_approve=False,
+        )
+
+    def test_a_draft_learns_from_later_runs_as_evidence_only(
+        self, db: WorkerDB, write_conn, tmp_path: Path,
+    ) -> None:
+        """WP-F12: a draft nobody approved yet still learns from its later
+        runs (the ledger's evidence, branches); nothing reaches the
+        knowledge base until the user approves it."""
+        from agenthandover_worker.procedure_schema import sop_to_procedure
+
+        kb = _kb(tmp_path)
+        sop_id = self._draft(db, self._promote(db))
+        for n, day in enumerate((8, 9)):
+            start = datetime(2026, 9, day, 9, tzinfo=timezone.utc)
+            _insert(write_conn, _session_events(f"detour{n}", start, steps=DETOUR))
+        now = datetime(2026, 9, 10, tzinfo=timezone.utc)
+        assert wm.record_observations(db, db.get_annotated_events_in_window(hours=48, now=now), now=now) == 2
+        assert wm.review_candidates(db, now=now, kb=kb) == []
+
+        record = db.get_generated_sop(sop_id)
+        assert record["status"] == "draft"
+        assert kb.get_procedure("payout") is None  # nothing exported
+        template = record["sop_json"]
+        detours = [o["obs_id"] for o in db.get_workflow_observations(since=datetime(2026, 9, 8, tzinfo=timezone.utc))]
+        assert [o["obs_id"] for o in template["observations"]][-2:] == detours
+        assert template["episode_count"] == 5
+        assert [h["step_index"] for h in template["branch_hypotheses"]] == [2, 2]
+        [branch] = template["branches"]
+        assert {e["id"] for e in branch["evidence"] if e["kind"] == "instance"} == set(detours)
+        # Once approved, the procedure holds all of it.
+        proc = sop_to_procedure(template)
+        assert len(proc["evidence"]["observations"]) == 5
+        assert proc["branches"] == [branch] and len(proc["branch_hypotheses"]) == 2
+        # Learned once: a later pass adds nothing.
+        wm.review_candidates(db, now=now, kb=kb)
+        assert len(db.get_generated_sop(sop_id)["sop_json"]["observations"]) == 5
+
+    def test_a_recognised_run_of_a_draft_is_its_evidence(
+        self, db: WorkerDB, write_conn,
+    ) -> None:
+        """Live recognition attaches a run of a draft as it does a Skill's."""
+        sop_id = self._draft(db, self._promote(db))
+        start = datetime(2026, 9, 8, 9, tzinfo=timezone.utc)
+        events = _session_events("live", start)
+        _insert(write_conn, events)
+        assert wm.recognize(db, None, now=start + timedelta(minutes=4)) == "payout"
+        last = start + timedelta(seconds=90 * (len(events) - 1))
+        assert wm.recognize(db, None, now=last + timedelta(minutes=10, seconds=30)) is None
+        (obs,) = db.get_workflow_observations(since=start)
+        template = db.get_generated_sop(sop_id)["sop_json"]
+        assert template["observations"][-1]["obs_id"] == obs["obs_id"]
+        assert db.get_generated_sop(sop_id)["status"] == "draft"
+
+    def test_an_approved_skill_is_not_learned_on_as_a_draft(self, db: WorkerDB) -> None:
+        promoted = self._promote(db)
+        sop_id = self._draft(db, promoted)
+        db.update_sop_status(sop_id, "approved")
+        later = _obs("2026-09-08", key="a")
+        assert db.save_workflow_observation(later)
+        assert not wm.learn_on_draft(db, "payout", [later])
+
     def test_an_instance_that_follows_the_steps_adds_no_hypothesis(
         self, db: WorkerDB, write_conn, tmp_path: Path,
     ) -> None:

@@ -358,6 +358,9 @@ def sop_to_procedure(sop_template: dict) -> dict:
     # Carry over enriched v3 fields from variant detection (Phase A)
     if sop_template.get("branches"):
         procedure["branches"] = sop_template["branches"]
+    # Divergences a draft's later runs showed (``workflow_mining.learn_on_draft``).
+    if sop_template.get("branch_hypotheses"):
+        procedure["branch_hypotheses"] = list(sop_template["branch_hypotheses"])
 
     # A passively mined workflow: its observations (pointers into the
     # workflow_observations log), recurrence and value.

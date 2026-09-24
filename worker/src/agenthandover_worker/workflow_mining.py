@@ -51,7 +51,10 @@ Skills and their observations (``promoted_slug``):
   is recorded as the Skill's observation as soon as it ends.
 
 Every observation attached to an existing Skill is aligned to its steps
-for divergence branches (:mod:`branch_mining`).
+for divergence branches (:mod:`branch_mining`).  A draft (a Skill in the
+review queue, not yet approved) learns the same way, as evidence only: its
+later runs are added to its template (:func:`learn_on_draft`), and nothing
+is exported until the user approves it.
 """
 
 from __future__ import annotations
@@ -614,10 +617,11 @@ def attach_observations(
     db.set_observations_promoted([o["obs_id"] for o in observations], slug)
     for obs in observations:
         obs["promoted_slug"] = slug
-    if kb is None:
+    proc = kb.get_procedure(slug) if kb is not None else None
+    if proc is None:
+        learn_on_draft(db, slug, observations)
         return
-    proc = kb.get_procedure(slug)
-    if proc is not None and add_instances(proc, observations):
+    if add_instances(proc, observations):
         kb.save_procedure(proc)  # saving recomputes ``learned`` and the ledger
     from agenthandover_worker.branch_mining import mine_observations
 
@@ -625,6 +629,61 @@ def attach_observations(
         mine_observations(db, kb, slug, observations)
     except Exception:
         logger.warning("Branch mining failed for '%s'", slug, exc_info=True)
+
+
+def learn_on_draft(
+    db: "WorkerDB", slug: str, observations: list[dict],
+    *, recurrence: dict | None = None, value: dict | None = None,
+) -> bool:
+    """A draft Skill (in the review queue, not approved) learns from its
+    later runs as evidence only: *observations* are added to its template's
+    ``observations`` (what the ledger's trigger, done and verification are
+    computed from when it is approved), their divergences become its branch
+    hypotheses and branches, and *recurrence* / *value*, when given,
+    replace the template's.  Nothing is exported: the draft stays a draft
+    until the user approves it.  Returns whether the template changed."""
+    record = db.get_generated_sop_by_slug(slug)
+    if record is None or record.get("status") != "draft":
+        return False
+    template = record.get("sop_json")
+    if not isinstance(template, dict) or not template:
+        return False
+    changed = False
+    cited = template.setdefault("observations", [])
+    held = {str(o.get("obs_id")) for o in cited if isinstance(o, dict) and o.get("obs_id")}
+    new = [o for o in observations if o["obs_id"] not in held]
+    if new:
+        cited.extend(observation_pointers(new))
+        template["episode_count"] = max(int(template.get("episode_count") or 0), len(cited))
+        changed = True
+        from agenthandover_worker.branch_mining import record_divergences
+        from agenthandover_worker.procedure_schema import sop_to_procedure
+
+        # Divergences are found against the draft's steps as the approved
+        # procedure will hold them (same order, ``app`` and ``location``).
+        view = {
+            "steps": sop_to_procedure(template)["steps"],
+            "branch_hypotheses": list(template.get("branch_hypotheses") or []),
+            "branches": list(template.get("branches") or []),
+        }
+        for obs in new:
+            ids = json.loads(obs.get("event_ids_json") or "[]")
+            frames = [f for f in map(AnnotatedFrame.from_event, db.get_events_by_ids(ids)) if f]
+            frames.sort(key=lambda f: f.timestamp)
+            if frames:
+                record_divergences(view, obs["obs_id"], frames)
+        if view["branch_hypotheses"]:
+            template["branch_hypotheses"] = view["branch_hypotheses"]
+        if view["branches"]:
+            template["branches"] = view["branches"]
+    for key, update in (("recurrence", recurrence), ("value", value)):
+        if update and template.get(key) != update:
+            template[key] = update
+            changed = True
+    if changed:
+        db.update_sop_json(slug, template)
+        logger.info("Draft '%s' learned from %d later run(s)", slug, len(new))
+    return changed
 
 
 def skill_signature(proc: dict) -> list[tuple[str, str, str]]:
@@ -956,13 +1015,18 @@ def recurring_workflows(
 
 def refresh_skills(db: "WorkerDB", kb: "KnowledgeBase", *, now: datetime) -> int:
     """Write each promoted workflow's recurrence, value and observation
-    count onto its procedure in the knowledge base.  Returns the number of
-    procedures updated."""
+    count onto its procedure in the knowledge base (a draft's recurrence
+    and value onto its template, :func:`learn_on_draft`).  Returns the
+    number of procedures and drafts updated."""
     updated = 0
     for workflow in recurring_workflows(db, now=now, kb=kb):
         slug = workflow["slug"]
         proc = kb.get_procedure(slug) if slug else None
         if proc is None:
+            if slug and learn_on_draft(
+                db, slug, [], recurrence=workflow["recurrence"], value=workflow["value"],
+            ):
+                updated += 1
             continue
         if workflow["recurrence"]:
             proc["recurrence"] = workflow["recurrence"]
