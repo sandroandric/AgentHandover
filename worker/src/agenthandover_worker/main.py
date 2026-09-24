@@ -4210,8 +4210,7 @@ def main(argv: list[str] | None = None) -> None:
     from agenthandover_worker.context import build_context, start
     from agenthandover_worker.stages import export
 
-    # A config still on a tier's earlier default models moves to the tier's
-    # current ones, then one read of config.toml for the run.
+    # The upgrade's model switch (once Ollama serves the models), then one read.
     _migrate_vlm_config()
     cfg = load_config()
     if args.adapter is None:
