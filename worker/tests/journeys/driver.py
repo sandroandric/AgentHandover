@@ -22,7 +22,8 @@ the loop body's processors in the loop's order:
    ``_process_focus_sessions_v2`` (or the v1 path when the v2 pipeline is
    off), then ``_process_passive_discovery`` every 2 hours of *clock* time
    (the timer starts when the worker is built, as main() seeds it at loop
-   entry) while no focus session is pending, charged to the budget, then
+   entry) while no focus session is pending, charged to the budget,
+   ``workflow_mining.recognize`` every 2 minutes of *clock* time, then
    ``ModelScheduler.end_generation``;
 6. ``_write_sops_index``;
 7. the status heartbeat, ``_write_worker_status`` with the running totals,
@@ -141,6 +142,7 @@ class JourneyWorker:
         self.state_dir = wm._status_dir()
         self.screenshots_dir = self.state_dir / "screenshots"
         self._last_passive_discovery = clock.now()
+        self._last_recognition = clock.now()
         # A worker is one process: its usage counters start at zero.
         ops_telemetry.MODEL_USAGE.reset()
         ops_telemetry.COMPUTE.reset()
@@ -535,6 +537,12 @@ class JourneyWorker:
             self._last_passive_discovery = self.clock.now()
             if passive_sops > 0:
                 wm._write_sops_index(db, self.knowledge_base)
+        # As main(): live recognition every two minutes, model-free.
+        if self.clock.now() - self._last_recognition >= timedelta(
+            seconds=wm.workflow_mining.RECOGNIZE_INTERVAL_SECONDS,
+        ):
+            wm.workflow_mining.recognize(db, self.knowledge_base, now=self.clock.now())
+            self._last_recognition = self.clock.now()
         # As main(): the heartbeat and the index, then (after the daily
         # jobs main() runs here) the end of the generation phase.
         self._write_status(unprocessed, summary, focus_sops, passive_sops, ann_stats, diff_stats)

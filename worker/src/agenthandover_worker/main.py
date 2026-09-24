@@ -1814,6 +1814,15 @@ def _process_focus_sessions_v2(
             db, state_dir, session_id=session_id, title=title,
             result=result, procedure=procedure_dict,
         )
+        # The recording (its frames as annotated now) is also an
+        # observation of its Skill, so passive sessions of the same
+        # workflow are attributed to it.
+        try:
+            workflow_mining.record_focus_observation(
+                db, db.get_focus_session_events(session_id), slug, title,
+            )
+        except Exception:
+            logger.warning("Focus observation for '%s' not recorded", slug, exc_info=True)
         if behavioral_synthesizer is not None:
             try:
                 # Prefer the rich per-frame observations stashed by the
@@ -4910,6 +4919,7 @@ def main(argv: list[str] | None = None) -> None:
         # Timers start now; once-per-day jobs are keyed on the local date
         # they last ran, persisted so a restart does not rerun them.
         _last_passive_discovery = time.monotonic()
+        _last_recognition = time.monotonic()
         daily_jobs_date = db.get_state(DAILY_JOBS_STATE_KEY) or ""
         annotation_budget.load(db.get_state(ANNOTATION_BUDGET_STATE_KEY))
         saved_budget_json = annotation_budget.to_json()
@@ -5350,6 +5360,20 @@ def main(argv: list[str] | None = None) -> None:
                             exc_info=True,
                         )
                     _last_passive_discovery = _now_mono_pd
+
+                # Live recognition (model-free): tag the session in
+                # progress with the Skill it begins, record it at its end.
+                if v2_schema_ok and (
+                    time.monotonic() - _last_recognition
+                    >= workflow_mining.RECOGNIZE_INTERVAL_SECONDS
+                ):
+                    try:
+                        workflow_mining.recognize(
+                            db, knowledge_base, now=datetime.now(timezone.utc),
+                        )
+                    except Exception:
+                        logger.warning("Live recognition failed", exc_info=True)
+                    _last_recognition = time.monotonic()
 
                 # What passive model use spent survives a restart.
                 if annotation_budget.to_json() != saved_budget_json:
