@@ -17,6 +17,11 @@ session), :func:`instance_signals` reads the raw events around it:
 - ``corrections``: the fields whose value the user corrected
   (``correction_detector.field_corrections``).
 
+AgentHandover's own windows are never part of a run, and the user's
+privacy zones hold here as everywhere: a blocked window is left out, a
+metadata-only one gives its app and nothing it showed.  Titles, subjects
+and values are redacted.
+
 The signals are stored with the instance: ``evidence.observations[i].signals``
 on the procedure, ``evidence_json["signals"]`` on a passive observation
 row.  :func:`learn` turns the instances' signals into ``proc["learned"]``:
@@ -41,6 +46,7 @@ value here is a model's guess: all of it is read from recorded events.
 
 from __future__ import annotations
 
+import json
 import re
 from collections import Counter
 from datetime import datetime, timedelta
@@ -56,6 +62,11 @@ from agenthandover_worker.event_helpers import (
     parse_annotation,
     parse_json_field,
     parse_timestamp,
+)
+from agenthandover_worker.privacy_zones import (
+    ObservationTier,
+    PrivacyZoneChecker,
+    PrivacyZoneConfig,
 )
 from agenthandover_worker.redaction import redact
 
@@ -233,16 +244,42 @@ def _commit(event: dict) -> dict | None:
 # ---------------------------------------------------------------------------
 
 
-def instance_signals(events: list[dict], *, start: datetime, end: datetime) -> dict:
+def _within_privacy(event: dict, privacy: PrivacyZoneChecker | None) -> dict | None:
+    """*event* as its privacy zone lets it be used: None when blocked
+    (by the stored annotation status or by *privacy*), only its app and
+    kind when metadata-only, else unchanged."""
+    status = event.get("annotation_status")
+    tier = privacy.check_event(event) if privacy is not None else ObservationTier.FULL
+    if status == "privacy_blocked" or tier is ObservationTier.BLOCKED:
+        return None
+    if status == "metadata_only" or tier is ObservationTier.METADATA_ONLY:
+        app_id = parse_json_field(event, "window_json").get("app_id")
+        return {
+            "id": event.get("id"),
+            "timestamp": event.get("timestamp"),
+            "kind_json": json.dumps({"type": _kind(event)[0]}),
+            "window_json": json.dumps({"app_id": app_id}) if app_id else None,
+        }
+    return event
+
+
+def instance_signals(
+    events: list[dict], *, start: datetime, end: datetime,
+    privacy: PrivacyZoneChecker | None = None,
+) -> dict:
     """The signals of the run from *start* to *end* (its first and last
     frame), read from *events*: every raw event from
     :data:`LEAD_IN_SECONDS` before *start* to :data:`VERIFY_SECONDS` after
     *end* (:meth:`WorkerDB.get_events_between`).  AgentHandover's own
-    windows are left out."""
+    windows are left out; privacy zones (*privacy*, and the zone the
+    worker already stored on the row) drop a blocked event and reduce a
+    metadata-only one to its app."""
     timed = sorted(
         (
-            (when, e) for e in events
-            if (when := parse_timestamp(e.get("timestamp"))) is not None and not is_own_event(e)
+            (when, kept) for e in events
+            if (when := parse_timestamp(e.get("timestamp"))) is not None
+            and not is_own_event(e)
+            and (kept := _within_privacy(e, privacy)) is not None
         ),
         key=lambda pair: pair[0],
     )
@@ -310,11 +347,13 @@ def _check_key(item: dict) -> tuple[str, str]:
 
 def signals_from_db(db: "WorkerDB", start: datetime, end: datetime) -> dict:
     """:func:`instance_signals` of the run from *start* to *end*, over the
-    events *db* holds around it."""
+    events *db* holds around it, within the privacy zones the user
+    configured."""
     events = db.get_events_between(
         start - timedelta(seconds=LEAD_IN_SECONDS), end + timedelta(seconds=VERIFY_SECONDS),
     )
-    return instance_signals(events, start=start, end=end)
+    privacy = PrivacyZoneChecker(config=PrivacyZoneConfig.configured())
+    return instance_signals(events, start=start, end=end, privacy=privacy)
 
 
 def run_signals_from_db(db: "WorkerDB", run_events: list[dict]) -> dict | None:

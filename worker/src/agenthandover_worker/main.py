@@ -4415,13 +4415,7 @@ def main(argv: list[str] | None = None) -> None:
     try:
         _pz_raw = cfg.privacy_zones
         if _pz_raw:
-            _pz_cfg = PrivacyZoneConfig(
-                full_observation=_pz_raw.get("full_observation", []),
-                metadata_only=_pz_raw.get("metadata_only", []),
-                blocked=_pz_raw.get("blocked", []),
-                blocked_urls=_pz_raw.get("blocked_urls", []),
-                auto_pause=_pz_raw.get("auto_pause", []),
-            )
+            _pz_cfg = PrivacyZoneConfig.from_zones(_pz_raw)
             logger.info(
                 "Privacy zones loaded: %d blocked, %d metadata_only, %d blocked_urls",
                 len(_pz_cfg.blocked), len(_pz_cfg.metadata_only), len(_pz_cfg.blocked_urls),

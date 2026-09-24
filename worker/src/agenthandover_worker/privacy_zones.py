@@ -80,6 +80,23 @@ class PrivacyZoneConfig:
     blocked_urls: list[str] = field(default_factory=list)
     auto_pause: list[str] = field(default_factory=list)
 
+    @classmethod
+    def from_zones(cls, zones: dict | None) -> "PrivacyZoneConfig":
+        """The config from ``config.toml``'s ``[privacy.zones]`` table
+        (``Config.privacy_zones``); defaults for a missing table."""
+        zones = zones if isinstance(zones, dict) else {}
+        return cls(**{
+            name: list(zones.get(name) or [])
+            for name in ("full_observation", "metadata_only", "blocked", "blocked_urls", "auto_pause")
+        })
+
+    @classmethod
+    def configured(cls) -> "PrivacyZoneConfig":
+        """The zones the user configured in ``config.toml``."""
+        from agenthandover_worker.config import load_config
+
+        return cls.from_zones(load_config().privacy_zones)
+
 
 class PrivacyZoneChecker:
     """Checks events against privacy zones and returns the applicable tier.

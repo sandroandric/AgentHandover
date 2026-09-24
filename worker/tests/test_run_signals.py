@@ -228,6 +228,28 @@ def test_a_click_labelled_send_is_a_commit() -> None:
     assert rs._commit(rows.rows[2]) is None  # a long label is not a control's name
 
 
+def test_privacy_zones_hold_for_the_lead_in(tmp_path: Path) -> None:
+    """A blocked window (a default one, 1Password; one the worker already
+    marked blocked) never reaches the signals; a metadata-only window
+    gives its app and nothing it showed."""
+    rows = Rows()
+    rows.frame(DAY - timedelta(minutes=4), "1Password", "Bank login - 1Password", work=False)
+    blocked = rows.frame(DAY - timedelta(minutes=3), "Mail", "Diagnosis results - Inbox", work=False)
+    private = rows.frame(DAY - timedelta(minutes=2), "Messages", "Dana: the password is x", work=False)
+    rows.frame(DAY, "Google Chrome", "News", NEWS)
+    rows.frame(DAY + timedelta(minutes=1), "Google Chrome", "News", NEWS)
+    for row in rows.rows:
+        if row["id"] == blocked:
+            row["annotation_status"] = "privacy_blocked"
+        if row["id"] == private:
+            row["annotation_status"] = "metadata_only"
+    with WorkerDB(rows.write(tmp_path / "events.db")) as db:
+        signals = rs.signals_from_db(db, DAY, DAY + timedelta(minutes=1))
+    assert signals["lead_in"] == [
+        {"app": "Messages", "place": "", "title": "", "event_id": private},
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Three runs fill the ledger
 # ---------------------------------------------------------------------------

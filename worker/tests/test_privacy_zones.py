@@ -1007,3 +1007,11 @@ def test_default_lists_match_the_daemon() -> None:
     assert _rust_string_list(rust, "DEFAULT_BLOCKED_URLS") == set(
         PrivacyZoneChecker._DEFAULT_BLOCKED_URLS
     )
+
+
+def test_zone_config_from_the_config_table() -> None:
+    """``[privacy.zones]`` as ``Config.privacy_zones`` holds it: every list
+    read, a missing table or key the default."""
+    cfg = PrivacyZoneConfig.from_zones({"blocked": ["Slack"], "blocked_urls": ["*bank*"]})
+    assert (cfg.blocked, cfg.blocked_urls, cfg.metadata_only) == (["Slack"], ["*bank*"], [])
+    assert PrivacyZoneConfig.from_zones(None) == PrivacyZoneConfig()
