@@ -1222,7 +1222,8 @@ class TestFocusDraftSavedAfterGeneration:
         processor._last_rich_observations = []
         seen = {}
 
-        def synthesize(slug_arg, procedure, observations, force=False, instance_ids=None):
+        def synthesize(slug_arg, procedure, observations, force=False, instance_ids=None,
+                       instance_lists=None):
             # Synthesis runs after the draft is on disk and in the queue.
             seen["records"] = _records(db_path, slug)
             seen["draft"] = json.loads((tmp_path / FOCUS_DRAFT_FILE).read_text())

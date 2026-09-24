@@ -689,9 +689,11 @@ def test_the_journeys_skip_markers_keys_are_named():
     prune never turns a running journey into a skipped one."""
     from journeys.focus_run import FOCUS_SOP_MISSING_KEYS
     from journeys.test_j_compute import COLD_CLASSIFIER_KEY, F6_MISSING_KEYS
+    from journeys.test_j_ledger import EXTRA_RUN_FIRST_KEYS, LEDGER_PENDING_KEYS
 
     named = cassette_module.keys_named_in_journeys()
     assert {*FOCUS_SOP_MISSING_KEYS, *F6_MISSING_KEYS, COLD_CLASSIFIER_KEY} <= named
+    assert {*EXTRA_RUN_FIRST_KEYS.values(), *LEDGER_PENDING_KEYS.values()} <= named
 
 
 def test_prune_refuses_a_log_without_a_journey_run(tmp_path, capsys):

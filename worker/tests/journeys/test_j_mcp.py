@@ -108,13 +108,46 @@ def _stale_observe_procedure(now) -> dict:
     }
 
 
-def _journey(events_db, worker, clock, temp_home, cassette):
+DRAFTS_LINE = "Daily news - saved in Drafts"
+
+
+def _mine_a_branch_at_the_first_step(proc: dict) -> dict:
+    """Two later runs of the Skill that start from a saved draft in Mail
+    instead of the Skill's first step, divergence-mined as the worker mines
+    another run (``branch_mining.record_divergences``): the second agreeing
+    run promotes the detour to a branch (``source: "divergence"``) at step
+    1, a decision the Skill holds as a hypothesis from evidence."""
+    from agenthandover_worker import branch_mining
+    from agenthandover_worker.task_segmenter import AnnotatedFrame
+
+    places = [(s.get("app") or "", s.get("location") or "") for s in proc["steps"]
+              if s.get("app") or s.get("location")]
+    for run_id in ("mined-run-1", "mined-run-2"):
+        seq = [("Mail", "Drafts"), *places[1:]]
+        frames = [
+            AnnotatedFrame(
+                event_id=f"{run_id}-{i}", timestamp=f"2026-09-2{i // 10}T08:{i % 60:02d}:00Z",
+                annotation={"app": app, "location": location,
+                            "_screen_text": DRAFTS_LINE if app == "Mail" else ""},
+                app=app, location=location,
+            )
+            for i, (app, location) in enumerate(seq)
+        ]
+        branch_mining.record_divergences(proc, run_id, frames)
+    [branch] = [b for b in proc.get("branches") or [] if b.get("source") == "divergence"]
+    assert branch["step_index"] == 0 and DRAFTS_LINE in branch["condition"], branch
+    return proc
+
+
+def _journey(events_db, worker, clock, temp_home, cassette, *, mined_branch: bool = False):
     run = start_focus_run(
         events_db=events_db, worker=worker, clock=clock,
         temp_home=temp_home, cassette=cassette,
     )
     slug = tick_until_skill(run, clock)["id"]
     kb = run.worker.knowledge_base
+    if mined_branch:
+        kb.save_procedure(_mine_a_branch_at_the_first_step(kb.get_procedure(slug)))
     kb.save_procedure(_stale_observe_procedure(clock.now()))
     approve_for_agents(run, clock, slug)
     before = kb.get_procedure(slug)
@@ -186,14 +219,16 @@ def test_mcp_deviation_asks_the_user_in_the_next_digest(
     events_db, worker, clock, temp_home, cassette,
 ) -> None:
     """WP-L5: the agent deviated at a step the Skill's decision (a
-    hypothesis, from one recording) applies at.  The decision is no longer
-    trusted: the ledger holds it unknown on the run's evidence, the next
-    digest asks the user how they decide there, and the next agent is told
-    to ask instead of assuming."""
+    hypothesis, from the branch two agreeing runs made) applies at.  The
+    decision is no longer trusted: the ledger holds it unknown on the run's
+    evidence, the next digest asks the user how they decide there, and the
+    next agent is told to ask instead of assuming.  (A single recording
+    holds no decision: the synthesis words branches, it never adds them.)"""
     kb, slug, before, after, session, run = _journey(
-        events_db, worker, clock, temp_home, cassette,
+        events_db, worker, clock, temp_home, cassette, mined_branch=True,
     )
     assert before["knowledge"]["decisions"]["status"] == "hypothesis"
+    assert [b["source"] for b in before["branches"]] == ["divergence"]
     execution_id = session.started["execution_id"]
     decisions = after["knowledge"]["decisions"]
     assert decisions["status"] == "unknown" and decisions["source"] == "agent"
@@ -220,9 +255,13 @@ def test_mcp_deviation_asks_the_user_in_the_next_digest(
     [section] = [s for s in saved["sections"] if s["title"] == "Questions for you"]
     [question] = [item for item in section["items"] if item["question_id"] == run_question]
     assert "Opened the digest from Drafts instead" in question["title"]
-    # It is the Skill's decisions question: the general one is not asked.
+    # It is the Skill's decisions question: the daily batch does not ask
+    # the general one.  (The focus window asked it after the recording,
+    # when nothing had been learned about decisions yet; the branch came
+    # from the later runs.)
     assert f"slot:{slug}:decisions" not in [
-        row["question_id"] for row in run.worker.db.get_micro_questions()
+        row["question_id"]
+        for row in run.worker.db.get_micro_questions(channel=questions.CHANNEL_CARD)
     ]
 
     # The next agent gets the question in its packet, and the decision as

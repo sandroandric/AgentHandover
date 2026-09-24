@@ -1005,6 +1005,63 @@ class FocusProcessor:
             owner["click_targets"].append({**click, "page_dom_nodes": page.get("dom_nodes")})
 
 
+def session_list_choices(db, events: list[dict]) -> list[list[dict]]:
+    """The lists the user picked from in a focus session, one per Chrome
+    click on a list row (:func:`contrast.click_choice`), in time order.
+
+    *events* are the session's own events (``get_focus_session_events``).
+    Extension events carry no ``focus_session_id``, so the clicks are found
+    by time, from the session's first event to its last (with the DOM
+    tolerance either side, as the keyframes' clicks are).  The list is the
+    page the click was made on: the extension's DOM snapshot of the click's
+    URL taken at or before it, within the DOM tolerance.  The entries'
+    numbers come from the OCR of the last focus frame at or before the
+    click.  A click that hit no row of that page (a button, a text box)
+    picks from no list.  Labels are redacted and screened for injection:
+    the synthesis prompt quotes the chosen ones.
+    """
+    from agenthandover_worker.contrast import click_choice
+    from agenthandover_worker.redaction import redact
+    from agenthandover_worker.scene_annotator import guard_screen_text
+
+    frames: list[tuple] = []
+    for event in events:
+        when = parse_timestamp(event.get("timestamp"))
+        metadata = parse_json_field(event, "metadata_json")
+        ocr = metadata.get("ocr") if isinstance(metadata.get("ocr"), dict) else {}
+        if when is not None and metadata.get("focus_capture"):
+            frames.append((when, str(ocr.get("full_text") or "")))
+    times = [t for e in events if (t := parse_timestamp(e.get("timestamp"))) is not None]
+    if not times:
+        return []
+    slack = timedelta(seconds=_DOM_TOLERANCE_SEC)
+    clicks = db.get_click_intents(
+        (min(times) - slack).isoformat(), (max(times) + slack).isoformat(),
+    )
+    choices: list[list[dict]] = []
+    for click in clicks:
+        when = parse_timestamp(click.get("timestamp"))
+        url = str(click.get("url") or "")
+        if when is None or not url:
+            continue
+        page = next((
+            snap for snap in db.get_dom_snapshots_near_timestamp(
+                str(click.get("timestamp") or ""), url, tolerance_sec=_DOM_TOLERANCE_SEC,
+            )
+            if snap.get("url") == url
+            and (taken := parse_timestamp(snap.get("timestamp"))) is not None and taken <= when
+        ), None)
+        if page is None:
+            continue
+        ocr_text = next((text for t, text in reversed(frames) if t <= when), "")
+        items = click_choice(page, click.get("target"), ocr_text)
+        for item in items:
+            item["label"] = guard_screen_text(redact(item["label"]))[0]
+        if items:
+            choices.append(items)
+    return choices
+
+
 def recorded_observations(db, proc: dict) -> tuple[list[list[dict]], list[str]]:
     """The behavioral synthesizer's observations for *proc*, one timeline
     per observation record, and the instance id of each.

@@ -120,20 +120,25 @@ def test_the_live_runs_flags_become_one_question_each() -> None:
     ]
 
 
-def test_dropped_steps_outrank_every_slot_but_an_unknown_required_one() -> None:
+def test_step_questions_outrank_every_slot_but_an_unknown_required_one() -> None:
+    """A concrete step question fixes what the agent will execute; a
+    generic optional slot does not.  So every step question, the typed
+    line included, comes after the unknown required slots and before the
+    unknown optional slots and the hypotheses."""
     proc = _live_run_procedure()
     ranked = qs.next_questions([proc], 20)
     kinds = [q.id.split(":")[2] if q.kind == qs.KIND_STEP else q.slot for q in ranked]
     ledger = derive_knowledge(proc)
-    unknown_required = [s for s in ("goal", "done_criteria") if ledger[s]["status"] == "unknown"]
+    unknown_required = [s for s in qs.REQUIRED_SLOTS if ledger[s]["status"] == "unknown"]
     assert kinds[:len(unknown_required)] == unknown_required
     rest = kinds[len(unknown_required):]
-    assert rest[:2] == ["dropped", "dropped"]
-    # A typed line the model missed comes before the hypotheses.
-    hypotheses = [s for s in qs.ASKED_SLOTS if ledger[s]["status"] == "hypothesis"]
-    assert hypotheses
-    assert max(rest.index(k) for k in ("added", "input")) < min(rest.index(s) for s in hypotheses)
-    # The dropped steps in step order; each question once.
+    assert rest[:4] == ["dropped", "dropped", "input", "added"]
+    slots = [k for k in rest if k in qs.ASKED_SLOTS]
+    unknown_optional = [s for s in slots if ledger[s]["status"] == "unknown"]
+    hypotheses = [s for s in slots if ledger[s]["status"] == "hypothesis"]
+    assert unknown_optional and hypotheses
+    assert rest[4:] == unknown_optional + hypotheses
+    # Each question once.
     assert len(set(q.id for q in ranked)) == len(ranked)
 
 

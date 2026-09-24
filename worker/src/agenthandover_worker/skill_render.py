@@ -539,7 +539,13 @@ def body_sections(proc: dict) -> list[str]:
         if not isinstance(br, dict):
             continue
         if br.get("condition"):
-            decisions.append(f"- If {br['condition']}: {br.get('action', '')}".rstrip(": "))
+            # A mined branch the synthesis worded: the words, then the
+            # screens the runs shared (the evidence).
+            condition = (
+                f"{br['worded_condition']} ({br['condition']})"
+                if br.get("worded_condition") else br["condition"]
+            )
+            decisions.append(f"- If {condition}: {br.get('action', '')}".rstrip(": "))
         elif br.get("alternatives"):
             alts = ", ".join(
                 str(a[0] if isinstance(a, (list, tuple)) else a)

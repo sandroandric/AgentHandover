@@ -157,10 +157,9 @@ Steps refer to inputs as `{{name}}`.
 
 ## Decisions
 
-- If User has collected exactly three distinct articles covering different tech domains.: User stops collecting, copies the entire note content, and proceeds to post to Slack.
 - Open question the user did not answer: "What starts this task?" Ask the user; do not guess.
+- Open question the user did not answer: "How do you choose between the options in this task?" Ask the user; do not guess.
 - Open question the user did not answer: "How do you check that this task worked?" Ask the user; do not guess.
-- Open question the user did not answer: "What is this task for?" Ask the user; do not guess.
 
 ## Guardrails
 
@@ -182,6 +181,7 @@ Steps refer to inputs as `{{name}}`.
 ## Not yet known
 
 - Trigger (what starts the task: a time, an event or a message): not learned from the recordings. Ask the user; do not assume.
+- Decisions (how the user chooses between options): not learned from the recordings. Ask the user; do not assume.
 - Verification (how the user checks the result): not learned from the recordings. Ask the user; do not assume.
 
 ## Evidence

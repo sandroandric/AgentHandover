@@ -32,7 +32,11 @@ from agenthandover_worker.db import WorkerDB
 from agenthandover_worker.episode_builder import EpisodeBuilder
 from agenthandover_worker.evidence_tracker import ObservationEvidence, append_observation
 from agenthandover_worker.exporter import IndexGenerator
-from agenthandover_worker.focus_processor import FocusProcessor, recorded_observations
+from agenthandover_worker.focus_processor import (
+    FocusProcessor,
+    recorded_observations,
+    session_list_choices,
+)
 from agenthandover_worker.frame_differ import FrameDiffer
 from agenthandover_worker.inference_runner import (
     P2, STATE_LOCK, InferenceRunner, model_wait, model_work,
@@ -1881,10 +1885,17 @@ def _process_focus_sessions_v2(
                     instance_ids = [iid for _, iid in earlier] + [session_id]
                 else:
                     obs_for_synthesis = [(result.sop or procedure_dict).get("steps", [])]
+                # Each run's clicks on list rows, from the browser's
+                # reports: what the selection criteria contrast.
+                instance_lists = {
+                    iid: session_list_choices(db, db.get_focus_session_events(iid))
+                    for iid in instance_ids
+                }
                 insights = behavioral_synthesizer.synthesize(
                     slug, procedure_dict, obs_for_synthesis,
                     force=True,  # bypass min_observations for focus
                     instance_ids=instance_ids,
+                    instance_lists=instance_lists,
                 )
                 if insights.goal or insights.strategy or insights.guardrails:
                     procedure_dict = behavioral_synthesizer.merge_insights_into_procedure(

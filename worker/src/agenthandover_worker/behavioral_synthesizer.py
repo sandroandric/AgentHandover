@@ -24,6 +24,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable
 
 from agenthandover_worker.contrast import criteria_hypotheses
+from agenthandover_worker.dom import url_host
 from agenthandover_worker.json_extract import extract_json
 from agenthandover_worker.ledger import set_slot
 from agenthandover_worker.model_profiles import STANDARD_TIER
@@ -242,22 +243,69 @@ def phrase_criteria(hypotheses: list[dict], worded: list[dict]) -> list[dict]:
     return out
 
 
+def _branch_terms(branch: dict) -> list[str]:
+    """What a mined branch's screens shared (its condition's terms and the
+    URL's host), lowercased: the evidence a worded condition must name."""
+    state = branch.get("condition_state") if isinstance(branch.get("condition_state"), dict) else {}
+    terms = [
+        *(str(t) for t in state.get("visible_items") or []),
+        *str(state.get("ocr_snippet") or "").splitlines(),
+        url_host(str(state.get("url") or "")),
+    ]
+    return [t.strip().lower() for t in terms if len(t.strip()) >= 4]
+
+
+def word_branches(branches: list, worded: list[dict], *, slug: str = "") -> list:
+    """The procedure's *branches* with the synthesis's *worded* ones
+    (``decision_branches``) applied as wording only.
+
+    Branches come from evidence: the divergence miner's
+    (``branch_mining``, ``source: "divergence"``, promoted by agreeing
+    runs) and those a generator derived from demonstrations.  A worded
+    branch whose condition names what a divergence branch's screens shared
+    (one of its terms, verbatim) becomes that branch's ``worded_condition``;
+    its ``condition`` stays the evidence.  Any other worded branch is
+    invented and dropped (logged): the model words branches, it never adds
+    them.  Returns a new list; *branches* is not changed."""
+    out = [dict(b) if isinstance(b, dict) else b for b in branches]
+    mined = [b for b in out if isinstance(b, dict) and b.get("source") == "divergence"]
+    for branch in worded:
+        text = str(branch.get("condition") or "").strip() if isinstance(branch, dict) else ""
+        low = text.lower()
+        match = next(
+            (b for b in mined if low and any(t in low for t in _branch_terms(b))), None,
+        )
+        if match is not None:
+            match["worded_condition"] = text[:200]
+        else:
+            logger.info(
+                "Behavioral synthesis for '%s': dropped a decision branch no "
+                "evidence supports: %.200s", slug, text,
+            )
+    return out
+
+
 def contrast_instances(
     observations: list[list[dict]], instance_ids: list[str] | None,
+    instance_lists: dict[str, list[list[dict]]] | None = None,
 ) -> list[dict]:
     """The observations as :func:`contrast.criteria_hypotheses` instances:
     each timeline's frames that hold a pick (``list_choice``, see
-    ``FocusProcessor._build_pre_analysis_obs``), under its id from
+    ``FocusProcessor._build_pre_analysis_obs``), then the lists
+    *instance_lists* holds for its id (the clicks on list rows,
+    ``focus_processor.session_list_choices``), under its id from
     *instance_ids* (parallel to *observations*)."""
     ids = list(instance_ids or [])
-    return [
-        {
-            "id": ids[i] if i < len(ids) else "",
-            "lists": [f["list_choice"] for f in timeline or []
-                      if isinstance(f, dict) and f.get("list_choice")],
-        }
-        for i, timeline in enumerate(observations)
-    ]
+    extra = instance_lists or {}
+    out = []
+    for i, timeline in enumerate(observations):
+        iid = ids[i] if i < len(ids) else ""
+        lists = [f["list_choice"] for f in timeline or []
+                 if isinstance(f, dict) and f.get("list_choice")]
+        if iid:
+            lists += [items for items in extra.get(iid) or [] if items]
+        out.append({"id": iid, "lists": lists})
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -362,6 +410,7 @@ class BehavioralSynthesizer:
         continuity_spans: list[dict] | None = None,
         force: bool = False,
         instance_ids: list[str] | None = None,
+        instance_lists: dict[str, list[list[dict]]] | None = None,
         _retry_count: int = 0,
     ) -> BehavioralInsights:
         """Run behavioral synthesis for a procedure.
@@ -379,6 +428,10 @@ class BehavioralSynthesizer:
             instance_ids: The session or observation id of each timeline
                 in *observations* (same order): the evidence the selection
                 criteria cite.  Timelines without an id add no criteria.
+            instance_lists: More lists each instance picked from, by its id
+                (the clicks on list rows the browser reported,
+                ``focus_processor.session_list_choices``), next to its
+                frames' own picks.
 
         The selection criteria are computed, not asked for: the chosen
         versus skipped list entries of the observations
@@ -401,7 +454,9 @@ class BehavioralSynthesizer:
             )
             return BehavioralInsights()
 
-        hypotheses = criteria_hypotheses(contrast_instances(observations, instance_ids))
+        hypotheses = criteria_hypotheses(
+            contrast_instances(observations, instance_ids, instance_lists),
+        )
 
         # Build the synthesis prompt
         prompt = self._build_prompt(
@@ -472,6 +527,7 @@ class BehavioralSynthesizer:
                     continuity_spans=continuity_spans,
                     force=force,
                     instance_ids=instance_ids,
+                    instance_lists=instance_lists,
                     _retry_count=_retry_count + 1,
                 )
             return BehavioralInsights()
@@ -495,6 +551,7 @@ class BehavioralSynthesizer:
                     continuity_spans=continuity_spans,
                     force=force,
                     instance_ids=instance_ids,
+                    instance_lists=instance_lists,
                     _retry_count=_retry_count + 1,
                 )
             return BehavioralInsights()
@@ -600,7 +657,10 @@ class BehavioralSynthesizer:
             constraints["guardrails"] = merged
             proc["constraints"] = constraints
         if insights.decision_branches:
-            proc["branches"] = insights.decision_branches
+            proc["branches"] = word_branches(
+                proc.get("branches") or [], insights.decision_branches,
+                slug=str(proc.get("id") or proc.get("slug") or ""),
+            )
         if insights.timing:
             proc["workflow_rhythm"] = insights.timing
         if insights.confidence > 0:

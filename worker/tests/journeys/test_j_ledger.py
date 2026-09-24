@@ -14,10 +14,12 @@ WP-L2 (contrast), WP-L3 (run signals) and WP-M5 (divergence branches).
 
 The whole journey needs the model's answers for the three extra runs
 (annotation and synthesis; each is another run of the Skill, so no SOP is
-generated for it), which are not recorded yet (the questions call no
-model since WP-L4).  The parts that call no model run now over the
-same fixtures, loaded into one events database the way the daemon keeps
-every morning: what the runs' events teach about the trigger, the done
+generated for it; the questions call no model since WP-L4).  They were
+recorded on the test Mac; the synthesis calls that carry the
+selection-criteria block (the front page's rows and the headline clicked,
+from the browser's reports) are not recorded yet (``LEDGER_PENDING_KEYS``).
+The parts that call no model run now over the same fixtures, loaded into
+one events database the way the daemon keeps every morning: what the runs' events teach about the trigger, the done
 criterion and the check (``run_signals``), the selection criterion the
 chosen headlines carry (``contrast``), and the branch the two detours
 make (``branch_mining``).  For the last two, the frames are described the
@@ -41,6 +43,7 @@ from agenthandover_worker.contrast import criteria_hypotheses, ground_visible_it
 from agenthandover_worker.db import WorkerDB
 from agenthandover_worker.event_helpers import display_name, parse_timestamp
 from agenthandover_worker.evidence_tracker import ObservationEvidence, append_observation
+from agenthandover_worker.focus_processor import session_list_choices
 from agenthandover_worker.ledger import readiness, refresh_knowledge
 from agenthandover_worker.task_segmenter import AnnotatedFrame
 from journeys.cassette import CASSETTE_DIR, load_entries
@@ -64,25 +67,36 @@ PAYWALL_LINE = "Subscribe to continue reading"
 ARCHIVE_HOST = "archive.example.net"
 
 # The first model request of each extra run (the annotation of its first
-# keyframe; a standalone run of the fixture on the focus_dailynews
-# cassette misses it).  The synthesis call that follows depends on these
-# answers, so it cannot be named before the recording.  A run that matches
-# the Skill makes no SOP call (``FocusProcessor.process_session``'s match).
-EXTRA_RUN_MISSING_KEYS: dict[str, str] = {
-    "focus_dailynews_skip": "93414f3ff1c29740ef33e93342b84ab116e26245258d0a156141b0d57e72ca15",
-    "focus_dailynews_diverge": "3f20f2202b8b75ccc6c40b2170af5a05737a407a66918dd0780c0b499a5791b0",
-    "focus_dailynews_diverge2": "28d4fe0afe5a63a264b5b2efab28a3dcc96f61f38b689f00c4bf6c0b3eb75941",
+# keyframe), read from the recording itself (cassettes/focus_dailynews.jsonl,
+# recorded on the test Mac with qwen3.5:4b), not predicted before it: keys
+# computed ahead of a recording go stale when a request changes before the
+# recording is made, and then skip the journey after it is recorded.
+EXTRA_RUN_FIRST_KEYS: dict[str, str] = {
+    "focus_dailynews_skip": "f0b2474f4b6523b9125fa50c33b922460468a446fd70d370a76149090f8dd521",
+    "focus_dailynews_diverge": "a5dc63a9db470e25e9158e5366622fb9b162087fb4a981262dc0acae813d90ea",
+    "focus_dailynews_diverge2": "95db091cf02a7a5a08b81e22c816a7f1fc7f4d5560b1dd2d20b5dedc3304deb5",
+}
+# The first request the recording predates: the skip run's synthesis, whose
+# prompt now carries the selection-criteria block (the runs' clicks on the
+# front page contrasted, ``focus_processor.session_list_choices``).  The
+# calls after it depend on its answer, so they cannot be named before the
+# recording.
+LEDGER_PENDING_KEYS: dict[str, str] = {
+    "focus_dailynews_skip synthesis": "afc69caaba18ccc8cc2f1750d37c656ffdfde7dd362d917bf262f1762d4a53e6",
 }
 _ENTRIES = load_entries(CASSETTE_DIR / f"{FOCUS_CASSETTE}.jsonl")
-_MISSING = [f"{name} {key}" for name, key in EXTRA_RUN_MISSING_KEYS.items() if key not in _ENTRIES]
+_MISSING = [
+    f"{name} {key}"
+    for name, key in {**EXTRA_RUN_FIRST_KEYS, **LEDGER_PENDING_KEYS}.items()
+    if key not in _ENTRIES
+]
 needs_extra_run_recordings = pytest.mark.skipif(
     bool(_MISSING) and os.environ.get("AH_RECORD") != "1",
     reason=(
-        f"cassettes/{FOCUS_CASSETTE}.jsonl lacks the model calls of the extra "
+        f"cassettes/{FOCUS_CASSETTE}.jsonl lacks model calls of the extra "
         "daily-news runs: " + ", ".join(_MISSING)
-        + " (and the synthesis call each unblocks; a run of the Skill makes "
-        "no SOP call); "
-        "re-record J-ledger with AH_RECORD=1 on the test Mac"
+        + " (and the calls each unblocks; a run of the Skill makes no SOP "
+        "call); re-record J-ledger with AH_RECORD=1 on the test Mac"
     ),
 )
 
@@ -278,6 +292,35 @@ def test_the_chosen_headlines_carry_a_criterion(events_db) -> None:
     assert (best["attribute"], best["value"]) == ("keyword", "show")
     assert best["counter"] == 0
     assert {e["id"] for e in best["evidence"]} == {_session(f) for f in fixtures}
+
+
+def test_the_clicks_the_browser_reported_carry_the_criterion(events_db) -> None:
+    """The pipeline's own reading of the same runs: each click the
+    extension reported on a front-page headline, found among the rows of
+    the snapshot taken before it (``focus_processor.session_list_choices``),
+    is one pick; the criterion is the "Show HN" post, every run cited.
+    The model never marks these picks: a frame of the front page does not
+    show which headline will be clicked, and the page is gone before the
+    next snapshot could mark the clicked link."""
+    fixtures = _load_runs(events_db)
+    with WorkerDB(fixtures[0].db_path) as db:
+        instances = [
+            {"id": _session(f),
+             "lists": session_list_choices(db, db.get_focus_session_events(_session(f)))}
+            for f in fixtures
+        ]
+    for instance in instances:
+        # Three headlines a morning; the clicks in Slack pick from no list.
+        assert len(instance["lists"]) == 3
+        for items in instance["lists"]:
+            [chosen] = [i for i in items if i["chosen"]]
+            assert chosen["attrs"]["point"] > 0  # read from the front page's OCR
+    best = criteria_hypotheses(instances)[0]
+    assert (best["attribute"], best["value"]) == ("keyword", "show")
+    assert best["counter"] == 0
+    assert {e["id"] for e in best["evidence"]} == {_session(f) for f in fixtures}
+    # One run alone teaches nothing: J-focus's synthesis prompt is unchanged.
+    assert criteria_hypotheses(instances[:1]) == []
 
 
 def _mine_divergences(events_db) -> tuple[dict, dict[str, str]]:

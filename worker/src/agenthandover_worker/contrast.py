@@ -11,6 +11,11 @@ Two halves:
   entries stand.  Either way each entry's ``attrs`` are the numbers read
   from its text and from its OCR line (points, comments, price, age, and
   for DOM rows the position in the list).
+* :func:`click_choice` is the same list for a click the extension reported
+  (a ``ClickIntent``): a link that opens another page never reaches a
+  snapshot's ``interacted`` anchor (the page it was on is gone before the
+  next snapshot), so the pick is the click's target found among the rows
+  of the snapshot taken before it.
 * :func:`criteria_hypotheses` compares chosen with skipped entries across
   the recorded instances of a procedure and returns the criteria the
   observations support: a numeric threshold (``have at least 100 points``,
@@ -134,41 +139,99 @@ def _is_row(node: dict) -> bool:
     return implicit_role(node) in _ROW_ROLES or node_tag(node)[0] in _ROW_TAGS
 
 
-def page_rows(page: dict | None) -> list[dict]:
+def _tree_rows(nodes: object) -> list[str]:
+    """The list rows of an earlier extension's snapshot tree (``children``
+    nested, text per node), which has no ``digest``: the text of each row
+    that holds no other row, in document order.  A row's text is its own
+    ``text``/``innerText``, else its descendants' joined.  Empty for an
+    anchor set (a flat list without ``children``)."""
+    rows: list[str] = []
+
+    def text_of(node: dict) -> str:
+        own = " ".join(str(node.get("text") or node.get("innerText") or "").split())
+        if own:
+            return own
+        return " ".join(
+            text for child in node.get("children") or []
+            if isinstance(child, dict) and (text := text_of(child))
+        )
+
+    def walk(node: dict) -> bool:
+        """Collect the rows under *node*; True when it is or holds one."""
+        if str(node.get("tag") or "").startswith("#"):
+            return False
+        holds_row = False
+        for child in node.get("children") or []:
+            if isinstance(child, dict) and walk(child):
+                holds_row = True
+        if not _is_row(node):
+            return holds_row
+        if not holds_row and (label := text_of(node)):
+            rows.append(label)
+        return True
+
+    if not isinstance(nodes, list) or not any(
+        isinstance(n, dict) and isinstance(n.get("children"), list) for n in nodes
+    ):
+        return []
+    for node in nodes:
+        if isinstance(node, dict):
+            walk(node)
+    return rows
+
+
+def _row_of(lines: list[str], text: object) -> int | None:
+    """The row *text* (the clicked element's text or name) identifies:
+    the longest row equal to it or contained in it, else the one row that
+    contains it (a link inside a row whose label adds a rank or a site)."""
+    low = _norm(text)
+    if not low:
+        return None
+    hits = [
+        i for i, line in enumerate(lines)
+        if _norm(line) == low or (len(_norm(line)) >= 8 and _norm(line) in low)
+    ]
+    if hits:
+        return max(hits, key=lambda i: len(lines[i]))
+    holding = [i for i, line in enumerate(lines) if len(low) >= 8 and low in _norm(line)]
+    return holding[0] if len(holding) == 1 else None
+
+
+def page_rows(page: dict | None, click: dict | None = None) -> list[dict]:
     """The list the user picked from on *page* (``{"nodes", "digest"}``, see
-    :func:`scene_annotator.page_for_event`), from the DOM: the digest's rows
-    in page order, the clicked one ``chosen``, each with its 1-based
-    ``position``; at most :data:`MAX_VISIBLE_ITEMS` (the chosen row and the
-    first others).  Empty unless the snapshot marks the clicked element and
-    that element is, or sits in, one of the rows."""
+    :func:`scene_annotator.page_for_event`), from the DOM: its rows in page
+    order (the ``digest``'s lines, or an earlier extension's tree rows),
+    the clicked one ``chosen``, each with its 1-based ``position``; at most
+    :data:`MAX_VISIBLE_ITEMS` (the chosen row and the first others).
+
+    The clicked element is *click* (a ``ClickIntent``'s ``target``:
+    ``innerText``, ``ariaLabel``) when given, else the element the snapshot
+    marks ``interacted``.  Empty unless that element is, or sits in, one of
+    the rows."""
     page = page or {}
     lines = [line.strip() for line in str(page.get("digest") or "").splitlines() if line.strip()]
+    if not lines:
+        lines = _tree_rows(page.get("nodes"))
     if len(lines) < 2:
         return []
-    nodes = list(flatten_dom(page.get("nodes")))
-    index = next((i for i, n in enumerate(nodes) if n.get("interacted")), None)
-    if index is None:
-        return []
-    # The clicked element, then its enclosing rows (the anchor set lists
-    # the element first, then its ancestors, innermost first).
-    clicked = nodes[index]
-    candidates = [accessible_name(clicked), _norm(clicked.get("text"))]
-    candidates += [
-        _norm(node.get("text")) or accessible_name(node)
-        for node in nodes[index + 1:] if _is_row(node)
-    ]
-    chosen = None
-    for text in candidates:
-        low = _norm(text)
-        if not low:
-            continue
-        hits = [
-            i for i, line in enumerate(lines)
-            if _norm(line) == low or (len(_norm(line)) >= 8 and _norm(line) in low)
+    if click is not None:
+        candidates = [click.get("innerText"), click.get("ariaLabel")]
+    else:
+        nodes = list(flatten_dom(page.get("nodes")))
+        index = next((i for i, n in enumerate(nodes) if n.get("interacted")), None)
+        if index is None:
+            return []
+        # The clicked element, then its enclosing rows (the anchor set
+        # lists the element first, then its ancestors, innermost first).
+        clicked = nodes[index]
+        candidates = [accessible_name(clicked), _norm(clicked.get("text"))]
+        candidates += [
+            _norm(node.get("text")) or accessible_name(node)
+            for node in nodes[index + 1:] if _is_row(node)
         ]
-        if hits:
-            chosen = max(hits, key=lambda i: len(lines[i]))
-            break
+    chosen = next(
+        (row for text in candidates if (row := _row_of(lines, text)) is not None), None,
+    )
     if chosen is None:
         return []
     others = [i for i in range(len(lines)) if i != chosen][: MAX_VISIBLE_ITEMS - 1]
@@ -176,6 +239,16 @@ def page_rows(page: dict | None) -> list[dict]:
         {"label": lines[i], "attrs": {"position": float(i + 1)}, "chosen": i == chosen}
         for i in sorted(others + [chosen])
     ]
+
+
+def _with_line_attrs(items: list[dict], ocr_text: str) -> list[dict]:
+    """*items* with each entry's ``attrs`` read from its OCR line added
+    (the entry's own attrs win)."""
+    lines = [line for line in str(ocr_text or "").splitlines() if line.strip()]
+    labels = [item["label"] for item in items]
+    for item in items:
+        item["attrs"] = {**_line_attrs(item["label"], lines, labels), **item["attrs"]}
+    return items
 
 
 def ground_visible_items(model_items: object, page: dict | None, ocr_text: str) -> list[dict]:
@@ -190,11 +263,18 @@ def ground_visible_items(model_items: object, page: dict | None, ocr_text: str) 
             for item in (model_items if isinstance(model_items, list) else [])
             if isinstance(item, dict) and str(item.get("label") or "").strip()
         ]
-    lines = [line for line in str(ocr_text or "").splitlines() if line.strip()]
-    labels = [item["label"] for item in items]
-    for item in items:
-        item["attrs"] = {**_line_attrs(item["label"], lines, labels), **item["attrs"]}
-    return items
+    return _with_line_attrs(items, ocr_text)
+
+
+def click_choice(page: dict | None, click: dict | None, ocr_text: str) -> list[dict]:
+    """The list a reported click picked from: *page*'s rows (the snapshot
+    of the page the click was made on) with the row *click* (a
+    ``ClickIntent``'s ``target``) hit ``chosen`` (:func:`page_rows`), each
+    entry's ``attrs`` read from its OCR line in *ocr_text* (the screen the
+    click was made on).  Empty when the click was not on a list row."""
+    if not isinstance(click, dict):
+        return []
+    return _with_line_attrs(page_rows(page, click), ocr_text)
 
 
 # ---------------------------------------------------------------------------

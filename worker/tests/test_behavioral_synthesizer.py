@@ -518,6 +518,55 @@ class TestMergeInsights:
         assert "last_synthesized" not in updated
         assert "_obs_at_last_synthesis" not in updated
 
+    _MINED = {
+        "source": "divergence", "kind": "detour", "step_index": 8, "rejoin_index": 10,
+        "condition": ('the screen shows "research.example.com", '
+                      '"Subscribe to continue reading"'),
+        "action": "instead of steps 9-10: go to archive.example.net",
+        "condition_state": {
+            "ocr_snippet": "research.example.com\nSubscribe to continue reading",
+            "url": "", "visible_items": [],
+        },
+    }
+
+    def test_the_synthesis_words_mined_branches_and_adds_none(self, caplog):
+        """Branches come from evidence (WP-M5's divergence mining): the
+        synthesis ran after the paywall branch was promoted and replaced it
+        with one it invented (J-ledger's recorded runs; every recorded
+        synthesis returns one).  A model branch that names what the mined
+        branch's screens shared words it; any other is dropped and logged."""
+        synth = BehavioralSynthesizer()
+        derived = {"condition": "if error", "action": "retry"}  # from demonstrations
+        before = {"id": "hn", "steps": [], "branches": [derived, self._MINED]}
+        insights = BehavioralInsights(goal="Share the news", decision_branches=[
+            {"condition": "The story sits behind a paywall (Subscribe to continue reading)",
+             "action": "Read it on the archive"},
+            {"condition": "User has collected three distinct articles", "action": "Post"},
+        ])
+        with caplog.at_level("INFO", logger="agenthandover_worker.behavioral_synthesizer"):
+            proc = synth.merge_insights_into_procedure(before, insights)
+        assert proc["branches"] == [derived, {
+            **self._MINED,
+            "worded_condition": "The story sits behind a paywall (Subscribe to continue reading)",
+        }]
+        assert "User has collected three distinct articles" in caplog.text
+        assert "worded_condition" not in before["branches"][1]  # the input is not mutated
+
+    def test_without_mined_branches_the_synthesis_adds_no_branch(self):
+        synth = BehavioralSynthesizer()
+        insights = BehavioralInsights(goal="g", decision_branches=[{"condition": "if X then Y"}])
+        proc = synth.merge_insights_into_procedure({"id": "p", "steps": []}, insights)
+        assert proc.get("branches", []) == []
+
+    def test_a_worded_branch_renders_with_its_evidence(self):
+        from agenthandover_worker.skill_render import render_body
+
+        branch = {**self._MINED, "worded_condition": "The story is paywalled"}
+        body = render_body({"id": "p", "title": "News", "steps": [], "branches": [branch]})
+        assert ('- If The story is paywalled (the screen shows "research.example.com", '
+                '"Subscribe to continue reading"): instead of steps 9-10: go to '
+                'archive.example.net') in body
+
     def test_merge_sets_last_synthesized_on_goal_only(self):
         """A goal alone is enough to consider synthesis successful."""
         synth = BehavioralSynthesizer()

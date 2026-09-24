@@ -3,13 +3,15 @@ annotation and the selection criteria learned by contrasting chosen with
 skipped entries across instances.
 
 The journey proof is J-ledger's selection-criteria assertion
-(``journeys/test_j_ledger.py``), which waits on the two extra recorded
-runs of the daily-news routine.
+(``journeys/test_j_ledger.py``), which waits on the recording of the
+synthesis calls that carry the criteria; its model-free pin over the same
+four runs is ``test_the_clicks_the_browser_reported_carry_the_criterion``.
 """
 
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 from agenthandover_worker.behavioral_synthesizer import (
@@ -20,12 +22,17 @@ from agenthandover_worker.behavioral_synthesizer import (
 )
 from agenthandover_worker.contrast import (
     MAX_VISIBLE_ITEMS,
+    click_choice,
     criteria_hypotheses,
     ground_visible_items,
     item_attrs,
     page_rows,
 )
-from agenthandover_worker.focus_processor import FocusProcessor, recorded_observations
+from agenthandover_worker.focus_processor import (
+    FocusProcessor,
+    recorded_observations,
+    session_list_choices,
+)
 from agenthandover_worker.ledger import derive_knowledge
 from agenthandover_worker.scene_annotator import AnnotationConfig, SceneAnnotator
 from agenthandover_worker.skill_render import render_body
@@ -118,6 +125,128 @@ class TestPageRows:
         assert len(rows) == MAX_VISIBLE_ITEMS
         assert rows[-1] == {"label": "Story number 25 about things",
                             "attrs": {"position": 25.0}, "chosen": True}
+
+
+class TestReportedClicks:
+    """A link that opens another page never reaches a snapshot as the
+    ``interacted`` anchor (the page is gone before the next snapshot), so
+    the pick is the ``ClickIntent``'s target among the rows of the snapshot
+    taken before it (J-ledger's recorded runs: no pick at all without it)."""
+
+    _RANKED = "\n".join([
+        "1. The quiet death of the RSS reader (example.com)",
+        "2. Designing a scheduler that respects laptop batteries (example.org)",
+        "3. SQLite's WAL mode, explained with diagrams (sqlite.org)",
+        "4. Ask HN: How do you keep a daily reading habit?",
+    ])
+    _LINK = {"tagName": "a", "innerText": "SQLite's WAL mode, explained with diagrams",
+             "composedPath": ["a", "span.titleline", "td.title", "tr.athing"]}
+
+    def test_the_clicked_link_picks_the_one_row_that_holds_it(self):
+        rows = page_rows({"nodes": [], "digest": self._RANKED}, self._LINK)
+        assert [r["chosen"] for r in rows] == [False, False, True, False]
+        assert [r["attrs"]["position"] for r in rows] == [1.0, 2.0, 3.0, 4.0]
+
+    def test_the_earlier_extensions_tree_gives_the_rows(self):
+        def row(rank: int, title: str) -> dict:
+            return {"tag": "tr", "children": [{"tag": "span", "innerText": f"{rank}."},
+                                              {"tag": "a", "innerText": title}]}
+        tree = [{"tag": "table", "children": [
+            {"tag": "tr", "children": [{"tag": "a", "innerText": "Hacker News"},
+                                       {"tag": "a", "innerText": "new"}]},
+            row(1, "The quiet death of the RSS reader"),
+            row(2, "SQLite's WAL mode, explained with diagrams"),
+            {"tag": "#truncated"},
+        ]}]
+        rows = page_rows({"nodes": tree, "digest": ""}, self._LINK)
+        assert [(r["label"], r["chosen"]) for r in rows] == [
+            ("Hacker News new", False),
+            ("1. The quiet death of the RSS reader", False),
+            ("2. SQLite's WAL mode, explained with diagrams", True),
+        ]
+        # Without a click the tree marks nothing: no pick.
+        assert page_rows({"nodes": tree, "digest": ""}) == []
+
+    def test_a_click_off_the_list_or_on_text_many_rows_hold_picks_nothing(self):
+        page = {"nodes": [], "digest": self._RANKED}
+        assert page_rows(page, {"tagName": "button", "ariaLabel": "Send now"}) == []
+        # Text two rows hold, or too short to tell rows apart, is no pick.
+        assert page_rows(page, {"innerText": "(example."}) == []
+        assert page_rows(page, {"innerText": "Ask HN"}) == []
+        assert page_rows(page, {"innerText": ""}) == []
+        # Text one row holds is.
+        [chosen] = [r for r in page_rows(page, {"innerText": "respects laptop"}) if r["chosen"]]
+        assert chosen["attrs"]["position"] == 2.0
+
+    def test_the_click_choice_reads_numbers_from_the_screen(self):
+        items = click_choice({"nodes": [], "digest": _DIGEST}, self._LINK, _OCR)
+        [wal] = [i for i in items if i["chosen"]]
+        assert wal["attrs"] == {"point": 310.0, "age_minutes": 120.0, "comment": 88.0,
+                                "position": 3.0}
+        assert click_choice({"nodes": [], "digest": _DIGEST}, None, _OCR) == []
+
+
+class _ClickDB:
+    """The two lookups :func:`session_list_choices` makes."""
+
+    def __init__(self, clicks: list[dict], snapshots: list[dict]):
+        self.clicks, self.snapshots = clicks, snapshots
+
+    def get_click_intents(self, start, end):
+        return [c for c in self.clicks if start <= c["timestamp"] <= end]
+
+    def get_dom_snapshots_near_timestamp(self, timestamp, url, tolerance_sec=5.0):
+        return sorted(self.snapshots, key=lambda s: abs(
+            (datetime.fromisoformat(s["timestamp"]) - datetime.fromisoformat(timestamp)).total_seconds()))
+
+
+def _ts(second: float) -> str:
+    return (datetime(2026, 9, 15, 8, 30, tzinfo=timezone.utc) + timedelta(seconds=second)).isoformat()
+
+
+class TestSessionListChoices:
+    _FRONT = "https://news.ycombinator.com/"
+
+    def _events(self) -> list[dict]:
+        frame = {"focus_capture": True, "ocr": {"full_text": _OCR}}
+        return [
+            {"timestamp": _ts(0), "metadata_json": json.dumps(frame)},
+            {"timestamp": _ts(60), "metadata_json": json.dumps(
+                {"focus_capture": True, "ocr": {"full_text": "a story page"}})},
+        ]
+
+    def test_each_click_on_a_row_is_a_pick_from_the_page_it_was_made_on(self):
+        story = "https://blog.example.org/wal"
+        db = _ClickDB(
+            clicks=[
+                {"timestamp": _ts(40), "url": self._FRONT,
+                 "target": {"tagName": "a", "innerText": "SQLite's WAL mode, explained with diagrams"}},
+                # A button in another app's page picks from no list.
+                {"timestamp": _ts(50), "url": "https://app.slack.com/client/T0/C0",
+                 "target": {"tagName": "button", "ariaLabel": "Send now"}},
+            ],
+            snapshots=[
+                # The page the click opened (closer in time) is not the list.
+                {"timestamp": _ts(41), "url": story, "nodes": [], "digest": "Some\nOther rows"},
+                {"timestamp": _ts(39), "url": self._FRONT, "nodes": [], "digest": _DIGEST},
+                {"timestamp": _ts(49), "url": "https://app.slack.com/client/T0/C0",
+                 "nodes": [], "digest": "daily-news\ngeneral"},
+            ],
+        )
+        [items] = session_list_choices(db, self._events())
+        [wal] = [i for i in items if i["chosen"]]
+        assert wal["label"] == "SQLite's WAL mode, explained with diagrams"
+        # The numbers come from the last frame before the click.
+        assert wal["attrs"]["point"] == 310.0
+
+    def test_a_snapshot_taken_after_the_click_is_not_the_page_it_was_made_on(self):
+        db = _ClickDB(
+            clicks=[{"timestamp": _ts(40), "url": self._FRONT,
+                     "target": {"innerText": "SQLite's WAL mode, explained with diagrams"}}],
+            snapshots=[{"timestamp": _ts(42), "url": self._FRONT, "nodes": [], "digest": _DIGEST}],
+        )
+        assert session_list_choices(db, self._events()) == []
+        assert session_list_choices(db, []) == []
 
 
 class TestGroundVisibleItems:
@@ -367,6 +496,30 @@ class TestSynthesizerWordsCriteria:
         assert "SELECTION CRITERIA HYPOTHESES" not in call.call_args.kwargs["prompt"]
         assert insights.selection_criteria == []
         assert insights.goal
+
+    def test_the_runs_clicks_join_their_frames_picks_under_their_ids(self):
+        # Frames with lists but no pick (the model marks none on the front page).
+        unpicked = [[_frame([(label, attrs, False) for label, attrs, _ in (
+            (i["label"], i["attrs"], i["chosen"]) for i in run["lists"][0]
+        )])] for run in _RUNS]
+        ids = ["sess-1", "sess-2", "sess-3"]
+        clicks = {run["id"]: run["lists"] for run in _RUNS}
+        assert criteria_hypotheses(contrast_instances(unpicked, ids)) == []
+        instances = contrast_instances(unpicked, ids, clicks)
+        assert [len(i["lists"]) for i in instances] == [1, 1, 1]
+        # A timeline without an id takes no one's clicks.
+        assert contrast_instances(unpicked, ids[:2], clicks)[2]["lists"] == []
+        synth = BehavioralSynthesizer(SynthesizerConfig(min_observations=1))
+        with patch(
+            "agenthandover_worker.behavioral_synthesizer._call_ollama_text",
+            return_value=(json.dumps(_ANSWER), 1.0),
+        ) as call:
+            insights = synth.synthesize(
+                "hn", {"id": "hn", "steps": []}, unpicked,
+                instance_ids=ids, instance_lists=clicks,
+            )
+        assert "C1: chosen entries have at least 250 points" in call.call_args.kwargs["prompt"]
+        assert insights.selection_criteria[0]["basis"] == "have at least 250 points"
 
     def test_unworded_hypotheses_keep_their_computed_wording(self):
         hypotheses = criteria_hypotheses(_RUNS)

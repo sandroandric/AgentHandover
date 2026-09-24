@@ -54,9 +54,14 @@ needs_recording = pytest.mark.skipif(
 )
 # The questions are the ledger's since WP-L4 (no model call), so the answer
 # revision's prompt, which quotes the question, and the embedding of the
-# answered procedure are new requests.
+# answered procedure are new requests.  Since step questions rank above
+# the optional unknown slots, the window asks the step question about the
+# first typed line first (then trigger and decisions; before: trigger,
+# verification, then the step question), so the typed answer below is to
+# that step question and the revision's prompt is a new request again
+# (b8ac16d6... was the revision of the trigger answer).
 REVISION_MISSING_KEYS: tuple[str, ...] = (
-    "b8ac16d6e56932ea4ab826d4b3316b925337fa874bf71efbf08a96084706167a",  # /api/generate
+    "5b124c77c1c0f11de549896ab97afe2efa392a475d20623caa560f1663bf8df2",  # /api/generate
     "9bd6ccc1158d3dbfd6bf8ca504c2a69a648fe9e7a6b1d7322f2a57026b5053e8",  # /api/embed
 )
 needs_revision_recording = pytest.mark.skipif(
