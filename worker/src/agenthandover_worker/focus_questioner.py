@@ -21,6 +21,7 @@ merges answers on the next poll cycle.
 from __future__ import annotations
 
 import json
+import re
 import logging
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -686,7 +687,13 @@ def apply_answer_revisions(
             s for s in revision.get("steps") or []
             if isinstance(s, dict) and str(s.get("action") or "").strip()
         ]
-        allowed = set(qa_result.questions[idx].step_indexes) or set(range(len(steps)))
+        # The question's own steps and their immediate neighbours (an answer
+        # about steps 4-7 may rightly also rewrite step 8: seen live, where
+        # the answer named the line after the ones asked about), else any.
+        named = set(qa_result.questions[idx].step_indexes)
+        allowed = (
+            named | {min(named) - 1, max(named) + 1} if named else set(range(len(steps)))
+        )
         if (
             not replaced or not set(replaced) <= allowed & set(range(len(steps)))
             or taken & set(replaced)
@@ -739,10 +746,12 @@ def apply_answer_revisions(
                     "user_answer": origin,
                 },
             })
+        _keep_typed_text(built, old, proc)
         steps[replaced[0]:replaced[-1] + 1] = [
             *built, *(s for i, s in enumerate(steps[replaced[0]:replaced[-1] + 1],
                                               replaced[0]) if i not in replaced),
         ]
+        _drop_duplicated_neighbours(steps, replaced[0], len(built), proc)
         applied.append({**origin, "steps": [s["action"] for s in built]})
     for n, step in enumerate(steps):
         step["index"] = n
@@ -754,6 +763,45 @@ def apply_answer_revisions(
             "; ".join(f"{a['replaced']} -> {a['steps']}" for a in applied),
         )
     return list(reversed(applied))
+
+
+def _typed(step: dict, proc: dict) -> str:
+    """The step's input with each ``{{name}}`` read as its example value,
+    normalised (lowercase words, one space apart)."""
+    examples = {
+        str(v.get("name")): str(v.get("example") or "")
+        for v in proc.get("variables") or [] if isinstance(v, dict) and v.get("name")
+    }
+    text = re.sub(r"\{\{\s*(\w+)\s*\}\}", lambda m: examples.get(m.group(1), m.group(0)),
+                  str(step.get("input") or ""))
+    return " ".join(re.findall(r"[a-z0-9]+", text.lower()))
+
+
+def _keep_typed_text(built: list[dict], old: list[dict], proc: dict) -> None:
+    """A revised step may not lose typed text its replaced steps carried:
+    an input that is only the start of an old step's input gets the old
+    one (seen live: the revision wrote "Reserved for documentation:
+    example.com" where step grounding had put the whole typed line)."""
+    for new in built:
+        text = _typed(new, proc)
+        if not text:
+            continue
+        longer = max(
+            (o for o in old if len(_typed(o, proc)) > len(text) and text in _typed(o, proc)),
+            key=lambda o: len(_typed(o, proc)), default=None,
+        )
+        if longer is not None:
+            new["input"] = str(longer.get("input") or "")
+
+
+def _drop_duplicated_neighbours(steps: list[dict], start: int, count: int, proc: dict) -> None:
+    """Remove an untouched step right before or after the revised ones
+    that types what a revised step now types (seen live: the answer's new
+    Source step, and the old one kept next to it)."""
+    revised = {_typed(s, proc) for s in steps[start:start + count]} - {""}
+    for i in (start + count, start - 1):
+        if 0 <= i < len(steps) and not start <= i < start + count and _typed(steps[i], proc) in revised:
+            del steps[i]
 
 
 # ---------------------------------------------------------------------------

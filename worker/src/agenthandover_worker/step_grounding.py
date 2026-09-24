@@ -25,7 +25,10 @@ checks do not depend on the model following it):
    ("Scroll down and click the 'Example Domain' link" keeps nothing: the
    step is dropped); what was cut and why is kept on the step's
    ``evidence.grounding`` or, for a dropped step, in the report.
-3. Steps are ordered by their first cited frame (stable).
+3. Steps are ordered by where their longest run of consecutive cited
+   frames starts (the earliest on a tie; stable): one stray citation
+   cannot move a step (seen live: a navigation citing frames 11, 13, 14,
+   15, where 11 was the paste before it).
 4. Every line the user typed that the frames show (a typed text or input
    value of a frame, visible in its document content and not there on the
    previous frame of the same app) appears in some step: as the empty
@@ -227,12 +230,14 @@ def _sentence(text: str) -> str:
 
 
 def _step_texts(step: dict, variables: dict[str, str]) -> str:
-    """The step's words (action, description, target and its parameters),
-    with each ``{{name}}`` read as its example value."""
+    """What the step does (its action and the input it types), with each
+    ``{{name}}`` read as its example value.  Not its description, target
+    or verify: a line that only a check mentions ("The full text 'Reserved
+    for documentation: {{domain_list}} ...' is visible", seen live) is
+    typed by no step."""
     params = step.get("parameters") if isinstance(step.get("parameters"), dict) else {}
     text = "\n".join(str(v or "") for v in (
-        step.get("step"), step.get("action"), step.get("description"), step.get("target"),
-        params.get("input"), params.get("location"), params.get("verify"),
+        step.get("step"), step.get("action"), params.get("input"),
     ))
     return _VAR_RE.sub(lambda m: variables.get(m.group(1), m.group(0)), text)
 
@@ -250,10 +255,13 @@ def typed_lines(timeline: list[dict]) -> list[tuple[int, str]]:
     value.  It counts when it is in that frame's document content, was
     not there on the previous frame of the same app (it was added, not
     read), and is not a text field's own label or placeholder (the Slack
-    composer's "Message #daily-news").  A line inside a longer counted
-    line (typing in progress) is not counted on its own."""
+    composer's "Message #daily-news").  A line caught while it was being
+    typed stands for its finished form: inside a longer counted line it
+    is not counted; inside a longer content line of a later frame of the
+    same app it becomes that line (the frames of a typing session may
+    only ever catch the line half typed, seen live)."""
     controls = _control_names(timeline)
-    found: list[tuple[int, str, str]] = []
+    found: list[tuple[int, str, str, str]] = []
     seen: set[str] = set()
     last_by_app: dict[str, int] = {}
     for i, frame in enumerate(timeline):
@@ -279,14 +287,36 @@ def typed_lines(timeline: list[dict]) -> list[tuple[int, str]]:
             ):
                 continue
             seen.add(norm)
-            found.append((i, line, norm))
-    return [
-        (i, line) for i, line, norm in found
-        if not any(
+            found.append((i, line, norm, app))
+
+    def finished(i: int, line: str, norm: str, app: str) -> tuple[str, str]:
+        """The longest later content line of *app* that extends *line*
+        (by characters: typing stops mid-word, "example.or"), else it."""
+        best = (line, norm)
+        for j in range(i + 1, len(timeline)):
+            frame = timeline[j]
+            annotation = frame.get("annotation") if isinstance(frame.get("annotation"), dict) else {}
+            if str(annotation.get("app") or frame.get("app") or "") != app:
+                continue
+            for text in frame_content(frame):
+                other = _norm(text)
+                if len(other) > len(best[1]) and norm in other:
+                    best = (_LIST_MARKER_RE.sub("", text).strip(), other)
+        return best
+
+    out: list[tuple[int, str]] = []
+    done: set[str] = set()
+    for i, line, norm, app in found:
+        if any(
             norm != other and (other.startswith(norm) or _contains(other, norm))
-            for _j, _l, other in found
-        )
-    ]
+            for _j, _l, other, _a in found
+        ):
+            continue
+        line, norm = finished(i, line, norm, app)
+        if norm not in done:
+            done.add(norm)
+            out.append((i, line))
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -363,8 +393,19 @@ def ground_steps(
         report["rewritten"].append({"action": step["step"], **record})
         kept.append(step)
 
-    # 3. The order the frames were recorded in (stable for ties).
-    order = sorted(range(len(kept)), key=lambda k: (cited(kept[k])[0], k))
+    # 3. The order the frames were recorded in (stable for ties), by where
+    # each step's longest run of consecutive cited frames starts, so one
+    # stray citation cannot move it.
+    def anchor(frames: list[int]) -> int:
+        runs: list[list[int]] = []
+        for f in frames:
+            if runs and f == runs[-1][-1] + 1:
+                runs[-1].append(f)
+            else:
+                runs.append([f])
+        return max(runs, key=len)[0]  # max keeps the earliest of equal runs
+
+    order = sorted(range(len(kept)), key=lambda k: (anchor(cited(kept[k])), k))
     report["reordered"] = order != list(range(len(kept)))
     kept = [kept[k] for k in order]
 
@@ -380,6 +421,22 @@ def ground_steps(
         frame = timeline[index]
         app = str((frame.get("annotation") or {}).get("app") or frame.get("app") or "")
         reason = "the frames show this line typed, and no step had it"
+        # A typing step holding only the start of the line (caught half
+        # typed) gets the finished line.
+        partial = next((
+            s for s in kept
+            if _TYPING_RE.search(str(s.get("step") or ""))
+            and (text := _norm((s.get("parameters") or {}).get("input")))
+            and len(text) < len(norm) and text in norm
+        ), None)
+        if partial is not None:
+            params = partial.setdefault("parameters", {})
+            record = {"status": INPUT_ADDED, "reason": "the frames show the finished line",
+                      "original": str(params.get("input") or "")}
+            params["input"] = line
+            partial.setdefault("evidence", {}).setdefault("grounding", record)
+            report["added"].append({"action": partial["step"], "input": line, **record})
+            continue
         typing = next((
             s for s in kept
             if _TYPING_RE.search(str(s.get("step") or ""))

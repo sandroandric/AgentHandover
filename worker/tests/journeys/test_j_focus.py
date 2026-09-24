@@ -228,7 +228,9 @@ def test_focus_click_anchors_land_on_the_steps_that_click(
     assert None not in at and at == sorted(at) and len(set(at)) == 3, anchored
     assert at[0] > 0, "the first step (opening the list) carries a story's link"
     assert "SQLite" in steps[at[0]]["action"], steps[at[0]]["action"]
-    assert "send" in steps[anchored["Send now"]]["action"].lower(), steps[anchored["Send now"]]["action"]
+    # The step that sends the message ("Send ..." or "Post the message ...").
+    send_step = steps[anchored["Send now"]]["action"]
+    assert re.search(r"\b(send|post)\b", send_step, re.I), send_step
 
 
 def _clipboard_previews(fixture) -> list[str]:

@@ -1,39 +1,39 @@
 ---
 name: daily-news-digest
-description: 'Posts a daily digest of 3 tech articles to the #daily-news Slack channel to keep the team updated on database internals, on-device AI, and testing tools.'
-argument-hint: '[article_title] [article_url] [summary_text] [note_content]'
+description: 'Posts a daily digest of three tech news items (one from Hacker News, one research article, one GitHub project) to the #daily-news Slack channel to the team on a daily cadence.'
+argument-hint: '[date] [article_title] [article_url] [summary_text]'
 allowed-tools: Read, WebFetch
 ---
 
 # Daily news digest
 
-Collects articles from Hacker News, research guides, and GitHub projects, summarizes them in a Notes app, and posts the compiled digest to a Slack channel.
+The user collects tech news articles from Hacker News, research guides, and GitHub repositories, summarizes them in a Notes app, and posts the compiled digest to a Slack channel.
 
-Outcome: A comprehensive daily news digest containing summaries and links to selected articles is posted to the #daily-news Slack channel.
+Outcome: The user successfully compiles a daily news update with links and summaries from multiple sources and posts it to the #daily-news Slack channel.
 
 ## Goal
 
-Posts a daily digest of 3 tech articles to the #daily-news Slack channel to keep the team updated on database internals, on-device AI, and testing tools.
+Posts a daily digest of three tech news items (one from Hacker News, one research article, one GitHub project) to the #daily-news Slack channel to the team on a daily cadence.
 
 ## Prerequisites
 
 - Access to Google Chrome browser
 - Access to the Notes app
-- Access to the Slack application
-- Account on Hacker News
-- Account on Slack (#daily-news channel)
+- Access to the Slack app (via web or desktop)
+- An account on Hacker News
+- A Slack workspace with a #daily-news channel
 
 ## When to use
 
-- When a user wants to curate and share their daily reading of technology news with a team or group.
-- Strategy: The user collects articles from Hacker News, research guides, and GitHub projects, copying the title and URL for each item into a specific note titled 'Daily news - 15 Sep' before summarizing key observations. They then copy the full content of this note and paste it directly into the Slack message box to share the curated list with the team.
+- When a user wants to curate and share a summary of technology news and research findings for a specific day.
+- Strategy: The user iteratively collects three specific articles from Hacker News, research guides, and GitHub repositories, copying their titles and URLs into a Notes app to draft summaries before pasting the final content into the Slack message box. They explicitly navigate back to Hacker News between research items to find the next relevant story, ensuring the digest covers database internals, on-device vision models, and HTTP testing tools.
 
 ## Inputs
 
-- `article_title` (text, required): The title of a news article selected from the feed. (example `SQLite's WAL mode, explained with diagrams`)
-- `article_url` (url, required): The URL of the article being processed. (example `https://blog.example.org/sqlite-wal-explained`)
-- `summary_text` (text, required): The specific observation or summary text added to the note. (example `Readers keep going while one writer appends; checkpoints fold the log back.`)
-- `note_content` (text, required): The complete text of the daily news note. (example `Daily news - 15 Sep | 1. SQLite's WAL mode, explained with diagrams | https://blog.example.org/sqlite-wal-explained | Readers keep going while one writer appends; checkpoints fold the log back.`)
+- `date` (date, required): The date of the daily news digest. (example `15 Sep`)
+- `article_title` (text, required): The title of a news article being summarized. (example `SQLite's WAL mode, explained with diagrams`)
+- `article_url` (url, required): The URL of the article being summarized. (example `https://blog.example.org/sqlite-wal-explained`)
+- `summary_text` (text, required): A short sentence summarizing the article content. (example `Readers keep going while one writer appends; checkpoints fold the log back.`)
 
 Steps refer to inputs as `{{name}}`.
 
@@ -43,149 +43,143 @@ Steps refer to inputs as `{{name}}`.
    Detail: Open the browser and go to the main feed to identify relevant articles for the daily digest.
    App: Google Chrome
    Target: https://news.ycombinator.com/
-   Verify: The Hacker News homepage displays the list of top stories.
+   Verify: The Hacker News feed page loads, displaying the list of top stories.
 2. [step_2] Click on the article titled 'SQLite's WAL mode, explained with diagrams'
-   Detail: Select the specific article to read and gather information for the first news item.
+   Detail: Select the first relevant article to read its content and gather information for the summary.
    App: Google Chrome
    Target: https://news.ycombinator.com/
    Verify: The browser navigates to the article page at {{article_url}}.
    Anchor: link "SQLite's WAL mode, explained with diagrams" (`role=link[name="SQLite's WAL mode, explained with diagrams"]`)
 3. [step_3] Copy the article title and URL
-   Detail: Capture the metadata for the first news item to include in the Notes app.
+   Detail: Select the text '{{article_title}}' and the URL to prepare it for pasting into the Notes app.
    App: Google Chrome
    Target: {{article_url}}
-   Verify: The text is copied to the clipboard (indicated by the system action log).
-4. [step_4] Open the Notes app
-   Detail: Access the application where the daily news will be compiled.
+   Verify: The text is copied to the clipboard (indicated by the Copy Action log).
+4. [step_4] Open the Notes app and create a new note
+   Detail: Launch the Notes application to begin drafting the daily news entry.
    App: Notes
    Target: Notes
-   Verify: The Notes app interface is visible.
-5. [step_5] Open the 'Daily news - 15 Sep' note
-   Detail: Locate the existing note for the current date to add the first article.
+   Verify: The Notes app interface is open and ready for input.
+5. [step_5] Type the note header and paste the first article details
+   Detail: Enter the date, title, and the copied URL for the SQLite article.
    App: Notes
    Target: Notes
-   Verify: The note titled 'Daily news - 15 Sep' is open and editable.
-6. [step_6] Paste the title and URL for the SQLite article
-   Detail: Insert the previously copied information as the first entry in the note.
-   App: Notes
-   Target: Daily news - 15 Sep
-   Input: {{article_title}} | {{article_url}}
+   Input: Daily news - {{date}} | 1. {{article_title}} | {{article_url}}
    Verify: The text appears in the note body.
-7. [step_7] Type the summary sentence about SQLite WAL mode
-   Detail: Add the specific observation or takeaway from the article to the note.
+6. [step_6] Type a summary sentence about SQLite's WAL mode
+   Detail: Add a specific observation or key takeaway from the article to the note.
    App: Notes
-   Target: Daily news - 15 Sep
+   Target: Notes
    Input: {{summary_text}}
-   Verify: The sentence is appended to the note content.
-8. [step_8] Navigate to the research article about on-device vision models
-   Detail: Find the second article to include in the digest.
+   Verify: The sentence is appended to the existing note content.
+7. [step_7] Navigate to the research article about on-device vision models
+   Detail: Return to the browser to find the second article for the digest.
    App: Google Chrome
    Target: https://news.ycombinator.com/
    Verify: The browser navigates to https://research.example.com/on-device-vision-guide.
    Anchor: link "A field guide to on-device vision models" (`role=link[name="A field guide to on-device vision models"]`)
-9. [step_9] Copy the title and URL of the on-device vision guide
-   Detail: Capture the metadata for the second news item.
+8. [step_8] Copy the title and URL of the on-device vision article
+   Detail: Select the text 'A field guide to on-device vision models' and the URL to save for the next step.
    App: Google Chrome
    Target: https://research.example.com/on-device-vision-guide
    Verify: The text is copied to the clipboard.
-10. [step_10] Paste the title and URL for the on-device vision guide
-   Detail: Insert the second article's metadata into the Notes app.
+9. [step_9] Paste the second article details into the Notes app
+   Detail: Insert the copied title and URL for the on-device vision article into the note.
    App: Notes
-   Target: Daily news - 15 Sep
-   Input: A field guide to on-device vision models | https://research.example.com/on-device-vision-guide
-   Verify: The text appears in the note body.
-11. [step_11] Type the observation about quantised models
-   Detail: Add the specific observation from the research article to the note.
+   Target: Notes - Daily news - {{date}}
+   Input: 2. A field guide to on-device vision models | https://research.example.com/on-device-vision-guide
+   Verify: The second entry appears in the note body.
+10. [step_10] Type a summary sentence about quantised models
+   Detail: Add a specific observation about quantised models to the second entry.
    App: Notes
-   Target: Daily news - 15 Sep
+   Target: Notes
    Input: Small quantised models now read screenshots well enough for UI tasks.
-   Verify: The sentence is appended to the note content.
-12. [step_12] Navigate to the GitHub repository page
-   Detail: Find the third article to include in the digest.
+   Verify: The sentence is appended to the second entry.
+11. [step_11] Navigate to the GitHub repository page for the HTTP cassette recorder
+   Detail: Find the third article to include in the daily news summary.
    App: Google Chrome
    Target: https://news.ycombinator.com/
    Verify: The browser navigates to https://github.com/example/cassette.
    Anchor: link "Show HN: A tiny HTTP cassette recorder for tests" (`role=link[name="Show HN: A tiny HTTP cassette recorder for tests"]`)
-13. [step_13] Copy the title and URL of the HTTP cassette recorder project
-   Detail: Capture the metadata for the third news item.
+12. [step_12] Copy the title and URL of the HTTP cassette recorder project
+   Detail: Select the text 'Show HN: A tiny HTTP cassette recorder for tests' and the URL to save.
    App: Google Chrome
    Target: https://github.com/example/cassette
    Verify: The text is copied to the clipboard.
-14. [step_14] Paste the title and URL for the HTTP cassette recorder
-   Detail: Insert the third article's metadata into the Notes app.
+13. [step_13] Paste the third article details into the Notes app
+   Detail: Insert the copied title and URL for the HTTP cassette recorder project into the note.
    App: Notes
-   Target: Daily news - 15 Sep
-   Input: Show HN: A tiny HTTP cassette recorder for tests | https://github.com/example/cassette
-   Verify: The text appears in the note body.
-15. [step_15] Type the observation about the cassette recorder
-   Detail: Add the specific observation from the GitHub project page to the note.
+   Target: Notes - Daily news - {{date}}
+   Input: 3. Show HN: A tiny HTTP cassette recorder for tests | https://github.com/example/cassette
+   Verify: The third entry appears in the note body.
+14. [step_14] Type a summary sentence about the HTTP cassette recorder
+   Detail: Add a specific observation about the HTTP cassette recorder to the third entry.
    App: Notes
-   Target: Daily news - 15 Sep
+   Target: Notes
    Input: Records real API answers once and replays them byte for byte.
-   Verify: The sentence is appended to the note content.
-16. [step_16] Copy the full content of the Daily news note
-   Detail: Capture the compiled digest to share it externally.
+   Verify: The sentence is appended to the third entry.
+15. [step_15] Copy the entire note content
+   Detail: Select and copy the full text of the daily news note to the clipboard.
    App: Notes
-   Target: Daily news - 15 Sep
-   Verify: The system action log indicates content was copied to the clipboard.
-17. [step_17] Navigate to the #daily-news Slack channel
-   Detail: Open the destination channel to post the digest.
+   Target: Notes
+   Verify: The content is copied to the clipboard (indicated by the Copy Action log).
+16. [step_16] Navigate to the Slack #daily-news channel
+   Detail: Open the Slack application and switch to the designated channel for posting.
    App: Google Chrome
    Target: https://app.slack.com/client/T0EXAMPLE/C0DAILYNEWS
-   Verify: The Slack channel #daily-news is active and the message composition box is visible.
+   Verify: The Slack interface shows the #daily-news channel with an active message textbox.
    Anchor: textbox "Message #daily-news" (`[aria-label="Message #daily-news"]`)
-18. [step_18] Paste the copied news digest into the Slack message box
-   Detail: Insert the compiled note content into the Slack channel.
+17. [step_17] Paste the copied note content into the Slack message box
+   Detail: Insert the previously copied daily news text into the Slack message field.
    App: Google Chrome
-   Target: #daily-news
-   Input: {{note_content}} | 2. A field guide to on-device vision models | https://research.example.com/on-device-vision-guide | Small quantised models now read screenshots well enough for UI tasks. | 3. Show HN: A tiny HTTP cassette recorder for tests | https://github.com/example/cassette | Records real API answers once and replays them byte for byte
-   Verify: The full text of the digest appears in the Slack message composition box.
-19. [step_19] Click the Send button to post the message
-   Detail: Submit the message to the channel to complete the sharing process.
+   Target: https://app.slack.com/client/T0EXAMPLE/C0DAILYNEWS
+   Input: Daily news - {{date}} | 1. {{article_title}} | {{article_url}} | {{summary_text}} | 2. A field guide to on-device vision models | https://research.example.com/on-device-vision-guide | Small quantised models now read screenshots well enough for UI tasks. | 3. Show HN: A tiny HTTP cassette recorder for tests | https://github.com/example/cassette | Records real API answers once and replays them byte for byte
+   Verify: The full text appears in the Slack message box.
+18. [step_18] Post the message in the #daily-news channel
+   Detail: Submit the message to complete the daily news digest workflow.
    App: Google Chrome
-   Target: #daily-news
-   Verify: The message appears in the channel history and the composition box is cleared.
+   Target: https://app.slack.com/client/T0EXAMPLE/C0DAILYNEWS
+   Verify: The message is sent and appears in the channel feed.
    Anchor: button "Send now" (`[aria-label="Send now"]`)
 
 ## Success criteria
 
-- The message containing the full daily news digest is successfully posted to the #daily-news Slack channel.
-- The Notes app contains the three articles with their summaries.
+- The note in the Notes app contains all three articles with their summaries.
+- The message in the Slack channel contains the same content as the note.
+- The user successfully navigated from Hacker News to Notes to Slack without errors.
 
 ## Common errors
 
-- If the user accidentally clicks the wrong article, they should verify the title matches the intended article before proceeding.
-- If the note is empty when trying to paste, the user must ensure they have opened the correct date-specific note.
-- If the Slack message does not send, check if the user has permission to the #daily-news channel.
+- If the user forgets to copy the note content before pasting to Slack, the message box will remain empty.
+- If the user navigates to the wrong Slack channel, the message will be posted to the incorrect channel.
+- If the user does not save the note in Notes before copying, the content will be lost.
 
 ## Decisions
 
-- If User has identified 3 distinct technical topics of interest.: User copies the full content of the 'Daily news - 15 Sep' note and pastes it into the Slack message box.
-- Choose by: Selects specific high-interest technical topics from the available feed, skipping unrelated items.
-  - Example: Selects 'SQLite's WAL mode, explained with diagrams' from the Hacker News feed (Frame 1) but skips 'The quiet death of the RSS reader, and its return' (Frame 1).
-  - Example: Selects the GitHub project 'HTTP cassette recorder' (Frame 15) instead of other potential links.
-- Open question the user did not answer: "Is the 'Daily news - 15 Sep' note already open in the Notes app, or do I need to create it if it doesn't exist?" Ask the user; do not guess.
-- Open question the user did not answer: "What specific text should I type for the summaries in Steps 7, 9, and 11 since only generic descriptions ('SQLite WAL mode', 'quantised models', 'cassette recorder') are provided?" Ask the user; do not guess.
-- Open question the user did not answer: "Are there any other articles currently visible on the Hacker News homepage that should be collected before clicking the specific SQLite link?" Ask the user; do not guess.
+- If User has collected exactly three distinct articles covering different tech domains.: User stops collecting, copies the entire note content, and proceeds to post to Slack.
+- Choose by: Selects articles based on specific technical topics: database internals (SQLite WAL), on-device AI (vision models), and developer tools (HTTP cassette recorder). (confidence 90%)
+  - Example: Frame 3 shows selection of 'SQLite's WAL mode, explained with diagrams' from Hacker News feed.
+  - Example: Frame 9 shows selection of 'A field guide to on-device vision models' from research.example.com.
+- Open question the user did not answer: "Are the specific article titles 'SQLite's WAL mode, explained with diagrams', the on-device vision guide, and the HTTP cassette recorder project guaranteed to exist at the URLs provided or are they dynamic links that might require searching?" Ask the user; do not guess.
+- Open question the user did not answer: "What specific format should the summary sentences follow (e.g., bullet points, paragraph style, word count limit) to ensure consistency in the final Slack post?" Ask the user; do not guess.
+- Open question the user did not answer: "Does the Notes app require any specific organization or folder structure before creating new notes, or should they be created in the default location?" Ask the user; do not guess.
 
 ## Guardrails
 
-- User never posts individual articles directly to Slack; they always compile them into a single note first.
-- User never includes the full article text, only the title, URL, and a single summary sentence per item.
+- User never posts articles from Hacker News directly without first copying the title and URL into the Notes app.
+- User never includes more than three articles in a single digest.
+- User never posts to Slack without first drafting the content in the Notes app.
 - Trust level: observe
 
 ## Voice
 
-- Output template: 1. {{Title}} | {{URL}}
-{{Summary Sentence}}
-2. {{Title}} | {{URL}}
-{{Summary Sentence}} (variables: Title, URL, Summary Sentence)
+- Output template: {{Article Title}}: {{Summary Sentence}} | {{URL}} (variables: Article Title, Summary Sentence, URL)
 
 ## Timing
 
-- Collection (~0 min): Browsing Hacker News, research sites, and GitHub to identify and copy 3 items.
-- Compilation (~0 min): Opening the 'Daily news - 15 Sep' note and pasting titles/URLs with typed summaries.
-- Distribution (~0 min): Copying the note content and pasting it into the #daily-news Slack channel.
+- collection (~0 min): User alternates between browsing Hacker News and reading external articles, copying details to Notes.
+- composition (~0 min): User types summary sentences and pastes collected links into the Notes app.
+- distribution (~0 min): User copies the note and pastes it into the Slack #daily-news channel.
 
 ## Not yet known
 

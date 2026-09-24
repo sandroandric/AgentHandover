@@ -99,6 +99,83 @@ def test_typed_lines_are_the_ones_the_document_gained() -> None:
     assert typed_lines(iana.timeline()) == [(3, iana.LINE_1), (4, iana.LINE_2)]
 
 
+def test_a_line_caught_mid_typing_stands_for_its_finished_line() -> None:
+    """Seen live (focus_iana_typed): a frame taken while the user typed
+    showed "... example.or"; the finished line was already on screen by
+    its next frame, so only the partial counted and became a junk
+    'Type "example.or"' step. A line a later frame of the same app
+    extends is typing in progress: it stands for the finished line."""
+    partial = "Reserved for documentation: example.com, example.net, example.or"
+    full = "Reserved for documentation: example.com, example.net, example.org"
+    timeline = [
+        _frame("a", 0, "TextEdit", []),
+        _frame("b", 2, "TextEdit", [partial]),
+        _frame("c", 4, "TextEdit", [full]),
+        _frame("d", 6, "TextEdit", [full]),
+    ]
+    timeline[1]["annotation"]["key_text"] = {"typed_text": partial}
+    timeline[2]["annotation"]["key_text"] = {"typed_text": ""}
+    assert typed_lines(timeline) == [(1, full)]
+    # Counted as it is when nothing extends it.
+    timeline[2]["content_text"] = [partial]
+    timeline[3]["content_text"] = [partial]
+    assert typed_lines(timeline) == [(1, partial)]
+
+
+def test_a_typing_step_with_the_start_of_a_line_gets_the_whole_line() -> None:
+    """Seen in focus_iana_typed: "Type the phrase 'Reserved for
+    documentation:' followed by the first domain name" had input
+    "Reserved for documentation: example.com"; the line the user finished
+    also listed example.net and example.org."""
+    partial = "Reserved for documentation: example.com"
+    full = "Reserved for documentation: example.com, example.net, example.org"
+    timeline = [
+        _frame("a", 0, "TextEdit", []),
+        _frame("b", 2, "TextEdit", [partial]),
+        _frame("c", 4, "TextEdit", [full]),
+    ]
+    timeline[1]["annotation"]["key_text"] = {"typed_text": partial}
+    steps = [_step("Type the phrase and the first domain", ["b"], input=partial)]
+    report = ground_steps(steps, timeline)
+    assert steps[0]["parameters"]["input"] == full
+    assert report["added"][0]["original"] == partial
+    assert len(steps) == 1
+
+
+def test_a_line_only_a_verify_mentions_is_not_typed_by_any_step() -> None:
+    full = "Reserved for documentation: example.com, example.net, example.org"
+    timeline = [_frame("a", 0, "TextEdit", []), _frame("b", 2, "TextEdit", [full])]
+    timeline[1]["annotation"]["key_text"] = {"typed_text": full}
+    steps = [_step("Type the source line", ["b"], input="Source: IANA",
+                   verify="The full text 'Reserved for documentation: {{domains}}' is visible")]
+    variables = [{"name": "domains", "example": "example.com, example.net, example.org"}]
+    report = ground_steps(steps, timeline, variables)
+    assert [a["input"] for a in report["added"]] == [full]
+
+
+def test_one_stray_citation_does_not_move_a_step() -> None:
+    """Seen in the focus_dailynews recording: "Navigate to the GitHub
+    repository page" cited frames 11, 13, 14, 15; frame 11 was the paste
+    of the previous article. Ordered by the first cited frame it jumped
+    ahead of that paste; by its longest run of frames (13-15) it stays
+    after it."""
+    timeline = [_frame(f"f{i}", i, "Safari" if i in (13, 14, 15) else "Notes", [])
+                for i in range(10, 17)]
+    steps = [
+        _step("Navigate to the GitHub repository page", ["f11", "f13", "f14", "f15"]),
+        _step("Paste the second article details into the note", ["f11"]),
+        _step("Type a summary sentence", ["f12"]),
+        _step("Copy the project title and URL", ["f15", "f16"]),
+    ]
+    assert ground_steps(steps, timeline)["reordered"]
+    assert [s["step"] for s in steps] == [
+        "Paste the second article details into the note",
+        "Type a summary sentence",
+        "Navigate to the GitHub repository page",
+        "Copy the project title and URL",
+    ]
+
+
 # ---------------------------------------------------------------------------
 # The checks, one at a time
 # ---------------------------------------------------------------------------

@@ -140,7 +140,6 @@ Rules:
 - Order the steps as the frames happened.
 - Name a link, button or tab only when its text is in the frame's Screen text or Items; a title seen only in a tab strip or menu is not a control the user clicked.
 - Write a Select or Scroll step only when a frame shows it.
-- Every line the user typed appears in a step's input.
 - Include EVERY meaningful step (navigation, data entry, confirmation, copy, paste, submit, save). Intermediate actions like typing into a field and then submitting are TWO separate steps — do not collapse them into one. The agent needs both the input action AND the submit action visible to execute correctly.
 - Skip redundant frames (reading, scrolling without action)
 - DETECT ACCIDENTAL CLICKS vs INTENTIONAL NAVIGATION: use your \
@@ -1296,20 +1295,32 @@ def _click_owners(raw_steps: list, timeline: list[dict] | None) -> dict[int, int
     A click is attached to the frame that shows its result (see
     ``FocusProcessor._attach_clicks``).  Several steps may cite that frame
     ("Click the SQLite story", then "Copy its title"; "Paste the digest",
-    then "Click Send" on one screen): the click goes to the one sharing the
-    most words with its target, the earliest on a tie.
+    then "Click Send" on one screen): the click goes to a step whose verb
+    clicks or navigates (a copy, paste or typing step never owns a click:
+    "Post the message" over "Paste the digest", "Navigate to the article"
+    over "Copy its title and URL" even when the copy step quotes the
+    title), then to the one sharing the most words with its target, then
+    the earliest.
     """
-    owners: dict[int, tuple[int, int]] = {}
+    owners: dict[int, tuple[int, int, int]] = {}
     for idx, raw_step in enumerate(raw_steps):
         if not isinstance(raw_step, dict):
             continue
         words = _step_words(raw_step)
+        clicks = int(_CLICK_VERB_RE.match(str(raw_step.get("action") or "").strip()) is not None)
         for frame in _step_frames(raw_step, timeline):
             for click in frame.get("click_targets") or []:
-                overlap = len(words & _click_words(click))
-                if id(click) not in owners or overlap > owners[id(click)][0]:
-                    owners[id(click)] = (overlap, idx)
-    return {click: idx for click, (_overlap, idx) in owners.items()}
+                score = (clicks, len(words & _click_words(click)))
+                if id(click) not in owners or score > owners[id(click)][:2]:
+                    owners[id(click)] = (*score, idx)
+    return {click: idx for click, (_clicks, _overlap, idx) in owners.items()}
+
+
+# Verbs of a step that clicks something (a button, link, tab, menu item).
+_CLICK_VERB_RE = re.compile(
+    r"(click|press|tap|send|post|submit|open|select|choose|toggle|check|confirm"
+    r"|navigate|go|visit|follow)\b", re.I,
+)
 
 
 def _anchor_for_step(

@@ -216,6 +216,43 @@ def test_revisions_outside_the_answers_steps_are_not_applied() -> None:
         assert [s["action"] for s in proc["steps"]] == before
 
 
+def test_a_revision_may_also_take_the_step_next_to_its_own() -> None:
+    """Seen live: the question named steps 4-7 and the typed answer ("...
+    then a Source line") rightly rewrote step 8 too; the whole revision was
+    refused. The steps right beside the question's own are allowed."""
+    qa = _qa()
+    proc = _merged(qa)
+    if len(proc["steps"]) < 5:
+        proc["steps"].append(dict(proc["steps"][-1], action="Type the Source line"))
+    applied = apply_answer_revisions(
+        proc, qa,
+        {"revisions": [{"answer": 1, "replaces": [3, 4, 5],
+                        "steps": [{"action": "Type the one line"}, {"action": "Type the Source line"}]}]},
+    )
+    assert len(applied) == 1
+    assert [s["action"] for s in proc["steps"]][2:4] == ["Type the one line", "Type the Source line"]
+
+
+def test_a_revision_keeps_typed_text_and_drops_the_step_it_repeats() -> None:
+    """Seen live (focus_iana_typed): the revision wrote the typing step with
+    only "... example.com" (grounding had put the whole line) and a new
+    Source step beside the old one."""
+    from agenthandover_worker.focus_questioner import (
+        _drop_duplicated_neighbours, _keep_typed_text,
+    )
+    full = "Reserved for documentation: example.com, example.net, example.org"
+    proc = {"variables": [{"name": "source", "example": "Source: IANA reserved domains page"}]}
+    old = [{"action": "Type the line", "input": full}]
+    built = [{"action": "Type the line", "input": "Reserved for documentation: example.com"},
+             {"action": "Type the Source line", "input": "Source: IANA reserved domains page"}]
+    _keep_typed_text(built, old, proc)
+    assert built[0]["input"] == full
+    steps = [{"action": "Open TextEdit", "input": ""}, *built,
+             {"action": "Type the source", "input": "{{source}}"}]
+    _drop_duplicated_neighbours(steps, 1, 2, proc)
+    assert [s["action"] for s in steps] == ["Open TextEdit", "Type the line", "Type the Source line"]
+
+
 def test_an_unavailable_model_leaves_the_steps_as_recorded() -> None:
     qa = _qa()
     proc = _merged(qa)

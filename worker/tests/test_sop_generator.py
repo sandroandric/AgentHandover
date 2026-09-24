@@ -1190,6 +1190,36 @@ class TestClickOwnership:
             "role": "button", "name": "Send now", "selector": '[aria-label="Send now"]',
         }
 
+    def test_on_a_tie_the_step_that_clicks_gets_the_anchor(self) -> None:
+        """Seen in the focus_dailynews recording: "Paste the copied note
+        content into the Slack message box" and "Post the message in the
+        #daily-news channel" both cite the frame of the Send click and
+        neither names the button; the anchor went to the paste."""
+        vlm_sop = {"steps": [
+            {"action": "Paste the copied note content into the Slack message box", "frames": [1]},
+            {"action": "Post the message in the #daily-news channel", "frames": [1]},
+        ]}
+        steps = _vlm_sop_to_template(vlm_sop, timeline=self._slack_timeline())["steps"]
+        assert steps[0]["anchor"] is None
+        assert steps[1]["anchor"]["name"] == "Send now"
+
+    def test_the_navigating_step_owns_a_link_click_over_a_copy_quoting_it(self) -> None:
+        """Seen in the focus_dailynews recording: "Copy the title and URL of
+        the on-device vision article", whose description quotes the story's
+        title, took the story link's anchor from "Navigate to the research
+        article" on the same frame."""
+        story = _frame("story", clicks=[_HN_CLICK])
+        story["click_targets"][0]["page_dom_nodes"] = _HN_TREE
+        vlm_sop = {"steps": [
+            {"action": "Navigate to the article", "frames": [1]},
+            {"action": "Copy the title and URL",
+             "description": "Copy \"SQLite's WAL mode, explained with diagrams\" and its link",
+             "frames": [1]},
+        ]}
+        steps = _vlm_sop_to_template(vlm_sop, timeline=[story])["steps"]
+        assert steps[0]["anchor"]["name"] == "SQLite's WAL mode, explained with diagrams"
+        assert steps[1]["anchor"] is None
+
     def test_on_a_tie_the_earliest_step_gets_the_anchor(self) -> None:
         story = _frame("story", clicks=[_HN_CLICK])
         story["click_targets"][0]["page_dom_nodes"] = _HN_TREE
