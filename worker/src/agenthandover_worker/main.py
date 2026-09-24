@@ -2056,7 +2056,7 @@ def _save_focus_draft(
     from.  Synthesis, Q&A and approval update the record afterwards.  A
     session that is another run of an existing Skill (not *new_skill*)
     adds no draft: the Skill's own record, if any, is updated."""
-    slug = procedure["slug"]
+    slug = procedure.get("slug") or procedure["id"]
     try:
         _atomic_write_result(state_dir / FOCUS_DRAFT_FILE, {
             "session_id": session_id,

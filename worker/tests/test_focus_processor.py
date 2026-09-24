@@ -1366,7 +1366,8 @@ class TestAnotherRunOfASkill:
 
     SESSION = "focus-again-1"
     SKILL = {
-        "id": "domain-check", "slug": "domain-check", "title": "Check a domain",
+        # Saved by passive discovery: an id, no slug.
+        "id": "domain-check", "title": "Check a domain",
         "lifecycle_state": "agent_ready",
         "steps": [
             {"step_id": "s1", "action": "Search the domain", "app": "Google Chrome", "location": WHOIS},
