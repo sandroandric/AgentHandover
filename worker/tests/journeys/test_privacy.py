@@ -114,7 +114,7 @@ def _inject_into_one_frame(db_path) -> str:
 def test_screen_text_cannot_instruct_the_annotator(temp_home, events_db, cassette, worker) -> None:
     tape = cassette("privacy_injection")
     temp_home.config_file.write_text(
-        f'[vlm]\nollama_host = "{tape.host}"\ntier = "standard"\n'
+        f'[vlm]\nollama_host = "{tape.host}"\ntier = "recommended"\n'
         'annotation_model = "qwen3.5:4b"\n\n'
         "[knowledge]\nquery_api_enabled = false\n",
         encoding="utf-8",

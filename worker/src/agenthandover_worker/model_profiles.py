@@ -67,8 +67,8 @@ class ModelProfile:
     # prompt tokens at the 20-keyframe cap + num_predict; synthesis 4,225 +
     # 3,000; reasoner calls <= 1,002 + 4,000.  Gemma (num_predict 6,000):
     # 12,619 -> 16,384.  Qwen (num_predict 12,000): 18,619 -> 24,576.
-    # Qwen 3.5 4B is the SOP model on the Standard and Recommended (16 GB)
-    # tiers, so those tiers' generation phase runs at 24,576; Gemma 4 12B
+    # Qwen 3.5 4B is the SOP model on the Standard (8 GB) and Recommended
+    # (16 GB) tiers, so those tiers' generation phase runs at 24,576; Gemma 4 12B
     # QAT (Performance) at 16,384 and 31B QAT (Max Quality) at 32,768.
     sop_system: str = ""
     sop_temperature: float = 0.3
@@ -151,7 +151,28 @@ _GEMMA_DIFF_SYSTEM = (
 # ---------------------------------------------------------------------------
 
 _PROFILES: dict[str, ModelProfile] = {
-    # --- Qwen 3.5 family (default for 8GB machines) ---
+    # --- Qwen 3.5 family ---
+    # The Standard (8 GB) tier's annotator (WP-F8).  The Qwen card warns
+    # that the 2B is prone to thinking loops, so ``think`` is off on every
+    # call type and the annotation output stays capped at 300 tokens (the
+    # compact schema's answers are ~120).  These are the settings the 8 GB
+    # measurement ran with (the focus_dailynews annotation prompts replayed
+    # on the test Mac: 10/10 valid annotations).  The SOP settings apply
+    # only when the scheduler falls back to the resident annotator.
+    "qwen3.5:2b-q4_K_M": ModelProfile(
+        model="qwen3.5:2b-q4_K_M",
+        family="qwen3.5",
+        ann_think=False,
+        ann_num_predict=300,
+        ann_num_ctx=4096,
+        sop_num_predict=12000,
+        sop_num_ctx=24576,
+        sop_temperature=0.3,
+        sop_think=False,
+        diff_num_predict=500,
+        diff_think=False,
+    ),
+    # The generic profile of any other Qwen tag (``get_profile``'s fallback).
     "qwen3.5:2b": ModelProfile(
         model="qwen3.5:2b",
         family="qwen3.5",
@@ -517,25 +538,35 @@ def ollama_supports_gemma4(ollama_host: str = "http://localhost:11434") -> bool:
 EMBEDDING_MODEL = "nomic-embed-text"
 
 # The per-frame annotator is the small resident model on every tier
-# (text-first annotation, WP-C3b); from 24 GB a larger model writes Skills
-# and behavioural syntheses, where quality matters and calls are rare.
-# 16 GB runs qwen3.5:4b for both (WP-F6, measured head-to-head on the test
-# Mac); 8 GB keeps it too, pending an 8 GB bench.
+# (text-first annotation, WP-C3b); a larger model writes Skills and
+# behavioural syntheses, where quality matters and calls are rare.  16 GB
+# runs qwen3.5:4b for both (WP-F6, measured head-to-head on the test Mac).
+# 8 GB annotates with qwen3.5:2b-q4_K_M and writes Skills with qwen3.5:4b
+# (WP-F8, measured 2026-09-23/24 on the 16 GB test Mac replaying the
+# focus_dailynews prompts): the 2B's annotations were valid 10/10 with the
+# right app 10/10 and location 6/10 against qwen3.5:4b, at ~55 tok/s;
+# writing the Skill, qwen3.5:4b got 18 steps right against 10 for
+# qwen3.5:2b and 13 for granite4.2:3b (rejected as annotator: no vision).
 TIER_BASIS = (
-    "Annotator qwen3.5:4b on every tier. Measured on a 16 GB Mac with Ollama "
+    "Measured on a 16 GB Mac with Ollama "
     "0.34.2: gemma4:12b-it-qat takes 40+ s per annotated frame (11 s image "
     "prefill + 30 s decode) against a 3 s budget, and does not fit next to "
     "qwen3.5:4b (3.4 GB) once ordinary apps are open. Writing Skills, "
     "qwen3.5:4b ran at 29.5 tok/s against Gemma 4 12B's 12.1 tok/s and "
     "wrote a Skill in 153 s against 230 s, of comparable quality, so 16 GB "
-    "Macs run qwen3.5:4b for everything. From 24 GB a Gemma 4 QAT model "
-    "writes Skills and synthesis, and the worker loads one model at a time: "
+    "Macs run qwen3.5:4b for everything. 8 GB Macs annotate with "
+    "qwen3.5:2b-q4_K_M (1.9 GB, ~55 tok/s, valid annotations 10/10 on the "
+    "focus_dailynews prompts), resident all day in ~2.3 GB instead of "
+    "~3.8 GB, and write Skills with qwen3.5:4b (18 correct steps against 10 "
+    "for qwen3.5:2b). From 24 GB a Gemma 4 QAT model writes Skills and "
+    "synthesis. Where the two models differ the worker loads one at a time: "
     "annotation first, then Skills."
 )
 
 # Download size in GB of the models a tier installs by default (``ollama
 # list`` on the test Mac; the 31B figure is the QAT quant's footprint).
 MODEL_SIZES_GB: dict[str, float] = {
+    "qwen3.5:2b-q4_K_M": 1.9,
     "qwen3.5:4b": 3.4,
     "gemma4:12b-it-qat": 7.2,
     "gemma4:31b-it-qat": 18.0,
@@ -569,9 +600,9 @@ TIERS: tuple[Tier, ...] = (
     Tier(
         id="standard",
         label="Standard",
-        subtitle="Qwen 3.5 4B for everything, works on 8 GB Macs",
+        subtitle="Qwen 3.5 2B watches, Qwen 3.5 4B writes Skills, works on 8 GB Macs",
         min_ram_gb=0,
-        annotation_model="qwen3.5:4b",
+        annotation_model="qwen3.5:2b-q4_K_M",
         sop_model="qwen3.5:4b",
     ),
     Tier(
@@ -617,8 +648,14 @@ TIERS: tuple[Tier, ...] = (
 #                (WP-C6; written by the installer 2ce4c15, setup 85e9cbb and
 #                onboarding 012b97f, merged in 2461285) until dfaa35d (WP-F6)
 #                moved the 16 GB tier to qwen3.5:4b for both.
-# standard, performance and max_quality have kept their WP-C6 pair.
+#   standard     qwen3.5:4b + qwen3.5:4b          the default from d770865
+#                (WP-C6; written by the same installer, setup and
+#                onboarding commits, and the installer's fresh-config block
+#                since 2ce4c15) until WP-F8 moved the 8 GB tier's annotator
+#                to qwen3.5:2b-q4_K_M.
+# performance and max_quality have kept their WP-C6 pair.
 PREVIOUS_TIER_DEFAULTS: dict[str, tuple[tuple[str, str], ...]] = {
+    "standard": (("qwen3.5:4b", "qwen3.5:4b"),),
     "recommended": (("qwen3.5:4b", "gemma4:12b-it-qat"),),
 }
 

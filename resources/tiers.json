@@ -1,9 +1,10 @@
 {
   "schema_version": 1,
-  "basis": "Annotator qwen3.5:4b on every tier. Measured on a 16 GB Mac with Ollama 0.34.2: gemma4:12b-it-qat takes 40+ s per annotated frame (11 s image prefill + 30 s decode) against a 3 s budget, and does not fit next to qwen3.5:4b (3.4 GB) once ordinary apps are open. Writing Skills, qwen3.5:4b ran at 29.5 tok/s against Gemma 4 12B's 12.1 tok/s and wrote a Skill in 153 s against 230 s, of comparable quality, so 16 GB Macs run qwen3.5:4b for everything. From 24 GB a Gemma 4 QAT model writes Skills and synthesis, and the worker loads one model at a time: annotation first, then Skills.",
+  "basis": "Measured on a 16 GB Mac with Ollama 0.34.2: gemma4:12b-it-qat takes 40+ s per annotated frame (11 s image prefill + 30 s decode) against a 3 s budget, and does not fit next to qwen3.5:4b (3.4 GB) once ordinary apps are open. Writing Skills, qwen3.5:4b ran at 29.5 tok/s against Gemma 4 12B's 12.1 tok/s and wrote a Skill in 153 s against 230 s, of comparable quality, so 16 GB Macs run qwen3.5:4b for everything. 8 GB Macs annotate with qwen3.5:2b-q4_K_M (1.9 GB, ~55 tok/s, valid annotations 10/10 on the focus_dailynews prompts), resident all day in ~2.3 GB instead of ~3.8 GB, and write Skills with qwen3.5:4b (18 correct steps against 10 for qwen3.5:2b). From 24 GB a Gemma 4 QAT model writes Skills and synthesis. Where the two models differ the worker loads one at a time: annotation first, then Skills.",
   "minimum_ollama_version_for_gemma4": "0.34.0",
   "embedding_model": "nomic-embed-text",
   "model_sizes_gb": {
+    "qwen3.5:2b-q4_K_M": 1.9,
     "qwen3.5:4b": 3.4,
     "gemma4:12b-it-qat": 7.2,
     "gemma4:31b-it-qat": 18.0,
@@ -13,12 +14,17 @@
     {
       "id": "standard",
       "label": "Standard",
-      "subtitle": "Qwen 3.5 4B for everything, works on 8 GB Macs",
+      "subtitle": "Qwen 3.5 2B watches, Qwen 3.5 4B writes Skills, works on 8 GB Macs",
       "min_ram_gb": 0,
-      "annotation_model": "qwen3.5:4b",
+      "annotation_model": "qwen3.5:2b-q4_K_M",
       "sop_model": "qwen3.5:4b",
       "ab_sop_model": "",
-      "previous_defaults": []
+      "previous_defaults": [
+        {
+          "annotation_model": "qwen3.5:4b",
+          "sop_model": "qwen3.5:4b"
+        }
+      ]
     },
     {
       "id": "recommended",

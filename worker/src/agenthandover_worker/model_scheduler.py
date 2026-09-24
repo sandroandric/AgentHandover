@@ -1,8 +1,9 @@
 """Phase-ordered model use: annotate first, then write Skills, one model at a time.
 
-On a tier whose annotation model (``qwen3.5:4b``) differs from its SOP model
-(``gemma4:12b-it-qat`` on 24 GB Macs, ``gemma4:31b-it-qat`` on 48 GB), the
-two may not fit in memory together once ordinary apps are open: Ollama
+On a tier whose annotation model differs from its SOP model
+(``qwen3.5:2b-q4_K_M`` and ``qwen3.5:4b`` on 8 GB Macs, ``qwen3.5:4b`` and
+``gemma4:12b-it-qat`` on 24 GB, ``qwen3.5:4b`` and ``gemma4:31b-it-qat`` on
+48 GB), the two may not fit in memory together once ordinary apps are open: Ollama
 evicts one to load the other, and under pressure a load can fail ("timed
 out waiting for llama-server to start").  The worker therefore runs each tick in two phases:
 
@@ -60,8 +61,8 @@ runs empty.
   withdraws it from Ollama's queue, so it does not hold up the annotation
   model's calls.
 
-On a tier with one model for both (Standard, and Recommended since WP-F6)
-none of this applies: the generation phase runs whenever work is due, as
+On a tier with one model for both (Recommended, since WP-F6) none of
+this applies: the generation phase runs whenever work is due, as
 before.
 """
 
