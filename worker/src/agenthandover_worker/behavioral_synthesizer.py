@@ -244,20 +244,25 @@ def phrase_criteria(hypotheses: list[dict], worded: list[dict]) -> list[dict]:
 
 def contrast_instances(
     observations: list[list[dict]], instance_ids: list[str] | None,
+    instance_lists: dict[str, list[list[dict]]] | None = None,
 ) -> list[dict]:
     """The observations as :func:`contrast.criteria_hypotheses` instances:
     each timeline's frames that hold a pick (``list_choice``, see
-    ``FocusProcessor._build_pre_analysis_obs``), under its id from
+    ``FocusProcessor._build_pre_analysis_obs``), then the lists
+    *instance_lists* holds for its id (the clicks on list rows,
+    ``focus_processor.session_list_choices``), under its id from
     *instance_ids* (parallel to *observations*)."""
     ids = list(instance_ids or [])
-    return [
-        {
-            "id": ids[i] if i < len(ids) else "",
-            "lists": [f["list_choice"] for f in timeline or []
-                      if isinstance(f, dict) and f.get("list_choice")],
-        }
-        for i, timeline in enumerate(observations)
-    ]
+    extra = instance_lists or {}
+    out = []
+    for i, timeline in enumerate(observations):
+        iid = ids[i] if i < len(ids) else ""
+        lists = [f["list_choice"] for f in timeline or []
+                 if isinstance(f, dict) and f.get("list_choice")]
+        if iid:
+            lists += [items for items in extra.get(iid) or [] if items]
+        out.append({"id": iid, "lists": lists})
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -362,6 +367,7 @@ class BehavioralSynthesizer:
         continuity_spans: list[dict] | None = None,
         force: bool = False,
         instance_ids: list[str] | None = None,
+        instance_lists: dict[str, list[list[dict]]] | None = None,
         _retry_count: int = 0,
     ) -> BehavioralInsights:
         """Run behavioral synthesis for a procedure.
@@ -379,6 +385,10 @@ class BehavioralSynthesizer:
             instance_ids: The session or observation id of each timeline
                 in *observations* (same order): the evidence the selection
                 criteria cite.  Timelines without an id add no criteria.
+            instance_lists: More lists each instance picked from, by its id
+                (the clicks on list rows the browser reported,
+                ``focus_processor.session_list_choices``), next to its
+                frames' own picks.
 
         The selection criteria are computed, not asked for: the chosen
         versus skipped list entries of the observations
@@ -401,7 +411,9 @@ class BehavioralSynthesizer:
             )
             return BehavioralInsights()
 
-        hypotheses = criteria_hypotheses(contrast_instances(observations, instance_ids))
+        hypotheses = criteria_hypotheses(
+            contrast_instances(observations, instance_ids, instance_lists),
+        )
 
         # Build the synthesis prompt
         prompt = self._build_prompt(
@@ -472,6 +484,7 @@ class BehavioralSynthesizer:
                     continuity_spans=continuity_spans,
                     force=force,
                     instance_ids=instance_ids,
+                    instance_lists=instance_lists,
                     _retry_count=_retry_count + 1,
                 )
             return BehavioralInsights()
@@ -495,6 +508,7 @@ class BehavioralSynthesizer:
                     continuity_spans=continuity_spans,
                     force=force,
                     instance_ids=instance_ids,
+                    instance_lists=instance_lists,
                     _retry_count=_retry_count + 1,
                 )
             return BehavioralInsights()
