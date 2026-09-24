@@ -1364,12 +1364,10 @@ class TestAnotherRunOfASkill:
         kb = KnowledgeBase(root=tmp_path / "kb", db_path=db_path)
         kb.ensure_structure()
         kb.save_procedure(json.loads(json.dumps(self.SKILL)))
-        processor = MagicMock()
-        # The model's SOP of the recording, under a slug of its own.
-        processor.process_session.return_value = GeneratedSOP(
-            sop=generated_sop_template("check_domain_availability"),
-        )
-        processor._last_rich_observations = []
+        # The real processor (models mocked): the match is decided once the
+        # recording's keyframes are annotated, before any SOP call.
+        sop_gen = _make_mock_sop_generator()
+        processor = FocusProcessor(_make_mock_annotator(), _make_mock_differ(), sop_gen)
         writer = MagicMock()
         writer.get_sops_dir.return_value = tmp_path / "sops"
         with WorkerDB(db_path) as db:
@@ -1382,9 +1380,13 @@ class TestAnotherRunOfASkill:
             [obs] = db.get_workflow_observations()
             records = db.get_generated_sops()
 
-        # No second Skill, no draft of the recording's own SOP.
+        # No SOP is generated for another run of a Skill (on a 16 GB Mac
+        # that call is minutes of the generation model), so there is no
+        # second Skill, no draft and no resume state.
+        assert sop_gen.generate_from_focus.call_count == 0
         assert [p["id"] for p in kb.list_procedures()] == ["domain-check"]
         assert records == []
+        assert not (tmp_path / "focus-draft.json").exists()
         proc = kb.get_procedure("domain-check")
         # The approved Skill's steps and lifecycle are its own.
         assert proc["steps"] == self.SKILL["steps"]
@@ -1397,3 +1399,41 @@ class TestAnotherRunOfASkill:
         assert (hyp["step_index"], hyp["rejoin_index"]) == (1, 1)
         assert [s["location"] for s in hyp["alternative_steps"]] == [NOTES]
         assert {"kind": "instance", "id": self.SESSION} in hyp["evidence"]
+
+    def test_process_session_skips_the_sop_call_for_a_match(self, tmp_path):
+        """``match`` runs after the keyframes are annotated and before the
+        SOP step: a Skill it returns ends the session with no SOP call
+        (even over a saved draft), None generates the SOP as before."""
+        db_path = self._recording(tmp_path)
+        skill = json.loads(json.dumps(self.SKILL))
+        with WorkerDB(db_path) as db:
+            events = db.get_focus_session_events(self.SESSION)
+            for saved in (None, GeneratedSOP(sop={"slug": "saved"})):
+                sop_gen = _make_mock_sop_generator()
+                processor = FocusProcessor(_make_mock_annotator(), _make_mock_differ(), sop_gen)
+                seen = []
+
+                def match():
+                    # The frames the match reads are annotated by now.
+                    seen.append([e["annotation_status"]
+                                 for e in db.get_focus_session_events(self.SESSION)])
+                    return skill
+
+                result = processor.process_session(
+                    db, self.SESSION, "Domain again", events,
+                    screenshots_dir=str(tmp_path), saved=saved, match=match,
+                )
+                assert sop_gen.generate_from_focus.call_count == 0
+                assert result.success and result.sop == {} and result.instance_of is skill
+                assert seen and "pending" not in seen[0]
+                # Synthesis still gets the recording's rich observations.
+                assert processor._last_rich_observations[0]
+
+            sop_gen = _make_mock_sop_generator()
+            processor = FocusProcessor(_make_mock_annotator(), _make_mock_differ(), sop_gen)
+            result = processor.process_session(
+                db, self.SESSION, "Domain again", events,
+                screenshots_dir=str(tmp_path), match=lambda: None,
+            )
+        assert sop_gen.generate_from_focus.call_count == 1
+        assert result.sop["slug"] == "test-task" and result.instance_of is None

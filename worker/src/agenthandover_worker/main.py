@@ -1769,11 +1769,31 @@ def _process_focus_sessions_v2(
     # validation is regenerated once, then recorded as a failure).  A
     # session whose SOP was generated before a restart resumes from its
     # saved draft instead of generating it again.
+    #
+    # A recording of a routine that already is a Skill (matched by its
+    # workflow, ``workflow_mining.focus_skill``, once its keyframes are
+    # annotated) is another run of that Skill, not a new one: no SOP is
+    # generated for it, its steps stay as they are, whatever its lifecycle
+    # (the run's own way goes to branch hypotheses, and the branches
+    # agreeing runs make, below), and the run joins its evidence, what the
+    # runs teach and its synthesis.
+    def match_skill() -> dict | None:
+        if knowledge_base is None:
+            return None
+        try:
+            return workflow_mining.focus_skill(
+                db, knowledge_base, db.get_focus_session_events(session_id),
+                title, now=now,
+            )
+        except Exception:
+            logger.warning("Focus session '%s' not matched to the Skills", title, exc_info=True)
+            return None
+
     saved = _read_focus_draft(state_dir, session_id)
     result, lint_error = _generate_linted(
         lambda: focus_processor.process_session(
             db, session_id, title, focus_events,
-            screenshots_dir=screenshots_dir, saved=saved,
+            screenshots_dir=screenshots_dir, saved=saved, match=match_skill,
         ),
         "focus_v2",
         title,
@@ -1787,31 +1807,16 @@ def _process_focus_sessions_v2(
         return 0
 
     exported = 0
-    if result.success and result.sop and not lint_error:
-        sop_templates = [result.sop]
-        slug = result.sop.get("slug", "")
-        # A recording of a routine that already is a Skill (matched by its
-        # workflow, ``workflow_mining.focus_skill``) is another run of that
-        # Skill, not a new one: its steps stay as they are, whatever its
-        # lifecycle (the run's own way goes to branch hypotheses, and
-        # the branches agreeing runs make, below), and the run joins its
-        # evidence, what the runs teach and its synthesis.  The SOP
-        # generated from the recording is not used.
-        skill = None
-        if knowledge_base is not None:
-            try:
-                skill = workflow_mining.focus_skill(
-                    db, knowledge_base, db.get_focus_session_events(session_id),
-                    title, now=now,
-                )
-            except Exception:
-                logger.warning("Focus session '%s' not matched to the Skills", title, exc_info=True)
+    skill = result.instance_of
+    if result.success and (skill is not None or result.sop) and not lint_error:
         if skill is not None:
             procedure_dict = skill
             slug = str(skill.get("id") or skill.get("slug"))
             sop_templates = [procedure_dict]
             logger.info("Focus v2 session '%s' is another run of Skill '%s'", title, slug)
         else:
+            sop_templates = [result.sop]
+            slug = result.sop.get("slug", "")
             # --- Convert to v3 procedure and set user's title ---
             from agenthandover_worker.procedure_schema import sop_to_procedure
             procedure_dict = sop_to_procedure(result.sop)
@@ -1875,7 +1880,7 @@ def _process_focus_sessions_v2(
                     obs_for_synthesis = [obs for obs, _ in earlier] + rich_obs
                     instance_ids = [iid for _, iid in earlier] + [session_id]
                 else:
-                    obs_for_synthesis = [result.sop.get("steps", [])]
+                    obs_for_synthesis = [(result.sop or procedure_dict).get("steps", [])]
                 insights = behavioral_synthesizer.synthesize(
                     slug, procedure_dict, obs_for_synthesis,
                     force=True,  # bypass min_observations for focus
@@ -1917,7 +1922,7 @@ def _process_focus_sessions_v2(
                 )
                 write_focus_pending(
                     state_dir, session_id, slug,
-                    sop_template=result.sop,
+                    sop_template=result.sop or procedure_dict,
                     procedure=procedure_dict,
                 )
                 logger.info(
@@ -2045,19 +2050,21 @@ def _save_focus_draft(
     resumes after a restart) and the state ``_read_focus_draft`` resumes
     from.  Synthesis, Q&A and approval update the record afterwards.  A
     session that is another run of an existing Skill (not *new_skill*)
-    adds no draft: the Skill's own record, if any, is updated."""
+    had no SOP generated: it adds no draft and no resume state (a restart
+    matches it again), and the Skill's own record, if any, is updated."""
     slug = procedure.get("slug") or procedure["id"]
-    try:
-        _atomic_write_result(state_dir / FOCUS_DRAFT_FILE, {
-            "session_id": session_id,
-            "sop_template": result.sop,
-            "inference_time_seconds": result.inference_time_seconds,
-        })
-    except OSError:
-        logger.warning(
-            "Could not save the draft state of '%s'; a restart before its "
-            "export generates it again", slug, exc_info=True,
-        )
+    if new_skill:
+        try:
+            _atomic_write_result(state_dir / FOCUS_DRAFT_FILE, {
+                "session_id": session_id,
+                "sop_template": result.sop,
+                "inference_time_seconds": result.inference_time_seconds,
+            })
+        except OSError:
+            logger.warning(
+                "Could not save the draft state of '%s'; a restart before its "
+                "export generates it again", slug, exc_info=True,
+            )
     record = db.get_generated_sop_by_slug(slug)
     if record is not None and (record.get("source_id") == session_id or not new_skill):
         db.update_sop_json(slug, procedure)

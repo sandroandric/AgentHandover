@@ -13,8 +13,9 @@ The ledger's schema (``proc["knowledge"]``, see
 WP-L2 (contrast), WP-L3 (run signals) and WP-M5 (divergence branches).
 
 The whole journey needs the model's answers for the three extra runs
-(annotation, SOP, synthesis), which are not recorded yet (the questions
-call no model since WP-L4).  The parts that call no model run now over the
+(annotation and synthesis; each is another run of the Skill, so no SOP is
+generated for it), which are not recorded yet (the questions call no
+model since WP-L4).  The parts that call no model run now over the
 same fixtures, loaded into one events database the way the daemon keeps
 every morning: what the runs' events teach about the trigger, the done
 criterion and the check (``run_signals``), the selection criterion the
@@ -64,8 +65,9 @@ ARCHIVE_HOST = "archive.example.net"
 
 # The first model request of each extra run (the annotation of its first
 # keyframe; a standalone run of the fixture on the focus_dailynews
-# cassette misses it).  The SOP and synthesis calls that follow depend on
-# these answers, so they cannot be named before the recording.
+# cassette misses it).  The synthesis call that follows depends on these
+# answers, so it cannot be named before the recording.  A run that matches
+# the Skill makes no SOP call (``FocusProcessor.process_session``'s match).
 EXTRA_RUN_MISSING_KEYS: dict[str, str] = {
     "focus_dailynews_skip": "93414f3ff1c29740ef33e93342b84ab116e26245258d0a156141b0d57e72ca15",
     "focus_dailynews_diverge": "3f20f2202b8b75ccc6c40b2170af5a05737a407a66918dd0780c0b499a5791b0",
@@ -78,7 +80,8 @@ needs_extra_run_recordings = pytest.mark.skipif(
     reason=(
         f"cassettes/{FOCUS_CASSETTE}.jsonl lacks the model calls of the extra "
         "daily-news runs: " + ", ".join(_MISSING)
-        + " (and the SOP and synthesis calls each unblocks); "
+        + " (and the synthesis call each unblocks; a run of the Skill makes "
+        "no SOP call); "
         "re-record J-ledger with AH_RECORD=1 on the test Mac"
     ),
 )

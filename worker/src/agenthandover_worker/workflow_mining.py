@@ -34,7 +34,9 @@ Skills and their observations (``promoted_slug``):
   same workflow group with it; a recording of a routine that already is a
   Skill (:func:`focus_skill`) is another run of that Skill, not a new
   one: the Skill keeps its steps (approved or draft, a later run never
-  rewrites them) and the run's own way is divergence-mined into branch
+  rewrites them, so no SOP is generated for the run: the match is made
+  once its keyframes are annotated, before the SOP call) and the run's
+  own way is divergence-mined into branch
   hypotheses and branches, like a passive run's;
 - a Skill with no observation at all (recorded before the observation
   log, or imported) is linked by its steps' places: a workflow group no

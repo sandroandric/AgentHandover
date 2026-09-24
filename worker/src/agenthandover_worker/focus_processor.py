@@ -19,6 +19,7 @@ import logging
 import re
 from datetime import timedelta
 from pathlib import Path
+from typing import Callable
 
 from agenthandover_worker.clipboard_grounding import (
     attach_clipboard_events,
@@ -177,6 +178,7 @@ class FocusProcessor:
         *,
         screenshots_dir: str | Path = "",
         saved: GeneratedSOP | None = None,
+        match: Callable[[], dict | None] | None = None,
     ) -> GeneratedSOP:
         """Process a completed focus session end-to-end.
 
@@ -185,7 +187,8 @@ class FocusProcessor:
              the other frames skipped, and annotate the SOP's keyframes
           2. Ensure the annotated SOP keyframes have frame diffs
           3. Collect the full annotated timeline
-          4. Generate a semantic SOP via the SOP generator
+          4. Generate a semantic SOP via the SOP generator, unless *match*
+             finds the recording is another run of an existing Skill
 
         Args:
             db: WorkerDB instance.
@@ -197,6 +200,13 @@ class FocusProcessor:
                 draft): steps 1-3 run again (no model call for frames
                 already annotated), step 4 returns it instead of generating
                 it again.
+            match: called once the SOP keyframes are annotated (it reads
+                the session's frames from *db*): the existing Skill (its
+                procedure) the recording is another run of, or None.  A
+                match skips step 4, since the Skill keeps its own steps and
+                the recording's SOP would be thrown away (on a 16 GB Mac,
+                minutes of the generation model); the result carries the
+                Skill in ``instance_of``, with an empty ``sop``.
 
         Returns:
             GeneratedSOP with the template dict (or error).
@@ -304,6 +314,15 @@ class FocusProcessor:
                 for f in ground_frame_texts(timeline, timeline) if f.get("annotation")
             ]
         ]
+
+        # A recording of an existing Skill needs no SOP of its own.
+        skill = match() if match is not None else None
+        if skill is not None:
+            logger.info(
+                "Focus v2: '%s' is another run of Skill '%s'; no SOP generated",
+                title, skill.get("id") or skill.get("slug"),
+            )
+            return GeneratedSOP(sop={}, instance_of=skill)
 
         # Step 4: Generate SOP (its first call switches Ollama to the
         # generation model, ``ModelScheduler.enter_generation``)

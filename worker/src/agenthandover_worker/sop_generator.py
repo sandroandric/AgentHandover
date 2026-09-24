@@ -69,6 +69,10 @@ class GeneratedSOP:
     error: str | None = None
     # True when Ollama was unreachable: nothing was consumed, retry later.
     deferred: bool = False
+    # A focus recording that is another run of this existing Skill (its
+    # procedure, ``FocusProcessor.process_session``'s *match*): no SOP was
+    # generated, and ``sop`` is empty.
+    instance_of: dict | None = None
 
 
 # ---------------------------------------------------------------------------
