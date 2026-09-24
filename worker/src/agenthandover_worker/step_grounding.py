@@ -257,6 +257,22 @@ def _unsupported(
     return None
 
 
+def clause_question(clause: str) -> tuple[str, str]:
+    """(what the recording did not show, the question to ask) for a clause
+    :func:`_unsupported` cut: "a scroll" / "Did you scroll?"."""
+    if _SCROLL_RE.search(clause):
+        return "a scroll", "Did you scroll?"
+    if _SELECT_RE.search(clause):
+        return "a selection", "Did you select it?"
+    if _SAVE_RE.search(clause):
+        return "a save", "Did you save it?"
+    targets = _targets(clause)
+    if targets:
+        names = " or ".join(f"'{t.strip()}'" for t in targets)
+        return names, f"Did you click {names}?"
+    return f"'{clause.strip()}'", "Did you do that?"
+
+
 def _clauses(action: str) -> list[str]:
     """*action* split at "and", "then" and semicolons, never inside a
     quoted name ('Terms and Conditions')."""
@@ -381,8 +397,12 @@ def ground_steps(
     ``action``, cited ``frames`` and ``reason``).
 
     Rewritten and added steps record ``evidence.grounding`` (``status``,
-    ``reason`` and, when rewritten, the model's ``original`` words).  A
-    timeline or steps without frame citations are left alone."""
+    ``reason`` and, when rewritten, the model's ``original`` words and the
+    ``cut`` clauses with their reasons).  A dropped entry also keeps the
+    step's ``description`` and ``parameters`` and where it stood
+    (``after_frames``), so a user's answer can restore it
+    (:mod:`questions`).  A timeline or steps without frame citations are
+    left alone."""
     report: dict = {"dropped": [], "rewritten": [], "added": [], "reordered": False}
     position = {f.get("event_id"): i for i, f in enumerate(timeline) if f.get("event_id")}
 
@@ -398,12 +418,22 @@ def ground_steps(
             )
         return report
 
-    def drop(step: dict, reason: str) -> None:
-        report["dropped"].append({
+    # Each dropped step's record and where it stood: its cited frames, or
+    # (citing none) the kept step before it in the model's order.
+    placed: list[tuple[dict, list[int], dict | None]] = []
+
+    def drop(step: dict, reason: str, indexes: list[int]) -> None:
+        params = step.get("parameters") if isinstance(step.get("parameters"), dict) else {}
+        record = {
             "action": str(step.get("step") or step.get("action") or ""),
             "frames": list((step.get("evidence") or {}).get("frames") or []),
             "reason": reason,
-        })
+            # What the user's "Yes, I did" restores (``questions``).
+            "description": str(step.get("description") or ""),
+            "parameters": dict(params),
+        }
+        report["dropped"].append(record)
+        placed.append((record, indexes, kept[-1] if kept else None))
 
     kept: list[dict] = []
     for step in steps:
@@ -411,7 +441,7 @@ def ground_steps(
             continue
         indexes = cited(step)
         if not indexes:
-            drop(step, "the step cites no recorded frame")
+            drop(step, "the step cites no recorded frame", indexes)
             continue
         frames = [timeline[i] for i in indexes]
         # A copy in the step's window (its frames to the frame after the
@@ -430,7 +460,7 @@ def ground_steps(
         reason = "; ".join(dict.fromkeys(reasons.values()))
         remaining = [c for c in clauses if c not in reasons]
         if not remaining:
-            drop(step, reason)
+            drop(step, reason, indexes)
             continue
         original = {"step": action, "description": str(step.get("description") or "")}
         step["step"] = _sentence(" and ".join(remaining))
@@ -438,7 +468,8 @@ def ground_steps(
         if any(_contains(_norm(original["description"]), t) for t in cut if t):
             step["description"] = f"{step['step']}."
         record = {"status": REWRITTEN, "reason": f"cut from the step: {reason}",
-                  "original": original}
+                  "original": original,
+                  "cut": [{"clause": c, "reason": r} for c, r in reasons.items()]}
         step.setdefault("evidence", {})["grounding"] = record
         report["rewritten"].append({"action": step["step"], **record})
         kept.append(step)
@@ -523,6 +554,18 @@ def ground_steps(
         kept.insert(at, new)
         report["added"].append({"action": new["step"], "input": line, "status": ADDED,
                                 "reason": reason})
+
+    # Where each dropped step stood among the final steps: after the last
+    # one whose frames start at or before its own (citing none, after the
+    # step before it in the model's order).  That step is named by its
+    # frames (``after_frames``; empty: at the start), which later answers
+    # keep while they renumber the steps.
+    for record, indexes, before in placed:
+        if indexes:
+            start = anchor(indexes)
+            earlier = [s for s in kept if anchor(cited(s)) <= start]
+            before = earlier[-1] if earlier else None
+        record["after_frames"] = list(((before or {}).get("evidence") or {}).get("frames") or [])
 
     steps[:] = kept
     if report["dropped"] or report["rewritten"] or report["added"] or report["reordered"]:

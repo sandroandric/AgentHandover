@@ -178,21 +178,27 @@ def _instances(proc: dict) -> list[dict]:
 
 
 def _step_frames(proc: dict) -> list[dict]:
-    """The frames the steps cite and the answers that revised steps (a
-    step whose evidence ``source`` is ``user_answer`` points at its
-    clarification)."""
+    """The frames the steps cite and the answers about steps: a step's
+    evidence ``user_answer`` (an answer that revised or confirmed it) and a
+    dropped step's (``evidence.dropped_steps``: the user said they did not
+    do it) point at their clarification."""
     frames: list[dict] = []
     answers: list[dict] = []
+    evidence = proc.get("evidence") if isinstance(proc.get("evidence"), dict) else {}
+    dropped = evidence.get("dropped_steps") if isinstance(evidence.get("dropped_steps"), list) else []
     for step in proc.get("steps") or []:
-        if isinstance(step, dict):
-            ev = step.get("evidence")
-            for frame in (ev.get("frames") or []) if isinstance(ev, dict) else []:
-                frames.append({"kind": "frame", "id": str(frame)})
-            origin = ev.get("user_answer") if isinstance(ev, dict) else None
-            if isinstance(origin, dict) and isinstance(origin.get("clarification"), int):
-                answers.append(
-                    {"kind": "answer", "id": f"agent_clarifications.{origin['clarification']}"}
-                )
+        ev = step.get("evidence") if isinstance(step, dict) else None
+        for frame in (ev.get("frames") or []) if isinstance(ev, dict) else []:
+            frames.append({"kind": "frame", "id": str(frame)})
+    for ev in [
+        *(s.get("evidence") for s in proc.get("steps") or [] if isinstance(s, dict)),
+        *dropped,
+    ]:
+        origin = ev.get("user_answer") if isinstance(ev, dict) else None
+        if isinstance(origin, dict) and isinstance(origin.get("clarification"), int):
+            answers.append(
+                {"kind": "answer", "id": f"agent_clarifications.{origin['clarification']}"}
+            )
     return _dedup(frames + answers)
 
 
@@ -314,7 +320,9 @@ def _answered(proc: dict) -> dict[str, dict]:
             continue
         category = str(item.get("category") or "").strip().lower().replace(" ", "_")
         slot = _ANSWER_SLOTS.get(category)
-        if slot is not None:
+        # An answer about a step is cited by that step (``_step_frames``):
+        # it joins the steps' frames instead of replacing them.
+        if slot is not None and slot != "steps":
             by_slot = guessed if item.get("source") == "accepted_guess" else typed
             by_slot.setdefault(slot, []).append(
                 {"kind": "answer", "id": f"agent_clarifications.{i}"}

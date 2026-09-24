@@ -2,8 +2,22 @@
 
 Every question comes from what the ledger (:mod:`ledger`) or the
 observation log (:mod:`workflow_mining`) does not know yet; no model writes
-them.  Two kinds:
+them.  Three kinds:
 
+- a **step question** per step that step grounding flagged
+  (:mod:`step_grounding`, :mod:`clipboard_grounding`) and no answer
+  settled yet: a step the recording did not show (dropped), a clause cut
+  from a step, a copy or paste the clipboard did not record, and a typed
+  line the recording showed that the model had left out or cut short.
+  The question quotes what the model wrote and what the recording showed,
+  with concrete choices ("Step 3 says 'Paste the copied text', but nothing
+  was copied before it in the recording.  What did you do?" [Typed it]
+  [Pasted it from somewhere else]).  A choice decides the step in code
+  (:func:`apply_step_answer`: restore what the model wrote, or keep the
+  grounded step); any other answer is left to the focus answers'
+  one revision call (``focus_questioner.answer_revision_prompt``).  Either
+  way the step cites the answer (``evidence.user_answer``), so the
+  ledger's ``steps`` slot carries an ``answer`` pointer next to its frames;
 - a **slot question** per ``unknown`` or ``hypothesis`` slot of a
   procedure (``What starts this task?``), its choices drawn from what the
   runs showed: the recurring lead-in or start time, the commit that ended
@@ -34,12 +48,16 @@ pass), and every card still open is listed in the day's digest.
 How often: at most the weekly budget (``[knowledge]
 weekly_question_budget``, default :data:`WEEKLY_BUDGET`) questions are
 asked in any seven days, the most valuable first (:func:`next_questions`),
-and each question once.  A question skipped or left open changes
+and each question once.  A dropped step or a cut clause (the Skill may miss
+something the user did) and an unconfirmed copy or paste rank below an
+unknown required slot and above every other slot; a typed line the model
+had missed ranks above the hypotheses.  A question skipped or left open changes
 nothing: its slot stays what it was.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from dataclasses import asdict, dataclass, field
@@ -47,8 +65,16 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from agenthandover_worker.clipboard_grounding import PASTE
+from agenthandover_worker.focus_questioner import USER_ANSWER
 from agenthandover_worker.ledger import REQUIRED_SLOTS, derive_knowledge
 from agenthandover_worker.skill_improver import RUN_QUESTION
+from agenthandover_worker.step_grounding import (
+    ADDED,
+    INPUT_ADDED,
+    REWRITTEN,
+    clause_question,
+)
 
 if TYPE_CHECKING:
     from agenthandover_worker.db import WorkerDB
@@ -65,6 +91,9 @@ MICRO_QUESTIONS_FILE = "micro-questions.json"
 
 KIND_SLOT = "slot"
 KIND_LABEL = "label"
+KIND_STEP = "step"
+#: The ledger slot a step question informs, and its answers' category.
+STEP_SLOT = "steps"
 #: Asked in the focus Q&A window, or as a review card (and in the digest).
 CHANNEL_FOCUS = "focus"
 CHANNEL_CARD = "card"
@@ -91,7 +120,7 @@ class Question:
     """One question, as the app shows it and the worker records it."""
 
     id: str
-    kind: str  # KIND_SLOT or KIND_LABEL
+    kind: str  # KIND_SLOT, KIND_STEP or KIND_LABEL
     subject: str  # the procedure's slug, or the workflow's key
     title: str  # what the subject is called
     question: str
@@ -108,6 +137,9 @@ class Question:
     # A question an agent run queued (``skill_improver``): the ``origin``
     # of its entry in ``agent_clarifications``, which the answer fills.
     origin: dict = field(default_factory=dict)
+    # Step questions: the (0-based) steps the question is about when it
+    # was asked; a free-text answer may revise these and their neighbours.
+    step_indexes: list[int] = field(default_factory=list)
 
     def to_json(self) -> dict:
         return asdict(self)
@@ -300,6 +332,351 @@ def _rank_value(tier: int, order: int, value_score: float) -> float:
 
 
 # ---------------------------------------------------------------------------
+# Step questions
+# ---------------------------------------------------------------------------
+
+# What step grounding flagged, by what the question is about.
+FLAG_DROPPED = "dropped"  # a step no frame showed (evidence.dropped_steps)
+FLAG_CUT = "cut"  # a clause cut from a step (evidence.grounding, rewritten)
+FLAG_CLIPBOARD = "clipboard"  # a copy/paste rewritten (evidence.clipboard)
+FLAG_ADDED = "added"  # a typed line the model left out (evidence.grounding)
+FLAG_INPUT = "input"  # a step's input set from the frames (evidence.grounding)
+
+#: Rank tiers for :func:`_rank_value`: between an unknown required slot
+#: (0) and an unknown slot (1) for what the Skill may be missing or have
+#: wrong, between an unknown slot and a hypothesis (2) for a typed line
+#: the recording showed.
+_STEP_TIERS: dict[str, float] = {
+    FLAG_DROPPED: 0.5, FLAG_CUT: 0.5, FLAG_CLIPBOARD: 0.6,
+    FLAG_ADDED: 1.5, FLAG_INPUT: 1.5,
+}
+
+YES_I_DID = "Yes, I did"
+NO_I_DID_NOT = "No, I didn't"
+TYPED_IT = "Typed it"
+PASTED_IT = "Pasted it from somewhere else"
+READ_IT = "No, I only read it"
+COPIED_IT = "Yes, I copied it"
+TYPED_THAT = "Yes, I typed it"
+LEAVE_IT_OUT = "No, leave it out"
+WHOLE_LINE = "The whole line"
+YES = "Yes"
+NO = "No"
+#: A quoted step text is cut at this many characters.
+_QUOTE_CHARS = 120
+
+
+@dataclass
+class _Flag:
+    """One thing step grounding flagged on a procedure."""
+
+    kind: str  # FLAG_*
+    record: dict  # the flag's record: a dropped entry, or a step's evidence entry
+    step: dict | None  # the flagged step (None: a dropped step)
+    index: int  # the step's position (a dropped step: where it would go)
+    identity: str  # what names the flag across renumbering
+
+
+def _quote(text: object) -> str:
+    text = _text(text)
+    return text if len(text) <= _QUOTE_CHARS else text[:_QUOTE_CHARS - 3].rstrip() + "..."
+
+
+def _steps(proc: dict) -> list[dict]:
+    return [s for s in proc.get("steps") or [] if isinstance(s, dict)]
+
+
+def _frames(item: dict | None) -> list[str]:
+    evidence = (item or {}).get("evidence")
+    return [str(f) for f in (evidence.get("frames") or [])] if isinstance(evidence, dict) else []
+
+
+def _input(step: dict) -> str:
+    params = step.get("parameters") if isinstance(step.get("parameters"), dict) else {}
+    return str(step.get("input") or params.get("input") or "")
+
+
+def _dropped(proc: dict) -> list[dict]:
+    evidence = proc.get("evidence") if isinstance(proc.get("evidence"), dict) else {}
+    dropped = evidence.get("dropped_steps")
+    return [d for d in dropped if isinstance(d, dict)] if isinstance(dropped, list) else []
+
+
+def _dropped_position(steps: list[dict], entry: dict) -> int:
+    """Where a dropped step would stand: after the last step citing a frame
+    of the step it followed (``after_frames``), at the start when it
+    followed none, at the end when that step is gone."""
+    after = set(entry.get("after_frames") or [])
+    if not after:
+        return 0 if "after_frames" in entry else len(steps)
+    return max(
+        (i + 1 for i, s in enumerate(steps) if after & set(_frames(s))), default=len(steps),
+    )
+
+
+def _flags(proc: dict, *, answered: bool = False) -> list[_Flag]:
+    """What step grounding flagged on *proc*'s steps and dropped steps, in
+    step order; with *answered*, the flags an answer settled too."""
+    steps = _steps(proc)
+    out: list[_Flag] = []
+    for i, step in enumerate(steps):
+        evidence = step.get("evidence") if isinstance(step.get("evidence"), dict) else {}
+        frames = "|".join(_frames(step))
+        grounding = evidence.get("grounding")
+        if isinstance(grounding, dict):
+            original = grounding.get("original")
+            kind = {REWRITTEN: FLAG_CUT, ADDED: FLAG_ADDED, INPUT_ADDED: FLAG_INPUT}.get(
+                grounding.get("status"),
+            )
+            if kind is not None:
+                text = original.get("step") if isinstance(original, dict) else original
+                out.append(_Flag(kind, grounding, step, i, f"{frames}\n{text or ''}"))
+        clipboard = evidence.get("clipboard")
+        if isinstance(clipboard, dict) and clipboard.get("claimed"):
+            original = clipboard.get("original") if isinstance(clipboard.get("original"), dict) else {}
+            text = json.dumps(original, sort_keys=True)
+            out.append(_Flag(FLAG_CLIPBOARD, clipboard, step, i, f"{frames}\n{text}"))
+    for entry in _dropped(proc):
+        position = _dropped_position(steps, entry)
+        identity = "|".join(str(f) for f in entry.get("frames") or []) + f"\n{entry.get('action')}"
+        out.append(_Flag(FLAG_DROPPED, entry, None, position, identity))
+    out.sort(key=lambda f: f.index)
+    return [f for f in out if answered or not isinstance(f.record.get("user_answer"), dict)]
+
+
+def _flag_id(slug: str, flag: _Flag) -> str:
+    digest = hashlib.sha256(f"{flag.kind}\n{flag.identity}".encode()).hexdigest()[:12]
+    return f"step:{slug}:{flag.kind}:{digest}"
+
+
+def _flag_text(flag: _Flag) -> tuple[str, str, list[str]]:
+    """(question, context, choices) for *flag*."""
+    n = flag.index + 1
+    record = flag.record
+    step = flag.step or {}
+    action = _quote(step.get("action") or step.get("step"))
+    if flag.kind == FLAG_DROPPED:
+        return (
+            f"The model thought you also did \"{_quote(record.get('action'))}\", but the "
+            "recording did not show it. Did you?",
+            f"Left out of the Skill: {_text(record.get('reason'))}.",
+            [NO_I_DID_NOT, YES_I_DID],
+        )
+    if flag.kind == FLAG_CUT:
+        cut = [c for c in record.get("cut") or [] if isinstance(c, dict) and c.get("clause")]
+        asks = [clause_question(str(c["clause"])) for c in cut]
+        original = _quote((record.get("original") or {}).get("step"))
+        if len(asks) == 1:
+            shown, ask = asks[0]
+        else:
+            shown = " or ".join(
+                f"'{_quote(c['clause'])}'" for c in cut
+            ) or "part of it"
+            ask = "Did you do that?"
+        return (
+            f"The recording did not show {shown} at step {n} (\"{action}\"). {ask}",
+            f"The model wrote: \"{original}\".",
+            [NO_I_DID_NOT, YES_I_DID],
+        )
+    if flag.kind == FLAG_CLIPBOARD:
+        original = record.get("original") if isinstance(record.get("original"), dict) else {}
+        said = _quote(original.get("step") or original.get("action")
+                      or next(iter(original.values()), action))
+        if PASTE in (record.get("claimed") or []):
+            return (
+                f"Step {n} says \"{said}\", but nothing was copied before it in the "
+                "recording. What did you do?",
+                f"The Skill has it as: \"{action}\".",
+                [TYPED_IT, PASTED_IT],
+            )
+        return (
+            f"Step {n} says \"{said}\", but the recording shows no copy. Did you copy it?",
+            f"The Skill has it as: \"{action}\".",
+            [READ_IT, COPIED_IT],
+        )
+    typed = _quote(_input(step))
+    if flag.kind == FLAG_ADDED:
+        return (
+            f"The recording shows you typed \"{typed}\" (step {n}), which the model had "
+            "left out. Did you type it?",
+            "Every line the recording shows typed is a step.",
+            [TYPED_THAT, LEAVE_IT_OUT],
+        )
+    partial = _quote(record.get("original"))
+    if partial:
+        return (
+            f"At step {n} the model had you type \"{partial}\", but the recording shows "
+            f"the finished line \"{typed}\". Which did you type?",
+            "The frames may catch a line half typed.",
+            [WHOLE_LINE, f"Only \"{partial}\""],
+        )
+    return (
+        f"The recording shows you typed \"{typed}\" at step {n} (\"{action}\"). "
+        "Is that what this step types?",
+        "The model had left the text out.",
+        [YES, NO],
+    )
+
+
+def step_questions(proc: dict) -> list[Question]:
+    """One question per step grounding flagged on *proc* that no answer
+    settled yet, ranked by :data:`_STEP_TIERS` and step order."""
+    slug = str(proc.get("id") or proc.get("slug") or "")
+    if not slug:
+        return []
+    value = float((proc.get("value") or {}).get("value_score") or 0.0)
+    title = _text(proc.get("title")) or slug
+    steps = _steps(proc)
+    out = []
+    for flag in _flags(proc):
+        question, context, choices = _flag_text(flag)
+        out.append(Question(
+            id=_flag_id(slug, flag), kind=KIND_STEP, subject=slug, title=title,
+            question=question, context=context, choices=choices, slot=STEP_SLOT,
+            value=_rank_value(_STEP_TIERS[flag.kind], flag.index / 100, value),
+            step_indexes=_flag_steps(flag, len(steps)),
+        ))
+    return out
+
+
+def _flag_steps(flag: _Flag, count: int) -> list[int]:
+    """The steps a flag's question is about: its step, or for a dropped
+    step the ones either side of where it stood."""
+    around = [flag.index] if flag.step is not None else [flag.index - 1, flag.index]
+    return [i for i in around if 0 <= i < count]
+
+
+def choice_index(choices: list[str], answer: str) -> int | None:
+    """Which of *choices* *answer* is (spacing and case aside), else None."""
+    wanted = _text(answer).lower()
+    return next((i for i, c in enumerate(choices) if _text(c).lower() == wanted), None)
+
+
+def _find(proc: dict, question_id: str, *, answered: bool) -> _Flag | None:
+    slug = str(proc.get("id") or proc.get("slug") or "")
+    return next(
+        (f for f in _flags(proc, answered=answered) if _flag_id(slug, f) == question_id), None,
+    )
+
+
+def step_question_indexes(proc: dict, question_id: str) -> list[int]:
+    """The steps step question *question_id* is about in *proc* as it is
+    now (answered or not; empty when the flag is gone)."""
+    flag = _find(proc, question_id, answered=True)
+    return _flag_steps(flag, len(_steps(proc))) if flag is not None else []
+
+
+def _set_input(step: dict, text: str) -> None:
+    step["input"] = text
+    if isinstance(step.get("parameters"), dict) and "input" in step["parameters"]:
+        step["parameters"]["input"] = text
+
+
+def _restored_step(entry: dict, origin: dict) -> dict:
+    """A dropped step as a procedure step, restored by the user's answer."""
+    params = dict(entry.get("parameters") or {})
+    return {
+        "action": str(entry.get("action") or ""),
+        "description": str(entry.get("description") or ""),
+        "target": str(params.get("target") or params.get("location") or ""),
+        "app": str(params.get("app") or ""),
+        "location": str(params.get("location") or ""),
+        "input": str(params.get("input") or ""),
+        "verify": str(params.get("verify") or ""),
+        "selector": None,
+        "anchor": None,
+        "parameters": params,
+        "confidence": 0.0,
+        "on_failure": {"strategy": "abort", "max_retries": 0, "delay_seconds": 0},
+        "evidence": {
+            "frames": list(entry.get("frames") or []),
+            "dom_snapshot_ids": [],
+            "source": USER_ANSWER,
+            "user_answer": origin,
+        },
+    }
+
+
+def apply_step_answer(
+    proc: dict, question_id: str, answer: str, *, clarification: int, question: str,
+) -> bool:
+    """Apply the answer to step question *question_id* to *proc* (in
+    place); returns True when one of the question's choices decided the
+    step, False for any other answer (left to the typed-answer revision)
+    or a flag that is no longer on the procedure.
+
+    Either way the flag records the answer (``user_answer``: the
+    *clarification* it was recorded as, the *question*, the answer) and so
+    does the step's evidence, which gives the ledger's ``steps`` slot an
+    ``answer`` pointer.  A choice then does what it says: "Yes, I did"
+    restores the dropped step or the cut clauses, "Pasted it" / "Yes, I
+    copied it" the model's clipboard wording, "No, leave it out" removes
+    an added typed line, "Only ..." / "No" put back the model's input; the
+    other choices keep the grounded step as it is.  The steps are
+    renumbered."""
+    flag = _find(proc, question_id, answered=False)
+    if flag is None:
+        logger.info("Step question %s: the step changed since it was asked", question_id)
+        return False
+    origin = {
+        "clarification": clarification, "question": question, "answer": answer,
+        "question_id": question_id,
+    }
+    flag.record["user_answer"] = dict(origin)
+    if flag.step is not None:
+        flag.step.setdefault("evidence", {})["user_answer"] = dict(origin)
+    _question, _context, choices = _flag_text(flag)
+    choice = choice_index(choices, answer)
+    if choice is None:
+        return False
+    steps = _steps(proc)
+    step = flag.step
+    restore = choice == 1
+    if flag.kind == FLAG_DROPPED and restore:
+        proc["evidence"]["dropped_steps"] = [
+            d for d in proc["evidence"]["dropped_steps"] if d is not flag.record
+        ]
+        steps.insert(flag.index, _restored_step(flag.record, origin))
+    elif flag.kind == FLAG_CUT and restore:
+        original = flag.record.get("original") or {}
+        step["action"] = str(original.get("step") or step.get("action") or "")
+        if original.get("description"):
+            step["description"] = str(original["description"])
+        step["evidence"]["source"] = USER_ANSWER
+    elif flag.kind == FLAG_CLIPBOARD and restore:
+        for key, text in (flag.record.get("original") or {}).items():
+            name = key.split(".", 1)[-1]
+            name = "action" if name == "step" else name
+            if key.startswith("parameters.") and isinstance(step.get("parameters"), dict):
+                step["parameters"][name] = text
+            if not key.startswith("parameters.") or name in step:
+                step[name] = text
+        step["evidence"]["source"] = USER_ANSWER
+    elif flag.kind == FLAG_ADDED and restore:
+        # Not typed after all: it leaves the steps, and the evidence keeps
+        # it with the answer.
+        steps.remove(step)
+        proc.setdefault("evidence", {}).setdefault("dropped_steps", []).append({
+            "action": str(step.get("action") or ""),
+            "frames": _frames(step),
+            "reason": "the user said they did not type it",
+            "user_answer": dict(origin),
+        })
+    elif flag.kind == FLAG_INPUT and restore:
+        _set_input(step, str(flag.record.get("original") or ""))
+        step["evidence"]["source"] = USER_ANSWER
+    for n, s in enumerate(steps):
+        s["index"] = n
+        s["step_id"] = f"step_{n + 1}"
+    proc["steps"] = steps
+    logger.info(
+        "Step question %s answered %r: %s", question_id, answer,
+        "restored what the model wrote" if restore else "kept the grounded step",
+    )
+    return True
+
+
+# ---------------------------------------------------------------------------
 # Labelling cards
 # ---------------------------------------------------------------------------
 
@@ -360,11 +737,15 @@ def next_questions(
 ) -> list[Question]:
     """The *budget* most valuable questions not asked yet: labelling cards
     (*workflows*, :func:`label_questions`) first, highest value first, then
-    one question per unknown or hypothesis slot of *procs*: unknown
-    required slots, other unknown slots, hypotheses, each in
-    :data:`ASKED_SLOTS` order and the more valuable procedure first."""
+    the questions of *procs*: unknown required slots, dropped steps and cut
+    clauses, unconfirmed copies and pastes, other unknown slots, typed
+    lines the model missed, hypotheses; slots in :data:`ASKED_SLOTS` order,
+    steps in step order, and the more valuable procedure first."""
     candidates = [
-        q for q in [*workflows, *(q for p in procs for q in slot_questions(p))]
+        q for q in [
+            *workflows,
+            *(q for p in procs for q in [*slot_questions(p), *step_questions(p)]),
+        ]
         if q.id not in asked
     ]
     candidates.sort(key=lambda q: (-q.value, q.id))
@@ -429,6 +810,7 @@ def ask_after_focus(
         FocusQuestion(
             question=q.question, category=q.slot or "", context=q.context,
             default=q.default, id=q.id, choices=q.choices,
+            step_indexes=list(q.step_indexes),
         )
         for q in chosen
     ]
@@ -575,7 +957,8 @@ def _apply_slot(kb: "KnowledgeBase", question: Question, answer: str) -> bool:
     if queued is not None:
         queued.update(answer=answer, status="answered", source="typed", question_id=question.id)
     else:
-        proc.setdefault("agent_clarifications", []).append({
+        clarifications = proc.setdefault("agent_clarifications", [])
+        clarifications.append({
             "category": question.slot,
             "question": question.question,
             "answer": answer,
@@ -584,6 +967,14 @@ def _apply_slot(kb: "KnowledgeBase", question: Question, answer: str) -> bool:
             "context": question.context,
             "question_id": question.id,
         })
+        if question.kind == KIND_STEP:
+            # A choice decides the step here.  Any other answer is recorded
+            # on the step it is about; the one model call that revises
+            # steps from typed answers belongs to the focus Q&A window.
+            apply_step_answer(
+                proc, question.id, answer,
+                clarification=len(clarifications) - 1, question=question.question,
+            )
     kb.save_procedure(proc)
     return True
 
