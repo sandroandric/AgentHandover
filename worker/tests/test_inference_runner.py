@@ -256,6 +256,30 @@ def test_the_state_lock_is_reentrant_and_released_at_any_depth() -> None:
         lock.release()
 
 
+def test_the_control_thread_can_give_up_waiting_for_the_state() -> None:
+    """main(): a control tick that cannot get the state within its wait
+    writes only the heartbeat."""
+    lock = StateLock()
+    taken, leave = threading.Event(), threading.Event()
+
+    def holder() -> None:
+        with lock:
+            taken.set()
+            leave.wait(5)
+
+    t = threading.Thread(target=holder)
+    t.start()
+    assert taken.wait(5)
+    started = time.monotonic()
+    assert lock.acquire(timeout=0.2) is False
+    assert 0.15 < time.monotonic() - started < 2
+    assert not lock.held()
+    leave.set()
+    t.join(5)
+    assert lock.acquire(timeout=1) is True
+    lock.release()
+
+
 def test_an_ollama_request_is_a_model_wait(monkeypatch) -> None:
     """Every Ollama request lets go of the state lock while it waits."""
     from agenthandover_worker import ollama

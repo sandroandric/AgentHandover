@@ -93,6 +93,9 @@ from agenthandover_worker import __version__ as _WORKER_VERSION
 _DB_RETRY_MAX_SECONDS = 120
 _DB_RETRY_POLL_SECONDS = 5
 _IDLE_LOG_INTERVAL_SECONDS = 300  # 5 minutes
+# A control tick waits this long for the state the inference thread holds
+# while it runs Python; then it writes only the heartbeat (inference_runner).
+CONTROL_LOCK_WAIT_SECONDS = 5.0
 
 
 def _lint_and_log(sop_template: dict, label: str) -> bool:
@@ -5745,7 +5748,16 @@ def main(argv: list[str] | None = None) -> None:
 
         def _heartbeat() -> None:
             """worker-status.json, written every tick outside the state lock
-            so a long model call never stops it.  The pending VLM count is
+            so a long model call never stops it (also after an error: the
+            app and doctor see a worker that is alive but failing, not a
+            dead one)."""
+            try:
+                _write_heartbeat()
+            except Exception:
+                logger.debug("Failed to write worker status", exc_info=True)
+
+        def _write_heartbeat() -> None:
+            """The pending VLM count is
             the database's (the in-memory queue only tracks enqueue-side
             stats; completions from _process_vlm_jobs are not reflected)."""
             _vlm_stats = vlm_queue.get_stats()
@@ -5795,7 +5807,16 @@ def main(argv: list[str] | None = None) -> None:
             # an error while this is non-empty counts against them.
             inflight_event_ids: list[str] = []
             backoff: float | None = None
-            STATE_LOCK.acquire()
+            # The inference thread holds the state while it runs Python
+            # between model calls; if that takes long, this tick only
+            # writes the heartbeat.
+            if not STATE_LOCK.acquire(
+                timeout=None if args.once else CONTROL_LOCK_WAIT_SECONDS,
+            ):
+                logger.debug("Control tick skipped: the inference thread holds the state")
+                _heartbeat()
+                time.sleep(current_interval)
+                continue
             try:
                 # Reset vector KB embedding budget each cycle
                 if vector_kb is not None:
@@ -5942,20 +5963,11 @@ def main(argv: list[str] | None = None) -> None:
             finally:
                 STATE_LOCK.release()
 
-            # The heartbeat, also after an error: the app and doctor see a
-            # worker that is alive but failing, not a dead one.
-            try:
-                _heartbeat()
-            except Exception:
-                logger.debug("Failed to write worker status", exc_info=True)
-
+            _heartbeat()
             if args.once:
                 # One iteration, including the model work it submitted.
                 runner.wait_idle()
-                try:
-                    _heartbeat()
-                except Exception:
-                    logger.debug("Failed to write worker status", exc_info=True)
+                _heartbeat()
                 break
             if backoff is not None:
                 interruptible_sleep(backoff, lambda: shutdown_flag[0])

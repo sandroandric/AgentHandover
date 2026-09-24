@@ -77,14 +77,18 @@ class StateLock:
         self._owner: int | None = None
         self._depth = 0
 
-    def acquire(self) -> None:
+    def acquire(self, timeout: float | None = None) -> bool:
+        """Take the lock, waiting at most *timeout* seconds (None: for as
+        long as it takes); False when it timed out."""
         me = threading.get_ident()
         if self._owner == me:
             self._depth += 1
-            return
-        self._lock.acquire()
+            return True
+        if not self._lock.acquire(timeout=-1 if timeout is None else timeout):
+            return False
         self._owner = me
         self._depth = 1
+        return True
 
     def release(self) -> None:
         if self._owner != threading.get_ident():
