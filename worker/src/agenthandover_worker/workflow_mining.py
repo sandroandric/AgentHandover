@@ -69,7 +69,7 @@ from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
 from agenthandover_worker import run_signals
-from agenthandover_worker.dom import host_or_doc, site_of
+from agenthandover_worker.dom import host_or_doc, site_of, url_host
 from agenthandover_worker.evidence_extractor import EvidenceExtractor
 from agenthandover_worker.pattern_detector import OBSERVATION_WINDOW_DAYS, PatternDetector
 from agenthandover_worker.scene_annotator import as_compact
@@ -629,6 +629,67 @@ def attach_observations(
         mine_observations(db, kb, slug, observations)
     except Exception:
         logger.warning("Branch mining failed for '%s'", slug, exc_info=True)
+
+
+# A click is captured up to this long before the frame that shows its
+# result (the shutter fires once the page has changed).
+_CLICK_LEAD_SECONDS = 10.0
+# Seconds around a click searched for the DOM snapshot of its page (the
+# focus path's tolerance).
+_DOM_TOLERANCE_SECONDS = 5.0
+
+
+def run_timelines(db: "WorkerDB", observations: list[dict]) -> list[list[dict]]:
+    """Each observation's frames still stored, oldest first, as
+    ``{"event_id", "place", "click_targets"}``: the frame's
+    :func:`host_or_doc` place and the Chrome clicks whose result it shows.
+    A click belongs to the first frame at or after it on its host, at most
+    :data:`_CLICK_LEAD_SECONDS` after it (the focus path's rule,
+    ``FocusProcessor._attach_clicks``); each carries ``page_dom_nodes``,
+    the DOM snapshot of its page when the extension took one."""
+    runs: list[list[dict]] = []
+    lead = timedelta(seconds=_CLICK_LEAD_SECONDS)
+    for obs in observations:
+        ids = json.loads(obs.get("event_ids_json") or "[]")
+        frames = sorted(
+            (f for f in map(AnnotatedFrame.from_event, db.get_events_by_ids(ids)) if f),
+            key=lambda f: f.timestamp,
+        )
+        if not frames:
+            continue
+        timeline = [
+            {"event_id": f.event_id, "place": host_or_doc(f.location),
+             "host": url_host(f.location), "at": _parse(f.timestamp), "click_targets": []}
+            for f in frames
+        ]
+        clicks = db.get_click_intents(
+            (timeline[0]["at"] - lead).isoformat(), timeline[-1]["at"].isoformat(),
+        )
+        for click in clicks:
+            when, host = _parse(click["timestamp"]), url_host(click.get("url"))
+            owner = next(
+                (f for f in timeline if when <= f["at"] <= when + lead and f["host"] == host),
+                None,
+            )
+            if owner is None or not host:
+                continue
+            snaps = db.get_dom_snapshots_near_timestamp(
+                click["timestamp"], click.get("url") or "", tolerance_sec=_DOM_TOLERANCE_SECONDS,
+            )
+            owner["click_targets"].append(
+                {**click, "page_dom_nodes": snaps[0].get("nodes") if snaps else None},
+            )
+        runs.append(timeline)
+    return runs
+
+
+def anchor_draft_steps(db: "WorkerDB", template: dict, observations: list[dict]) -> int:
+    """Anchor a passive draft's steps to the elements its runs clicked,
+    model-free (:func:`sop_generator.anchor_passive_steps` over
+    :func:`run_timelines`).  Returns the number of steps anchored."""
+    from agenthandover_worker.sop_generator import anchor_passive_steps
+
+    return anchor_passive_steps(template, run_timelines(db, observations))
 
 
 def learn_on_draft(

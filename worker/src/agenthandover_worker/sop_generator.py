@@ -1306,18 +1306,87 @@ def _click_owners(raw_steps: list, timeline: list[dict] | None) -> dict[int, int
     title), then to the one sharing the most words with its target, then
     the earliest.
     """
+    return _owners(raw_steps, [
+        _step_frames(raw_step, timeline) if isinstance(raw_step, dict) else []
+        for raw_step in raw_steps
+    ])
+
+
+def _owners(raw_steps: list, step_frames: list[list[dict]]) -> dict[int, int]:
+    """:func:`_click_owners` over the frames each step stands on
+    (*step_frames*, one list per step)."""
     owners: dict[int, tuple[int, int, int]] = {}
-    for idx, raw_step in enumerate(raw_steps):
+    for idx, (raw_step, frames) in enumerate(zip(raw_steps, step_frames)):
         if not isinstance(raw_step, dict):
             continue
         words = _step_words(raw_step)
         clicks = int(_CLICK_VERB_RE.match(str(raw_step.get("action") or "").strip()) is not None)
-        for frame in _step_frames(raw_step, timeline):
+        for frame in frames:
             for click in frame.get("click_targets") or []:
                 score = (clicks, len(words & _click_words(click)))
                 if id(click) not in owners or score > owners[id(click)][:2]:
                     owners[id(click)] = (*score, idx)
     return {click: idx for click, (_clicks, _overlap, idx) in owners.items()}
+
+
+def anchor_passive_steps(template: dict, runs: list[list[dict]]) -> int:
+    """Give the steps of a passive draft the anchor of the element they
+    click, model-free, as a focus recording's steps get theirs.
+
+    *runs* are the draft's observations as frame timelines (oldest first),
+    each frame ``{"event_id", "place", "click_targets"}``: its
+    ``host_or_doc`` place and the Chrome clicks whose result it shows
+    (with ``page_dom_nodes``, ``workflow_mining.run_timelines``).  The
+    passive prompt cites no frame per step, so a step stands on the frames
+    of every run on its own place (its ``location``, a template variable
+    matching any record id).  From there the focus path's rules apply: a
+    click goes to one of the steps standing on its frame
+    (:func:`_click_owners`), and a step's anchor is its own click sharing
+    the most words with it (:func:`_anchor_for_step`).  The step's
+    evidence gains those frames and clicks.  A step that already has an
+    anchor keeps it.  Returns the number of steps anchored.
+    """
+    from agenthandover_worker.dom import host_or_doc
+
+    steps = [s for s in template.get("steps") or [] if isinstance(s, dict)]
+    raw_steps = [
+        {
+            "action": str(s.get("step") or ""),
+            "description": str(s.get("description") or ""),
+            "location": str((s.get("parameters") or {}).get("location") or s.get("target") or ""),
+        }
+        for s in steps
+    ]
+    step_frames: list[list[dict]] = []
+    for step, raw_step in zip(steps, raw_steps):
+        place = "/".join(
+            "{id}" if "{{" in seg else seg
+            for seg in host_or_doc(raw_step["location"]).split("/")
+        )
+        on_place = [] if step.get("anchor") or not raw_step["location"] else [
+            f for run in runs for f in run if f.get("place") == place
+        ]
+        step_frames.append(on_place)
+    owners = _owners(raw_steps, step_frames)
+    anchored = 0
+    for idx, (step, raw_step, frames) in enumerate(zip(steps, raw_steps, step_frames)):
+        own = {c for c, owner in owners.items() if owner == idx}
+        if not own:
+            continue
+        anchor = _anchor_for_step(raw_step, frames, own)
+        if not anchor:
+            continue
+        step["anchor"] = anchor
+        evidence = step.setdefault("evidence", {})
+        evidence["frames"] = list(dict.fromkeys(
+            [*(evidence.get("frames") or []), *(f["event_id"] for f in frames if f.get("event_id"))]
+        ))
+        evidence["click_ids"] = [
+            c["event_id"] for f in frames for c in f.get("click_targets") or []
+            if id(c) in own and c.get("event_id")
+        ]
+        anchored += 1
+    return anchored
 
 
 # Verbs of a step that clicks something (a button, link, tab, menu item).

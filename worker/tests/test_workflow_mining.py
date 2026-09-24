@@ -963,3 +963,82 @@ class TestSkillsAndObservations:
         wm.record_observations(db, db.get_annotated_events_in_window(hours=4, now=now), now=now)
         wm.review_candidates(db, now=now, kb=kb)
         assert kb.get_procedure("payout").get("branch_hypotheses", []) == []
+
+
+def _click(write_conn, eid: str, when: datetime, url: str, target: dict) -> None:
+    """A Chrome ClickIntent row as the extension records it."""
+    write_conn.execute(
+        "INSERT INTO events (id, timestamp, kind_json, window_json, display_topology_json, "
+        "primary_display_id, artifact_ids_json, metadata_json, processed) "
+        "VALUES (?, ?, ?, '{}', '[]', '', '[]', ?, 1)",
+        (eid, when.isoformat(), json.dumps({"type": "ClickIntent"}),
+         json.dumps({"url": url, "target": target})),
+    )
+    write_conn.commit()
+
+
+class TestPassiveAnchors:
+    """WP-F12: a passive draft's steps carry the anchor of the element its
+    runs clicked, matched without a model (the focus path's rules over the
+    frames of each run on the step's place)."""
+
+    TEMPLATE_STEPS = [
+        ("Open the payouts list", PAYOUT[0][0]),
+        ("Open today's payout", "https://dashboard.stripe.com/payouts/po_{{payout_id}}"),
+        ("Enter the amount in the sheet", PAYOUT[2][0]),
+        ("Mark the row reconciled", PAYOUT[3][0]),
+        ("Post in #finance", PAYOUT[4][0]),
+    ]
+    # The element clicked just before each frame of a run (None: typing).
+    CLICKS = [
+        {"tagName": "a", "role": "link", "innerText": "Payouts"},
+        {"tagName": "a", "role": "link", "innerText": "$1,204.00"},
+        None,
+        {"tagName": "div", "role": "checkbox", "ariaLabel": "D240 Reconciled"},
+        {"tagName": "button", "ariaLabel": "Send now"},
+    ]
+
+    def _template(self) -> dict:
+        return {"steps": [
+            {"step": text, "parameters": {"location": loc}, "anchor": None, "evidence": {"frames": []}}
+            for text, loc in self.TEMPLATE_STEPS
+        ]}
+
+    def _runs(self, db: WorkerDB, write_conn, days=(1, 2)) -> list[dict]:
+        runs = []
+        for day in days:
+            start = datetime(2026, 9, day, 9, tzinfo=timezone.utc)
+            events = _session_events(f"run{day}", start)
+            _insert(write_conn, events)
+            for i, target in enumerate(self.CLICKS):
+                if target is not None:
+                    _click(write_conn, f"click{day}-{i}", start + timedelta(seconds=90 * i - 3),
+                           PAYOUT[i][0], target)
+            obs = _obs(f"2026-09-{day:02d}", key="a")
+            obs["event_ids_json"] = json.dumps([e["id"] for e in events])
+            runs.append(obs)
+        return runs
+
+    def test_steps_get_the_anchor_of_the_element_they_click(self, db: WorkerDB, write_conn) -> None:
+        runs = self._runs(db, write_conn)
+        # Clicked long after the run: no frame of it shows the result.
+        _click(write_conn, "late", datetime(2026, 9, 1, 11, tzinfo=timezone.utc), PAYOUT[4][0],
+               {"tagName": "button", "ariaLabel": "Send now"})
+        template = self._template()
+
+        assert wm.anchor_draft_steps(db, template, runs) == 4
+        names = [(s["anchor"] or {}).get("name") for s in template["steps"]]
+        assert names == ["Payouts", "$1,204.00", None, "D240 Reconciled", "Send now"]
+        payouts, _payout, sheet, _row, post = template["steps"]
+        assert payouts["evidence"]["click_ids"] == ["click1-0", "click2-0"]
+        assert payouts["evidence"]["frames"] == ["run1-0", "run2-0"]
+        assert post["evidence"]["click_ids"] == ["click1-4", "click2-4"]
+        assert "click_ids" not in sheet["evidence"]  # typed, nothing clicked
+
+    def test_a_step_on_a_page_no_run_visits_gets_no_anchor(self, db: WorkerDB, write_conn) -> None:
+        runs = self._runs(db, write_conn, days=(1,))
+        template = {"steps": [
+            {"step": "Open the payouts list", "parameters": {"location": "https://dashboard.stripe.com/balance"}},
+        ]}
+        assert wm.anchor_draft_steps(db, template, runs) == 0
+        assert "anchor" not in template["steps"][0]

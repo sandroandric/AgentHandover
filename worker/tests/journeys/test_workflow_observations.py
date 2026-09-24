@@ -421,3 +421,65 @@ def test_labelling_cards_are_the_ground_truth_replay_scores_against(mined, tmp_p
         [candidate(queue[0].observations), candidate(expenses)], product, start,
     )
     assert precision == 0.5
+
+
+def _draft_template(slug: str, cand: wm.Candidate) -> dict:
+    """What passive discovery saves for a candidate, the model's steps
+    replaced by the places of its first run (model-free)."""
+    steps = [
+        {"step": f"{verb} {place}", "app": app,
+         "parameters": {"location": f"https://{place}", "app": app}}
+        for app, place, verb in json.loads(cand.observations[0]["step_sig_json"])
+    ]
+    return {"slug": slug, "title": cand.task_label, "steps": steps, **cand.template_evidence()}
+
+
+def test_drafts_learn_from_later_runs_until_approved_at_the_end(tmp_path: Path, local_tz) -> None:
+    """WP-F12, J-passive's learning model-free: each routine becomes a draft
+    when it reaches three observations and nobody approves it for three
+    weeks, as a real user leaves the review queue.  Its later runs are its
+    evidence all the same, so when the user approves both at the end the
+    daily routine is done "15 of 15 runs" and the weekly one is triggered
+    by its Monday clock; nothing reached the knowledge base before."""
+    local_tz("UTC")
+    fixture, labels, start, end = _load(tmp_path)
+    kb = KnowledgeBase(root=tmp_path / "knowledge", db_path=kb_db(tmp_path / "knowledge"))
+    kb.ensure_structure()
+    unit_of = _unit_of(labels)
+    drafted: dict[str, str] = {}  # routine -> slug
+    with WorkerDB(fixture.db_path) as db:
+        now = start
+        while now <= end:
+            events = db.get_annotated_events_in_window(hours=24, now=now)
+            if events:
+                wm.record_observations(db, events, now=now, sleep_boundaries=db.get_sleep_boundaries())
+            for cand in wm.review_candidates(db, now=now, kb=kb):
+                [routine] = _routine_of(cand, unit_of)
+                slug = f"{routine}-draft"
+                db.save_generated_sop(slug, cand.task_label, "passive",
+                                      _draft_template(slug, cand), auto_approve=False)
+                db.set_observations_promoted(cand.obs_ids, slug, promoted_at=now)
+                drafted[routine] = slug
+            if now.hour == 0:
+                wm.run_daily(db, kb, now=now)
+            now += TICK
+        assert set(drafted) == {STRIPE, EXPENSES}
+        assert kb.list_procedures() == []  # drafts are not exported
+
+        # The user approves both drafts at the end.
+        for slug in drafted.values():
+            kb.save_procedure(sop_to_procedure(db.get_generated_sop_by_slug(slug)["sop_json"]))
+
+    daily = kb.get_procedure(drafted[STRIPE])
+    assert len(daily["evidence"]["observations"]) == 15
+    assert daily["learned"]["done"]["label"] == "Send now"
+    assert daily["learned"]["done"]["support"] == "15 of 15 runs"
+    assert daily["recurrence"]["pattern"] == "daily"
+
+    weekly = kb.get_procedure(drafted[EXPENSES])
+    assert len(weekly["evidence"]["observations"]) == 3
+    assert weekly["recurrence"]["pattern"] == "weekly"
+    learned = weekly["learned"]["trigger"]
+    assert (learned["kind"], learned["weekday"], learned["time"]) == ("time", 0, "10:30")
+    assert learned["description"] == "Most Mondays around 10:30"
+    assert weekly["knowledge"]["trigger"]["status"] == "hypothesis"
