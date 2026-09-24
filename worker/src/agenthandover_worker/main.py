@@ -1800,10 +1800,7 @@ def _process_focus_sessions_v2(
 
         # --- Ask about what the ledger does not know yet (no model) ---
         try:
-            from agenthandover_worker.focus_questioner import (
-                write_focus_pending,
-                write_focus_questions,
-            )
+            from agenthandover_worker.focus_questioner import ask_focus_questions
             from agenthandover_worker.questions import ask_after_focus
 
             questions = ask_after_focus(
@@ -1811,18 +1808,18 @@ def _process_focus_sessions_v2(
                 now=now, weekly_budget=weekly_question_budget,
             )
             if questions:
-                write_focus_questions(
+                # Queued per session: an earlier session's questions still
+                # in the app are shown first, these once those are done.
+                shown = ask_focus_questions(
                     state_dir, session_id, slug, questions, title=title,
-                )
-                write_focus_pending(
-                    state_dir, session_id, slug,
                     sop_template=result.sop or procedure_dict,
                     procedure=procedure_dict,
                 )
                 logger.info(
-                    "Focus v2 session '%s': %d question(s) asked, "
+                    "Focus v2 session '%s': %d question(s) asked (%s), "
                     "pausing export for user answers",
                     title, len(questions),
+                    "shown" if shown else "queued behind another session's",
                 )
                 # The draft stays a draft until the answers: it now
                 # carries the synthesis.
@@ -1906,7 +1903,7 @@ def _process_focus_sessions_v2(
 
 
 # The last focus session's generated SOP until the session is exported or
-# waits for answers (``focus-pending.json`` then holds it).
+# waits for answers (its ``focus-pending/<session_id>.json`` then holds it).
 FOCUS_DRAFT_FILE = "focus-draft.json"
 
 
@@ -2083,7 +2080,20 @@ def _focus_answers_ready(state_dir: Path) -> bool:
     from agenthandover_worker.focus_questioner import read_focus_questions
 
     questions = read_focus_questions(state_dir)
-    return questions is not None and questions.get("status") in ("answered", "skipped")
+    return isinstance(questions, dict) and questions.get("status") in ("answered", "skipped")
+
+
+def _restore_focus_queue(state_dir: Path) -> None:
+    """Startup: move a 0.4.x/0.5.0 ``focus-pending.json`` into the
+    per-session queue and show the oldest queued questions when the app
+    has none (``focus_questioner.restore_focus_queue``).  A failure is
+    logged: it never stops the worker."""
+    from agenthandover_worker.focus_questioner import restore_focus_queue
+
+    try:
+        restore_focus_queue(state_dir)
+    except Exception:
+        logger.warning("Could not restore the focus Q&A queue", exc_info=True)
 
 
 def _stopped_focus_signal(state_dir: Path) -> dict | None:
@@ -2134,13 +2144,14 @@ def _check_focus_answers(
         clear_focus_qa_files,
         merge_answers,
         parse_qa_result_from_file,
+        publish_next_focus_questions,
         read_focus_pending,
         read_focus_questions,
     )
     from agenthandover_worker.questions import close_focus_questions
 
     questions_data = read_focus_questions(state_dir)
-    if questions_data is None:
+    if not isinstance(questions_data, dict):
         return None
 
     status = questions_data.get("status", "")
@@ -2148,17 +2159,21 @@ def _check_focus_answers(
         # Still pending — user hasn't answered yet
         return None
 
-    # Load the saved pending SOP state
-    pending = read_focus_pending(state_dir)
+    # The pending SOP state of the session these answers are for (each
+    # session's is queued under its id).
+    session_id = str(questions_data.get("session_id") or "")
+    pending = read_focus_pending(state_dir, session_id)
     if pending is None:
         logger.warning(
-            "Focus Q&A answers found but no pending SOP state — clearing stale files",
+            "Focus Q&A answers found but no pending SOP state for session %r "
+            "— clearing the stale questions file",
+            session_id,
         )
-        clear_focus_qa_files(state_dir)
+        clear_focus_qa_files(state_dir, session_id)
+        publish_next_focus_questions(state_dir)
         return None
 
     slug = pending.get("slug", "")
-    session_id = pending.get("session_id", "")
     sop_template = pending.get("sop_template", {})
     procedure_dict = pending.get("procedure", {})
     title = sop_template.get("title", procedure_dict.get("title", "Untitled"))
@@ -2234,8 +2249,10 @@ def _check_focus_answers(
         if record is not None:
             db.update_sop_status(record["sop_id"], "approved")
 
-    # Clean up Q&A files
-    clear_focus_qa_files(state_dir)
+    # Clean up this session's Q&A files, then show the next queued
+    # session's questions.
+    clear_focus_qa_files(state_dir, session_id)
+    publish_next_focus_questions(state_dir)
 
     # Refresh the Claude Code Skills with the new/updated procedure
     _refresh_claude_commands()
@@ -4186,6 +4203,9 @@ def main(argv: list[str] | None = None) -> None:
 
         with STATE_LOCK:
             requeue_step_answers(ctx.db, ctx.knowledge_base, ctx.sop_generator)
+        # Focus Q&As wait in a per-session queue; an upgrade from a single
+        # focus-pending.json moves it there.
+        _restore_focus_queue(_status_dir())
         if ctx.vector_kb is not None:
             ctx.runner.submit(
                 "startup-embedding", P2,
