@@ -27,6 +27,12 @@ _RE_FILEPATH_WIN = re.compile(r"[A-Z]:\\")
 
 _PARAM_FIELDS = ("input", "target", "location")
 
+#: The most steps one demonstration brings to alignment, and the most
+#: entries the canonical list holds: the passive SOP prompt carries one line
+#: per canonical step next to its sampled frames, and aligning two
+#: demonstrations costs len(a) x len(b) similarity computations.
+MAX_STEPS = 60
+
 
 @dataclass
 class AlignedStep:
@@ -78,6 +84,61 @@ def _self_align(steps: list[dict]) -> list[AlignedStep]:
     ]
 
 
+def _evenly(n: int, cap: int) -> list[int]:
+    """At most *cap* indices of ``range(n)``, evenly spaced, first and last kept."""
+    if n <= cap:
+        return list(range(n))
+    if cap <= 1:
+        return list(range(cap))
+    return sorted({round(i * (n - 1) / (cap - 1)) for i in range(cap)})
+
+
+def _step_key(step: dict) -> tuple[str, ...]:
+    return tuple(str(step.get(k) or "").strip().lower() for k in ("action", "app", "location"))
+
+
+def merge_steps(
+    steps: list[dict], embeddings: list[list[float] | None] | None = None,
+) -> tuple[list[dict], list[list[float] | None] | None]:
+    """*steps* with each run of consecutive steps sharing ``(action, app,
+    location)`` merged into its first, then evenly capped at
+    :data:`MAX_STEPS`.  *embeddings* (one per step, None where a step has
+    none) are kept in step with them."""
+    keep: list[int] = []
+    for i, step in enumerate(steps):
+        if not keep or _step_key(steps[keep[-1]]) != _step_key(step):
+            keep.append(i)
+    keep = [keep[i] for i in _evenly(len(keep), MAX_STEPS)]
+    merged = [steps[i] for i in keep]
+    if embeddings is None:
+        return merged, None
+    return merged, [embeddings[i] if i < len(embeddings) else None for i in keep]
+
+
+def frame_step(annotation: object) -> dict | None:
+    """The alignment step of one annotated frame: what the user was doing,
+    where, and on what (the list entry they picked, else the control they
+    were on).  None for a frame without an annotation."""
+    from agenthandover_worker.scene_annotator import as_compact
+
+    if not isinstance(annotation, dict):
+        return None
+    ann = as_compact(annotation)
+    chosen = next(
+        (str(item.get("label") or "")
+         for item in ann.get("visible_items") or []
+         if isinstance(item, dict) and item.get("chosen")),
+        "",
+    )
+    return {
+        "action": (ann.get("task_context") or {}).get("what_doing", ""),
+        "app": ann.get("app", ""),
+        "location": ann.get("location", ""),
+        "target": chosen or str((ann.get("ui_state") or {}).get("active_element") or ""),
+        "input": "",
+    }
+
+
 class VariantDetector:
     """Detect workflow variants and extract parameters from multiple demos.
 
@@ -96,10 +157,13 @@ class VariantDetector:
 
     def semantic_align(
         self, steps_a: list[dict], steps_b: list[dict],
-        embeddings_a: list[list[float]] | None = None,
-        embeddings_b: list[list[float]] | None = None,
+        embeddings_a: list[list[float] | None] | None = None,
+        embeddings_b: list[list[float] | None] | None = None,
     ) -> list[AlignedStep]:
-        """Align two step sequences using Needleman-Wunsch dynamic programming."""
+        """Align two step sequences using Needleman-Wunsch dynamic programming.
+
+        A step pair is compared on its embeddings when both steps have one,
+        else on the word overlap of their actions."""
         m, n = len(steps_a), len(steps_b)
         if m == 0 and n == 0:
             return []
@@ -164,17 +228,84 @@ class VariantDetector:
             step.position = idx
         return aligned
 
+    def analyse(
+        self, label: str, timelines: list[list[dict]],
+        embeddings: list[list[list[float] | None]] | None = None,
+    ) -> dict:
+        """Passive discovery's analysis of one workflow's demonstrations.
+
+        *timelines*: per demonstration, its frames (``{"annotation": ...}``);
+        *embeddings*: per demonstration, the task segmenter's vector for
+        each frame (None where it has none).  Each timeline becomes its
+        frames' steps, merged and capped (:func:`merge_steps`); the demos
+        are aligned once (:meth:`align_demos`) and that alignment feeds
+        variants, parameters and the canonical workflow.
+
+        Returns ``{"alignments", "variants", "parameters", "normalized",
+        "demo_steps"}``, or ``{}`` when fewer than two demos have steps.
+        """
+        demo_steps: list[list[dict]] = []
+        demo_embs: list[list[list[float] | None] | None] = []
+        for d, timeline in enumerate(timelines):
+            frame_embs = embeddings[d] if embeddings and d < len(embeddings) else None
+            steps: list[dict] = []
+            embs: list[list[float] | None] = []
+            for i, frame in enumerate(timeline):
+                step = frame_step(frame.get("annotation"))
+                if step is None:
+                    continue
+                steps.append(step)
+                embs.append(frame_embs[i] if frame_embs and i < len(frame_embs) else None)
+            steps, merged_embs = merge_steps(steps, embs)
+            if steps:
+                demo_steps.append(steps)
+                demo_embs.append(merged_embs)
+        if len(demo_steps) < 2:
+            return {}
+        alignments = self.align_demos(demo_steps, demo_embs)
+        variants = self.detect_variants(label, demo_steps, alignments=alignments)
+        return {
+            "alignments": alignments,
+            "variants": variants,
+            "parameters": self.extract_parameters(demo_steps, alignments),
+            "normalized": self.normalize_workflow(demo_steps, variants, alignments),
+            "demo_steps": demo_steps,
+        }
+
+    def align_demos(
+        self, demos: list[list[dict]],
+        embeddings: list[list[list[float] | None] | None] | None = None,
+    ) -> list[list[AlignedStep]]:
+        """Every demo aligned against the first (the first against itself):
+        one Needleman-Wunsch pass per other demo, shared by
+        :meth:`detect_variants`, :meth:`extract_parameters` and
+        :meth:`normalize_workflow`.  *embeddings*: per demo, one vector (or
+        None) per step."""
+        if not demos:
+            return []
+        emb = embeddings or [None] * len(demos)
+        return [_self_align(demos[0])] + [
+            self.semantic_align(demos[0], demo, emb[0], emb[i])
+            for i, demo in enumerate(demos[1:], start=1)
+        ]
+
     def detect_variants(
         self, slug: str, demos: list[list[dict]],
         reference_steps: list[dict] | None = None,
-        embeddings: list[list[list[float]]] | None = None,
+        embeddings: list[list[list[float] | None]] | None = None,
+        alignments: list[list[AlignedStep]] | None = None,
     ) -> list[WorkflowVariant]:
-        """Detect workflow variants across multiple demonstrations."""
+        """Detect workflow variants across multiple demonstrations.
+
+        *alignments* (from :meth:`align_demos`: every demo against the
+        first) are used as given instead of aligning again."""
         if len(demos) < 2:
             return []
 
         # Pick reference
-        if reference_steps is not None:
+        if alignments is not None:
+            ref_idx = 0
+        elif reference_steps is not None:
             ref, ref_idx, ref_emb = reference_steps, -1, None
         else:
             ref_idx = max(range(len(demos)), key=lambda i: len(demos[i]))
@@ -182,13 +313,14 @@ class VariantDetector:
             ref_emb = embeddings[ref_idx] if embeddings else None
 
         # Align every demo against reference
-        alignments: list[list[AlignedStep]] = []
-        for d_idx, demo in enumerate(demos):
-            if d_idx == ref_idx:
-                alignments.append(_self_align(ref))
-                continue
-            demo_emb = embeddings[d_idx] if embeddings else None
-            alignments.append(self.semantic_align(ref, demo, ref_emb, demo_emb))
+        if alignments is None:
+            alignments = []
+            for d_idx, demo in enumerate(demos):
+                if d_idx == ref_idx:
+                    alignments.append(_self_align(ref))
+                    continue
+                demo_emb = embeddings[d_idx] if embeddings else None
+                alignments.append(self.semantic_align(ref, demo, ref_emb, demo_emb))
 
         max_len = max(len(a) for a in alignments) if alignments else 0
 
@@ -269,9 +401,12 @@ class VariantDetector:
             return []
 
         if alignments is None:
-            ref = demos[0]
-            alignments = [_self_align(ref) if i == 0 else self.semantic_align(ref, d)
-                          for i, d in enumerate(demos)]
+            alignments = self.align_demos(demos)
+        if len(alignments) != len(demos):
+            raise ValueError(
+                f"{len(alignments)} alignments for {len(demos)} demos: pass one per "
+                "demo, the first aligned against itself (see align_demos)"
+            )
 
         max_len = max(len(a) for a in alignments) if alignments else 0
         num_demos = len(demos)
@@ -314,10 +449,16 @@ class VariantDetector:
                 merged[p.name] = p
         return list(merged.values())
 
-    def normalize_workflow(self, demos: list[list[dict]], variants: list[WorkflowVariant]) -> dict:
-        """Produce a canonical workflow from multiple demonstrations.
+    def normalize_workflow(
+        self, demos: list[list[dict]], variants: list[WorkflowVariant],
+        alignments: list[list[AlignedStep]] | None = None,
+    ) -> dict:
+        """Produce a canonical workflow from multiple demonstrations
+        (*alignments* from :meth:`align_demos`, computed here when absent).
 
-        Returns ``{"canonical_steps": [...], "branches": [...], "parameters": [...]}``.
+        Returns ``{"canonical_steps": [...], "branches": [...], "parameters": [...]}``
+        with at most :data:`MAX_STEPS` canonical steps, evenly spaced over
+        the workflow (each keeps its alignment ``position``).
         """
         if not demos:
             return {"canonical_steps": [], "branches": [], "parameters": []}
@@ -326,9 +467,8 @@ class VariantDetector:
                           "alternatives": [], "step": s} for k, s in enumerate(demos[0])]
             return {"canonical_steps": canonical, "branches": [], "parameters": []}
 
-        ref = demos[0]
-        alignments = [_self_align(ref) if i == 0 else self.semantic_align(ref, d)
-                      for i, d in enumerate(demos)]
+        if alignments is None:
+            alignments = self.align_demos(demos)
         max_len = max(len(a) for a in alignments) if alignments else 0
         total = len(demos)
 
@@ -362,6 +502,9 @@ class VariantDetector:
                 branches.append({"position": pos, "canonical_action": canon_act,
                                  "alternatives": alts})
 
+        canonical_steps = [canonical_steps[i] for i in _evenly(len(canonical_steps), MAX_STEPS)]
+        kept = {c["position"] for c in canonical_steps}
+        branches = [b for b in branches if b["position"] in kept]
         params = self.extract_parameters(demos, alignments)
         param_dicts = [{"name": p.name, "type": p.type, "values_seen": p.values_seen,
                         "step_positions": p.step_positions, "confidence": p.confidence}

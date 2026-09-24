@@ -45,7 +45,6 @@ from agenthandover_worker.annotation_cache import AnnotationCache
 from agenthandover_worker.scene_annotator import (
     AnnotationConfig,
     SceneAnnotator,
-    as_compact,
     page_for_event,
     skip_record,
 )
@@ -2504,9 +2503,12 @@ def _process_passive_discovery(
     # Step 3: Persist segments, then record each finished work session as
     # a workflow observation (the grouping unit; it outlives raw frames).
     labels: dict[str, str] = {}
+    # The segmenter's frame vectors, reused by the variant alignment below.
+    frame_embeddings: dict[str, list[float]] = {}
     for seg in seg_result.segments:
         event_ids = [f.event_id for f in seg.frames]
         labels.update(dict.fromkeys(event_ids, seg.task_label))
+        frame_embeddings.update((f.event_id, f.embedding) for f in seg.frames if f.embedding)
         db.save_task_segment(
             segment_id=seg.segment_id,
             cluster_id=seg.cluster_id,
@@ -2524,7 +2526,7 @@ def _process_passive_discovery(
     # Step 4: the workflows the review queue admits now.
     import json as _json
 
-    candidates = workflow_mining.review_candidates(db, now=now)
+    candidates = workflow_mining.review_candidates(db, now=now, kb=knowledge_base)
     if not candidates:
         logger.info("Passive discovery: no workflow ready for review")
         return 0
@@ -2541,10 +2543,12 @@ def _process_passive_discovery(
         # Reconstruct demonstrations (timelines) from DB event IDs; the
         # frames of observations older than the raw retention are gone.
         demonstrations: list[list[dict]] = []
+        demo_event_ids: list[list[str]] = []  # each timeline frame's event id
         for obs in candidate.observations:
             event_ids = _json.loads(obs["event_ids_json"])
             events_for_seg = db.get_events_by_ids(event_ids)
             timeline: list[dict] = []
+            timeline_ids: list[str] = []
             for ev in events_for_seg:
                 ann_raw = ev.get("scene_annotation_json")
                 if not ann_raw:
@@ -2578,8 +2582,10 @@ def _process_passive_discovery(
                     frame["focused_field"] = ev_field
                     frame["event_id"] = ev.get("id", "")
                 timeline.append(frame)
+                timeline_ids.append(ev.get("id", ""))
             if timeline:
                 demonstrations.append(timeline)
+                demo_event_ids.append(timeline_ids)
 
         if len(demonstrations) < segmenter.config.min_demonstrations:
             # Recorded as a failure for these observations, so the workflow
@@ -2593,72 +2599,20 @@ def _process_passive_discovery(
             )
             continue
 
-        # --- Semantic alignment + variant detection + parameter extraction ---
+        # --- Alignment (once per workflow), variants, parameters ---
         _variant_results: dict = {}
         if variant_detector is not None and len(demonstrations) >= 2:
             try:
-                from dataclasses import asdict as _asdict
-
-                # Build step lists from demonstration annotations
-                _demo_steps: list[list[dict]] = []
-                for demo_tl in demonstrations:
-                    steps = []
-                    for frame in demo_tl:
-                        ann = frame.get("annotation", {})
-                        if not isinstance(ann, dict):
-                            continue
-                        ann = as_compact(ann)
-                        # The target: the list entry the user picked, else
-                        # the control they were on.
-                        chosen = next(
-                            (str(item.get("label") or "")
-                             for item in ann.get("visible_items") or []
-                             if isinstance(item, dict) and item.get("chosen")),
-                            "",
-                        )
-                        steps.append({
-                            "action": ann.get("task_context", {}).get("what_doing", ""),
-                            "app": ann.get("app", ""),
-                            "location": ann.get("location", ""),
-                            "target": chosen or str(
-                                (ann.get("ui_state") or {}).get("active_element") or ""
-                            ),
-                            "input": "",
-                        })
-                    if steps:
-                        _demo_steps.append(steps)
-
-                if len(_demo_steps) >= 2:
-                    # Pairwise alignment against first demo
-                    _alignments = []
-                    for i in range(1, len(_demo_steps)):
-                        aligned = variant_detector.semantic_align(
-                            _demo_steps[0], _demo_steps[i],
-                        )
-                        _alignments.append(aligned)
-
-                    _variants = variant_detector.detect_variants(
-                        task_label or str(cluster_id), _demo_steps,
-                    )
-                    _parameters = variant_detector.extract_parameters(
-                        _demo_steps, _alignments,
-                    )
-                    _normalized = variant_detector.normalize_workflow(
-                        _demo_steps, _variants,
-                    )
-
-                    _variant_results = {
-                        "alignments": _alignments,
-                        "variants": _variants,
-                        "parameters": _parameters,
-                        "normalized": _normalized,
-                        "demo_steps": _demo_steps,
-                    }
+                _variant_results = variant_detector.analyse(
+                    task_label or str(cluster_id), demonstrations,
+                    [[frame_embeddings.get(eid) for eid in ids] for ids in demo_event_ids],
+                )
+                if _variant_results:
                     logger.info(
                         "Variant detection for '%s': %d variants, %d params",
                         task_label[:60],
-                        len(_variants),
-                        len(_parameters),
+                        len(_variant_results["variants"]),
+                        len(_variant_results["parameters"]),
                     )
             except Exception:
                 logger.debug(

@@ -455,3 +455,89 @@ class TestEdgeCases:
         # extract_parameters should also work
         params = det.extract_parameters(demos)
         assert isinstance(params, list)
+
+
+# ------------------------------------------------------------------
+# Passive discovery's analysis: merged, capped, aligned once (#164)
+# ------------------------------------------------------------------
+
+
+def _frame(what: str, app: str = "Chrome", location: str = "https://app.example.com/x") -> dict:
+    return {"annotation": {"app": app, "location": location,
+                           "task_context": {"what_doing": what}}}
+
+
+class TestAnalyse:
+    """``VariantDetector.analyse``: what passive discovery runs per workflow."""
+
+    def test_one_alignment_pass_per_demo_pair(self, monkeypatch):
+        det = VariantDetector()
+        calls = []
+        real = det.semantic_align
+        monkeypatch.setattr(det, "semantic_align", lambda *a, **k: calls.append(1) or real(*a, **k))
+        timelines = [[_frame("Open"), _frame("Fill"), _frame("Send")] for _ in range(4)]
+        result = det.analyse("wf", timelines)
+        # Demos 2..4 each aligned once against demo 1; variants, parameters
+        # and the canonical list reuse those alignments.
+        assert len(calls) == 3
+        assert len(result["alignments"]) == 4
+        assert result["alignments"][0][0].similarity == 1.0
+
+    def test_parameter_in_all_three_demos_has_confidence_one(self):
+        det = VariantDetector()
+        demos = [
+            [_step("Open invoice", location="https://x.com"),
+             _step("Type amount", input_val=value)]
+            for value in ("10", "20", "30")
+        ]
+        [param] = [p for p in det.extract_parameters(demos, det.align_demos(demos))
+                   if p.name == "input"]
+        assert param.confidence == 1.0
+        assert param.values_seen == ["10", "20", "30"]
+
+    def test_alignments_must_cover_every_demo(self):
+        det = VariantDetector()
+        demos = [[_step("A")], [_step("A")], [_step("A")]]
+        # The pre-fix caller passed D-1 alignments, understating confidence.
+        with pytest.raises(ValueError):
+            det.extract_parameters(demos, det.align_demos(demos)[1:])
+
+    def test_consecutive_equal_steps_merge_and_the_list_is_capped(self):
+        from agenthandover_worker.variant_detector import MAX_STEPS, merge_steps
+
+        steps = [_step("Scroll feed")] * 5 + [_step("Open post")] + [_step("Scroll feed")]
+        merged, embs = merge_steps(steps, [[float(i)] for i in range(len(steps))])
+        assert [s["action"] for s in merged] == ["Scroll feed", "Open post", "Scroll feed"]
+        # Each merged step keeps the first frame's vector.
+        assert embs == [[0.0], [5.0], [6.0]]
+
+        long = [_step(f"Step {i}") for i in range(500)]
+        capped, _ = merge_steps(long)
+        assert len(capped) == MAX_STEPS
+        assert capped[0]["action"] == "Step 0" and capped[-1]["action"] == "Step 499"
+
+    def test_canonical_list_is_capped_for_the_prompt(self):
+        from agenthandover_worker.variant_detector import MAX_STEPS
+
+        det = VariantDetector()
+        timelines = [[_frame(f"Step {i}") for i in range(200)] for _ in range(2)]
+        result = det.analyse("wf", timelines)
+        assert all(len(d) <= MAX_STEPS for d in result["demo_steps"])
+        assert len(result["normalized"]["canonical_steps"]) <= MAX_STEPS
+
+    def test_segmenter_embeddings_reach_the_aligner(self, monkeypatch):
+        det = VariantDetector()
+        seen = []
+        real = det.semantic_align
+        monkeypatch.setattr(
+            det, "semantic_align",
+            lambda a, b, ea=None, eb=None: seen.append((ea, eb)) or real(a, b, ea, eb),
+        )
+        timelines = [[_frame("Open"), _frame("Open"), _frame("Send")]] * 2
+        vectors = [[[1.0, 0.0], [1.0, 0.0], [0.0, 1.0]], [[1.0, 0.0], None, [0.0, 1.0]]]
+        det.analyse("wf", timelines, vectors)
+        # The two "Open" frames merged; each demo brings one vector per step.
+        assert seen == [([[1.0, 0.0], [0.0, 1.0]], [[1.0, 0.0], [0.0, 1.0]])]
+
+    def test_fewer_than_two_demos_with_steps(self):
+        assert VariantDetector().analyse("wf", [[_frame("Open")], [{"annotation": None}]]) == {}
