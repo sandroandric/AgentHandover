@@ -36,8 +36,12 @@ def once_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     if worker_main._platform.system() != "Darwin":
         config_dir = home / ".config" / "agenthandover"
     config_dir.mkdir(parents=True, exist_ok=True)
+    # The tier is pinned: without it the models follow this machine's RAM,
+    # and on a 24 GB Mac the Performance tier's two models make the
+    # scheduler hold generation for its batch window, so one --once tick
+    # ends before the daily pass.
     (config_dir / "config.toml").write_text(
-        f'[vlm]\nollama_host = "{host}"\n\n'
+        f'[vlm]\ntier = "recommended"\nollama_host = "{host}"\n\n'
         "[knowledge]\nquery_api_enabled = false\n",
         encoding="utf-8",
     )
@@ -176,7 +180,8 @@ def test_startup_migrates_a_config_on_an_earlier_tier_default(
     config = worker_main._status_dir() / "config.toml"
     if worker_main._platform.system() != "Darwin":
         config = once_home / ".config" / "agenthandover" / "config.toml"
-    host_line = config.read_text(encoding="utf-8").splitlines()[1]
+    host_line = next(line for line in config.read_text(encoding="utf-8").splitlines()
+                     if line.startswith("ollama_host"))
     old = (
         '[vlm]\nmode = "local"\ntier = "recommended"\n'
         'annotation_model = "qwen3.5:4b"\nsop_model = "gemma4:12b-it-qat"\n'
