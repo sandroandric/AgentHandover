@@ -623,6 +623,50 @@ class TestSkillsAndObservations:
         assert proc["recurrence"]["pattern"] == "daily"
         assert proc["evidence"]["total_observations"] == 3
 
+    def test_attached_observations_teach_the_skill_its_trigger_and_done(
+        self, db: WorkerDB, tmp_path: Path,
+    ) -> None:
+        """Instances attached after the draft (WP-M5) are added to the
+        procedure's evidence with their run signals, so what they show
+        (WP-L3: a recurring lead-in, the commit that ends them) becomes the
+        Skill's learned trigger and done, citing them."""
+        kb = _kb(tmp_path, PAYOUT_SKILL)
+        self._promote(db)
+        later = []
+        for n, day in enumerate(_workdays(date(2026, 9, 8), 3)):
+            obs = _obs(day, key="a")
+            obs["evidence_json"] = json.dumps({"signals": {
+                "lead_in": [{"app": "Mail", "place": "", "title": f"Payout failed #{n} - Inbox",
+                             "subject": f"Payout failed #{n}", "event_id": f"lead-{n}"}],
+                "local_weekday": date.fromisoformat(day).weekday(), "local_minute": 9 * 60,
+                "done": {"kind": "post", "label": "Post", "app": "Google Chrome",
+                         "place": "app.slack.com", "event_id": f"done-{n}"},
+                "verification": [], "corrections": [],
+            }})
+            assert db.save_workflow_observation(obs)
+            later.append(obs["obs_id"])
+        now = datetime(2026, 9, 20, tzinfo=timezone.utc)
+        assert wm.review_candidates(db, now=now, kb=kb) == []
+
+        proc = kb.get_procedure("payout")
+        cited = [o["obs_id"] for o in proc["evidence"]["observations"]]
+        # The three instances attached now (the promoted ones were the
+        # draft's, set by the promotion, not attached).
+        assert cited == later
+        assert proc["evidence"]["total_observations"] == 3
+        trigger = proc["learned"]["trigger"]
+        # Recurring by the subject's shape; described by the latest one.
+        assert trigger["description"] == 'Usually starts after the message "Payout failed #2" in Mail'
+        assert trigger["instances"] == later
+        assert proc["learned"]["done"]["event_ids"] == ["done-0", "done-1", "done-2"]
+        ledger = proc["knowledge"]
+        assert ledger["trigger"]["status"] == "hypothesis"
+        assert {e["id"] for e in ledger["trigger"]["evidence"]} == set(later)
+        assert ledger["done_criteria"]["value_ref"] == "learned.done"
+        # Attached once: a later pass cites nothing twice.
+        wm.review_candidates(db, now=now, kb=kb)
+        assert len(kb.get_procedure("payout")["evidence"]["observations"]) == len(cited)
+
     def test_a_skill_without_places_is_not_linked(self, db: WorkerDB, tmp_path: Path) -> None:
         for day in _workdays(date(2026, 9, 1), 3):
             db.save_workflow_observation(_obs(day, key="a"))
