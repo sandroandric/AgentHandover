@@ -200,8 +200,6 @@ def _read_keychain_api_key(provider: str) -> str:
 
     Returns the key string, or "" if not found / not on macOS.
     """
-    import subprocess
-
     if _platform.system() != "Darwin":
         return ""
 
