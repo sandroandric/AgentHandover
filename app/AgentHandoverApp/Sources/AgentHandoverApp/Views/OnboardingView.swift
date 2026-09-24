@@ -1887,7 +1887,7 @@ struct OnboardingView: View {
                             .font(.system(size: 13, weight: .bold, design: .rounded))
                             .foregroundColor(darkNavy)
                     }
-                    Text("Cloud VLM sends screenshots of your desktop to a third-party API for analysis. Only enable this if you accept this trade-off.")
+                    Text("Cloud mode sends the window title and details of events AgentHandover cannot classify on its own to a third-party API. Screen annotation and Skill writing still run locally through Ollama, so the local models are still needed. Only enable this if you accept this trade-off.")
                         .font(.system(size: 12))
                         .foregroundColor(darkNavy.opacity(0.5))
                         .multilineTextAlignment(.center)

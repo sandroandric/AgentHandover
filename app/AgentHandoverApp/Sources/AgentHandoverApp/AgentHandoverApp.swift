@@ -48,6 +48,7 @@ struct AgentHandoverApp: App {
 
         Window("FAQ", id: "faq") {
             FAQView()
+                .environmentObject(delegate.sharedAppState)
         }
         .defaultSize(width: 560, height: 700)
         .windowResizability(.contentMinSize)
