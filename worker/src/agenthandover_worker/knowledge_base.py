@@ -28,7 +28,9 @@ import logging
 import os
 import sqlite3
 import tempfile
-from contextlib import closing
+import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -81,6 +83,11 @@ class KnowledgeBase:
         self._db_path = Path(db_path) if db_path is not None else paths.db_path()
         # list_procedures() cache: slug -> (stored text, parsed procedure)
         self._procedure_cache: dict[str, tuple[str, dict]] = {}
+        # One connection, opened on first use and shared by the threads
+        # that use the knowledge base (control, inference, query API) one
+        # at a time under _lock.
+        self._conn: sqlite3.Connection | None = None
+        self._lock = threading.RLock()
 
     @property
     def root(self) -> Path:
@@ -112,24 +119,40 @@ class KnowledgeBase:
     # Procedures
     # ------------------------------------------------------------------
 
-    def connect(self) -> sqlite3.Connection | None:
-        """A read-write connection to the database, or None when the
-        daemon has not created it yet (nothing is saved then).  Never
-        creates the file: the daemon owns the database and its schema."""
-        if not self._db_path.is_file():
-            return None
-        return sqlite3.connect(
-            f"{self._db_path.resolve().as_uri()}?mode=rw", uri=True, timeout=10,
-        )
-
-    def _require_connection(self) -> sqlite3.Connection:
-        conn = self.connect()
-        if conn is None:
-            raise FileNotFoundError(
-                f"No AgentHandover database at {self._db_path}: the daemon "
-                "creates it on its first start (agenthandover start)."
+    def _connection(self, *, required: bool) -> sqlite3.Connection | None:
+        """The read-write connection (call under ``_lock``), or None when
+        the daemon has not created the database yet (*required*: raise
+        instead).  Never creates the file: the daemon owns the database
+        and its schema."""
+        if self._conn is None:
+            if not self._db_path.is_file():
+                if required:
+                    raise FileNotFoundError(
+                        f"No AgentHandover database at {self._db_path}: the "
+                        "daemon creates it on its first start (agenthandover start)."
+                    )
+                return None
+            self._conn = sqlite3.connect(
+                f"{self._db_path.resolve().as_uri()}?mode=rw",
+                uri=True, timeout=10, check_same_thread=False,
             )
-        return conn
+        return self._conn
+
+    def _read(self, sql: str, params: tuple = ()) -> list[tuple]:
+        """The rows of *sql*; none before the daemon created the database.
+        Each read sees every write committed before it (no transaction
+        is held between statements)."""
+        with self._lock:
+            conn = self._connection(required=False)
+            return [] if conn is None else conn.execute(sql, params).fetchall()
+
+    @contextmanager
+    def _transaction(self) -> Iterator[sqlite3.Connection]:
+        """The connection inside one transaction (committed on success)."""
+        with self._lock:
+            conn = self._connection(required=True)
+            with conn:
+                yield conn
 
     def _procedure_path(self, slug: str) -> Path:
         return self._root / _PROCEDURES_DIR / f"{slug}.json"
@@ -137,7 +160,7 @@ class KnowledgeBase:
     def _store_procedure(self, slug: str, procedure: dict, text: str) -> Path:
         """Write *text* (the JSON of *procedure*) as the row of *slug*,
         then as its export file."""
-        with closing(self._require_connection()) as conn, conn:
+        with self._transaction() as conn:
             conn.execute(
                 "INSERT INTO procedures (slug, title, lifecycle_state, procedure_json, "
                 "  updated_at) "
@@ -183,15 +206,10 @@ class KnowledgeBase:
 
     def get_procedure(self, slug: str) -> dict | None:
         """Load a procedure by slug, or return None if not found."""
-        conn = self.connect()
-        if conn is None:
-            return None
-        with closing(conn):
-            row = conn.execute(
-                "SELECT procedure_json FROM procedures WHERE slug = ?",
-                (_sanitize_slug(slug),),
-            ).fetchone()
-        return _parse_procedure(slug, row[0]) if row else None
+        rows = self._read(
+            "SELECT procedure_json FROM procedures WHERE slug = ?", (_sanitize_slug(slug),),
+        )
+        return _parse_procedure(slug, rows[0][0]) if rows else None
 
     def list_procedures(self) -> list[dict]:
         """Every procedure, in the order of their export file names.
@@ -201,16 +219,11 @@ class KnowledgeBase:
         with the cache, so callers must not modify them (edit a copy from
         :meth:`get_procedure` and save it instead).
         """
-        conn = self.connect()
-        if conn is None:
-            return []
-        with closing(conn):
-            # Ordered as the files were listed before procedures moved into
-            # the database (by file name), so every consumer sees them in
-            # the same order.
-            rows = conn.execute(
-                "SELECT slug, procedure_json FROM procedures ORDER BY slug || '.json'"
-            ).fetchall()
+        # Ordered as the files were listed before procedures moved into the
+        # database (by file name), so every consumer sees the same order.
+        rows = self._read(
+            "SELECT slug, procedure_json FROM procedures ORDER BY slug || '.json'"
+        )
         cache = self._procedure_cache
         fresh: dict[str, tuple[str, dict]] = {}
         results = []
@@ -235,11 +248,7 @@ class KnowledgeBase:
         """
         from agenthandover_worker.procedure_schema import backfill_procedure_fields
 
-        conn = self.connect()
-        if conn is None:
-            return 0
-        with closing(conn):
-            rows = conn.execute("SELECT slug, procedure_json FROM procedures").fetchall()
+        rows = self._read("SELECT slug, procedure_json FROM procedures")
         count = 0
         for slug, text in rows:
             data = _parse_procedure(slug, text)
@@ -253,13 +262,14 @@ class KnowledgeBase:
         """Delete a procedure (its row and its export file).  Returns True
         if it existed."""
         slug = _sanitize_slug(slug)
-        conn = self.connect()
         deleted = False
-        if conn is not None:
-            with closing(conn), conn:
-                deleted = conn.execute(
-                    "DELETE FROM procedures WHERE slug = ?", (slug,),
-                ).rowcount > 0
+        with self._lock:
+            conn = self._connection(required=False)
+            if conn is not None:
+                with conn:
+                    deleted = conn.execute(
+                        "DELETE FROM procedures WHERE slug = ?", (slug,),
+                    ).rowcount > 0
         path = self._procedure_path(slug)
         if path.is_file():
             path.unlink()
@@ -281,7 +291,7 @@ class KnowledgeBase:
         logged and left where they are.  Returns the number imported.
         """
         proc_dir = self._root / _PROCEDURES_DIR
-        with closing(self._require_connection()) as conn, conn:
+        with self._transaction() as conn:
             if conn.execute(
                 "SELECT 1 FROM worker_state WHERE key = ?", (_IMPORT_MARKER,),
             ).fetchone():
@@ -324,11 +334,7 @@ class KnowledgeBase:
         """Rewrite each procedure's export file that is missing or differs
         from its row (a save interrupted between the two writes).  Files
         with no row are left alone.  Returns the number written."""
-        conn = self.connect()
-        if conn is None:
-            return 0
-        with closing(conn):
-            rows = conn.execute("SELECT slug, procedure_json FROM procedures").fetchall()
+        rows = self._read("SELECT slug, procedure_json FROM procedures")
         written = 0
         for slug, text in rows:
             path = self._procedure_path(slug)

@@ -30,6 +30,7 @@ from agenthandover_worker.annotation_cache import (
     simhash64,
 )
 from agenthandover_worker.db import WorkerDB
+from agenthandover_worker import knowledge_base as kb_module
 from agenthandover_worker.knowledge_base import KnowledgeBase
 from agenthandover_worker.ollama import Response
 from agenthandover_worker.ops_telemetry import MODEL_USAGE
@@ -530,8 +531,8 @@ class TestNoRepeatedWork:
         kb = KnowledgeBase(root=tmp_path / "kb", db_path=kb_db(tmp_path / "kb"))
         kb.ensure_structure()
         _write_procedures(kb, 60)
-        loads = MagicMock(side_effect=json.load)
-        with patch("agenthandover_worker.knowledge_base.json.load", loads):
+        loads = MagicMock(side_effect=kb_module._parse_procedure)
+        with patch.object(kb_module, "_parse_procedure", loads):
             assert len(kb.list_procedures()) == 60
             assert loads.call_count == 60
             assert len(kb.list_procedures()) == 60
@@ -540,7 +541,7 @@ class TestNoRepeatedWork:
             procs = kb.list_procedures()
             assert loads.call_count == 61
             assert procs[7]["title"] == "Changed"
-            (tmp_path / "kb" / "procedures" / "proc-08.json").unlink()
+            kb.delete_procedure("proc-08")
             assert len(kb.list_procedures()) == 59
             assert loads.call_count == 61
 
@@ -559,9 +560,9 @@ class TestNoRepeatedWork:
                 )
             wm._write_sops_index(db, kb, force=True)
             connects = MagicMock(side_effect=sqlite3.connect)
-            loads = MagicMock(side_effect=json.load)
+            loads = MagicMock(side_effect=kb_module._parse_procedure)
             with patch("agenthandover_worker.db.sqlite3.connect", connects), \
-                    patch("agenthandover_worker.knowledge_base.json.load", loads):
+                    patch.object(kb_module, "_parse_procedure", loads):
                 wm._write_sops_index(db, kb, force=True)
             assert connects.call_count == 0
             assert loads.call_count == 0

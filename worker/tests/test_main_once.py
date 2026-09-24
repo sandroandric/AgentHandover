@@ -238,9 +238,10 @@ def test_first_start_imports_a_v040_knowledge_base_once(
     once_home: Path, tmp_db_path: Path, tmp_path: Path,
 ) -> None:
     """Upgrading from v0.4.0: the procedure files the old worker wrote go
-    into the procedures table on the first start, the files stay byte for
-    byte (they are the export agents read), and later starts import
-    nothing (a procedure deleted since stays deleted)."""
+    into the procedures table on the first start (verbatim: pinned in
+    ``test_knowledge_base.py``), the files stay the table's export byte for
+    byte whatever the run then saves, and later starts import nothing (a
+    procedure deleted since stays deleted)."""
     import sqlite3
 
     from agenthandover_worker.knowledge_base import KnowledgeBase
@@ -262,7 +263,6 @@ def test_first_start_imports_a_v040_knowledge_base_once(
             json.dump(proc, f, indent=2, default=str)
         files[slug] = path.read_bytes()
     (proc_dir / "broken.json").write_text("{not json", encoding="utf-8")
-    mtimes = {p.name: p.stat().st_mtime_ns for p in proc_dir.iterdir()}
 
     _run_once(tmp_db_path, tmp_path)
 
@@ -270,12 +270,11 @@ def test_first_start_imports_a_v040_knowledge_base_once(
     rows = dict(conn.execute("SELECT slug, procedure_json FROM procedures"))
     states = dict(conn.execute("SELECT slug, lifecycle_state FROM procedures"))
     conn.close()
-    assert rows == {slug: data.decode("utf-8") for slug, data in files.items()}
     assert states == {"file-expenses": "agent_ready", "weekly-report": "draft"}
-    # The files are untouched: same bytes, never rewritten.
-    assert {p.name: p.stat().st_mtime_ns for p in proc_dir.iterdir()} == mtimes
-    for slug, data in files.items():
-        assert (proc_dir / f"{slug}.json").read_bytes() == data
+    for slug, text in rows.items():
+        assert (proc_dir / f"{slug}.json").read_text(encoding="utf-8") == text
+        assert json.loads(text)["title"] == json.loads(files[slug])["title"]
+    assert (proc_dir / "broken.json").read_text(encoding="utf-8") == "{not json"
 
     kb = KnowledgeBase(root=tmp_path / "knowledge", db_path=tmp_db_path)
     assert kb.delete_procedure("weekly-report")

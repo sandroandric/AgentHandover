@@ -23,6 +23,7 @@ from agenthandover_worker.sop_generator import (
     GeneratedSOP,
 )
 from agenthandover_worker.db import WorkerDB
+from daemon_db import create_daemon_db
 from fixtures.vlm_answers import generated_sop_template, load_answer
 
 
@@ -30,53 +31,9 @@ from fixtures.vlm_answers import generated_sop_template, load_answer
 # Shared test data
 # ---------------------------------------------------------------------------
 
-DAEMON_SCHEMA = """
-CREATE TABLE events (
-    id TEXT PRIMARY KEY,
-    timestamp TEXT NOT NULL,
-    kind_json TEXT,
-    window_json TEXT,
-    metadata_json TEXT DEFAULT '{}',
-    artifact_ids_json TEXT DEFAULT '[]',
-    processed INTEGER DEFAULT 0,
-    display_ids_spanned_json TEXT,
-    scene_annotation_json TEXT DEFAULT NULL,
-    annotation_status TEXT DEFAULT 'pending',
-    frame_diff_json TEXT DEFAULT NULL
-);
-CREATE INDEX idx_events_annotation_status ON events(annotation_status);
-CREATE TABLE vlm_queue (
-    id TEXT PRIMARY KEY,
-    event_id TEXT NOT NULL,
-    priority REAL DEFAULT 0.0,
-    status TEXT DEFAULT 'pending',
-    ttl_expires_at TEXT,
-    result_json TEXT,
-    processed_at TEXT
-);
-CREATE TABLE episodes (
-    id TEXT PRIMARY KEY,
-    segment_id TEXT,
-    status TEXT DEFAULT 'active',
-    event_count INTEGER DEFAULT 0,
-    created_at TEXT
-);
-CREATE TABLE artifacts (
-    id TEXT PRIMARY KEY,
-    event_id TEXT,
-    artifact_type TEXT,
-    file_path TEXT
-);
-"""
-
-
 def _create_test_db(tmp_path: Path) -> Path:
-    """Create a fresh test database with v2 schema."""
-    db_path = tmp_path / "events.db"
-    conn = sqlite3.connect(str(db_path))
-    conn.executescript(DAEMON_SCHEMA)
-    conn.close()
-    return db_path
+    """A new daemon database (the daemon's migrations)."""
+    return create_daemon_db(tmp_path / "events.db")
 
 
 def _insert_focus_events(
@@ -115,9 +72,9 @@ def _insert_focus_events(
 
         conn.execute(
             "INSERT INTO events "
-            "(id, timestamp, kind_json, window_json, metadata_json, "
+            "(id, timestamp, kind_json, display_topology_json, primary_display_id, window_json, metadata_json, "
             " annotation_status, scene_annotation_json, frame_diff_json) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "VALUES (?, ?, ?, '[]', 'main', ?, ?, ?, ?, ?)",
             (
                 event_id,
                 f"2026-03-03T10:00:{i:02d}Z",
@@ -315,8 +272,8 @@ class TestFocusProcessorAnnotation:
 
         # Annotated event
         conn.execute(
-            "INSERT INTO events (id, timestamp, kind_json, metadata_json, "
-            "annotation_status, scene_annotation_json) VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO events (id, timestamp, kind_json, display_topology_json, primary_display_id, metadata_json, "
+            "annotation_status, scene_annotation_json) VALUES (?, ?, ?, '[]', 'main', ?, ?, ?)",
             ("evt-ann-0", "2026-03-03T10:00:00Z", '{}', metadata,
              "completed", json.dumps({
                  "app": "Chrome", "location": "https://x.com",
@@ -326,8 +283,8 @@ class TestFocusProcessorAnnotation:
         )
         # Unannotated event
         conn.execute(
-            "INSERT INTO events (id, timestamp, kind_json, metadata_json, "
-            "annotation_status) VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO events (id, timestamp, kind_json, display_topology_json, primary_display_id, metadata_json, "
+            "annotation_status) VALUES (?, ?, ?, '[]', 'main', ?, ?)",
             ("evt-unann-1", "2026-03-03T10:00:01Z", '{}', metadata, "pending"),
         )
         conn.commit()
@@ -408,13 +365,13 @@ class TestFocusProcessorDiffs:
             "task_context": {"what_doing": "Test", "likely_next": "", "is_workflow": True},
         })
         conn.execute(
-            "INSERT INTO events (id, timestamp, kind_json, metadata_json, "
-            "annotation_status, scene_annotation_json) VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO events (id, timestamp, kind_json, display_topology_json, primary_display_id, metadata_json, "
+            "annotation_status, scene_annotation_json) VALUES (?, ?, ?, '[]', 'main', ?, ?, ?)",
             ("evt-d0", "2026-03-03T09:00:00Z", '{}', metadata, "completed", ann),
         )
         conn.execute(
-            "INSERT INTO events (id, timestamp, kind_json, metadata_json, "
-            "annotation_status, scene_annotation_json) VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO events (id, timestamp, kind_json, display_topology_json, primary_display_id, metadata_json, "
+            "annotation_status, scene_annotation_json) VALUES (?, ?, ?, '[]', 'main', ?, ?, ?)",
             ("evt-d1", "2026-03-03T09:00:01Z", '{}', metadata, "completed", ann),
         )
         conn.commit()
@@ -491,8 +448,8 @@ class TestFocusProcessorFirstFrameNoDiff:
             "task_context": {"what_doing": "Reading email", "likely_next": "", "is_workflow": False},
         })
         conn.execute(
-            "INSERT INTO events (id, timestamp, kind_json, metadata_json, "
-            "annotation_status, scene_annotation_json) VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO events (id, timestamp, kind_json, display_topology_json, primary_display_id, metadata_json, "
+            "annotation_status, scene_annotation_json) VALUES (?, ?, ?, '[]', 'main', ?, ?, ?)",
             ("evt-presession", "2026-03-03T09:59:50Z", '{}', '{}',
              "completed", pre_ann),
         )
@@ -569,8 +526,8 @@ class TestDBFocusMethods:
         conn = sqlite3.connect(str(db_path))
         metadata = json.dumps({"focus_session_id": session_id})
         conn.execute(
-            "INSERT INTO events (id, timestamp, kind_json, metadata_json, "
-            "annotation_status) VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO events (id, timestamp, kind_json, display_topology_json, primary_display_id, metadata_json, "
+            "annotation_status) VALUES (?, ?, ?, '[]', 'main', ?, ?)",
             ("evt-unann", "2026-03-03T10:00:05Z", '{}', metadata, "pending"),
         )
         conn.commit()
@@ -598,8 +555,8 @@ class TestDBFocusMethods:
         metadata = json.dumps({"focus_session_id": session_id})
         for i in range(2):
             conn.execute(
-                "INSERT INTO events (id, timestamp, kind_json, metadata_json, "
-                "annotation_status) VALUES (?, ?, ?, ?, ?)",
+                "INSERT INTO events (id, timestamp, kind_json, display_topology_json, primary_display_id, metadata_json, "
+                "annotation_status) VALUES (?, ?, ?, '[]', 'main', ?, ?)",
                 (f"evt-p-{i}", f"2026-03-03T10:01:{i:02d}Z", '{}', metadata, "pending"),
             )
         conn.commit()

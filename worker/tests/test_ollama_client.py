@@ -14,6 +14,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+from daemon_db import create_daemon_db
 
 from agenthandover_worker import (
     behavioral_synthesizer,
@@ -187,7 +188,7 @@ def test_request_bytes_are_unchanged(tmp_path):
 
 def test_vector_kb_batches_and_keeps_the_body(tmp_path):
     opener = _Urlopen({"embeddings": [[1.0], [2.0]]}, {"embeddings": [[3.0]]})
-    kb = VectorKB(tmp_path / "v.db", VectorKBConfig(batch_size=2))
+    kb = VectorKB(create_daemon_db(tmp_path / "v.db"), VectorKBConfig(batch_size=2))
     with patch("urllib.request.urlopen", opener):
         vectors = kb.compute_embeddings(["a", "b", "c"])
     assert vectors == [[1.0], [2.0], [3.0]]
@@ -340,7 +341,7 @@ def test_errors_are_classified(error, expected):
 def test_embedding_callers_degrade_on_every_ollama_error(tmp_path, error):
     """vector_kb degrades (no vector, no results) on any client error, as it
     did when its own client re-raised every failure as ConnectionError."""
-    kb = VectorKB(tmp_path / "v.db", VectorKBConfig())
+    kb = VectorKB(create_daemon_db(tmp_path / "v.db"), VectorKBConfig())
     with patch("urllib.request.urlopen", _Urlopen(error)):
         assert kb.upsert("sop", "s1", "open the report") is False
     with patch("urllib.request.urlopen", _Urlopen(error)):

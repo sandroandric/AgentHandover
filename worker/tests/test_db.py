@@ -283,42 +283,6 @@ class TestEmptyDatabase:
 
 
 # ------------------------------------------------------------------
-# 8. Legacy episode store (the removed v1 miner's input) is dropped
-# ------------------------------------------------------------------
-
-
-class TestDropEpisodeStore:
-    def test_drops_the_legacy_table_and_its_rows(
-        self, tmp_db_path: Path, write_conn: sqlite3.Connection
-    ) -> None:
-        write_conn.execute(
-            "CREATE TABLE translated_episodes (episode_id TEXT PRIMARY KEY, "
-            "thread_id TEXT NOT NULL, steps_json TEXT NOT NULL, "
-            "step_count INTEGER NOT NULL, created_at TEXT NOT NULL)"
-        )
-        write_conn.execute(
-            "INSERT INTO translated_episodes VALUES "
-            "('ep-1', 'a', '[]', 0, '2026-09-01T00:00:00Z')"
-        )
-        write_conn.commit()
-
-        with WorkerDB(tmp_db_path) as db:
-            db.drop_episode_store()
-            db.drop_episode_store()  # idempotent
-
-        tables = {
-            row[0] for row in write_conn.execute(
-                "SELECT name FROM sqlite_master WHERE type = 'table'"
-            )
-        }
-        assert "translated_episodes" not in tables
-
-    def test_fresh_db_is_a_no_op(self, tmp_db_path: Path) -> None:
-        with WorkerDB(tmp_db_path) as db:
-            db.drop_episode_store()
-
-
-# ------------------------------------------------------------------
 # DOM snapshot queries
 # ------------------------------------------------------------------
 

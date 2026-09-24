@@ -176,7 +176,8 @@ def test_focus_approve_and_mcp_read_the_same_packet(tmp_path: Path):
     )
 
     # MCP: get_skill returns the packet.
-    with patch("agenthandover_worker.mcp_server._get_kb_root", return_value=kb_root):
+    with patch("agenthandover_worker.mcp_server._get_kb_root", return_value=kb_root), \
+            patch("agenthandover_worker.mcp_server._get_db_path", return_value=kb.db_path):
         server = build_mcp_server()
         answer = json.loads(server._tool_manager.get_tool("get_skill").fn(proc["id"]))
     mcp_body = _body_of(answer["packet"])

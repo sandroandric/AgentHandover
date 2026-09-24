@@ -35,7 +35,7 @@ from agenthandover_worker.session_linker import (
 )
 from agenthandover_worker.vector_kb import VectorKB, VectorKBConfig
 from journeys.cassette import open_cassette
-from daemon_db import kb_db
+from daemon_db import create_daemon_db, kb_db
 
 JOURNEY = "linker_threshold"
 
@@ -70,7 +70,7 @@ def _scores(tmp_path: Path) -> list[tuple[str, str, float]]:
     with open_cassette(JOURNEY) as tape:
         linker = SessionLinker(
             KnowledgeBase(root=tmp_path / "knowledge", db_path=kb_db(tmp_path / "knowledge")),
-            vector_kb=VectorKB(tmp_path / "vectors.db", VectorKBConfig(ollama_host=tape.host)),
+            vector_kb=VectorKB(create_daemon_db(tmp_path / "vectors.db"), VectorKBConfig(ollama_host=tape.host)),
         )
         out = []
         for (ta, a), (tb, b) in combinations(INTENTS, 2):

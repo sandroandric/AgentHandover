@@ -25,7 +25,7 @@ from agenthandover_worker.scene_annotator import (
     _build_context_section,
 )
 
-from daemon_db import insert_event
+from daemon_db import create_daemon_db, insert_event
 
 
 # ---------------------------------------------------------------------------
@@ -943,7 +943,7 @@ class TestScreenshotLifecycle:
         second frame reuses the first frame's annotation."""
         from agenthandover_worker.annotation_cache import AnnotationCache
 
-        db = tmp_path / "events.db"
+        db = create_daemon_db(tmp_path / "events.db")
         sqlite3.connect(db).close()
         annotator = SceneAnnotator(AnnotationConfig(), cache=AnnotationCache(db))
         metadata = {
@@ -976,7 +976,7 @@ class TestScreenshotLifecycle:
     def _cached_annotator(self, tmp_path):
         from agenthandover_worker.annotation_cache import AnnotationCache
 
-        db = tmp_path / "events.db"
+        db = create_daemon_db(tmp_path / "events.db")
         sqlite3.connect(db).close()
         return SceneAnnotator(AnnotationConfig(), cache=AnnotationCache(db))
 

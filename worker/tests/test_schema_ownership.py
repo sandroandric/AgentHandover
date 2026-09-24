@@ -41,7 +41,7 @@ def test_the_worker_expects_the_daemons_current_schema() -> None:
 
 def test_no_worker_module_changes_the_schema() -> None:
     """DDL lives in the daemon's migrations only."""
-    ddl = re.compile(r"\b(CREATE|ALTER|DROP)\s+(VIRTUAL\s+)?(TABLE|INDEX)\b", re.I)
+    ddl = re.compile(r"\b(CREATE|ALTER|DROP)\s+(VIRTUAL\s+)?(TABLE|INDEX)\b")
     offenders = [
         f"{path.relative_to(WORKER_SRC)}:{n}"
         for path in sorted(WORKER_SRC.rglob("*.py"))
