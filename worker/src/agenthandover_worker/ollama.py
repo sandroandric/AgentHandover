@@ -37,6 +37,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from agenthandover_worker import ops_telemetry
+from agenthandover_worker.inference_runner import model_wait
 
 logger = logging.getLogger(__name__)
 
@@ -294,8 +295,11 @@ class OllamaClient:
         )
         model = (payload or {}).get("model", "?")
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                body = resp.read()
+            # The worker's shared state is free for the control thread
+            # while this thread waits for Ollama (inference_runner).
+            with model_wait(f"{method} {path} {model}"):
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    body = resp.read()
         except urllib.error.HTTPError as exc:
             if exc.code == 404:
                 raise OllamaUnavailable(

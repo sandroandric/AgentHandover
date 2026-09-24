@@ -102,7 +102,9 @@ class AnnotationCache:
     """``annotation_cache(app, title_hash, ocr_simhash) -> annotation_json``."""
 
     def __init__(self, db_path: str | Path) -> None:
-        self._conn = sqlite3.connect(str(db_path))
+        # Created on the control thread, used on the inference thread
+        # (inference_runner).
+        self._conn = sqlite3.connect(str(db_path), check_same_thread=False)
         self._conn.execute("PRAGMA busy_timeout = 5000;")
         self._conn.execute(
             "CREATE TABLE IF NOT EXISTS annotation_cache ("

@@ -70,7 +70,9 @@ class WorkerDB:
             raise FileNotFoundError(f"Database file does not exist: {resolved}")
 
         uri = f"file:{resolved}?mode=ro"
-        self._conn = sqlite3.connect(uri, uri=True)
+        # Used by the control and the inference thread, one at a time
+        # (inference_runner.STATE_LOCK); SQLite itself is serialized.
+        self._conn = sqlite3.connect(uri, uri=True, check_same_thread=False)
         # Worker-owned tables already created through this instance.
         self._ensured: set[str] = set()
         self._conn.row_factory = sqlite3.Row
@@ -492,6 +494,16 @@ class WorkerDB:
             (session_id,),
         )
         return self._rows_to_dicts(cur.fetchall())
+
+    def count_passive_unannotated(self) -> int:
+        """Count passive frames (outside any focus session) still pending
+        annotation: the backlog the worker publishes to the daemon."""
+        row = self._conn.execute(
+            "SELECT COUNT(*) AS cnt FROM events "
+            "WHERE annotation_status = 'pending' "
+            "  AND json_extract(metadata_json, '$.focus_session_id') IS NULL",
+        ).fetchone()
+        return row["cnt"] if row else 0
 
     def count_focus_unannotated(self, session_id: str) -> int:
         """Count focus session events that are still pending annotation."""

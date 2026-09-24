@@ -666,6 +666,11 @@ class FocusProcessor:
                 len(keyframes), len(events), dropped,
             )
 
+    @property
+    def has_remaining(self) -> bool:
+        """True while the last session has keyframes for annotate_remaining()."""
+        return bool(self._remaining)
+
     def annotate_remaining(self, db: object) -> dict:
         """Annotate the last session's keyframes that the SOP did not need.
 
