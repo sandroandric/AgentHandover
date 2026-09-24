@@ -52,6 +52,15 @@ impl Tier {
     }
 }
 
+/// A `[vlm]` pair v0.4.0 wrote with no `tier` key (`UNTIERED_DEFAULTS` in
+/// the worker), and the tiers it stood for.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct UntieredDefault {
+    pub annotation_model: String,
+    pub sop_model: String,
+    pub tiers: Vec<String>,
+}
+
 /// The whole of `tiers.json`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct TierTable {
@@ -62,6 +71,9 @@ pub struct TierTable {
     pub model_sizes_gb: BTreeMap<String, f64>,
     /// Ascending by `min_ram_gb`; the first row takes any Mac.
     pub tiers: Vec<Tier>,
+    /// The pairs v0.4.0 wrote without a `tier` key.
+    #[serde(default)]
+    pub untiered_defaults: Vec<UntieredDefault>,
 }
 
 impl TierTable {
@@ -77,6 +89,30 @@ impl TierTable {
             .filter(|t| t.min_ram_gb <= ram_gb)
             .last()
             .unwrap_or(&self.tiers[0])
+    }
+
+    /// The tier a tier-less pair v0.4.0 wrote now means on a Mac with
+    /// `ram_gb`, or None for another pair: of the pair's tiers, the largest
+    /// whose `min_ram_gb` fits, else the smallest (the worker's
+    /// `model_profiles.untiered_default_tier`).
+    pub fn untiered_default_tier(
+        &self,
+        annotation_model: &str,
+        sop_model: &str,
+        ram_gb: u64,
+    ) -> Option<&Tier> {
+        let entry = self
+            .untiered_defaults
+            .iter()
+            .find(|d| d.annotation_model == annotation_model && d.sop_model == sop_model)?;
+        let candidates: Vec<&Tier> =
+            self.tiers.iter().filter(|t| entry.tiers.contains(&t.id)).collect();
+        candidates
+            .iter()
+            .filter(|t| t.min_ram_gb <= ram_gb)
+            .last()
+            .or(candidates.first())
+            .copied()
     }
 
     /// Every model `tier` needs pulled, annotation model first, no repeats.
@@ -332,6 +368,23 @@ mod tests {
         for id in ["performance", "max_quality"] {
             assert!(table().get(id).unwrap().previous_defaults.is_empty(), "{id}");
         }
+    }
+
+    #[test]
+    fn untiered_defaults_pick_by_ram_as_the_worker_does() {
+        let t = table();
+        let pick = |a: &str, s: &str, ram: u64| t.untiered_default_tier(a, s, ram).map(|t| t.id.as_str());
+        let gemma = "gemma4:12b-it-qat";
+        // The worker's test_the_gemma_12b_pair_picks_by_ram_as_onboarding_recommends.
+        for (ram, id) in [(0, "recommended"), (8, "recommended"), (16, "recommended"),
+                          (23, "recommended"), (24, "performance"), (48, "performance"),
+                          (128, "performance")] {
+            assert_eq!(pick(gemma, gemma, ram), Some(id), "{ram} GB");
+        }
+        assert_eq!(pick("qwen3.5:2b", "qwen3.5:4b", 64), Some("standard"));
+        assert_eq!(pick("gemma4:31b-it-qat", "gemma4:31b-it-qat", 8), Some("max_quality"));
+        assert_eq!(pick("qwen3.5:4b", "qwen3.5:4b", 16), None);
+        assert_eq!(pick(gemma, "qwen3.5:4b", 16), None);
     }
 
     #[test]
