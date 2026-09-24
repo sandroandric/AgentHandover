@@ -108,6 +108,14 @@ def host_or_doc(location: str) -> str:
     return template_path(location)[:200]
 
 
+def site_of(place: str) -> str:
+    """The site of a :func:`host_or_doc` *place*: the host of a web page
+    (another story, another record on it is the same site), the place
+    itself otherwise (a document, an app's window)."""
+    host, slash, _ = place.partition("/")
+    return host if slash and "." in host and " " not in host else place
+
+
 def flatten_dom(nodes: Iterable | None) -> Iterator[dict]:
     """Every element node of a stored snapshot (tree or anchor set), in
     document order, without the ``#truncated`` markers."""

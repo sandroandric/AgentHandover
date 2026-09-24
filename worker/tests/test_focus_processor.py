@@ -1307,3 +1307,93 @@ class TestFocusDraftSavedAfterGeneration:
         assert sop_gen.generate_from_focus.call_count == 0
         # The rich observations synthesis uses are rebuilt from the frames.
         assert processor._last_rich_observations and processor._last_rich_observations[0]
+
+
+# ---------------------------------------------------------------------------
+# A later recording of an existing Skill is another run of it (WP-F11)
+# ---------------------------------------------------------------------------
+
+WHOIS = "https://whois.example.com/search"
+CART = "https://registrar.example.net/cart"
+MAIL = "https://mail.example.com/inbox"
+NOTES = "https://notes.example.org/pad"
+
+
+class TestAnotherRunOfASkill:
+
+    SESSION = "focus-again-1"
+    SKILL = {
+        # Saved by passive discovery: an id, no slug.
+        "id": "domain-check", "title": "Check a domain",
+        "lifecycle_state": "agent_ready",
+        "steps": [
+            {"step_id": "s1", "action": "Search the domain", "app": "Google Chrome", "location": WHOIS},
+            {"step_id": "s2", "action": "Add it to the cart", "app": "Google Chrome", "location": CART},
+            {"step_id": "s3", "action": "Mail the quote", "app": "Google Chrome", "location": MAIL},
+        ],
+    }
+
+    def _recording(self, tmp_path):
+        """A recording of the Skill's routine with a detour to a notes pad."""
+        (tmp_path / "focus-session.json").write_text(json.dumps({
+            "session_id": self.SESSION, "status": "stopped", "title": "Domain again",
+        }))
+        db_path = _create_test_db(tmp_path)
+        conn = sqlite3.connect(str(db_path))
+        for i, location in enumerate((WHOIS, NOTES, CART, MAIL)):
+            conn.execute(
+                "INSERT INTO events (id, timestamp, kind_json, display_topology_json, "
+                "primary_display_id, window_json, metadata_json, annotation_status, "
+                "scene_annotation_json) VALUES (?, ?, ?, '[]', 'main', ?, ?, ?, ?)",
+                (f"again-{i}", f"2026-03-03T10:0{i}:00Z", '{"DwellSnapshot":{}}',
+                 '{"app_id":"com.google.Chrome","title":"Example"}',
+                 json.dumps({"focus_session_id": self.SESSION}), "completed",
+                 json.dumps({"app": "Google Chrome", "location": location,
+                             "task_context": {"what_doing": f"on {location}", "is_workflow": True},
+                             "_screen_text": "Domain taken" if location == WHOIS else ""})),
+            )
+        conn.commit()
+        conn.close()
+        return db_path
+
+    def test_the_skill_keeps_its_steps_and_mines_the_run(self, tmp_path):
+        from agenthandover_worker.knowledge_base import KnowledgeBase
+        from agenthandover_worker.main import _process_focus_sessions_v2
+
+        db_path = self._recording(tmp_path)
+        kb = KnowledgeBase(root=tmp_path / "kb", db_path=db_path)
+        kb.ensure_structure()
+        kb.save_procedure(json.loads(json.dumps(self.SKILL)))
+        processor = MagicMock()
+        # The model's SOP of the recording, under a slug of its own.
+        processor.process_session.return_value = GeneratedSOP(
+            sop=generated_sop_template("check_domain_availability"),
+        )
+        processor._last_rich_observations = []
+        writer = MagicMock()
+        writer.get_sops_dir.return_value = tmp_path / "sops"
+        with WorkerDB(db_path) as db:
+            with patch("agenthandover_worker.main._status_dir", return_value=tmp_path):
+                _process_focus_sessions_v2(
+                    db, focus_processor=processor, openclaw_writer=writer,
+                    index_generator=MagicMock(), screenshots_dir=str(tmp_path),
+                    knowledge_base=kb, weekly_question_budget=0,
+                )
+            [obs] = db.get_workflow_observations()
+            records = db.get_generated_sops()
+
+        # No second Skill, no draft of the recording's own SOP.
+        assert [p["id"] for p in kb.list_procedures()] == ["domain-check"]
+        assert records == []
+        proc = kb.get_procedure("domain-check")
+        # The approved Skill's steps and lifecycle are its own.
+        assert proc["steps"] == self.SKILL["steps"]
+        assert proc["lifecycle_state"] == "agent_ready"
+        # The run is its instance: the ledger cites it, the observation
+        # log attributes it, and its detour is a branch hypothesis.
+        assert [o["session_id"] for o in proc["evidence"]["observations"]] == [self.SESSION]
+        assert obs["source"] == "focus" and obs["promoted_slug"] == "domain-check"
+        [hyp] = proc["branch_hypotheses"]
+        assert (hyp["step_index"], hyp["rejoin_index"]) == (1, 1)
+        assert [s["location"] for s in hyp["alternative_steps"]] == [NOTES]
+        assert {"kind": "instance", "id": self.SESSION} in hyp["evidence"]

@@ -166,3 +166,118 @@ class TestHypothesesAndBranches:
             bm.record_divergences(proc, f"obs-{n}", _diverging(f"d{n}", {"items": [f"only {n}"]}))
         assert len(proc["branch_hypotheses"]) == bm.MAX_HYPOTHESES
         assert bm._instance(proc["branch_hypotheses"][0]) == "obs-5"
+
+
+# The daily-news routine of the J-ledger fixtures (``focus_dailynews*``):
+# read the front page, open each story worth sharing, note it, go back,
+# post the digest.  Each run opens other stories on the same sites.
+HN = "https://news.ycombinator.com/"
+SLACK_TITLE = "daily-news (Channel) - Example Co - Slack"
+PAYWALL = {"text": "research.example.com\nSubscribe to continue reading\nSubscribe | Sign in"}
+GUIDE = "https://research.example.com/on-device-vision-guide"
+DAILY = {
+    "id": "daily-news-digest",
+    "steps": [
+        {"action": f"Open {loc or app}", "app": app, "location": loc}
+        for app, loc in [
+            ("Google Chrome", HN), ("Google Chrome", "https://blog.example.org/sqlite-wal"),
+            ("Notes", ""), ("Google Chrome", HN), ("Google Chrome", GUIDE), ("Notes", ""),
+            ("Google Chrome", GUIDE), ("Google Chrome", HN),
+            ("Google Chrome", "https://github.com/example/cassette"), ("Notes", ""),
+            ("Google Chrome", SLACK_TITLE),
+        ]
+    ],
+}
+
+
+def _daily() -> dict:
+    return json.loads(json.dumps(DAILY))
+
+
+def _run(prefix: str, places: list[tuple[str, str, dict]]) -> list[AnnotatedFrame]:
+    t0 = datetime(2026, 9, 17, 8, tzinfo=timezone.utc)
+    return [
+        AnnotatedFrame.from_event({
+            "id": f"{prefix}-{i}",
+            "timestamp": (t0 + timedelta(minutes=i)).isoformat(),
+            "scene_annotation_json": json.dumps({
+                "app": app, "location": loc, "_screen_text": extra.get("text", ""),
+                "task_context": {"what_doing": "", "is_workflow": True},
+            }),
+        })
+        for i, (app, loc, extra) in enumerate(places)
+    ]
+
+
+def _paywall_run(prefix: str, story: str) -> list[AnnotatedFrame]:
+    """A morning whose second story is paywalled: read through the archive."""
+    archive = f"https://archive.example.net/?url=https://research.example.com/articles/{story}"
+    return _run(prefix, [
+        ("Google Chrome", HN, {}), ("Google Chrome", f"https://blog.example.org/{prefix}", {}),
+        ("Notes", "", {}), ("Google Chrome", HN, {}),
+        ("Google Chrome", f"https://research.example.com/articles/{story}", PAYWALL),
+        ("Google Chrome", archive, {}), ("Notes", "", {}), ("Google Chrome", archive, {}),
+        ("Google Chrome", HN, {}), ("Google Chrome", f"https://github.com/example/{prefix}", {}),
+        ("Notes", "", {}), ("Google Chrome", SLACK_TITLE, {}),
+    ])
+
+
+def _skip_run(prefix: str) -> list[AnnotatedFrame]:
+    """A morning that glances at a video and leaves the second story out."""
+    return _run(prefix, [
+        ("Google Chrome", HN, {}), ("Google Chrome", "https://blog.example.org/planner", {}),
+        ("Notes", "", {}), ("Google Chrome", "https://blog.example.org/planner", {}),
+        ("Google Chrome", HN, {}), ("Google Chrome", "https://video.example.com/watch/db", {}),
+        ("Google Chrome", HN, {}), ("Google Chrome", "https://github.com/example/snap", {}),
+        ("Notes", "", {}), ("Google Chrome", SLACK_TITLE, {}),
+    ])
+
+
+class TestOneDetourIsOneDivergence:
+    def test_another_page_of_a_steps_site_is_the_step(self) -> None:
+        frames = _frames("r", [(STRIPE, {}), (STRIPE + "/po_other", {}), (SHEET, {}), (SLACK, {})])
+        assert bm.find_divergences(_proc(), frames) == []
+
+    def test_the_paywall_detour_is_one_divergence(self) -> None:
+        [div] = bm.find_divergences(_daily(), _paywall_run("d", "48213"))
+        # It replaces "note the story, back to the story" (steps 6-7) with
+        # the archived copy, the note and the archived copy again; the
+        # paywalled article is the "open the story" step.
+        assert (div["step_index"], div["rejoin_index"]) == (5, 7)
+        assert [f.event_id for f in div["alternative"]] == ["d-5", "d-6", "d-7"]
+        # Decided on the paywalled story.
+        assert div["condition_frame"].event_id == "d-4"
+
+    def test_the_left_out_story_is_one_divergence(self) -> None:
+        [div] = bm.find_divergences(_daily(), _skip_run("s"))
+        # The video replaces the second story's steps (open, note, back).
+        assert (div["step_index"], div["rejoin_index"]) == (4, 7)
+        assert [f.location for f in div["alternative"]] == ["https://video.example.com/watch/db"]
+        assert div["condition_frame"].location == HN
+
+    def test_two_paywall_mornings_make_one_branch_the_skip_a_hypothesis(self) -> None:
+        proc = _daily()
+        bm.record_divergences(proc, "skip", _skip_run("s"))
+        bm.record_divergences(proc, "d1", _paywall_run("d1", "48213"))
+        bm.record_divergences(proc, "d2", _paywall_run("d2", "51877"))
+        [branch] = proc["branches"]
+        assert branch["kind"] == "detour"
+        assert (branch["step_index"], branch["rejoin_index"]) == (5, 7)
+        assert "Subscribe to continue reading" in branch["condition"]
+        assert branch["action"].startswith("instead of steps 6-7: go to https://archive.example.net/")
+        assert {e["id"] for e in branch["evidence"] if e["kind"] == "instance"} == {"d1", "d2"}
+        [skip] = [h for h in proc["branch_hypotheses"] if bm._instance(h) == "skip"]
+        assert (skip["step_index"], skip["rejoin_index"]) == (4, 7)
+
+    def test_a_late_return_to_a_detour_is_another_divergence(self) -> None:
+        frames = _frames("m", [(STRIPE, {}), (MAIL, {}), (PAYOUT, {}), (SHEET, {}), (SLACK, {}), (MAIL, {})])
+        divs = bm.find_divergences(_proc(), frames)
+        assert [(d["step_index"], d["rejoin_index"]) for d in divs] == [(1, 1), (4, 4)]
+
+    def test_skipped_steps_in_a_row_are_one_skip(self) -> None:
+        frames = _frames("s", [(STRIPE, {"text": "Nothing today"}), (SLACK, {})])
+        [div] = bm.find_divergences(_proc(), frames)
+        assert (div["step_index"], div["rejoin_index"], div["alternative"]) == (1, 3, [])
+        bm.record_divergences(proc := _proc(), "obs-1", frames)
+        [hyp] = proc["branch_hypotheses"]
+        assert hyp["kind"] == "skip"

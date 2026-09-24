@@ -86,12 +86,6 @@ needs_extra_run_recordings = pytest.mark.skipif(
 
 @needs_focus_sop_recording
 @needs_extra_run_recordings
-@pytest.mark.xfail(strict=True, reason=(
-    "WP-M5 follow-up: a focus recording of an existing Skill is never "
-    "divergence-mined (workflow_mining.record_focus_observation promotes the "
-    "observation without branch_mining.mine_observations), and one detour "
-    "makes three agreeing divergences (test_one_detour_makes_one_branch)"
-))
 def test_runs_fill_the_ledger_with_evidence(
     events_db, worker, clock, temp_home, cassette,
 ) -> None:
@@ -306,9 +300,9 @@ def _instances(entry: dict) -> set[str]:
 
 def test_the_paywall_detour_makes_a_branch(events_db) -> None:
     """The two mornings that read a paywalled story through the archive
-    agree (same step, same place, a screen that shares the paywall's
-    lines): the branch names the paywall and cites both, and nothing the
-    skipping morning did becomes a branch."""
+    agree (the same steps replaced by the same places, a screen that
+    shares the paywall's lines): the branch names the paywall and cites
+    both, and nothing the skipping morning did becomes a branch."""
     proc, sessions = _mine_divergences(events_db)
     diverging = {sessions[name] for name in DIVERGE_RUNS}
 
@@ -316,22 +310,32 @@ def test_the_paywall_detour_makes_a_branch(events_db) -> None:
     assert len(paywall) == 1
     [branch] = paywall
     assert branch["source"] == "divergence"
-    assert [s["location"].split("/")[2] for s in branch["alternative_steps"]] == [ARCHIVE_HOST]
     assert _instances(branch) == diverging
     assert "research.example.com" in branch["condition_state"]["ocr_snippet"]
-    # The skip left its own hypotheses (the video, the story it never
-    # opened) that no other run agrees with.
-    assert any(branch_mining._instance(h) == sessions[SKIP_RUN] for h in proc["branch_hypotheses"])
+    # The skip left its own hypothesis (the video glanced at instead of
+    # the second story's steps) that no other run agrees with.
+    [skipped] = [h for h in proc["branch_hypotheses"]
+                 if branch_mining._instance(h) == sessions[SKIP_RUN]]
+    assert [s["location"].split("/")[2] for s in skipped["alternative_steps"]] == [
+        "video.example.com"]
     assert all(_instances(b) == diverging for b in proc["branches"])
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "WP-M5 follow-up: the detour also agrees as two more branches, opening "
-    "the paywalled article (research.example.com/articles/{id} is not a "
-    "place of the Skill) and returning from Notes to the archive page "
-    "(condition: the screen shows \"Notes\")"
-))
 def test_one_detour_makes_one_branch(events_db) -> None:
-    proc, _ = _mine_divergences(events_db)
+    """The paywalled story's detour (the archived copy, the note, back to
+    the archived copy) is one branch: it replaces the Skill's "note the
+    story, back to the story" steps with the detour's own steps, the
+    story opened on the paywalled site being the Skill's "open the story"
+    step."""
+    proc, sessions = _mine_divergences(events_db)
     [branch] = proc["branches"]
     assert PAYWALL_LINE in branch["condition"]
+    steps = proc["steps"]
+    assert [steps[i]["app"] for i in range(branch["step_index"], branch["rejoin_index"])] == [
+        "Notes", "Google Chrome"]
+    assert [s["location"].split("/")[2] if s["location"] else s["app"]
+            for s in branch["alternative_steps"]] == [ARCHIVE_HOST, "Notes", ARCHIVE_HOST]
+    # Each diverging run left exactly one hypothesis.
+    for name in DIVERGE_RUNS:
+        assert len([h for h in proc["branch_hypotheses"]
+                    if branch_mining._instance(h) == sessions[name]]) == 1

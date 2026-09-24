@@ -31,7 +31,11 @@ Skills and their observations (``promoted_slug``):
 - a focus recording is recorded as an observation of its own
   (``source="focus"``) attributed to its Skill
   (:func:`record_focus_observation`), so later passive sessions of the
-  same workflow group with it;
+  same workflow group with it; a recording of a routine that already is a
+  Skill (:func:`focus_skill`) is another run of that Skill, not a new
+  one: the Skill keeps its steps (approved or draft, a later run never
+  rewrites them) and the run's own way is divergence-mined into branch
+  hypotheses and branches, like a passive run's;
 - a Skill with no observation at all (recorded before the observation
   log, or imported) is linked by its steps' places: a workflow group no
   Skill holds is attributed to the Skill whose steps' ``(app,
@@ -58,7 +62,7 @@ from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
 from agenthandover_worker import run_signals
-from agenthandover_worker.dom import host_or_doc
+from agenthandover_worker.dom import host_or_doc, site_of
 from agenthandover_worker.evidence_extractor import EvidenceExtractor
 from agenthandover_worker.pattern_detector import OBSERVATION_WINDOW_DAYS, PatternDetector
 from agenthandover_worker.scene_annotator import as_compact
@@ -624,14 +628,88 @@ def link_recorded_skills(db: "WorkerDB", kb: "KnowledgeBase", win: WorkflowWindo
     return linked
 
 
-def record_focus_observation(
-    db: "WorkerDB", events: list[dict], slug: str, title: str = "",
-) -> str | None:
-    """Record a focus recording's annotated frames as one observation
-    (``source="focus"``) of its Skill *slug*.  Returns its ``obs_id``, or
-    None when fewer than :data:`MIN_SESSION_FRAMES` frames are annotated."""
+def _focus_session(events: list[dict]) -> list[AnnotatedFrame]:
+    """A focus recording's annotated work frames, oldest first."""
     session = [f for f in map(AnnotatedFrame.from_event, events) if f and not _is_noise_frame(f)]
     session.sort(key=lambda f: f.timestamp)
+    return session
+
+
+def site_steps(steps: list[tuple[str, str, str]]) -> list[tuple[str, str, str]]:
+    """*steps* with each place reduced to its site (``dom.site_of``) and
+    no verb, collapsed: another story, another record on the same site is
+    the same step (as in :mod:`branch_mining`)."""
+    return collapse([(app, site_of(doc), "") for app, doc, _ in steps])
+
+
+def _same_title(a: str, b: str) -> bool:
+    return bool(a.strip()) and " ".join(a.lower().split()) == " ".join(b.lower().split())
+
+
+def focus_skill(
+    db: "WorkerDB", kb: "KnowledgeBase", events: list[dict], title: str, *, now: datetime,
+) -> dict | None:
+    """The existing Skill a focus recording is another run of, or None.
+
+    The recording's steps (its annotated frames, as an observation's
+    signature) are matched against every Skill's observations (the
+    window's and each Skill's most recent older ones, as live
+    :func:`recognize` does; the recording's own observation, on a retry,
+    is left out) and, for a Skill with none, against its steps' places
+    (:func:`skill_signature`, as :func:`link_recorded_skills` does):
+
+    - the same workflow (:func:`same_workflow`: key, step bag or
+      alignment), or
+    - named as the Skill is (the user's title for the recording equals
+      the Skill's title) and aligning with it by site
+      (:func:`site_steps`, at least :data:`ALIGN_THRESHOLD`): a routine
+      whose items change every run (the day's stories, this week's
+      invoice) visits other pages of the same sites each time.
+
+    The best-aligned match wins.  Returns the Skill's procedure (a copy
+    the caller may edit and save)."""
+    session = _focus_session(events)
+    if len(session) < MIN_SESSION_FRAMES:
+        return None
+    steps = collapse([step_signature(f) for f in session])
+    own = observation_id(session)
+    since = now - timedelta(days=OBSERVATION_WINDOW_DAYS)
+    signatures: dict[str, list[list[tuple[str, str, str]]]] = {}
+    for obs in _anchors(db, since) + db.get_workflow_observations(since=since, until=now):
+        if obs.get("promoted_slug") and obs["obs_id"] != own:
+            signatures.setdefault(obs["promoted_slug"], []).append(_steps(obs))
+    best: tuple[float, str] | None = None
+    for proc in kb.list_procedures():
+        slug = proc.get("id") or proc.get("slug")
+        if not slug:
+            continue
+        for signature in signatures.get(slug) or [skill_signature(proc)]:
+            if len(set(signature)) < 2:
+                continue  # one place says nothing about the routine
+            by_site = _skill_score(site_steps(signature), site_steps(steps))
+            matched = same_workflow(steps, signature) or (
+                _same_title(title, str(proc.get("title") or "")) and by_site >= ALIGN_THRESHOLD
+            )
+            if matched and (best is None or by_site > best[0]):
+                best = (by_site, slug)
+    # A copy to edit (``list_procedures`` shares its cache).
+    return kb.get_procedure(best[1]) if best else None
+
+
+def record_focus_observation(
+    db: "WorkerDB", events: list[dict], slug: str, title: str = "",
+    *, instance_of: dict | None = None, session_id: str = "",
+) -> str | None:
+    """Record a focus recording's annotated frames as one observation
+    (``source="focus"``) of its Skill *slug*.  With *instance_of*, the
+    existing Skill *slug* the recording is another run of
+    (:func:`focus_skill`), the run's divergences from its steps are
+    recorded on that procedure in place, under the recording's
+    *session_id* (the id the ledger cites the run by), as
+    :func:`attach_observations` does for passive runs.  Returns its
+    ``obs_id``, or None when fewer than :data:`MIN_SESSION_FRAMES` frames
+    are annotated."""
+    session = _focus_session(events)
     if len(session) < MIN_SESSION_FRAMES:
         return None
     by_id = {e.get("id", ""): e for e in events}
@@ -643,6 +721,10 @@ def record_focus_observation(
     if not db.save_workflow_observation(obs):
         return None
     db.set_observations_promoted([obs["obs_id"]], slug)
+    if instance_of is not None:
+        from agenthandover_worker.branch_mining import record_divergences
+
+        record_divergences(instance_of, session_id or obs["obs_id"], session)
     return obs["obs_id"]
 
 

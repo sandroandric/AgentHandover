@@ -1800,24 +1800,46 @@ def _process_focus_sessions_v2(
     if result.success and result.sop and not lint_error:
         sop_templates = [result.sop]
         slug = result.sop.get("slug", "")
-
-        # --- Convert to v3 procedure and set user's title ---
-        from agenthandover_worker.procedure_schema import sop_to_procedure
-        procedure_dict = sop_to_procedure(result.sop)
-        procedure_dict["id"] = slug
-        procedure_dict["slug"] = slug
-        procedure_dict["title"] = title  # User's focus session title, not VLM's guess
-        procedure_dict["source"] = "focus"
-        procedure_dict["lifecycle_state"] = "draft"  # Focus recordings start as draft, not observed
-        # A re-recording of an existing Skill is a new draft, but keeps
-        # its evidence, trust, lifecycle history and agent-run record.
+        # A recording of a routine that already is a Skill (matched by its
+        # workflow, ``workflow_mining.focus_skill``) is another run of that
+        # Skill, not a new one: its steps stay as they are, whatever its
+        # lifecycle (the run's own way goes to branch hypotheses, and
+        # the branches agreeing runs make, below), and the run joins its
+        # evidence, what the runs teach and its synthesis.  The SOP
+        # generated from the recording is not used.
+        skill = None
         if knowledge_base is not None:
-            from agenthandover_worker.procedure_writer import merge_existing_procedure
-            existing_proc = knowledge_base.get_procedure(slug)
-            if existing_proc is not None:
-                merge_existing_procedure(
-                    procedure_dict, existing_proc, keep_lifecycle=False,
+            try:
+                skill = workflow_mining.focus_skill(
+                    db, knowledge_base, db.get_focus_session_events(session_id),
+                    title, now=now,
                 )
+            except Exception:
+                logger.warning("Focus session '%s' not matched to the Skills", title, exc_info=True)
+        if skill is not None:
+            procedure_dict = skill
+            slug = str(skill.get("id") or skill.get("slug"))
+            sop_templates = [procedure_dict]
+            logger.info("Focus v2 session '%s' is another run of Skill '%s'", title, slug)
+        else:
+            # --- Convert to v3 procedure and set user's title ---
+            from agenthandover_worker.procedure_schema import sop_to_procedure
+            procedure_dict = sop_to_procedure(result.sop)
+            procedure_dict["id"] = slug
+            procedure_dict["slug"] = slug
+            procedure_dict["title"] = title  # User's focus session title, not VLM's guess
+            procedure_dict["source"] = "focus"
+            procedure_dict["lifecycle_state"] = "draft"  # Focus recordings start as draft, not observed
+            # A recording the model named as an existing Skill is a new
+            # draft of it, but keeps its evidence, trust, lifecycle
+            # history and agent-run record.
+            if knowledge_base is not None:
+                from agenthandover_worker.procedure_writer import merge_existing_procedure
+                existing_proc = knowledge_base.get_procedure(slug)
+                if existing_proc is not None:
+                    merge_existing_procedure(
+                        procedure_dict, existing_proc, keep_lifecycle=False,
+                    )
         # This recording is one instance of the procedure: the ledger's
         # evidence for what was learned from it, with what its surrounding
         # events showed (lead-in, commit, checks, corrections).
@@ -1830,14 +1852,16 @@ def _process_focus_sessions_v2(
         # restart before they finish must not lose the generated SOP.
         _save_focus_draft(
             db, state_dir, session_id=session_id, title=title,
-            result=result, procedure=procedure_dict,
+            result=result, procedure=procedure_dict, new_skill=skill is None,
         )
         # The recording (its frames as annotated now) is also an
         # observation of its Skill, so passive sessions of the same
-        # workflow are attributed to it.
+        # workflow are attributed to it; another run of a Skill is
+        # divergence-mined against its steps.
         try:
             workflow_mining.record_focus_observation(
                 db, db.get_focus_session_events(session_id), slug, title,
+                instance_of=skill, session_id=session_id,
             )
         except Exception:
             logger.warning("Focus observation for '%s' not recorded", slug, exc_info=True)
@@ -2024,12 +2048,15 @@ def _save_focus_draft(
     title: str,
     result: "GeneratedSOP",
     procedure: dict,
+    new_skill: bool = True,
 ) -> None:
     """Persist a focus session's SOP as soon as it is generated: a draft
     record in the review queue (updated, not duplicated, when the session
     resumes after a restart) and the state ``_read_focus_draft`` resumes
-    from.  Synthesis, Q&A and approval update the record afterwards."""
-    slug = procedure["slug"]
+    from.  Synthesis, Q&A and approval update the record afterwards.  A
+    session that is another run of an existing Skill (not *new_skill*)
+    adds no draft: the Skill's own record, if any, is updated."""
+    slug = procedure.get("slug") or procedure["id"]
     try:
         _atomic_write_result(state_dir / FOCUS_DRAFT_FILE, {
             "session_id": session_id,
@@ -2042,8 +2069,10 @@ def _save_focus_draft(
             "export generates it again", slug, exc_info=True,
         )
     record = db.get_generated_sop_by_slug(slug)
-    if record is not None and record.get("source_id") == session_id:
+    if record is not None and (record.get("source_id") == session_id or not new_skill):
         db.update_sop_json(slug, procedure)
+        return
+    if not new_skill:
         return
     db.save_generated_sop(
         slug=slug,

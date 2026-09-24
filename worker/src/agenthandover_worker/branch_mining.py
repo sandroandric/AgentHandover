@@ -9,17 +9,24 @@ collapse into the places it visited, a procedure step's place is its
 
 The instance *diverges* where it
 
-- visits places the Skill never visits (a run of such places is one
-  divergence, before the canonical step the alignment puts next), or
+- visits places the Skill never visits (another page of a step's own site,
+  another story or record, is the step, not a divergence), or
 - never visits the place of a canonical step (a skip).
 
 Returning to a place the Skill does visit elsewhere is not a divergence.
+One detour is one divergence: the aligned columns that diverge one after
+the other, with the steps they replace, and a return to the detour's
+places right after a step outside it continues the detour
+(:func:`find_divergences`).
 
 Each divergence is stored as a *branch hypothesis* on the procedure::
 
     proc["branch_hypotheses"] = [{
-        "step_index": <canonical step the divergence replaces or precedes;
-                       len(steps) when it comes after the last one>,
+        "kind": "detour" | "skip",   # a skip does nothing instead
+        "step_index": <first canonical step the divergence replaces or
+                       precedes; len(steps) when it comes after the last one>,
+        "rejoin_index": <the canonical step the instance is back on;
+                         step_index when nothing is replaced>,
         "condition_state": {"ocr_snippet", "url", "visible_items"},
         "alternative_steps": [{"action", "app", "location"}],  # [] = skipped
         "evidence": [{"kind": "instance", "id": <obs_id>},
@@ -29,8 +36,8 @@ Each divergence is stored as a *branch hypothesis* on the procedure::
 
 ``condition_state`` is the screen the user decided on: the frame before
 the divergence (its salient OCR lines, URL and list entries).  Two
-hypotheses from different instances *agree* when they diverge at the same
-step into the same places and their screens share an entry or an OCR line;
+hypotheses from different instances *agree* when they replace the same
+steps with the same places and their screens share an entry or an OCR line;
 the second agreeing instance promotes them to a branch in
 ``proc["branches"]`` (``source: "divergence"``, every agreeing hypothesis's
 evidence), whose ``condition`` names what the screens shared.  Later
@@ -45,7 +52,7 @@ import logging
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
-from agenthandover_worker.dom import host_or_doc
+from agenthandover_worker.dom import host_or_doc, site_of
 from agenthandover_worker.scene_annotator import as_compact
 from agenthandover_worker.sop_dedup import _normalize_app
 from agenthandover_worker.task_segmenter import AnnotatedFrame
@@ -63,6 +70,9 @@ OCR_SNIPPET_CHARS = 300
 MAX_VISIBLE_ITEMS = 10
 # What a promoted branch's condition quotes.
 MAX_CONDITION_TERMS = 3
+# A detour the user steps out of for at most this many aligned steps and
+# returns to is one detour (``find_divergences``).
+DETOUR_RETURN_COLUMNS = 2
 # Hypotheses a procedure keeps (the oldest go first; a promoted branch
 # keeps its own evidence).
 MAX_HYPOTHESES = 50
@@ -92,14 +102,34 @@ def condition_state(frame: AnnotatedFrame) -> dict:
     }
 
 
+def _site(place: tuple[str, str]) -> tuple[str, str]:
+    return (place[0], site_of(place[1]))
+
+
 def find_divergences(proc: dict, frames: list[AnnotatedFrame]) -> list[dict]:
     """The divergences of the instance *frames* (oldest first) from
-    *proc*'s steps, as ``{step_index, condition_frame, alternative}``
-    where *alternative* lists the frames of the new places (empty for a
-    skip)."""
+    *proc*'s steps, as ``{step_index, rejoin_index, condition_frame,
+    alternative}``: the instance leaves the Skill before (or instead of)
+    canonical step ``step_index`` and is back on it at ``rejoin_index``
+    (the steps in between are replaced; equal indexes mean the new places
+    come before the step), and *alternative* lists the frames of what it
+    did instead (empty for a skip).
+
+    The alignment's columns are read in order.  A column *agrees* when
+    the instance performs the canonical step (the same place, or another
+    page of the same site: another story, another record), returns to a
+    place it already performed a step on or that the Skill visits
+    elsewhere, or leaves out a step whose place it visits elsewhere.  Every
+    other column diverges, and a run of contiguous diverging columns is
+    one divergence (one detour).  A detour that only goes back to the
+    places of the detour just before it, after at most
+    :data:`DETOUR_RETURN_COLUMNS` agreeing columns, continues that detour:
+    the two and the columns between them are one divergence (the user
+    stepped out of the detour, to write a note, and returned to it)."""
+    steps = proc.get("steps") or []
     canon: list[tuple[int, tuple[str, str]]] = [
         (i, _place(str(s.get("app") or ""), str(s.get("location") or "")))
-        for i, s in enumerate(proc.get("steps") or [])
+        for i, s in enumerate(steps)
         if isinstance(s, dict) and (s.get("app") or s.get("location"))
     ]
     if not canon or not frames:
@@ -110,45 +140,76 @@ def find_divergences(proc: dict, frames: list[AnnotatedFrame]) -> list[dict]:
         place = _place(frame.app, frame.location)
         if not runs or runs[-1][0] != place:
             runs.append((place, idx))
-    canon_places = {p for _, p in canon}
     visited = {p for p, _ in runs}
     aligned = _ALIGNER.semantic_align(
         [_as_step(p) for _, p in canon], [_as_step(p) for p, _ in runs],
     )
+    # Places the instance performed a canonical step on.
+    performed = {
+        runs[pos.index_b][0] for pos in aligned
+        if pos.index_a is not None and pos.index_b is not None
+        and _site(runs[pos.index_b][0]) == _site(canon[pos.index_a][1])
+    }
+    known = {p for _, p in canon} | performed
 
-    divergences: list[dict] = []
-    pending: list[int] = []  # run indices of new places not yet closed
-    last_run = -1  # the instance's last run before the current position
-
-    def close(step_index: int) -> None:
-        if pending:
-            first_frame = runs[pending[0]][1]
-            divergences.append({
-                "step_index": step_index,
-                "condition_frame": frames[max(first_frame - 1, 0)],
-                "alternative": [frames[runs[r][1]] for r in pending],
-            })
-            pending.clear()
-
+    # Each column as (canonical step or None, instance run or None,
+    # diverges); a column pairing a step with a place of another site is
+    # a skip of the step and a visit to the place, and its run is left out
+    # when only the skip diverges.  A step left out here whose place the
+    # instance visits elsewhere neither agrees nor diverges (None).
+    columns: list[tuple[int | None, int | None, bool | None]] = []
     for pos in aligned:
         a, b = pos.index_a, pos.index_b
-        if b is not None and runs[b][0] not in canon_places:
-            pending.append(b)
-        if a is not None:
-            step_index, place = canon[a]
-            if pending:
-                # New places before (or instead of) this step.
-                close(step_index)
-            elif place not in visited:
-                at = runs[last_run][1] if last_run >= 0 else 0
-                divergences.append({
-                    "step_index": step_index,
-                    "condition_frame": frames[at],
-                    "alternative": [],
-                })
-        if b is not None:
-            last_run = b
-    close(len(proc.get("steps") or []))
+        step = canon[a][0] if a is not None else None
+        if b is None:
+            columns.append((step, None, canon[a][1] not in visited or None))
+            continue
+        if a is not None and _site(runs[b][0]) == _site(canon[a][1]):
+            columns.append((step, b, False))
+            continue
+        skipped = a is not None and canon[a][1] not in visited
+        new_place = runs[b][0] not in known
+        columns.append((step, b if new_place or not skipped else None, skipped or new_place))
+
+    # Runs of diverging columns, contiguous but for undecided ones, as
+    # [first, last] column.
+    spans: list[list[int]] = []
+    for c, (_, _, diverges) in enumerate(columns):
+        if not diverges:
+            continue
+        if spans and all(d is None for _, _, d in columns[spans[-1][1] + 1:c]):
+            spans[-1][1] = c
+        else:
+            spans.append([c, c])
+
+    def places(span: list[int]) -> set[tuple[str, str]]:
+        return {runs[b][0] for _, b, _ in columns[span[0]:span[1] + 1] if b is not None}
+
+    merged: list[list[int]] = []
+    for span in spans:
+        if (merged and places(span) and places(span) <= places(merged[-1])
+                and span[0] - merged[-1][1] - 1 <= DETOUR_RETURN_COLUMNS):
+            merged[-1][1] = span[1]  # back to the detour just before
+        else:
+            merged.append(span)
+
+    divergences: list[dict] = []
+    for first, last in merged:
+        inside = columns[first:last + 1]
+        alternative = [b for _, b, _ in inside if b is not None]
+        replaced = [step for step, _, _ in inside if step is not None]
+        after = next((step for step, _, _ in columns[last + 1:] if step is not None), len(steps))
+        if alternative:
+            condition_at = max(runs[alternative[0]][1] - 1, 0)
+        else:
+            before = [b for _, b, _ in columns[:first] if b is not None]
+            condition_at = runs[before[-1]][1] if before else 0
+        divergences.append({
+            "step_index": replaced[0] if replaced else after,
+            "rejoin_index": replaced[-1] + 1 if replaced else after,
+            "condition_frame": frames[condition_at],
+            "alternative": [frames[runs[b][1]] for b in alternative],
+        })
     return divergences
 
 
@@ -158,7 +219,9 @@ def _hypothesis(divergence: dict, obs_id: str, now: str) -> dict:
     frame_ids = [divergence["condition_frame"].event_id] + [f.event_id for f in alt]
     evidence += [{"kind": "frame", "id": eid} for eid in dict.fromkeys(frame_ids) if eid]
     return {
+        "kind": "detour" if alt else "skip",
         "step_index": divergence["step_index"],
+        "rejoin_index": divergence["rejoin_index"],
         "condition_state": condition_state(divergence["condition_frame"]),
         "alternative_steps": [
             {"action": f.what_doing, "app": f.app, "location": f.location} for f in alt
@@ -169,8 +232,8 @@ def _hypothesis(divergence: dict, obs_id: str, now: str) -> dict:
 
 
 def _key(hyp: dict) -> tuple:
-    """Hypotheses with equal keys diverge at the same step into the same places."""
-    return (hyp["step_index"], tuple(
+    """Hypotheses with equal keys leave the same steps for the same places."""
+    return (hyp["step_index"], hyp.get("rejoin_index"), tuple(
         _place(str(s.get("app") or ""), str(s.get("location") or ""))
         for s in hyp.get("alternative_steps") or []
     ))
@@ -208,13 +271,19 @@ def _branch(hyps: list[dict], steps: list) -> dict | None:
     condition = "the screen shows " + ", ".join(f'"{t}"' for t in terms)
     if shared["url"]:
         condition += f" ({shared['url']})"
-    k = hyps[0]["step_index"]
+    k, rejoin = hyps[0]["step_index"], hyps[0]["rejoin_index"]
     alt = hyps[0]["alternative_steps"]
+    replaced = f"step {k + 1}" if rejoin == k + 1 else f"steps {k + 1}-{rejoin}"
     if not alt:
-        skipped = steps[k].get("action", "") if k < len(steps) and isinstance(steps[k], dict) else ""
-        action = f"skip step {k + 1}" + (f" ({skipped})" if skipped else "")
+        skipped = [
+            str(s.get("action") or "") for s in steps[k:rejoin] if isinstance(s, dict)
+        ]
+        action = f"skip {replaced}" + (f" ({'; '.join(a for a in skipped if a)})" if any(skipped) else "")
     else:
-        where = f"before step {k + 1}" if k < len(steps) else "after the last step"
+        if rejoin > k:
+            where = f"instead of {replaced}"
+        else:
+            where = f"before step {k + 1}" if k < len(steps) else "after the last step"
         action = f"{where}: " + "; then ".join(
             s.get("action") or f"go to {s.get('location') or s.get('app')}" for s in alt
         )
@@ -222,7 +291,9 @@ def _branch(hyps: list[dict], steps: list) -> dict | None:
     for h in hyps:
         evidence += [e for e in h["evidence"] if e not in evidence]
     return {
+        "kind": "detour" if alt else "skip",
         "step_index": k,
+        "rejoin_index": rejoin,
         "condition": condition,
         "action": action,
         "alternative_steps": alt,
