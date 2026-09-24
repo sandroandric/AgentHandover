@@ -247,7 +247,7 @@ final class AppState: ObservableObject {
     /// (set by the app delegate; see `OnboardingProgress.regrantAction`).
     var onPermissionsGranted: (() -> Void)?
     /// Both grants at the previous `checkPermissions`; nil before the first.
-    private var grantedAtLastCheck: Bool?
+    private(set) var grantedAtLastCheck: Bool?
     /// Set by `servicesStarting()`, cleared once health leaves `.starting`.
     private var startedAt: Date?
     private var startupTimer: Timer?
@@ -338,6 +338,12 @@ final class AppState: ObservableObject {
     /// seen by `refreshStatus` (the 30 s poll and every menu open).
     nonisolated static func quickCheckReadsGrants(grantedAtLastCheck: Bool?) -> Bool {
         grantedAtLastCheck != true
+    }
+
+    /// The launch's own reading of the grants, which decided whether setup
+    /// opened: the next reading is compared with it (`grantsReturned`).
+    func seedGrants(accessibility: Bool, screenRecording: Bool) {
+        grantedAtLastCheck = accessibility && screenRecording
     }
 
     // MARK: - Status Reading

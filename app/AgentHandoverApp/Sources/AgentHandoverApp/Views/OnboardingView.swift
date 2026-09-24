@@ -2329,8 +2329,8 @@ struct OnboardingView: View {
         process.standardError = pipe
         do {
             try process.run()
-            process.waitUntilExit()
             let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+            process.waitUntilExit()
             let firstLine = output.components(separatedBy: "\n").first ?? output
             let parts = firstLine.components(separatedBy: " ")
             return parts.last?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -2377,10 +2377,10 @@ struct OnboardingView: View {
 
         do {
             try whichProcess.run()
-            whichProcess.waitUntilExit()
-            guard whichProcess.terminationStatus == 0 else { return nil }
             let output = String(data: outputPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
                 .trimmingCharacters(in: .whitespacesAndNewlines)
+            whichProcess.waitUntilExit()
+            guard whichProcess.terminationStatus == 0 else { return nil }
             return (output?.isEmpty == false) ? output : nil
         } catch {
             return nil
@@ -2458,8 +2458,8 @@ struct OnboardingView: View {
             let listPipe = Pipe()
             listProcess.standardOutput = listPipe
             try? listProcess.run()
-            listProcess.waitUntilExit()
             let installedModels = String(data: listPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+            listProcess.waitUntilExit()
 
             for (index, (model, purpose)) in models.enumerated() {
                 // Skip if already installed
@@ -2627,12 +2627,12 @@ struct OnboardingView: View {
 
         do {
             try process.run()
+            let output = String(data: outputPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
             process.waitUntilExit()
             guard process.terminationStatus == 0 else {
                 return .failure(NSError(domain: "OllamaList", code: Int(process.terminationStatus)))
             }
 
-            let output = String(data: outputPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
             let modelNames = Set(
                 output
                     .components(separatedBy: "\n")

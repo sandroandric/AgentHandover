@@ -81,7 +81,12 @@ final class ServiceController {
     static func startDaemon() -> Bool {
 
         // Check if already running
-        if isDaemonRunning() { return true }
+        if isDaemonRunning() {
+            let pidFile = daemonPid().map { String($0) } ?? "absent"
+            launchLog.notice("daemon already running (pid file \(pidFile, privacy: .public)), not starting another")
+            return true
+        }
+        launchLog.notice("starting the daemon")
 
         let process = Process()
         process.executableURL = daemonExecutableURL
@@ -410,9 +415,9 @@ final class ServiceController {
 
         do {
             try process.run()
-            process.waitUntilExit()
-
+            // Read before waiting: a full pipe blocks the child (see `shell`).
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
             let output = String(data: data, encoding: .utf8) ?? ""
             return (process.terminationStatus, output)
         } catch {
@@ -420,7 +425,12 @@ final class ServiceController {
         }
     }
 
-    private static func shell(_ path: String, args: [String]) -> String {
+    /// *path*'s standard output. Read to the end before waiting for the
+    /// exit: a child writing more than the pipe holds (64 KB) blocks until
+    /// it is read, so waiting first deadlocked. Seen on the test Mac, where
+    /// `ps -ax -o args=` printed 64,320 bytes and the app never started
+    /// the daemon.
+    static func shell(_ path: String, args: [String]) -> String {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: path)
         process.arguments = args
@@ -428,8 +438,8 @@ final class ServiceController {
         process.standardOutput = pipe
         do {
             try process.run()
-            process.waitUntilExit()
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
             return String(data: data, encoding: .utf8) ?? ""
         } catch {
             return ""

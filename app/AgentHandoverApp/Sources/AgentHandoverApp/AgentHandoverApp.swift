@@ -1,6 +1,11 @@
 import SwiftUI
 import Sparkle
 import ServiceManagement
+import os
+
+/// Launch and capture-start decisions, in the unified log
+/// (`log show --predicate 'subsystem == "com.agenthandover.app"'`).
+let launchLog = Logger(subsystem: "com.agenthandover.app", category: "launch")
 
 @main
 struct AgentHandoverApp: App {
@@ -128,11 +133,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Obse
             sharedAppState.onPermissionsGranted = { [weak self] in self?.permissionsGranted() }
         }
 
+        let accessibility = PermissionChecker.isAccessibilityGranted()
+        let screenRecording = PermissionChecker.isScreenRecordingGranted()
         let launch = OnboardingProgress.launchAction(
             defaults: .standard,
-            accessibilityGranted: PermissionChecker.isAccessibilityGranted(),
-            screenRecordingGranted: PermissionChecker.isScreenRecordingGranted()
+            accessibilityGranted: accessibility,
+            screenRecordingGranted: screenRecording
         )
+        // The grants' next reading is compared with this one: a launch that
+        // opened setup for a grant it read as missing (right after an
+        // upgrade macOS can report one missing for a moment) resumes
+        // observing when the next reading has both.
+        MainActor.assumeIsolated {
+            sharedAppState.seedGrants(accessibility: accessibility, screenRecording: screenRecording)
+        }
+        launchLog.notice("launch: \(String(describing: launch), privacy: .public) (accessibility \(accessibility, privacy: .public), screen recording \(screenRecording, privacy: .public))")
         if case .setup(let step) = launch {
             hasTriggeredOnboarding = true
 
@@ -168,6 +183,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Obse
     /// Start capture off the main thread (startAll waits for the daemon).
     @MainActor
     private func startObserving() {
+        launchLog.notice("start observing (a start already in flight: \(self.observationToggle.isTransitioning, privacy: .public))")
         sharedAppState.userStopped = false
         sharedAppState.servicesStarting()
         observationToggle.start { [weak self] _ in

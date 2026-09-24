@@ -151,6 +151,21 @@ final class UpgradeLaunchTests: XCTestCase {
         XCTAssertTrue(AppState.quickCheckReadsGrants(grantedAtLastCheck: false))
         XCTAssertFalse(AppState.quickCheckReadsGrants(grantedAtLastCheck: true))
     }
+
+    /// Right after an upgrade macOS can report a grant missing for a moment:
+    /// the launch opens setup, and the next reading (both granted) must count
+    /// as the grants coming back, or setup never finishes and capture never
+    /// starts. The launch's reading seeds the comparison.
+    @MainActor
+    func testTheLaunchsReadingSeedsTheNextComparison() {
+        let state = AppState()
+        state.seedGrants(accessibility: true, screenRecording: false)
+        XCTAssertEqual(state.grantedAtLastCheck, false)
+        XCTAssertTrue(AppState.quickCheckReadsGrants(grantedAtLastCheck: state.grantedAtLastCheck))
+        XCTAssertTrue(AppState.grantsReturned(before: state.grantedAtLastCheck, now: true))
+        state.seedGrants(accessibility: true, screenRecording: true)
+        XCTAssertFalse(AppState.grantsReturned(before: state.grantedAtLastCheck, now: true))
+    }
 }
 
 /// focus-questions.json is watched with a stat every couple of seconds, so
