@@ -1347,3 +1347,94 @@ class TestFocusDraftSavedAfterGeneration:
         assert sop_gen.generate_from_focus.call_count == 0
         # The rich observations synthesis uses are rebuilt from the frames.
         assert processor._last_rich_observations and processor._last_rich_observations[0]
+
+
+class TestFocusQuestionsSubprocess:
+    """WP-C7 / audit #67: the post-recording questions child process leaves
+    no temp file behind, whatever happens to it, and its wait lets the
+    control thread run."""
+
+    @staticmethod
+    def _call(run):
+        from agenthandover_worker.main import _generate_focus_questions
+
+        return _generate_focus_questions(
+            {"id": "p"}, {"slug": "p"},
+            ollama_host="http://127.0.0.1:9", qna_model="qwen3.5:4b", run=run,
+        )
+
+    def test_an_exception_in_the_call_removes_both_temp_files(self):
+        seen: list[list[str]] = []
+
+        def run(argv, **kwargs):
+            seen.append(argv)
+            assert Path(argv[1]).is_file() and Path(argv[2]).is_file()
+            raise RuntimeError("the child could not start")
+
+        with pytest.raises(RuntimeError):
+            self._call(run)
+        _python, script, qa_input, qa_output = seen[0]
+        assert not Path(script).exists()
+        assert not Path(qa_input).exists()
+        assert not Path(qa_output).exists()
+
+    def test_a_timeout_removes_the_temp_files(self):
+        import subprocess
+
+        seen: list[list[str]] = []
+
+        def run(argv, **kwargs):
+            seen.append(argv)
+            assert kwargs["timeout"] == 1800
+            raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+
+        with pytest.raises(subprocess.TimeoutExpired):
+            self._call(run)
+        assert not any(Path(p).exists() for p in seen[0][1:])
+
+    def test_the_questions_are_read_and_every_file_removed(self):
+        import subprocess
+
+        seen: list[list[str]] = []
+
+        def run(argv, **kwargs):
+            seen.append(argv)
+            assert kwargs["env"]["AH_QNA_MODEL"] == "qwen3.5:4b"
+            assert kwargs["env"]["OLLAMA_HOST"] == "http://127.0.0.1:9"
+            assert json.loads(Path(argv[2]).read_text()) == {
+                "procedure": {"id": "p"}, "sop": {"slug": "p"},
+            }
+            Path(argv[3]).write_text(json.dumps([{"question": "Which account?"}]))
+            return subprocess.CompletedProcess(argv, 0, b"", b"")
+
+        assert self._call(run) == [{"question": "Which account?"}]
+        assert not any(Path(p).exists() for p in seen[0][1:])
+
+    def test_a_failed_child_returns_no_questions_and_removes_the_files(self):
+        import subprocess
+
+        seen: list[list[str]] = []
+
+        def run(argv, **kwargs):
+            seen.append(argv)
+            Path(argv[3]).write_text("[]")
+            return subprocess.CompletedProcess(argv, 1, b"", b"Traceback ...")
+
+        assert self._call(run) == []
+        assert not any(Path(p).exists() for p in seen[0][1:])
+
+    def test_the_wait_frees_the_state_lock(self):
+        import subprocess
+
+        from agenthandover_worker.inference_runner import STATE_LOCK
+
+        held: list[bool] = []
+
+        def run(argv, **kwargs):
+            held.append(STATE_LOCK.held())
+            return subprocess.CompletedProcess(argv, 1, b"", b"")
+
+        with STATE_LOCK:
+            self._call(run)
+            assert STATE_LOCK.held()
+        assert held == [False]
