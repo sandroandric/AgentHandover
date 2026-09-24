@@ -325,7 +325,19 @@ final class AppState: ObservableObject {
             NotificationCenter.default.post(name: MicroQuestions.changed, object: nil)
             FocusQuestionsNotifier.shared.microQuestionsReady(questions)
         }
-        checkPermissions()
+        if Self.quickCheckReadsGrants(grantedAtLastCheck: grantedAtLastCheck) {
+            checkPermissions()
+        }
+    }
+
+    /// Whether the 2 s check reads the grants: only while one is missing
+    /// (or not read yet), so switching it on in System Settings starts
+    /// capture within seconds. Each reading re-verifies the app's code
+    /// signature; done every 2 s it cost the idle app ~0.7 s of CPU a
+    /// minute on the test Mac. With both grants in place, a revocation is
+    /// seen by `refreshStatus` (the 30 s poll and every menu open).
+    nonisolated static func quickCheckReadsGrants(grantedAtLastCheck: Bool?) -> Bool {
+        grantedAtLastCheck != true
     }
 
     // MARK: - Status Reading

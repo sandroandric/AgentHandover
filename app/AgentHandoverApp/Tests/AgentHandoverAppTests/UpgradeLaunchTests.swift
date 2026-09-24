@@ -142,6 +142,15 @@ final class UpgradeLaunchTests: XCTestCase {
         XCTAssertFalse(AppState.grantsReturned(before: false, now: false))
         XCTAssertTrue(AppState.grantsReturned(before: false, now: true))
     }
+
+    /// The 2 s check reads the grants only while one is missing: a re-grant
+    /// still starts capture within seconds, and an idle app with both
+    /// grants stops re-verifying its signature every 2 s.
+    func testTheQuickCheckReadsGrantsOnlyWhileOneIsMissing() {
+        XCTAssertTrue(AppState.quickCheckReadsGrants(grantedAtLastCheck: nil))
+        XCTAssertTrue(AppState.quickCheckReadsGrants(grantedAtLastCheck: false))
+        XCTAssertFalse(AppState.quickCheckReadsGrants(grantedAtLastCheck: true))
+    }
 }
 
 /// focus-questions.json is watched with a stat every couple of seconds, so
