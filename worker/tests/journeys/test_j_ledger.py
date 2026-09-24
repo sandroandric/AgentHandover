@@ -20,8 +20,9 @@ RUNS = ("focus_dailynews", "focus_dailynews_skip", "focus_dailynews_diverge")
 
 @needs_focus_sop_recording
 @pytest.mark.xfail(strict=True, reason=(
-    "waits on WP-L2..WP-L4 (contrast learning, triggers and divergence, "
-    "micro-questions) and the focus_dailynews_skip / focus_dailynews_diverge fixtures"
+    "waits on WP-L4 (micro-questions), the focus_dailynews_skip / "
+    "focus_dailynews_diverge fixtures, and a decision on WP-M5's branch rule "
+    "(two agreeing detours make a branch; this journey has one diverging run)"
 ))
 def test_three_runs_fill_the_ledger_with_evidence(
     events_db, worker, clock, temp_home, cassette,
