@@ -111,7 +111,13 @@ def merge_answers(
 ) -> dict:
     """Merge user answers into the procedure dict.
 
-    Does NOT mutate the input.  Returns a new dict.
+    Does NOT mutate the input procedure.  Returns a new dict.  The step
+    questions of *qa_result* get the ``step_indexes`` of their steps in
+    the returned procedure (a choice may have restored or removed a step).
+
+    A step question (``questions.step_questions``) answered with one of
+    its choices changes its step in code (``questions.apply_step_answer``);
+    answered otherwise, it is left to the revision call.
 
     Q&A answers always land in ``agent_clarifications[]``.  They do NOT
     auto-create ``environment.accounts[]`` or ``branches[]`` entries from
@@ -174,6 +180,17 @@ def merge_answers(
             # procedure field and rewrites no step.
             continue
 
+        if is_step_question(q):
+            # A step grounding flagged: a choice decides it in code; any
+            # other answer goes to the revision call (``_revisable``).
+            from agenthandover_worker.questions import apply_step_answer
+
+            apply_step_answer(
+                proc, q.id, answer, clarification=len(clarifications) - 1,
+                question=q.question,
+            )
+            continue
+
         # Strategy: free text, but only fill if we don't already have one
         # from behavioral synthesis (which is structurally richer).
         if cat in ("strategy", "goal", "purpose", "approach"):
@@ -190,7 +207,20 @@ def merge_answers(
     # value referenced by a step (e.g. "the subreddit is r/ClaudeAI").
     _rewrite_steps_for_clarifications(proc, qa_result)
 
+    # A choice may have restored or removed a step: a step question left to
+    # the revision call names its steps as they now stand.
+    from agenthandover_worker.questions import step_question_indexes
+
+    for q in qa_result.questions:
+        if is_step_question(q):
+            q.step_indexes = step_question_indexes(proc, q.id)
+
     return proc
+
+
+def is_step_question(question: FocusQuestion) -> bool:
+    """A question about a step grounding flagged (``questions.step_questions``)."""
+    return question.id.startswith("step:")
 
 def _merge_strategy(proc: dict, answer: str) -> None:
     """Merge strategy answer into procedure.
@@ -327,13 +357,18 @@ USER_ANSWER = "user_answer"
 def _revisable(qa_result: FocusQAResult) -> list[int]:
     """The indexes of the typed answers that may change steps: not an
     accepted guess (it confirms nothing), not a field's answer (strategy,
-    scope), not a URL the deterministic rewrite already put in its steps."""
+    scope), not a URL the deterministic rewrite already put in its steps,
+    not a step question's choice (``merge_answers`` applied it in code)."""
+    from agenthandover_worker.questions import choice_index
+
     indexes = []
     for idx, q in enumerate(qa_result.questions):
         answer = str(qa_result.answers.get(idx) or "").strip()
         if not answer or qa_result.source(idx) != ANSWER_TYPED:
             continue
         if q.category.lower().replace(" ", "_") in _FIELD_CATEGORIES:
+            continue
+        if is_step_question(q) and choice_index(q.choices, answer) is not None:
             continue
         if q.step_indexes and answer.startswith(("r/", "/r/", "http://", "https://", "/")):
             continue

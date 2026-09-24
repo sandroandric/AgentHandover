@@ -162,4 +162,59 @@ final class MicroQuestionsTests: XCTestCase {
         XCTAssertEqual(other.answers, ["0": "Nothing fixed: I start it when I decide to"])
         XCTAssertEqual(other.sources, ["0": "typed"])
     }
+
+    // MARK: - WP-F10: step questions (from step grounding)
+
+    /// A step question as the worker writes it into the focus Q&A file.
+    private static let stepQuestionJSON = """
+    {"index": 2, "id": "step:note:clipboard:0a1b2c3d4e5f",
+     "question": "Step 5 says \\"Paste the copied text\\", but nothing was copied before it in the recording. What did you do?",
+     "category": "steps", "context": "The Skill has it as: \\"Type the text\\".", "default": "",
+     "step_indexes": [4], "choices": ["Typed it", "Pasted it from somewhere else"]}
+    """
+
+    func testAStepQuestionRendersItsChoicesInTheQAWindow() throws {
+        let q = try JSONDecoder().decode(FocusQuestion.self, from: Data(Self.stepQuestionJSON.utf8))
+        XCTAssertEqual(FocusQAView.choices(for: q), ["Typed it", "Pasted it from somewhere else"])
+        // No guess: the field starts empty and says the question is left open.
+        XCTAssertEqual(FocusQAView.initialAnswers(for: [q]), [:])
+        XCTAssertEqual(FocusQAView.answerNote(for: q, answers: [:]), "Left open: your agent will ask.")
+        // A picked choice is sent as typed, word for word: the worker matches it.
+        let picked = FocusQAView.submission(
+            for: [q], answers: [2: "Typed it"], picked: [2: "Typed it"]
+        )
+        XCTAssertEqual(picked.answers, ["2": "Typed it"])
+        XCTAssertEqual(picked.sources, ["2": "typed"])
+        // The step it is about survives the round trip.
+        let rewritten = try JSONSerialization.jsonObject(
+            with: JSONEncoder().encode(q)
+        ) as? [String: Any]
+        XCTAssertEqual(rewritten?["step_indexes"] as? [Int], [4])
+        XCTAssertEqual(rewritten?["id"] as? String, "step:note:clipboard:0a1b2c3d4e5f")
+    }
+
+    func testAStepQuestionCardRendersItsChoicesAndTheOtherField() throws {
+        let json = """
+        {"questions": [
+          {"id": "step:look:cut:9f8e7d6c5b4a", "kind": "step", "subject": "look", "title": "Look",
+           "question": "The recording did not show a scroll at step 1 (\\"Open Safari\\"). Did you scroll?",
+           "context": "The model wrote: \\"Open Safari and scroll down\\".",
+           "choices": ["No, I didn't", "Yes, I did"], "slot": "steps", "default": "",
+           "asks_name": false, "workflow_keys": [], "obs_ids": [], "value": 2500000.0,
+           "origin": {}, "step_indexes": [0], "asked_at": "2026-09-24T09:00:00.000Z"}
+        ]}
+        """
+        let decoded = try JSONDecoder().decode(MicroQuestionsFile.self, from: Data(json.utf8)).questions
+        let cards = MicroReviewViewModel.questionCards(decoded)
+        XCTAssertEqual(cards.map(\.type), [.question])
+        XCTAssertFalse(cards[0].asksName)
+        XCTAssertEqual(ReviewCard.answerButtons(for: cards[0]), ["No, I didn't", "Yes, I did"])
+        XCTAssertEqual(ReviewCard.fieldPrompt(for: cards[0]), "Or type your answer")
+        XCTAssertEqual(cards[0].evidenceText, "The model wrote: \"Open Safari and scroll down\".")
+        let payload = MicroReviewViewModel.questionPayload(
+            card: cards[0], action: .answer(ReviewCard.answerButtons(for: cards[0])[1], name: "")
+        )
+        XCTAssertEqual(payload?["question_id"], "step:look:cut:9f8e7d6c5b4a")
+        XCTAssertEqual(payload?["answer"], "Yes, I did")
+    }
 }

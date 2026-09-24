@@ -340,6 +340,56 @@ def record_divergences(proc: dict, obs_id: str, frames: list[AnnotatedFrame]) ->
     return True
 
 
+def shift_steps(proc: dict, at: int, delta: int, steps: list | None = None) -> None:
+    """Keep *proc*'s branch hypotheses and divergence branches on the
+    steps they name after a step was inserted at *at* (*delta* ``+1``) or
+    step *at* was removed (*delta* ``-1``); *steps* are the steps as they
+    now stand (default ``proc["steps"]``).  A step index at or after an
+    inserted step, or after a removed one, moves with its step; one on a
+    removed step names the step that took its place.  A skip that skipped
+    only the removed step skips nothing any more and is dropped.  Each
+    divergence branch's ``action`` is worded again from the steps."""
+    if delta not in (1, -1):
+        raise ValueError(f"shift_steps: delta must be +1 or -1, not {delta!r}")
+    steps = proc.get("steps") or [] if steps is None else steps
+
+    def moved(index: object) -> object:
+        if not isinstance(index, int):
+            return index
+        if delta > 0:
+            return index + 1 if index >= at else index
+        return index - 1 if index > at else index
+
+    def shifted(items: list) -> list:
+        kept = []
+        for item in items:
+            if isinstance(item, dict) and "step_index" in item:
+                item["step_index"] = moved(item["step_index"])
+                item["rejoin_index"] = moved(item.get("rejoin_index"))
+                if (
+                    item.get("kind") == "skip"
+                    and isinstance(item["rejoin_index"], int)
+                    and item["rejoin_index"] <= item["step_index"]
+                ):
+                    continue
+            kept.append(item)
+        return kept
+
+    if isinstance(proc.get("branch_hypotheses"), list):
+        proc["branch_hypotheses"] = shifted(proc["branch_hypotheses"])
+    if isinstance(proc.get("branches"), list):
+        branches = []
+        for branch in proc["branches"]:
+            if isinstance(branch, dict) and branch.get("source") == "divergence":
+                if not shifted([branch]):
+                    continue
+                reworded = _branch([branch], steps)
+                if reworded is not None:
+                    branch["action"] = reworded["action"]
+            branches.append(branch)
+        proc["branches"] = branches
+
+
 def mine_observations(
     db: "WorkerDB", kb: "KnowledgeBase", slug: str, observations: list[dict],
 ) -> int:

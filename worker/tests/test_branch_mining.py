@@ -9,6 +9,8 @@ from __future__ import annotations
 import json
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from agenthandover_worker import branch_mining as bm
 from agenthandover_worker.ledger import derive_knowledge
 from agenthandover_worker.task_segmenter import AnnotatedFrame
@@ -166,6 +168,68 @@ class TestHypothesesAndBranches:
             bm.record_divergences(proc, f"obs-{n}", _diverging(f"d{n}", {"items": [f"only {n}"]}))
         assert len(proc["branch_hypotheses"]) == bm.MAX_HYPOTHESES
         assert bm._instance(proc["branch_hypotheses"][0]) == "obs-5"
+
+
+class TestShiftSteps:
+    """A step answer (``questions.apply_step_answer``) restores or removes
+    a step of a Skill that may carry hypotheses and branches: they stay on
+    the steps they named."""
+
+    OTHER = {"items": ["Payout failed", "Contact support"], "text": "Payout failed\nInsufficient funds"}
+
+    def _mined(self) -> dict:
+        """A promoted detour before step 3 and a skip of step 3."""
+        proc = _proc()
+        bm.record_divergences(proc, "obs-1", _diverging("d1"))
+        bm.record_divergences(proc, "obs-2", _diverging("d2", self.OTHER))
+        bm.record_divergences(proc, "obs-3", _frames("s", [(STRIPE, {}), (PAYOUT, FAILED), (SLACK, {})]))
+        assert [(h["kind"], h["step_index"], h["rejoin_index"]) for h in proc["branch_hypotheses"]] == [
+            ("detour", 2, 2), ("detour", 2, 2), ("skip", 2, 3),
+        ]
+        [branch] = proc["branches"]
+        assert branch["action"] == "before step 3: Emailing the bank about the failed payout"
+        return proc
+
+    def test_an_inserted_step_moves_what_comes_at_or_after_it(self) -> None:
+        proc = self._mined()
+        proc["steps"].insert(1, {"action": "Check the balance"})
+        bm.shift_steps(proc, 1, +1)
+        assert [(h["step_index"], h["rejoin_index"]) for h in proc["branch_hypotheses"]] == [
+            (3, 3), (3, 3), (3, 4),
+        ]
+        [branch] = proc["branches"]
+        assert (branch["step_index"], branch["rejoin_index"]) == (3, 3)
+        assert branch["action"] == "before step 4: Emailing the bank about the failed payout"
+        # A step inserted after them moves nothing.
+        proc["steps"].append({"action": "Close the tab"})
+        bm.shift_steps(proc, len(proc["steps"]) - 1, +1)
+        assert branch["step_index"] == 3
+
+    def test_a_removed_step_moves_what_comes_after_it(self) -> None:
+        proc = self._mined()
+        del proc["steps"][1]
+        bm.shift_steps(proc, 1, -1)
+        assert [(h["step_index"], h["rejoin_index"]) for h in proc["branch_hypotheses"]] == [
+            (1, 1), (1, 1), (1, 2),
+        ]
+        [branch] = proc["branches"]
+        assert branch["action"] == "before step 2: Emailing the bank about the failed payout"
+        assert proc["steps"][branch["step_index"]]["location"] == SHEET
+
+    def test_a_skip_of_only_the_removed_step_is_dropped(self) -> None:
+        proc = self._mined()
+        del proc["steps"][2]  # the sheet step the skip skipped
+        bm.shift_steps(proc, 2, -1)
+        # The detour now comes before the step that took the sheet's place.
+        assert [(h["kind"], h["step_index"], h["rejoin_index"]) for h in proc["branch_hypotheses"]] == [
+            ("detour", 2, 2), ("detour", 2, 2),
+        ]
+        [branch] = proc["branches"]
+        assert proc["steps"][branch["step_index"]]["location"] == SLACK
+
+    def test_only_one_step_at_a_time(self) -> None:
+        with pytest.raises(ValueError):
+            bm.shift_steps(_proc(), 0, 2)
 
 
 # The daily-news routine of the J-ledger fixtures (``focus_dailynews*``):

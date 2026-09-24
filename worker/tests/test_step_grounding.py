@@ -290,8 +290,11 @@ def test_a_step_that_cites_no_frame_is_dropped() -> None:
     steps = [_step("Open Notes", ["a"]), _step("Save the note", [])]
     report = ground_steps(steps, timeline)
     assert [s["step"] for s in steps] == ["Open Notes"]
+    # The record keeps what a "Yes, I did" answer restores, and where the
+    # step stood: after the step citing frame "a".
     assert report["dropped"] == [
-        {"action": "Save the note", "frames": [], "reason": "the step cites no recorded frame"},
+        {"action": "Save the note", "frames": [], "reason": "the step cites no recorded frame",
+         "description": "", "parameters": {}, "after_frames": ["a"]},
     ]
 
 

@@ -308,6 +308,14 @@ def _anchor_line(step: dict) -> str:
     return f"`{step['selector']}`" if step.get("selector") else ""
 
 
+def _answered_line(record: dict) -> str | None:
+    """The line for a grounding flag the user answered, else None."""
+    origin = record.get("user_answer")
+    if not isinstance(origin, dict) or not origin.get("answer"):
+        return None
+    return f"   Asked: {origin.get('question') or ''} The user answered: {origin['answer']}"
+
+
 def _render_step(num: int, step: dict) -> list[str]:
     step_id = step_key(step, num - 1)
     intent = str(
@@ -330,13 +338,17 @@ def _render_step(num: int, step: dict) -> list[str]:
             lines.append(f"   {label}: {value}")
     # The step claimed a copy or paste the clipboard did not record: its
     # wording was rewritten; the agent is told so.
+    # Once the user answered the step's question (``questions``), the
+    # agent gets their answer instead.
     clipboard = (step.get("evidence") or {}).get("clipboard")
     if isinstance(clipboard, dict) and clipboard.get("reason"):
-        lines.append(f"   Unconfirmed: {clipboard['reason']}")
+        lines.append(_answered_line(clipboard) or f"   Unconfirmed: {clipboard['reason']}")
     # Part of the step named what its frames do not show and was cut.
     grounding = (step.get("evidence") or {}).get("grounding")
     if isinstance(grounding, dict) and grounding.get("status") == REWRITTEN:
-        lines.append(f"   Unconfirmed: {grounding.get('reason')}")
+        lines.append(_answered_line(grounding) or f"   Unconfirmed: {grounding.get('reason')}")
+    elif isinstance(grounding, dict) and (answered := _answered_line(grounding)):
+        lines.append(answered)
     # Any other observed parameter (DOM-derived steps carry e.g. ``value``).
     params = step.get("parameters")
     if isinstance(params, dict):
@@ -632,9 +644,11 @@ def body_sections(proc: dict) -> list[str]:
         ev_lines.append(f"- Contradictions recorded: {len(contradictions)}")
     for dropped in evidence.get("dropped_steps") or []:
         if isinstance(dropped, dict) and dropped.get("action"):
-            ev_lines.append(
-                f"- Not a step: \"{dropped['action']}\" ({dropped.get('reason') or 'unconfirmed'})"
-            )
+            why = dropped.get("reason") or "unconfirmed"
+            origin = dropped.get("user_answer")
+            if isinstance(origin, dict) and origin.get("answer"):
+                why += f"; the user answered: {origin['answer']}"
+            ev_lines.append(f"- Not a step: \"{dropped['action']}\" ({why})")
     staleness = proc.get("staleness") or {}
     if staleness.get("last_confirmed"):
         ev_lines.append(f"- Last confirmed: {staleness['last_confirmed']}")

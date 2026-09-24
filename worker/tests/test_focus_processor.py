@@ -1437,3 +1437,82 @@ class TestAnotherRunOfASkill:
             )
         assert sop_gen.generate_from_focus.call_count == 1
         assert result.sop["slug"] == "test-task" and result.instance_of is None
+
+    def test_the_step_questions_are_the_skills_own_and_keep_its_branches(self, tmp_path):
+        """Another run of a Skill makes no SOP, so no step of the run is
+        grounded: the Q&A window's step questions are the Skill's own
+        flags (a step its first recording did not show), numbered on the
+        Skill's steps.  "Yes, I did" restores the step in code (no model
+        call) and the run's detour, mined onto the Skill in the same tick,
+        stays on the step it came before."""
+        from agenthandover_worker.focus_questioner import FOCUS_QUESTIONS_FILE
+        from agenthandover_worker.knowledge_base import KnowledgeBase
+        from agenthandover_worker.main import _process_focus_sessions_v2
+        from agenthandover_worker.questions import YES_I_DID
+
+        prices = "https://registrar.example.net/prices"
+        skill = json.loads(json.dumps(self.SKILL))
+        skill["goal"] = "Quote a domain"
+        skill["outcome"] = "The quote is mailed"
+        for n, step in enumerate(skill["steps"]):
+            step["evidence"] = {"frames": [f"first-{n}"]}
+        skill["evidence"] = {"dropped_steps": [{
+            "action": "Check the price list", "frames": [],
+            "reason": "the step cites no recorded frame",
+            "description": "Look up the price.",
+            "parameters": {"app": "Google Chrome", "location": prices},
+            "after_frames": ["first-0"],
+        }]}
+
+        db_path = self._recording(tmp_path)
+        kb = KnowledgeBase(root=tmp_path / "kb", db_path=db_path)
+        kb.ensure_structure()
+        kb.save_procedure(skill)
+        sop_gen = _make_mock_sop_generator()
+        processor = FocusProcessor(_make_mock_annotator(), _make_mock_differ(), sop_gen)
+        writer = MagicMock()
+        writer.get_sops_dir.return_value = tmp_path / "sops"
+
+        def tick(db):
+            with patch("agenthandover_worker.main._status_dir", return_value=tmp_path):
+                _process_focus_sessions_v2(
+                    db, focus_processor=processor, openclaw_writer=writer,
+                    index_generator=MagicMock(), screenshots_dir=str(tmp_path),
+                    knowledge_base=kb, weekly_question_budget=5,
+                    sop_auto_approve=False,
+                )
+
+        with WorkerDB(db_path) as db:
+            tick(db)
+            asked = json.loads((tmp_path / FOCUS_QUESTIONS_FILE).read_text())
+            [step_q] = [q for q in asked["questions"] if q["id"].startswith("step:")]
+            assert step_q["id"].startswith("step:domain-check:dropped:")
+            assert "Check the price list" in step_q["question"]
+            # Where the step stood in the Skill: between its steps 1 and 2.
+            assert step_q["step_indexes"] == [0, 1]
+            assert step_q["choices"][1] == YES_I_DID
+
+            asked.update(
+                status="answered",
+                answers={str(step_q["index"]): YES_I_DID},
+                answer_sources={str(step_q["index"]): "typed"},
+            )
+            (tmp_path / FOCUS_QUESTIONS_FILE).write_text(json.dumps(asked))
+            tick(db)
+
+        assert sop_gen.generate_from_focus.call_count == 0
+        # A choice: decided in code, no revision call.
+        assert sop_gen.revise.call_count == 0
+        proc = kb.get_procedure("domain-check")
+        assert [s["action"] for s in proc["steps"]] == [
+            "Search the domain", "Check the price list", "Add it to the cart", "Mail the quote",
+        ]
+        restored = proc["steps"][1]
+        assert restored["location"] == prices
+        assert restored["evidence"]["user_answer"]["answer"] == YES_I_DID
+        assert proc["evidence"]["dropped_steps"] == []
+        # The run's detour to the notes pad came before "Add it to the
+        # cart", which is now step 3.
+        [hyp] = proc["branch_hypotheses"]
+        assert (hyp["step_index"], hyp["rejoin_index"]) == (2, 2)
+        assert proc["steps"][hyp["step_index"]]["location"] == CART
