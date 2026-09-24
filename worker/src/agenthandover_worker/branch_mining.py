@@ -9,17 +9,24 @@ collapse into the places it visited, a procedure step's place is its
 
 The instance *diverges* where it
 
-- visits places the Skill never visits (a run of such places is one
-  divergence, before the canonical step the alignment puts next), or
+- visits places the Skill never visits (another page of a step's own site,
+  another story or record, is the step, not a divergence), or
 - never visits the place of a canonical step (a skip).
 
 Returning to a place the Skill does visit elsewhere is not a divergence.
+One detour is one divergence: the aligned columns that diverge one after
+the other, with the steps they replace, and a return to the detour's
+places right after a step outside it continues the detour
+(:func:`find_divergences`).
 
 Each divergence is stored as a *branch hypothesis* on the procedure::
 
     proc["branch_hypotheses"] = [{
-        "step_index": <canonical step the divergence replaces or precedes;
-                       len(steps) when it comes after the last one>,
+        "kind": "detour" | "skip",   # a skip does nothing instead
+        "step_index": <first canonical step the divergence replaces or
+                       precedes; len(steps) when it comes after the last one>,
+        "rejoin_index": <the canonical step the instance is back on;
+                         step_index when nothing is replaced>,
         "condition_state": {"ocr_snippet", "url", "visible_items"},
         "alternative_steps": [{"action", "app", "location"}],  # [] = skipped
         "evidence": [{"kind": "instance", "id": <obs_id>},
@@ -29,8 +36,8 @@ Each divergence is stored as a *branch hypothesis* on the procedure::
 
 ``condition_state`` is the screen the user decided on: the frame before
 the divergence (its salient OCR lines, URL and list entries).  Two
-hypotheses from different instances *agree* when they diverge at the same
-step into the same places and their screens share an entry or an OCR line;
+hypotheses from different instances *agree* when they replace the same
+steps with the same places and their screens share an entry or an OCR line;
 the second agreeing instance promotes them to a branch in
 ``proc["branches"]`` (``source: "divergence"``, every agreeing hypothesis's
 evidence), whose ``condition`` names what the screens shared.  Later
