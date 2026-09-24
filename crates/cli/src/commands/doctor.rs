@@ -304,7 +304,7 @@ pub fn run() -> Result<()> {
             // Over HTTP, as `setup` asks (see crate::ollama for why).
             let installed = ollama::installed_models(&report.host.url).unwrap_or_default();
 
-            // The standard tier runs one model for both jobs; deduplicate
+            // The recommended tier runs one model for both jobs; deduplicate
             // so we don't report the same model twice.
             let mut models_to_check: Vec<(String, &str)> = Vec::new();
             if !annotation_model.is_empty() {

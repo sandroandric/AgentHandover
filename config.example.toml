@@ -65,16 +65,17 @@ max_compute_minutes_per_day = 20
 # resources/tiers.json).  Onboarding and `agenthandover setup` write
 # `tier`, `annotation_model` and `sop_model`; a missing model key falls
 # back to the named tier, else to the tier this Mac's RAM recommends:
-#   standard     (any):  qwen3.5:4b annotates and writes Skills
-#   recommended  (16GB): same models as standard (qwen3.5:4b wrote Skills
-#                        faster than gemma4:12b-it-qat on a 16 GB Mac)
+#   standard     (any):  qwen3.5:2b-q4_K_M annotates, qwen3.5:4b writes
+#                        Skills (one model loaded at a time)
+#   recommended  (16GB): qwen3.5:4b annotates and writes Skills (it wrote
+#                        Skills faster than gemma4:12b-it-qat on a 16 GB Mac)
 #   performance  (24GB): qwen3.5:4b annotates, gemma4:12b-it-qat writes Skills
 #   max_quality  (48GB): qwen3.5:4b annotates, gemma4:31b-it-qat writes Skills
 # The Gemma 4 QAT tags need Ollama 0.34.0+.  Settings per model are
 # auto-tuned via model_profiles.py.
 tier = "standard"
-annotation_model = "qwen3.5:4b"   # model for per-frame annotation
-sop_model = "qwen3.5:4b"          # model for Skill generation and synthesis
+annotation_model = "qwen3.5:2b-q4_K_M"  # model for per-frame annotation
+sop_model = "qwen3.5:4b"                # model for Skill generation and synthesis
 # reasoning_model = ""             # the LLM reasoner's model; empty = sop_model
 # sop_ab = false                   # max_quality: A/B arm gemma4:26b-a4b-it-qat as sop_model
 annotation_enabled = true          # enable continuous scene annotation pipeline
