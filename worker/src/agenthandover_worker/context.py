@@ -139,6 +139,9 @@ class WorkerContext:
 
     # Set by main() after the build (services a journey does not start).
     vlm_available: bool = False
+    # The configured models Ollama does not serve (None: Ollama did not
+    # answer); the app's menu offers their download.
+    missing_models: list[str] | None = None
     query_api_server: Any = None
     # The inference thread; None in the journey driver's inline mode.
     runner: Any = None

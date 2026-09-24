@@ -378,3 +378,36 @@ def test_worker_startup_with_ollama_down_keeps_a_cloud_configs_models(tmp_path, 
     lines = [r for r in caplog.records if "[vlm]" in r.getMessage()]
     assert len(lines) == 1 and lines[0].levelno == logging.WARNING
     assert "cloud mode was removed" in lines[0].getMessage()
+
+
+# --- worker-status.json: what the app's menu shows -----------------------------
+
+
+def test_missing_models_names_the_configured_models_ollama_lacks(ollama):
+    from agenthandover_worker.config import VlmConfig
+
+    vlm = VlmConfig(
+        ollama_host=ollama.host, annotation_model="qwen3.5:4b", sop_model="gemma4:12b-it-qat",
+    )
+    ollama.models = ["gemma4:12b-it-qat"]
+    assert worker_main._missing_vlm_models(vlm) == ["qwen3.5:4b"]
+    ollama.models = ["qwen3.5:4b", "gemma4:12b-it-qat"]
+    assert worker_main._missing_vlm_models(vlm) == []
+    down = VlmConfig(ollama_host="http://127.0.0.1:9", annotation_model="qwen3.5:4b")
+    assert worker_main._missing_vlm_models(down) is None
+
+
+def test_worker_status_carries_missing_models_only_when_ollama_answered(tmp_path, monkeypatch):
+    monkeypatch.setattr(worker_main, "_status_dir", lambda: tmp_path)
+    common = dict(
+        started_at="2026-09-25T09:00:00Z", events_processed_today=0, sops_generated=0,
+        last_pipeline_duration_ms=None, consecutive_errors=0, vlm_available=False,
+    )
+    worker_main._write_worker_status(**common, missing_models=["qwen3.5:4b"])
+    status = json.loads((tmp_path / "worker-status.json").read_text(encoding="utf-8"))
+    assert (status["vlm_available"], status["missing_models"]) == (False, ["qwen3.5:4b"])
+    # The early "starting" status and an Ollama that did not answer: no key,
+    # so the app's menu does not claim a model is missing.
+    worker_main._write_worker_status(**common)
+    status = json.loads((tmp_path / "worker-status.json").read_text(encoding="utf-8"))
+    assert "missing_models" not in status

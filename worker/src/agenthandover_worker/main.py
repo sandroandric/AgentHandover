@@ -761,8 +761,13 @@ def _write_worker_status(
     reasoning_paused_reason: str | None = None,
     model_schedule: dict | None = None,
     inference: dict | None = None,
+    missing_models: list[str] | None = None,
 ) -> None:
     """Atomically write worker-status.json (tmp + fsync + rename).
+
+    ``missing_models`` (written when Ollama answered) lists the configured
+    annotation and Skills models it does not serve; the app's menu offers
+    their download while ``vlm_available`` is false.
 
     ``inference`` is the inference thread's queue
     (``InferenceRunner.status``) with ``annotation_backlog``, the passive
@@ -789,6 +794,8 @@ def _write_worker_status(
         "consecutive_errors": consecutive_errors,
         "vlm_available": vlm_available,
     }
+    if missing_models is not None:
+        status["missing_models"] = missing_models
     if v2_annotation_enabled:
         status["v2_annotation_enabled"] = True
         status["v2_annotations_today"] = v2_annotations_today
@@ -4063,6 +4070,20 @@ def _vlm_backend_available(vlm_cfg) -> bool:
     return available
 
 
+def _missing_vlm_models(vlm_cfg) -> list[str] | None:
+    """``missing_models`` in ``worker-status.json``: the annotation and
+    Skills models Ollama does not serve at ``[vlm] ollama_host``; None
+    when it does not answer."""
+    from agenthandover_worker.model_profiles import missing_models
+    from agenthandover_worker.ollama import OllamaClient
+
+    try:
+        served = OllamaClient(vlm_cfg.ollama_host).tags()
+    except Exception:
+        return None
+    return missing_models(dict.fromkeys([vlm_cfg.annotation_model, vlm_cfg.sop_model]), served)
+
+
 def _start_query_api(ctx) -> "object | None":
     """The localhost query API server, when ``[knowledge]
     query_api_enabled``; None otherwise or when it could not start."""
@@ -4205,6 +4226,7 @@ def main(argv: list[str] | None = None) -> None:
     try:
         _log_model_profiles(cfg.vlm)
         ctx.vlm_available = _vlm_backend_available(cfg.vlm)
+        ctx.missing_models = _missing_vlm_models(cfg.vlm)
         ctx.query_api_server = _start_query_api(ctx)
         export.heartbeat(ctx)
         logger.info("Connected to database, entering main loop")
