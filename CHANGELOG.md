@@ -38,8 +38,8 @@ are marked *(not yet recorded)*.
 - **Knowledge ledger, hand-off gate and budgeted questions** (up to 3 after
   a recording, 5 a week; step questions quote the recording). The four-check
   hand-off gate replaces the six readiness gates. Proof: J-approve, J-mcp,
-  J-ledger (the skip/diverge runs *not yet recorded*), J-focus-typed (answer
-  revision leg *not yet recorded*).
+  J-focus-typed (step questions and answer revision), J-ledger (its
+  skip/diverge leg is *still skipped*).
 - **Recognition of repeated workflows**: recurrence mining with at most 3
   new drafts a week; a session or recording of an existing Skill becomes a
   run and a branch. Proof: `test_workflow_observations.py`, J-ledger; the
