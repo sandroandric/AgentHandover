@@ -192,3 +192,27 @@ def test_startup_migrates_a_config_on_an_earlier_tier_default(
     backups = list(config.parent.glob("config.toml.*.bak"))
     assert len(backups) == 1
     assert backups[0].read_text(encoding="utf-8") == old
+
+
+def test_main_only_builds_the_context_and_loops() -> None:
+    """WP-S1: the loop's work lives in ``stages`` (the journey driver runs
+    the same ``stages.tick``); ``main()`` builds the context and loops, in
+    under 100 lines, and never calls a stage's processor itself."""
+    import ast
+    import inspect
+
+    source = inspect.getsource(worker_main)
+    fn = next(
+        node for node in ast.parse(source).body
+        if isinstance(node, ast.FunctionDef) and node.name == "main"
+    )
+    assert fn.end_lineno - fn.lineno + 1 < 100
+    called = {
+        node.func.attr if isinstance(node.func, ast.Attribute) else getattr(node.func, "id", "")
+        for node in ast.walk(fn) if isinstance(node, ast.Call)
+    }
+    assert "tick" in called and "build_context" in called
+    assert not called & {
+        "run_pipeline", "_process_annotations", "_process_passive_discovery",
+        "_process_focus_sessions_v2", "drain",
+    }
