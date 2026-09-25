@@ -289,7 +289,7 @@ curl -X POST http://localhost:9477/search/semantic \
 
 ### Download and run
 
-Download the latest `.pkg` from [**Releases**](https://github.com/sandroandric/AgentHandover/releases) and double-click.
+Download the latest `.pkg` from [**Releases**](https://github.com/sandroandric/AgentHandover/releases) and double-click. Requires macOS 14 (Sonoma) or later and [Ollama](https://ollama.com/download).
 
 The onboarding app walks you through: permissions, AI model downloads (it recommends a tier for your Mac's RAM and shows the memory each tier needs against what is free now), Chrome extension, and your first recording.
 

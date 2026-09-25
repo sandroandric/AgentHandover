@@ -18,6 +18,8 @@ also checked live on that Mac: signed-package upgrades, focus recordings in
 Comet and TextEdit, and the questions that follow them.
 
 ### Changed
+- **Requires macOS 14 (Sonoma).** Capture is ScreenCaptureKit only; macOS 13
+  stays on 0.4.0 (the update feed does not offer 0.5.0 there).
 - **Models.** 16 GB: `qwen3.5:4b` annotates and writes Skills (was Gemma 4
   12B QAT). 8 GB: `qwen3.5:2b-q4_K_M` annotates, `qwen3.5:4b` writes Skills.
   24/48 GB keep Gemma 4 12B/31B QAT for Skills. Measured head to head on a
