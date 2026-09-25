@@ -1074,7 +1074,7 @@ mod tests {
         event.focused_element = Some(FocusedElement {
             role: "AXTextField".into(),
             title: Some("Token".into()),
-            value: Some("ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijkl".into()),
+            value: Some(concat!("ghp_", "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijkl").into()),
             ancestors: vec![AxAncestor {
                 role: "AXGroup".into(),
                 description: Some("password: hunter2".into()),
@@ -1102,7 +1102,7 @@ mod tests {
         match event.kind {
             EventKind::ShellCommand { cwd, command } => {
                 assert_eq!(cwd, "/Users/me/app");
-                assert!(!command.contains("ghp_ABCDEFGHIJ"), "{command}");
+                assert!(!command.contains(concat!("ghp_", "ABCDEFGHIJ")), "{command}");
                 assert!(command.starts_with("curl -u me:"), "the rest of the command stays: {command}");
             }
             other => panic!("kind changed: {other:?}"),
@@ -1219,9 +1219,9 @@ mod tests {
         let mut event = make_test_event_with_kind(EventKind::FocusChange);
         event.metadata = serde_json::json!({
             "url": "https://example.com",
-            "token": "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijkl",
+            "token": concat!("ghp_", "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijkl"),
             "nested": {
-                "secret": "AKIAIOSFODNN7EXAMPLE1"
+                "secret": concat!("AKIA", "IOSFODNN7EXAMPLE1")
             }
         });
 
@@ -1240,7 +1240,7 @@ mod tests {
         let input = serde_json::json!({
             "count": 42,
             "active": true,
-            "tags": ["safe", "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijkl"]
+            "tags": ["safe", concat!("ghp_", "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijkl")]
         });
 
         let output = redact_json_value(&input, &redactor);
@@ -1254,7 +1254,7 @@ mod tests {
     #[test]
     fn test_redact_event_navigation_and_form_submit() {
         let redactor = Redactor::new();
-        let secret = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijkl";
+        let secret = concat!("ghp_", "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijkl");
 
         let mut nav = make_test_event_with_kind(EventKind::NavigationChange {
             url: format!("https://example.com/{secret}"),

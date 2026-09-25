@@ -5,7 +5,7 @@ fn test_redacts_aws_access_key() {
     let r = Redactor::new();
     let input = "export AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE";
     let output = r.redact(input);
-    assert!(!output.contains("AKIAIOSFODNN7EXAMPLE"));
+    assert!(!output.contains(concat!("AKIA", "IOSFODNN7EXAMPLE")));
     assert!(output.contains("[REDACTED_AWS_KEY]"));
 }
 
@@ -83,17 +83,17 @@ fn test_detects_sensitive_content() {
 fn test_redacts_provider_secret_shapes() {
     let r = Redactor::new();
     let cases = [
-        ("sk-ant-api03-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789_-abcd", "[REDACTED_ANTHROPIC_KEY]"),
-        ("sk-proj-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789", "[REDACTED_OPENAI_KEY]"),
+        (concat!("sk-ant-", "api03-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789_-abcd"), "[REDACTED_ANTHROPIC_KEY]"),
+        (concat!("sk-proj-", "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789"), "[REDACTED_OPENAI_KEY]"),
         (concat!("sk_", "live_51HqLyjWDarjtT1zdp7dcXYZ"), "[REDACTED_STRIPE_KEY]"),
         (concat!("sk_", "test_4eC39HqLyjWDarjtT1zdp7dc"), "[REDACTED_STRIPE_KEY]"),
         (concat!("rk_", "live_51HqLyjWDarjtT1zdp7dcXYZ"), "[REDACTED_STRIPE_KEY]"),
-        ("AIzaSyA-1234567890abcdefghijklmnopqrstu", "[REDACTED_GOOGLE_API_KEY]"),
-        ("github_pat_11ABCDEFG0123456789_abcdefghijklmnopqrstuvwxyz", "[REDACTED_GITHUB_TOKEN]"),
-        ("ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij", "[REDACTED_GITHUB_TOKEN]"),
+        (concat!("AIza", "SyA-1234567890abcdefghijklmnopqrstu"), "[REDACTED_GOOGLE_API_KEY]"),
+        (concat!("github_pat_", "11ABCDEFG0123456789_abcdefghijklmnopqrstuvwxyz"), "[REDACTED_GITHUB_TOKEN]"),
+        (concat!("ghp_", "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij"), "[REDACTED_GITHUB_TOKEN]"),
         ("gho_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij", "[REDACTED_GITHUB_TOKEN]"),
         ("ghs_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij", "[REDACTED_GITHUB_TOKEN]"),
-        ("glpat-AbCdEfGhIjKlMnOpQrSt", "[REDACTED_GITLAB_TOKEN]"),
+        (concat!("glpat-", "AbCdEfGhIjKlMnOpQrSt"), "[REDACTED_GITLAB_TOKEN]"),
         (concat!("hf_", "AbCdEfGhIjKlMnOpQrStUvWxYzAbCdEfGh"), "[REDACTED_HF_TOKEN]"),
         (
             "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U",

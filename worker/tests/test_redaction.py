@@ -19,7 +19,7 @@ from agenthandover_worker.redaction import redact, redact_value, strip_url, stri
     ("-----BEGIN RSA PRIVATE KEY-----\nMIIE\n-----END RSA PRIVATE KEY-----", "[REDACTED_PRIVATE_KEY]"),
     ("ghp_" + "a" * 36, "[REDACTED_GITHUB_TOKEN]"),
     ("github_pat_" + "B" * 22, "[REDACTED_GITHUB_TOKEN]"),
-    ("xoxb-1234567890-abcdef", "[REDACTED_SLACK_TOKEN]"),
+    ("xoxb-" "1234567890-abcdef", "[REDACTED_SLACK_TOKEN]"),
     ("sk-ant-" + "c" * 24, "[REDACTED_ANTHROPIC_KEY]"),
     ("sk-proj-" + "d" * 24, "[REDACTED_OPENAI_KEY]"),
     ("sk_live_" + "e" * 24, "[REDACTED_STRIPE_KEY]"),

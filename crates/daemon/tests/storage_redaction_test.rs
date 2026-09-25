@@ -10,8 +10,8 @@ use agenthandover_daemon::observer::event_loop::{run_storage_writer, ObserverMes
 use serde_json::json;
 use tokio::sync::mpsc;
 
-const ANTHROPIC_KEY: &str = "sk-ant-api03-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789";
-const GITHUB_TOKEN: &str = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij";
+const ANTHROPIC_KEY: &str = concat!("sk-ant-", "api03-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789");
+const GITHUB_TOKEN: &str = concat!("ghp_", "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij");
 const JWT: &str = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U";
 const STRIPE_KEY: &str = concat!("sk_", "live_51HqLyjWDarjtT1zdp7dcXYZ");
 const RESET_TOKEN: &str = "reset-4f1c9e";

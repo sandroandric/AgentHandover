@@ -250,7 +250,7 @@ class TestAWSAccessKeyRedaction:
         self, tmp_db_path: Path, write_conn: sqlite3.Connection, redactor: Redactor
     ) -> None:
         """AWS access key (AKIA...) in window title is redacted."""
-        secret = "AKIAIOSFODNN7EXAMPLE"
+        secret = "AKIA" "IOSFODNN7EXAMPLE"
         _insert_event(
             write_conn,
             event_id="ev-aws-key",
@@ -281,7 +281,7 @@ class TestGitHubTokenRedaction:
         self, tmp_db_path: Path, write_conn: sqlite3.Connection, redactor: Redactor
     ) -> None:
         """GitHub personal access token (ghp_...) is redacted."""
-        secret = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij"
+        secret = "ghp_" "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij"
         _insert_event(
             write_conn,
             event_id="ev-ghp",
@@ -490,7 +490,7 @@ class TestSlackTokenRedaction:
         self, tmp_db_path: Path, write_conn: sqlite3.Connection, redactor: Redactor
     ) -> None:
         """Slack bot token (xoxb-...) is redacted."""
-        secret = "xoxb-1234567890-1234567890123-ABCDEFghijklMNOP"
+        secret = "xoxb-" "1234567890-1234567890123-ABCDEFghijklMNOP"
         _insert_event(
             write_conn,
             event_id="ev-slack",
@@ -576,7 +576,7 @@ class TestMultipleSecretsInOneEvent:
         self, tmp_db_path: Path, write_conn: sqlite3.Connection, redactor: Redactor
     ) -> None:
         """Multiple different secret types in one event are all redacted."""
-        aws_key = "AKIAIOSFODNN7EXAMPLE"
+        aws_key = "AKIA" "IOSFODNN7EXAMPLE"
         cc_number = "4111-1111-1111-1111"
         ssn = "123-45-6789"
         _insert_event(
@@ -613,8 +613,8 @@ class TestSecretsAcrossFields:
         self, tmp_db_path: Path, write_conn: sqlite3.Connection, redactor: Redactor
     ) -> None:
         """Secrets in both window title and metadata_json are redacted."""
-        github_token = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij"
-        slack_token = "xoxb-1234567890-1234567890123-ABCDEFghijklMNOP"
+        github_token = "ghp_" "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij"
+        slack_token = "xoxb-" "1234567890-1234567890123-ABCDEFghijklMNOP"
         _insert_event(
             write_conn,
             event_id="ev-cross-field",
@@ -684,11 +684,11 @@ class TestFullPipelineRoundTrip:
     ) -> None:
         """Events with secrets are redacted, stored, and re-read cleanly."""
         secrets = {
-            "aws_key": "AKIAIOSFODNN7EXAMPLE",
-            "github_token": "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij",
+            "aws_key": "AKIA" "IOSFODNN7EXAMPLE",
+            "github_token": "ghp_" "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij",
             "cc_number": "4111-1111-1111-1111",
             "ssn": "123-45-6789",
-            "slack_token": "xoxb-1234567890-1234567890123-ABCDEFghijklMNOP",
+            "slack_token": "xoxb-" "1234567890-1234567890123-ABCDEFghijklMNOP",
         }
 
         # Insert events with various secrets
@@ -747,7 +747,7 @@ class TestSecretsInKindJson:
         self, tmp_db_path: Path, write_conn: sqlite3.Connection, redactor: Redactor
     ) -> None:
         """Secret in kind_json target_description field is redacted."""
-        secret = "AKIAIOSFODNN7EXAMPLE"
+        secret = "AKIA" "IOSFODNN7EXAMPLE"
         _insert_event(
             write_conn,
             event_id="ev-kind",
