@@ -565,6 +565,7 @@ def _memory_writer(
         screenshots_dir=data_dir / "screenshots",
         data_dir=data_dir,
         privacy_checker=privacy_checker,
+        annotation_enabled=scene_annotator is not None,
         blocker=model_scheduler.embedding_blocker,
         now=now,
         monotonic=monotonic,

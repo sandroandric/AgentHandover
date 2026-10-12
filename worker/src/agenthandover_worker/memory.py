@@ -16,7 +16,8 @@ at a time:
   focus recording's frames that are not keyframes (the focus processor
   marks them ``skipped``), frames whose JPEG is gone;
 * a focus recording's frame waits until the focus processor has decided
-  whether it is a keyframe (its row leaves ``pending``);
+  whether it is a keyframe (its row leaves ``pending``; with annotation
+  off there is no such decision and it is embedded at once);
 * a frame of the same window as the latest row, less than
   :data:`MERGE_GAP_SECONDS` after it and with cosine >=
   :data:`MERGE_COSINE` to its vector, extends that row (``last_ts``,
@@ -30,11 +31,12 @@ at a time:
 Embed before delete: until the writer has passed a frame, every path that
 deletes screenshots after annotation (the scene annotator, the backlog
 expiry, the startup orphan sweep) leaves its JPEG alone
-(:meth:`MemoryWriter.holds`), and once the writer has embedded a frame
-whose annotation is done it deletes the JPEG itself.  The wait is bounded:
-a frame older than :data:`HOLD_HOURS` is given up on (not held, not
-embedded).  Blocked and metadata-only frames are deleted at once by the
-annotation path, as before; they are never held.
+(:meth:`MemoryWriter.holds`), and once the writer has passed a frame
+whose annotation is done (or with annotation off) it deletes the JPEG
+itself.  The wait is bounded: a frame older than :data:`HOLD_HOURS` is
+given up on (not held, not embedded).  Blocked and metadata-only frames
+are deleted at once by the annotation path, as before; they are never
+held.
 
 Embedding waits (frames stay held) while ``[memory]`` is paused, while the
 model scheduler's memory/swap guard or a generation phase stands in the
@@ -271,6 +273,7 @@ class MemoryWriter:
         screenshots_dir: Path,
         data_dir: Path,
         privacy_checker: Any = None,
+        annotation_enabled: bool = True,
         blocker: Callable[[], str | None] = lambda: None,
         now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
         monotonic: Callable[[], float] = time.monotonic,
@@ -280,6 +283,7 @@ class MemoryWriter:
         self.screenshots_dir = Path(screenshots_dir)
         self.data_dir = Path(data_dir)
         self._privacy = privacy_checker
+        self._annotation = annotation_enabled
         self._blocker = blocker
         self._now = now
         self._monotonic = monotonic
@@ -473,6 +477,8 @@ class MemoryWriter:
                 when = when.replace(tzinfo=timezone.utc)
             path = find_screenshot(event, self.screenshots_dir)
             if when is None or path is None or self._never_kept(event):
+                if path is not None:
+                    self._release(event, path)
                 passed = (rowid, event)
                 stats["passed"] += 1
                 continue
@@ -483,7 +489,7 @@ class MemoryWriter:
                 passed = (rowid, event)
                 stats["passed"] += 1
                 continue
-            if _focus_session(event) is not None and event.get("annotation_status") == "pending":
+            if self._annotation_needs(event) and _focus_session(event) is not None:
                 stats["waiting"] = "a focus recording's frames are not processed yet"
                 break
             if stats["embedded"] >= FRAMES_PER_JOB:
@@ -519,10 +525,14 @@ class MemoryWriter:
             )
         return stats
 
+    def _annotation_needs(self, event: dict) -> bool:
+        """True while annotation (or the focus processor) will still read
+        the frame's JPEG."""
+        return self._annotation and event.get("annotation_status") == "pending"
+
     def _release(self, event: dict, path: str) -> None:
-        """Delete a frame's JPEG once its annotation (or the focus
-        processor) no longer needs it."""
-        if event.get("annotation_status") == "pending":
+        """Delete a frame's JPEG once annotation no longer needs it."""
+        if self._annotation_needs(event):
             return
         try:
             Path(path).unlink(missing_ok=True)

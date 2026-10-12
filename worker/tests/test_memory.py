@@ -393,7 +393,7 @@ def test_a_focus_recordings_frames_wait_for_the_keyframe_decision(env):
     assert rows(env)[0]["focus_session_id"] == "s1"
     assert stats["passed"] == 1
     assert not key["path"].exists()
-    assert drop["path"].exists(), "the focus processor deletes what it drops"
+    assert not drop["path"].exists(), "a dropped frame is never kept: its JPEG is freed"
 
 
 def test_frames_older_than_the_hold_are_given_up_on(env):
@@ -836,3 +836,26 @@ def test_purged_older_events_do_not_move_the_cursor_back(env):
     add_frame(env, at=NOW - timedelta(minutes=1), title="Other", image=b"c")
     assert writer.run()["embedded"] == 1
     assert len(fake.calls) == 3, "nothing embedded twice"
+
+
+def test_with_annotation_off_memory_deletes_every_jpeg_it_passes(env):
+    """No annotator will read the frames: Memory frees them, blocked ones
+    included, and does not wait for a keyframe decision that never comes."""
+    clock = Clock()
+    cfg = replace(MemoryConfig(), enabled=True)
+    writer = MemoryWriter(
+        env.db_path, cfg, embed=FakeEmbedder({b"a": _basis(0), b"f": _basis(5)}),
+        screenshots_dir=env.shots, data_dir=env.data_dir,
+        privacy_checker=PrivacyZoneChecker(), annotation_enabled=False,
+        now=lambda: clock.now, monotonic=lambda: clock.mono,
+    )
+    kept = add_frame(env, at=NOW - timedelta(minutes=3), image=b"a")
+    blocked = add_frame(env, at=NOW - timedelta(minutes=2), app="1Password", image=b"x")
+    focus = add_frame(env, at=NOW - timedelta(minutes=1), title="Rec", image=b"f", focus="s1")
+
+    stats = writer.run()
+
+    assert stats["embedded"] == 2 and stats["passed"] == 1
+    assert [r["id"] for r in rows(env)] == [kept["id"], focus["id"]]
+    for frame in (kept, blocked, focus):
+        assert not frame["path"].exists()
