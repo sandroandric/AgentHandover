@@ -31,8 +31,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from agenthandover_worker.model_profiles import EMBEDDING_MODEL, embedding_profile
 from agenthandover_worker.ollama import OllamaClient, OllamaError
-from agenthandover_worker.vector_kb import CLUSTERING_PREFIX
 
 if TYPE_CHECKING:
     from agenthandover_worker.llm_reasoning import LLMReasoner
@@ -49,16 +49,18 @@ logger = logging.getLogger(__name__)
 class SegmenterConfig:
     """Configuration for the task segmenter."""
 
-    # Embedding model — nomic-embed-text (768d, much better quality than minilm)
-    embedding_model: str = "nomic-embed-text"
+    # ``[embedding] model``; its profile gives the clustering prefix, the
+    # stored size and the threshold below.
+    embedding_model: str = EMBEDDING_MODEL
     ollama_host: str = "http://localhost:11434"
 
     # Clustering: cosine similarity to a cluster centroid for "same task".
-    # Calibrated for ``clustering:``-prefixed nomic-embed-text vectors, which
-    # sit ~0.09 higher than unprefixed ones: 0.83 is the operating point the
-    # old unprefixed 0.75 had (no two tasks merged) on the labelled set in
-    # tests/journeys/test_segmenter_threshold.py.
-    similarity_threshold: float = 0.83
+    # None: the embedding profile's ``segmenter`` threshold.  For
+    # nomic-embed-text that is 0.83, calibrated for its ``clustering:``-
+    # prefixed vectors (which sit ~0.09 higher than unprefixed ones): the
+    # operating point the old unprefixed 0.75 had (no two tasks merged) on
+    # the labelled set in tests/journeys/test_segmenter_threshold.py.
+    similarity_threshold: float | None = None
 
     # Noise filtering
     min_workflow_ratio: float = 0.0  # ratio of is_workflow=True frames
@@ -200,9 +202,9 @@ class SegmentationResult:
 # Embedding via Ollama
 # ---------------------------------------------------------------------------
 
-# nomic-embed-text is trained with task prefixes; grouping frames by task is
-# its ``clustering`` task.  The similarity threshold is calibrated for
-# vectors computed with this prefix.
+# The embedding models are trained with task prefixes; grouping frames by
+# task is their ``clustering`` task.  The similarity threshold is
+# calibrated for vectors computed with that prefix.
 
 
 def _compute_embeddings(
@@ -212,13 +214,16 @@ def _compute_embeddings(
     host: str = "http://localhost:11434",
     timeout: float = 30.0,
 ) -> list[list[float]]:
-    """Embed *texts* with the ``clustering:`` task prefix via /api/embed.
+    """Embed *texts* with *model*'s clustering task prefix, at its
+    profile's size, via /api/embed.
 
     Returns a list of embedding vectors (one per input text).
     Raises ConnectionError if Ollama is not reachable.
     """
+    profile = embedding_profile(model)
     return OllamaClient(host).embed(
-        model, texts, prefix=CLUSTERING_PREFIX, timeout=timeout,
+        model, texts, prefix=profile.cluster_prefix,
+        dimensions=profile.dimensions, timeout=timeout,
     )
 
 
@@ -464,6 +469,7 @@ class TaskSegmenter:
         vector_kb: "VectorKB | None" = None,
     ) -> None:
         self.config = config or SegmenterConfig()
+        self._profile = embedding_profile(self.config.embedding_model)
         self._llm_reasoner = llm_reasoner
         self._cluster_label_store = cluster_label_store
         self._vector_kb = vector_kb
@@ -633,12 +639,31 @@ class TaskSegmenter:
         except OSError:
             logger.debug("Failed to save cluster label cache", exc_info=True)
 
+    def _similarity_threshold(self) -> float:
+        """The configured clustering threshold, else the profile's.
+        Raises ValueError for a model not calibrated yet."""
+        if self.config.similarity_threshold is not None:
+            return self.config.similarity_threshold
+        if self._profile.thresholds is None:
+            raise ValueError(
+                f"{self._profile.model} has no calibrated segmenter threshold"
+            )
+        return self._profile.thresholds.segmenter
+
+    def _shared_kb(self) -> "VectorKB | None":
+        """The vector KB when it embeds with the segmenter's model (the
+        frame vectors it holds are then the segmenter's own), else None."""
+        vkb = self._vector_kb
+        if vkb is None or vkb.profile.model != self._profile.model:
+            return None
+        return vkb
+
     def _cached_embeddings(
         self, frames: list[AnnotatedFrame], texts: list[str],
     ) -> list[list[float] | None]:
         """Each frame's stored vector for exactly this text and model, or None."""
-        vkb = self._vector_kb
-        if vkb is None or vkb.config.embedding_model != self.config.embedding_model:
+        vkb = self._shared_kb()
+        if vkb is None:
             return [None] * len(frames)
         cached: list[list[float] | None] = []
         for frame, text in zip(frames, texts):
@@ -646,7 +671,7 @@ class TaskSegmenter:
                 cached.append(
                     vkb.get_current(
                         "annotation", frame.event_id, text,
-                        prefix=CLUSTERING_PREFIX,
+                        prefix=self._profile.cluster_prefix,
                     )
                     if frame.event_id else None
                 )
@@ -731,16 +756,19 @@ class TaskSegmenter:
             )
 
             # Store annotation embeddings in vector KB (piggybacks on
-            # the embed call — zero extra Ollama cost)
-            if self._vector_kb and embeddings:
+            # the embed call — zero extra Ollama cost).  Only into a KB of
+            # the same model: the rows are labelled with the KB's model.
+            vkb = self._shared_kb()
+            if vkb is not None and embeddings:
                 try:
                     items = [
                         ("annotation", frames[i].event_id, texts[i])
                         for i, emb in zip(missing, embeddings) if emb
                     ]
                     valid_embs = [emb for emb in embeddings if emb]
-                    stored = self._vector_kb.upsert_batch(
-                        items, embeddings=valid_embs, prefix=CLUSTERING_PREFIX,
+                    stored = vkb.upsert_batch(
+                        items, embeddings=valid_embs,
+                        prefix=self._profile.cluster_prefix,
                     )
                     logger.info(
                         "Vector KB: %d/%d annotation embeddings stored",
@@ -755,7 +783,7 @@ class TaskSegmenter:
             return self._fallback_app_clustering(frames, result, sleep_starts)
 
         # Step 3: Cluster by embedding similarity
-        clusters = _cluster_frames(frames, self.config.similarity_threshold)
+        clusters = _cluster_frames(frames, self._similarity_threshold())
 
         # Step 4: Split clusters into contiguous segments + noise filtering.
         # A cluster's frames split wherever two consecutive frames are more

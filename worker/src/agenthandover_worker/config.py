@@ -178,14 +178,30 @@ class KnowledgeConfig:
 
 @dataclass(frozen=True)
 class EmbeddingConfig:
-    """``[embedding]``: one model for every text embedding (the vector KB
-    and the task segmenter), always used with nomic's task prefixes."""
+    """``[embedding]``: one model for every text embedding (the vector KB,
+    the task segmenter and the session linker), used with its embedding
+    profile's task prefixes and thresholds.  A model whose profile has no
+    calibrated thresholds yet is refused (the default is used)."""
 
     model: str = "nomic-embed-text"
     # Vectors not updated for this many days are purged once a day.
     retention_days: int = 90
     # Hard cap on stored vectors; the least recently updated go first.
     max_rows: int = 50_000
+
+
+@dataclass(frozen=True)
+class MemoryConfig:
+    """``[memory]``: the private memory of kept screens (mirrors
+    ``MemoryConfig`` in ``crates/common/src/config.rs``)."""
+
+    enabled: bool = False
+    model: str = "embeddinggemma-2:440m"
+    dimensions: int = 256
+    retention_days: int = 365
+    thumbnail_days: int = 7
+    agents_access: bool = False
+    max_frames_per_hour: int = 600
 
 
 @dataclass(frozen=True)
@@ -216,6 +232,7 @@ class Config:
     export: ExportConfig = field(default_factory=ExportConfig)
     knowledge: KnowledgeConfig = field(default_factory=KnowledgeConfig)
     embedding: EmbeddingConfig = field(default_factory=EmbeddingConfig)
+    memory: MemoryConfig = field(default_factory=MemoryConfig)
     focus: FocusConfig = field(default_factory=FocusConfig)
     openclaw: OpenClawConfig = field(default_factory=OpenClawConfig)
     # ``[privacy.zones]`` as written; ``privacy_zones.PrivacyZoneConfig``
@@ -260,7 +277,8 @@ def load_config(path: str | Path | None = None) -> Config:
         features=_build(FeaturesConfig, "features", section("features")),
         export=_export(section("export")),
         knowledge=_build(KnowledgeConfig, "knowledge", section("knowledge")),
-        embedding=_build(EmbeddingConfig, "embedding", section("embedding")),
+        embedding=_embedding(section("embedding")),
+        memory=_build(MemoryConfig, "memory", section("memory")),
         focus=_build(FocusConfig, "focus", section("focus")),
         openclaw=_build(OpenClawConfig, "openclaw", section("openclaw")),
         privacy_zones=zones if isinstance(zones, dict) else {},
@@ -355,6 +373,23 @@ def _vlm(values: dict) -> VlmConfig:
         annotation_model=base.annotation_model or tier.annotation_model,
         sop_model=sop_model,
     )
+
+
+def _embedding(values: dict) -> EmbeddingConfig:
+    """``[embedding]``, refusing a model with no calibrated thresholds:
+    every threshold the worker applies to its vectors would be one measured
+    on another model."""
+    from agenthandover_worker.model_profiles import embedding_profile
+
+    base = _build(EmbeddingConfig, "embedding", values)
+    if embedding_profile(base.model).thresholds is None:
+        default = EmbeddingConfig.model
+        logger.warning(
+            "[embedding] model = %r has no calibrated thresholds in this "
+            "version; using %r", base.model, default,
+        )
+        return replace(base, model=default)
+    return base
 
 
 def _idle_jobs(values: dict) -> IdleJobsConfig:

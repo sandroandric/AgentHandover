@@ -11,9 +11,10 @@ Design choices:
   * Own SQLite connection — same isolation pattern as ActivitySearcher
   * Idempotent upsert — a row is reused only when its text_hash, embedding
     model and task prefix all match; a model or prefix change re-embeds
-  * nomic-embed-text task prefixes — documents are stored with
-    ``search_document:``, queries embed with ``search_query:``, the task
-    segmenter's frame vectors with ``clustering:``
+  * One embedding profile per model (``model_profiles.EMBEDDING_PROFILES``):
+    its task prefixes (documents, queries, the task segmenter's frame
+    vectors), its stored size and its thresholds; a search ranks only rows
+    of the query's model
   * Budget cap — max_embeds_per_cycle prevents Ollama overload on backlog catch-up
 """
 
@@ -28,14 +29,16 @@ import struct
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from agenthandover_worker.model_profiles import (
+    EMBEDDING_MODEL,
+    MEMORY_MODEL,
+    EmbeddingProfile,
+    EmbeddingThresholds,
+    embedding_profile,
+)
 from agenthandover_worker.ollama import OllamaClient, OllamaError
 
 logger = logging.getLogger(__name__)
-
-# nomic-embed-text's task prefixes: every text is embedded with one.
-DOCUMENT_PREFIX = "search_document: "
-QUERY_PREFIX = "search_query: "
-CLUSTERING_PREFIX = "clustering: "
 
 
 # ---------------------------------------------------------------------------
@@ -46,9 +49,12 @@ CLUSTERING_PREFIX = "clustering: "
 class VectorKBConfig:
     """Configuration for the vector knowledge base."""
 
-    embedding_model: str = "nomic-embed-text"
+    embedding_model: str = EMBEDDING_MODEL
+    # ``[memory] model``: ``purge_stale`` keeps its rows too, so vectors a
+    # background re-embed writes with it survive the daily maintenance
+    # until the switch.
+    memory_model: str = MEMORY_MODEL
     ollama_host: str = "http://localhost:11434"
-    embedding_dim: int = 768
     batch_size: int = 32
     timeout_seconds: float = 60.0
     max_embeds_per_cycle: int = 200
@@ -179,6 +185,8 @@ class VectorKB:
         config: VectorKBConfig | None = None,
     ) -> None:
         self.config = config or VectorKBConfig()
+        # How this KB embeds: task prefixes, stored size, thresholds.
+        self.profile: EmbeddingProfile = embedding_profile(self.config.embedding_model)
         self._db_path = str(db_path)
         # Shared by the control, inference and query-API threads
         # (inference_runner); SQLite itself is serialized.
@@ -230,6 +238,18 @@ class VectorKB:
             logger.info("Deleted %d screenshot vector(s) of the removed "
                         "image embedder", cur.rowcount)
 
+    @property
+    def thresholds(self) -> EmbeddingThresholds:
+        """The cosine thresholds measured on the configured model.
+
+        Raises ValueError for a model not calibrated yet: its vectors can
+        be stored and searched, but no threshold measured on another model
+        means anything for them.
+        """
+        if self.profile.thresholds is None:
+            raise ValueError(f"{self.profile.model} has no calibrated thresholds")
+        return self.profile.thresholds
+
     # ------------------------------------------------------------------
     # Embedding computation (Ollama /api/embed)
     # ------------------------------------------------------------------
@@ -238,9 +258,11 @@ class VectorKB:
         self,
         texts: list[str],
         *,
-        prefix: str = DOCUMENT_PREFIX,
+        prefix: str | None = None,
     ) -> list[list[float]]:
-        """Embed *texts* with the task *prefix*, batched by config.batch_size.
+        """Embed *texts* with the task *prefix* (default: the profile's
+        document prefix) at the profile's size, batched by
+        config.batch_size.
 
         Raises ConnectionError if Ollama is unreachable.
         """
@@ -248,7 +270,8 @@ class VectorKB:
         return OllamaClient(self.config.ollama_host).embed(
             self.config.embedding_model,
             texts,
-            prefix=prefix,
+            prefix=self.profile.doc_prefix if prefix is None else prefix,
+            dimensions=self.profile.dimensions,
             batch_size=self.config.batch_size,
             timeout=self.config.timeout_seconds,
         )
@@ -320,12 +343,15 @@ class VectorKB:
 
     def get_current(
         self, source_type: str, source_id: str, text: str,
-        *, prefix: str = DOCUMENT_PREFIX,
+        *, prefix: str | None = None,
     ) -> list[float] | None:
         """The stored vector of *text* for this source, or None when the row
         is missing or is not current for this text, the configured model
-        and *prefix* (the same test ``upsert`` skips on).  *text* is the
-        unprefixed text: the prefix is recorded in its own column."""
+        and *prefix* (default: the profile's document prefix; the same test
+        ``upsert`` skips on).  *text* is the unprefixed text: the prefix is
+        recorded in its own column."""
+        if prefix is None:
+            prefix = self.profile.doc_prefix
         vid = _vector_id(source_type, source_id)
         if not self._is_current(
             vid, _text_hash(text), self.config.embedding_model, prefix,
@@ -343,20 +369,23 @@ class VectorKB:
         text: str,
         *,
         embedding: list[float] | None = None,
-        prefix: str = DOCUMENT_PREFIX,
+        prefix: str | None = None,
         model: str | None = None,
     ) -> bool:
-        """Store a single vector of *text* embedded with *prefix*.
+        """Store a single vector of *text* embedded with *prefix* (default:
+        the document prefix of the model that made it).
 
         Skips when the stored row has the same text, model and prefix.
         If *embedding* is provided, uses it directly (no Ollama call);
         *model* then names the model that made it when that is not the
-        configured text model (image vectors).
+        configured embedding model.
         Returns True if the vector was stored/updated.
         """
         vid = _vector_id(source_type, source_id)
         thash = _text_hash(text)
         model = model or self.config.embedding_model
+        if prefix is None:
+            prefix = embedding_profile(model).doc_prefix
 
         if self._is_current(vid, thash, model, prefix):
             return False  # unchanged
@@ -386,20 +415,22 @@ class VectorKB:
         items: list[tuple[str, str, str]],
         *,
         embeddings: list[list[float]] | None = None,
-        prefix: str = DOCUMENT_PREFIX,
+        prefix: str | None = None,
     ) -> int:
         """Bulk upsert.  Each item is (source_type, source_id, text).
 
         If *embeddings* is provided (matching length), uses them directly;
-        they must have been computed from the texts with *prefix* by the
-        configured model.  Otherwise, filters unchanged items, then embeds
-        the rest with *prefix* in one batched call.  Returns count of
-        vectors stored/updated.
+        they must have been computed from the texts with *prefix* (default:
+        the profile's document prefix) by the configured model.  Otherwise,
+        filters unchanged items, then embeds the rest with *prefix* in one
+        batched call.  Returns count of vectors stored/updated.
         """
         if not items:
             return 0
 
         model = self.config.embedding_model
+        if prefix is None:
+            prefix = self.profile.doc_prefix
         to_store: list[tuple[str, str, str, list[float]]] = []
 
         if embeddings and len(embeddings) == len(items):
@@ -459,9 +490,12 @@ class VectorKB:
         source_types: list[str] | None = None,
         min_score: float = 0.0,
     ) -> list[VectorSearchResult]:
-        """Embed *query_text* and find closest vectors by cosine similarity."""
+        """Embed *query_text* with the profile's query prefix and find the
+        closest vectors of the configured model by cosine similarity."""
         try:
-            embeddings = self.compute_embeddings([query_text], prefix=QUERY_PREFIX)
+            embeddings = self.compute_embeddings(
+                [query_text], prefix=self.profile.query_prefix,
+            )
         except (ConnectionError, OllamaError):
             logger.debug("Ollama unavailable for search embedding")
             return []
@@ -510,15 +544,20 @@ class VectorKB:
         top_k: int = 10,
         source_types: list[str] | None = None,
         min_score: float = 0.0,
+        model: str | None = None,
     ) -> list[VectorSearchResult]:
-        """Find closest vectors to a pre-computed vector.
+        """Find closest vectors to a pre-computed vector made by *model*
+        (default: the configured embedding model).
 
-        A coarse pass ranks every row by its 8-bit copy; the best
-        ``max(40, 4 * top_k)`` are re-scored from their float32 vectors,
-        and those exact scores are what is returned.
+        Only rows of that model and size are ranked: a vector of another
+        model lives in another space whatever its size, so its cosine with
+        the query means nothing.  A coarse pass ranks every such row by its
+        8-bit copy; the best ``max(40, 4 * top_k)`` are re-scored from their
+        float32 vectors, and those exact scores are what is returned.
         """
         if not query_vector or top_k <= 0:
             return []
+        model = model or self.config.embedding_model
         dim = len(query_vector)
         unit = _normalize(query_vector)
         qvec, qscale = _quantize(unit)
@@ -528,7 +567,10 @@ class VectorKB:
 
         coarse: list[tuple[float, str]] = []
         for vid, row in self._sync_index().items():
-            if row.dim != dim or (wanted is not None and row.source_type not in wanted):
+            if (
+                row.model != model or row.dim != dim
+                or (wanted is not None and row.source_type not in wanted)
+            ):
                 continue
             # sum((q+128)(r+128)) minus the offset terms = sum(q * r)
             approx = (
@@ -588,23 +630,26 @@ class VectorKB:
 
     def purge_stale(self, max_age_days: int | None = None) -> int:
         """Remove entries not updated for *max_age_days* (default
-        ``config.retention_days``), and every vector made by a model other
-        than the configured embedding model: after a model change they are
-        in another space."""
+        ``config.retention_days``), and every vector made by a model that is
+        neither the configured embedding model nor the memory model: after
+        a model change those are in a space nothing searches.  The memory
+        model's rows stay (a background re-embed with it is kept until the
+        switch)."""
         days = self.config.retention_days if max_age_days is None else max_age_days
+        kept = (self.config.embedding_model, self.config.memory_model)
         cur = self._conn.execute(
             "DELETE FROM vector_store "
             "WHERE updated_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?) "
-            "OR model != ?",
-            (f"-{days} days", self.config.embedding_model),
+            "OR model NOT IN (?, ?)",
+            (f"-{days} days", *kept),
         )
         self._conn.commit()
         deleted = cur.rowcount
         if deleted:
             self._index = None
             logger.info(
-                "Purged %d vectors (>%dd old or not from %s)",
-                deleted, days, self.config.embedding_model,
+                "Purged %d vectors (>%dd old, or from neither %s nor %s)",
+                deleted, days, *kept,
             )
         return deleted
 

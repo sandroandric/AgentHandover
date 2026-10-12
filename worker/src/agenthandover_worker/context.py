@@ -498,6 +498,7 @@ def _vector_kb(cfg: Any, db_path: Path) -> Any:
 
         vkb_config = VectorKBConfig(
             embedding_model=cfg.embedding.model,
+            memory_model=cfg.memory.model,
             ollama_host=cfg.vlm.ollama_host,
             retention_days=cfg.embedding.retention_days,
             max_rows=cfg.embedding.max_rows,

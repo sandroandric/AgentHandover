@@ -301,6 +301,8 @@ def _jaccard(a: set, b: set) -> float:
 # Matching
 # ------------------------------------------------------------------
 
+# Fingerprint (token-set Jaccard) similarity of a match, the same for every
+# embedding model; a semantic match uses the embedding profile's ``dedup``.
 _DEFAULT_THRESHOLD = 0.70
 
 
@@ -318,8 +320,10 @@ def find_matching_sop(
     Args:
         new_sop: The newly generated SOP template.
         existing_sops: List of previously generated SOP templates.
-        threshold: Minimum similarity score to consider a match (0.0–1.0).
-        vector_kb: Optional VectorKB for semantic matching.
+        threshold: Minimum fingerprint similarity to consider a match
+            (0.0–1.0).
+        vector_kb: Optional VectorKB for semantic matching; a semantic
+            match needs its embedding profile's ``dedup`` cosine.
 
     Returns:
         Index into ``existing_sops`` of the best match, or ``None`` if no
@@ -339,7 +343,7 @@ def find_matching_sop(
                     query,
                     top_k=3,
                     source_types=["procedure"],
-                    min_score=threshold,
+                    min_score=vector_kb.thresholds.dedup,
                 )
                 if results:
                     # Map vector result (slug) back to index in existing_sops
@@ -664,6 +668,8 @@ def merge_sops(
     return merged
 
 
+# Fingerprint similarity of a variant family, ``[0.60, 0.70)``: token sets,
+# no embedding model involved.
 _FAMILY_THRESHOLD = 0.60
 
 

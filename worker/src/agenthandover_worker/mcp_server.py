@@ -228,7 +228,6 @@ def build_mcp_server():
         semantic search was not used.
         """
         from agenthandover_worker.ollama import OllamaError
-        from agenthandover_worker.vector_kb import QUERY_PREFIX
 
         vkb, reason = _vector_kb()
         if vkb is not None:
@@ -240,7 +239,7 @@ def build_mcp_server():
             else:
                 try:
                     vectors = vkb.compute_embeddings(
-                        [query], prefix=QUERY_PREFIX,
+                        [query], prefix=vkb.profile.query_prefix,
                     )
                 except (ConnectionError, TimeoutError, OllamaError) as exc:
                     reason = f"embedding model unavailable: {exc}"
@@ -253,7 +252,8 @@ def build_mcp_server():
                     if vectors and vectors[0]:
                         hits = vkb.search_by_vector(
                             vectors[0], top_k=limit,
-                            source_types=["procedure"], min_score=0.3,
+                            source_types=["procedure"],
+                            min_score=vkb.thresholds.min_score,
                         )
                         titles = {
                             p.get("id", ""): p.get("title", "")
