@@ -21,6 +21,7 @@ from agenthandover_worker import main as wm
 from agenthandover_worker import workflow_mining
 from agenthandover_worker.focus_processor import recorded_observations
 from agenthandover_worker.scheduler import charged_to
+from agenthandover_worker.thumbnails import thumbnail_days
 
 logger = logging.getLogger("agenthandover_worker")
 
@@ -83,6 +84,8 @@ def run(ctx: Any, tick: Any) -> bool:
         vector_kb=ctx.vector_kb,
         activity_searcher=ctx.activity_searcher,
         annotation_cache=ctx.annotation_cache,
+        db=db,
+        thumbnail_days=thumbnail_days(ctx.cfg.raw),
     )
     db.set_state(wm.DAILY_JOBS_STATE_KEY, today_local)
     ctx.daily_jobs_date = today_local
