@@ -433,14 +433,32 @@ class QueryAPIHandler(http.server.BaseHTTPRequestHandler):
             self._send_error(400, f"Invalid JSON: {exc}")
             return
 
+        if not isinstance(body, dict):
+            self._send_error(400, "Request body must be a JSON object")
+            return
         query = body.get("query", "")
-        if not query:
+        if not isinstance(query, str) or not query:
             self._send_error(400, "Missing 'query' field")
             return
 
         top_k = body.get("limit", 10)
+        if isinstance(top_k, bool) or not isinstance(top_k, int) or top_k < 1:
+            self._send_error(400, "'limit' must be a positive integer")
+            return
         source_types = body.get("source_types")
-        min_score = body.get("min_score", 0.3)
+        if source_types is not None and not (
+            isinstance(source_types, list)
+            and all(isinstance(t, str) for t in source_types)
+        ):
+            self._send_error(400, "'source_types' must be a list of strings")
+            return
+        # Default floor: the one measured on the configured embedding model.
+        min_score = body.get("min_score")
+        if min_score is None:
+            min_score = vector_kb.thresholds.min_score
+        elif isinstance(min_score, bool) or not isinstance(min_score, (int, float)):
+            self._send_error(400, "'min_score' must be a number")
+            return
 
         results = vector_kb.search(
             query,

@@ -24,7 +24,7 @@ import sys
 import tempfile
 import tomllib
 from collections.abc import Collection, Iterable
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime
 from pathlib import Path
 
@@ -561,11 +561,12 @@ class EmbeddingThresholds:
     # band just below it where an LLM verdict decides.
     linker_cos: float
     linker_band: float
-    # SOP dedup: a semantic match, and the lower edge of the family range
-    # ``[dedup_family, dedup)``.
+    # SOP dedup: the lowest cosine of a semantic match.  (Its structural
+    # fingerprint threshold and the variant-family range compare token
+    # overlaps, not vectors, so they belong to sop_dedup, not a model.)
     dedup: float
-    dedup_family: float
-    # Procedure matcher: a match counts as supporting evidence.
+    # Procedure matcher: the lowest cosine of a semantic match counted as
+    # supporting evidence (its fingerprint fallback keeps its own threshold).
     matcher: float
     # Skill search (MCP ``search_procedures`` and the query API's
     # ``/search``): the default lowest score returned.
@@ -584,12 +585,23 @@ class EmbeddingProfile:
     query_prefix: str
     cluster_prefix: str
     thresholds: EmbeddingThresholds | None
+    # True when ``dim`` is a truncation Ollama makes on request (a
+    # Matryoshka model stored below its native size).
+    truncated: bool = False
+
+    @property
+    def dimensions(self) -> int | None:
+        """The ``dimensions`` to send with every ``/api/embed`` request:
+        ``dim`` for a truncated model, None (the field left out, the model's
+        native size) otherwise."""
+        return self.dim if self.truncated else None
 
 
-# One row per embedding model the worker can use.  nomic-embed-text keeps
-# the numbers the readers hold today (task_segmenter, session_linker,
-# sop_dedup, procedure_matcher, mcp_server, query_api, and vector_kb's
-# prefixes); WP-E2 points the readers at this table.  EmbeddingGemma 2's
+# One row per embedding model the worker can use; every reader of a
+# prefix or a cosine threshold (vector_kb, task_segmenter, session_linker,
+# sop_dedup, procedure_matcher, mcp_server, query_api) takes it from the
+# row of the model it embeds with.  nomic-embed-text's numbers are the ones
+# those readers held before this table.  EmbeddingGemma 2's
 # prefixes are its model card's; it is stored truncated to 256 dimensions
 # (Matryoshka; measured near-lossless against 768), and its thresholds come
 # from the calibration recordings (WP-E3), never guessed.
@@ -605,7 +617,6 @@ EMBEDDING_PROFILES: dict[str, EmbeddingProfile] = {
             linker_cos=0.89,
             linker_band=0.08,
             dedup=0.70,
-            dedup_family=0.60,
             matcher=0.50,
             min_score=0.3,
         ),
@@ -617,8 +628,20 @@ EMBEDDING_PROFILES: dict[str, EmbeddingProfile] = {
         query_prefix="task: search result | query: ",
         cluster_prefix="task: clustering | query: ",
         thresholds=None,
+        truncated=True,
     ),
 }
+
+
+def embedding_profile(model: str) -> EmbeddingProfile:
+    """The profile of embedding *model*.  A model without a row of its own
+    (one set by hand in ``[embedding] model``) is used the way every
+    version before profiles used it: nomic-embed-text's prefixes and
+    thresholds, at its native size."""
+    profile = EMBEDDING_PROFILES.get(model)
+    if profile is None:
+        return replace(EMBEDDING_PROFILES[EMBEDDING_MODEL], model=model)
+    return profile
 
 # The per-frame annotator is the small resident model on every tier
 # (text-first annotation, WP-C3b); a larger model writes Skills and

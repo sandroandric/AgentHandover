@@ -10,6 +10,7 @@ from unittest.mock import patch
 import pytest
 
 from agenthandover_worker.knowledge_base import KnowledgeBase
+from agenthandover_worker.model_profiles import EMBEDDING_PROFILES
 from daemon_db import kb_db
 from agenthandover_worker.session_linker import (
     STOP_WORDS,
@@ -582,8 +583,15 @@ class _CountingReasoner:
         return ReasoningResult(value=self._answer, success=True)
 
 
+_NOMIC = EMBEDDING_PROFILES["nomic-embed-text"]
+
+
 class _FakeVectorKB:
-    """compute_embeddings returning fixed vectors per text."""
+    """compute_embeddings returning fixed vectors per text (as
+    nomic-embed-text's vector KB: its profile and thresholds)."""
+
+    profile = _NOMIC
+    thresholds = _NOMIC.thresholds
 
     def __init__(self, vectors: dict[str, list[float]]) -> None:
         self.vectors = vectors
@@ -629,14 +637,43 @@ class TestLLMBand:
     def test_cosine_is_compared_with_the_cosine_threshold(self, kb: KnowledgeBase) -> None:
         """A cosine of 0.6 is far below the cosine threshold, though it
         would pass the Jaccard-calibrated 0.4."""
-        from agenthandover_worker.session_linker import _COSINE_THRESHOLD, _LLM_BAND
-
         vectors = {"x": [1.0, 0.0], "y": [0.6, 0.8]}  # cosine 0.6
         linker = SessionLinker(kb, vector_kb=_FakeVectorKB(vectors))
         score, metric = linker._intent_similarity("x", "y")
         assert metric == "cosine" and score == pytest.approx(0.6)
-        assert score < _COSINE_THRESHOLD - _LLM_BAND["cosine"]
+        assert score < _NOMIC.thresholds.linker_cos - _NOMIC.thresholds.linker_band
         assert linker._intents_match("x", "y") is False
+
+    def test_cosine_threshold_band_and_prefix_are_the_vector_kbs_profile(
+        self, kb: KnowledgeBase,
+    ) -> None:
+        """The same cosine links under a model whose profile puts the
+        threshold below it, and falls in the LLM band under one whose band
+        reaches it; intents embed with the profile's clustering prefix."""
+        from dataclasses import replace
+
+        vectors = {"x": [1.0, 0.0], "y": [0.6, 0.8]}  # cosine 0.6
+        prefixes: list[str] = []
+
+        class _Profiled(_FakeVectorKB):
+            def __init__(self, thresholds) -> None:
+                super().__init__(vectors)
+                self.profile = replace(_NOMIC, cluster_prefix="cluster> ", thresholds=thresholds)
+                self.thresholds = thresholds
+
+            def compute_embeddings(self, texts, *, prefix=""):
+                prefixes.append(prefix)
+                return super().compute_embeddings(texts, prefix=prefix)
+
+        low = replace(_NOMIC.thresholds, linker_cos=0.55)
+        assert SessionLinker(kb, vector_kb=_Profiled(low))._intents_match("x", "y") is True
+        assert prefixes == ["cluster> "]
+
+        wide = replace(_NOMIC.thresholds, linker_cos=0.65, linker_band=0.1)
+        reasoner = _CountingReasoner(answer=True)
+        linker = SessionLinker(kb, llm_reasoner=reasoner, vector_kb=_Profiled(wide))
+        assert linker._intents_match("x", "y") is True
+        assert reasoner.calls == 1
 
     def test_each_intent_is_embedded_once(self, kb: KnowledgeBase) -> None:
         vkb = _FakeVectorKB({"x": [1.0, 0.0], "y": [0.0, 1.0], "z": [1.0, 1.0]})
@@ -660,6 +697,8 @@ class _PromptReasoner(_CountingReasoner):
 
 class _DownVectorKB:
     """An embedder whose model is unreachable."""
+
+    profile = _NOMIC
 
     def __init__(self) -> None:
         self.calls = 0

@@ -7,7 +7,9 @@ that correspond to newly observed task segments or continuity spans.
 The match threshold (default 0.50) is intentionally lower than dedup's 0.70
 because partial matches are still valuable as supporting evidence for
 continuity detection — a segment that partially overlaps a known procedure
-is a signal, even if it's not a full duplicate.
+is a signal, even if it's not a full duplicate.  With a vector KB, a
+semantic match is tried first, at the embedding profile's ``matcher``
+cosine (0.50 for nomic-embed-text).
 
 Integration points:
 - Called by the continuity detector to link segments to known SOPs
@@ -84,7 +86,7 @@ class ProcedureMatcher:
                         query,
                         top_k=5,
                         source_types=["procedure"],
-                        min_score=self._match_threshold,
+                        min_score=self._vector_kb.thresholds.matcher,
                     )
                     if results:
                         return [(r.source_id, r.score) for r in results]

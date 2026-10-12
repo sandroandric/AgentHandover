@@ -43,21 +43,20 @@ STOP_WORDS = {
 }
 
 # Linking thresholds, one per similarity metric: Jaccard over normalised
-# intent tokens, and cosine of ``clustering:``-prefixed nomic-embed-text
-# vectors.  A score from one metric is never compared with the other's
-# threshold.  The cosine value is measured on intent texts in
-# tests/journeys/test_linker_threshold.py (recorded nomic-embed-text
-# vectors): same-task pairs score 0.76-0.96, and the closest different-task
-# pair (a Stripe payout reconciliation vs. failed payments in the Stripe
-# dashboard) 0.88, so the segmenter's 0.83 would link different tasks.
-# 0.89 links no two tasks; the pairs in between go to the LLM band.
+# intent tokens, and cosine of clustering-prefixed vectors of the vector
+# KB's embedding model.  A score from one metric is never compared with the
+# other's threshold.  The cosine threshold and its LLM band are the
+# embedding profile's (``linker_cos``, ``linker_band``); nomic-embed-text's
+# are measured on intent texts in tests/journeys/test_linker_threshold.py:
+# same-task pairs score 0.76-0.96, and the closest different-task pair (a
+# Stripe payout reconciliation vs. failed payments in the Stripe dashboard)
+# 0.88, so the segmenter's 0.83 would link different tasks.  0.89 links no
+# two tasks; the pairs in between go to the LLM band.
 _JACCARD_THRESHOLD = 0.4
-_COSINE_THRESHOLD = 0.89
-_THRESHOLDS = {"jaccard": _JACCARD_THRESHOLD, "cosine": _COSINE_THRESHOLD}
 # Just below its metric's threshold, an LLM YES links two intents.  Only
 # below: at or above the threshold the intents link without a model call,
 # so a verdict there would change nothing.
-_LLM_BAND = {"jaccard": 0.25, "cosine": 0.08}
+_JACCARD_LLM_BAND = 0.25
 # New pairs in that band sent to the model per daily pass.  A pair once
 # answered is remembered (``judgements`` in session_links.json), so the
 # pairs over the cap are asked on a later day.
@@ -297,9 +296,8 @@ class SessionLinker:
         if self._vector_kb is None or not missing:
             return
         try:
-            from agenthandover_worker.vector_kb import CLUSTERING_PREFIX
             embs = self._vector_kb.compute_embeddings(
-                missing, prefix=CLUSTERING_PREFIX,
+                missing, prefix=self._vector_kb.profile.cluster_prefix,
             )
         except Exception:
             logger.debug("Intent embedding failed, linking by Jaccard", exc_info=True)
@@ -334,10 +332,14 @@ class SessionLinker:
         says YES (remembered from an earlier pass, or asked while the
         pass's budget lasts)."""
         score, metric = self._intent_similarity(a, b)
-        threshold = _THRESHOLDS[metric]
+        if metric == "cosine":
+            thresholds = self._vector_kb.thresholds
+            threshold, band = thresholds.linker_cos, thresholds.linker_band
+        else:
+            threshold, band = _JACCARD_THRESHOLD, _JACCARD_LLM_BAND
         if score >= threshold:
             return True
-        if self._llm_reasoner is None or score < threshold - _LLM_BAND[metric]:
+        if self._llm_reasoner is None or score < threshold - band:
             return False
         key = _pair_key(a, b)
         self._consulted.add(key)

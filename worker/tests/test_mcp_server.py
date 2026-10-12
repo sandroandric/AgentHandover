@@ -246,6 +246,34 @@ class TestSearchSkillsMode:
             {"slug": "reddit-marketing", "title": "Reddit Community Marketing", "score": 1.0},
         ]
 
+    def test_query_prefix_and_floor_are_the_embedding_profiles(self, server):
+        """nomic-embed-text (the default ``[embedding] model``): the query
+        embeds with ``search_query: `` and results stop at its 0.3."""
+        from agenthandover_worker.vector_kb import VectorKB
+
+        search, db = server
+        self._embed_skill(db)
+        prefixes: list[str] = []
+        searches: list[dict] = []
+
+        def embed(self, texts, *, prefix=None):
+            prefixes.append(prefix)
+            return _fake_embed(self, texts, prefix=prefix)
+
+        real_search = VectorKB.search_by_vector
+
+        def search_by_vector(self, vector, **kwargs):
+            searches.append(kwargs)
+            return real_search(self, vector, **kwargs)
+
+        with patch.object(VectorKB, "compute_embeddings", embed), \
+             patch.object(VectorKB, "search_by_vector", search_by_vector):
+            assert search("post on the subreddit")["mode"] == "semantic"
+        assert prefixes == ["search_query: "]
+        assert searches == [
+            {"top_k": 5, "source_types": ["procedure"], "min_score": 0.3},
+        ]
+
     def test_embedding_model_down_falls_back_and_warns(self, server, caplog):
         from agenthandover_worker.ollama import OllamaUnavailable
         from agenthandover_worker.vector_kb import VectorKB

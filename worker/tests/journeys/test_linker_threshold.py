@@ -4,8 +4,8 @@
 live vector KB it scores a pair by the cosine of the intents'
 ``clustering:``-prefixed embeddings; without one, by token Jaccard.  The two
 scores live on different scales, so each has its own threshold
-(``_JACCARD_THRESHOLD``, ``_COSINE_THRESHOLD``); this file pins the cosine
-one on the model's real output (answered by the recorded cassette).
+(``_JACCARD_THRESHOLD``, and the embedding profile's ``linker_cos``); this
+file pins nomic-embed-text's cosine one on the model's real output (answered by the recorded cassette).
 
 The set: intents of five recurring tasks, each phrased the way three
 different days' summaries phrase it, plus hard negatives that share a site,
@@ -28,16 +28,17 @@ from pathlib import Path
 import pytest
 
 from agenthandover_worker.knowledge_base import KnowledgeBase
-from agenthandover_worker.session_linker import (
-    _COSINE_THRESHOLD,
-    _LLM_BAND,
-    SessionLinker,
-)
+from agenthandover_worker.model_profiles import EMBEDDING_PROFILES
+from agenthandover_worker.session_linker import SessionLinker
 from agenthandover_worker.vector_kb import VectorKB, VectorKBConfig
 from journeys.cassette import open_cassette
 from daemon_db import create_daemon_db, kb_db
 
 JOURNEY = "linker_threshold"
+# The linker's cosine threshold and LLM band: nomic-embed-text's profile.
+_THRESHOLDS = EMBEDDING_PROFILES["nomic-embed-text"].thresholds
+_COSINE_THRESHOLD = _THRESHOLDS.linker_cos
+_COSINE_BAND = _THRESHOLDS.linker_band
 
 # (task, intent as a daily summary words it)
 INTENTS = [
@@ -89,7 +90,7 @@ def test_no_two_tasks_reach_the_cosine_threshold(tmp_path: Path) -> None:
 def test_most_same_task_pairs_link_or_reach_the_llm_band(tmp_path: Path) -> None:
     same = [s for ta, tb, s in _scores(tmp_path) if ta == tb]
     linked = sum(s >= _COSINE_THRESHOLD for s in same)
-    in_band = sum(_COSINE_THRESHOLD - _LLM_BAND["cosine"] <= s < _COSINE_THRESHOLD for s in same)
+    in_band = sum(_COSINE_THRESHOLD - _COSINE_BAND <= s < _COSINE_THRESHOLD for s in same)
     assert linked >= len(same) // 2, (linked, len(same))
     assert linked + in_band >= 0.8 * len(same), (linked, in_band, len(same))
 

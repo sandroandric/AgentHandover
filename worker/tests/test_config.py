@@ -265,6 +265,53 @@ def test_other_sections(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# [embedding] model and [memory] (WP-E2)
+# ---------------------------------------------------------------------------
+
+
+def test_memory_defaults_are_the_shared_contract(tmp_path):
+    from agenthandover_worker.config import MemoryConfig
+
+    assert load_config(tmp_path / "missing.toml").memory == MemoryConfig(
+        enabled=False,
+        model="embeddinggemma-2:440m",
+        dimensions=256,
+        retention_days=365,
+        thumbnail_days=7,
+        agents_access=False,
+        max_frames_per_hour=600,
+    )
+
+
+def test_memory_values(tmp_path):
+    cfg = load_config(_write(tmp_path, (
+        '[memory]\nenabled = true\nmodel = "memory-x"\nagents_access = true\n'
+        "thumbnail_days = 3\n"
+    )))
+    assert cfg.memory.enabled is True
+    assert cfg.memory.model == "memory-x"
+    assert cfg.memory.agents_access is True
+    assert cfg.memory.thumbnail_days == 3
+    assert cfg.memory.retention_days == 365
+
+
+def test_an_embedding_model_with_a_profile_or_none_is_kept(tmp_path):
+    cfg = load_config(_write(tmp_path, '[embedding]\nmodel = "mxbai-embed-large"\n'))
+    assert cfg.embedding.model == "mxbai-embed-large"
+
+
+def test_an_uncalibrated_embedding_model_is_refused(tmp_path, caplog):
+    """EmbeddingGemma 2 has no measured thresholds yet: as ``[embedding]
+    model`` every threshold applied to its vectors would be nomic's."""
+    cfg = load_config(_write(tmp_path, (
+        '[embedding]\nmodel = "embeddinggemma-2:440m"\nretention_days = 30\n'
+    )))
+    assert cfg.embedding.model == "nomic-embed-text"
+    assert cfg.embedding.retention_days == 30
+    assert "has no calibrated thresholds" in caplog.text
+
+
+# ---------------------------------------------------------------------------
 # [idle_jobs] (was main._read_idle_jobs_config)
 # ---------------------------------------------------------------------------
 
