@@ -120,7 +120,7 @@ fn v040_database(path: &std::path::Path) {
 fn a_new_database_has_every_table_the_worker_uses() {
     let tmp = TempDir::new().unwrap();
     let store = EventStore::open(&tmp.path().join("events.db")).unwrap();
-    assert_eq!(store.schema_version(), 8);
+    assert_eq!(store.schema_version(), 9);
     let names: Vec<String> = store
         .connection()
         .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
@@ -133,7 +133,7 @@ fn a_new_database_has_every_table_the_worker_uses() {
         "worker_state", "task_segments", "workflow_observations", "micro_questions",
         "generated_sops", "failed_generations", "preserved_text", "vector_store",
         "annotation_cache", "events_fts", "events_fts_ids", "runs", "procedures",
-        "memory_frames",
+        "memory_frames", "vector_store_next",
     ] {
         assert!(names.iter().any(|n| n == table), "{table} missing from {names:?}");
     }
@@ -149,7 +149,7 @@ fn a_v040_database_upgrades_to_the_new_schema_and_keeps_its_rows() {
     let upgraded = EventStore::open(&old).unwrap();
     let fresh = EventStore::open(&tmp.path().join("fresh.db")).unwrap();
 
-    assert_eq!(upgraded.schema_version(), 8);
+    assert_eq!(upgraded.schema_version(), 9);
     let fresh_schema = schema_of(fresh.connection());
     assert!(fresh_schema.len() > 25, "compares the whole schema: {fresh_schema:?}");
     assert_eq!(schema_of(upgraded.connection()), fresh_schema);
@@ -190,7 +190,7 @@ fn reopening_an_upgraded_database_changes_nothing() {
         schema_of(store.connection())
     };
     let store = EventStore::open(&path).unwrap();
-    assert_eq!(store.schema_version(), 8);
+    assert_eq!(store.schema_version(), 9);
     assert_eq!(schema_of(store.connection()), before);
 }
 
@@ -292,7 +292,7 @@ fn a_v7_database_gains_the_memory_table_and_keeps_its_rows() {
             .unwrap();
     }
     let store = EventStore::open(&path).unwrap();
-    assert_eq!(store.schema_version(), 8);
+    assert_eq!(store.schema_version(), 9);
     let conn = store.connection();
     let kept: i64 = conn.query_row("SELECT count(*) FROM procedures", [], |r| r.get(0)).unwrap();
     assert_eq!(kept, 1);
@@ -308,5 +308,51 @@ fn a_v7_database_gains_the_memory_table_and_keeps_its_rows() {
         })
         .unwrap();
     assert_eq!(frames, 1);
+    assert!(created.ends_with('Z'));
+}
+
+#[test]
+fn a_v8_database_gains_the_re_embed_staging_table_and_keeps_its_vectors() {
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join("events.db");
+    {
+        let conn = Connection::open(&path).unwrap();
+        for sql in [
+            include_str!("../src/migrations/v001_initial.sql"),
+            include_str!("../src/migrations/v002_add_display_ids_spanned.sql"),
+            include_str!("../src/migrations/v003_add_scene_annotation.sql"),
+            include_str!("../src/migrations/v004_drop_old_dom_trees.sql"),
+            include_str!("../src/migrations/v005_add_focused_element.sql"),
+            include_str!("../src/migrations/v006_worker_tables.sql"),
+            include_str!("../src/migrations/v007_procedures.sql"),
+            include_str!("../src/migrations/v008_memory_frames.sql"),
+        ] {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.pragma_update(None, "user_version", 8).unwrap();
+        conn.execute_batch(
+            "INSERT INTO vector_store (id, source_type, source_id, embedding, model, dim, text_hash) \
+             VALUES ('v1', 'procedure', 'p', x'0000803f', 'nomic-embed-text', 1, 'h');",
+        )
+        .unwrap();
+    }
+    let store = EventStore::open(&path).unwrap();
+    assert_eq!(store.schema_version(), 9);
+    let conn = store.connection();
+    let kept: i64 = conn.query_row("SELECT count(*) FROM vector_store", [], |r| r.get(0)).unwrap();
+    assert_eq!(kept, 1);
+    // A source whose text is gone is staged without a vector.
+    conn.execute(
+        "INSERT INTO vector_store_next (id, source_type, source_id, from_hash, model) \
+         VALUES ('v1', 'procedure', 'p', 'h', 'embeddinggemma-2:440m')",
+        [],
+    )
+    .unwrap();
+    let (dim, created): (i64, String) = conn
+        .query_row("SELECT dim, created_at FROM vector_store_next WHERE id = 'v1'", [], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .unwrap();
+    assert_eq!(dim, 0);
     assert!(created.ends_with('Z'));
 }

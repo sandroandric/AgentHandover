@@ -109,11 +109,11 @@ def _daily_batch(ctx: Any, day: str) -> None:
     # The daily summary, for semantic search.
     wm._embed_in_vector_kb(
         ctx.vector_kb, "daily_summary", day,
-        f"Daily summary for {day}: "
-        f"{summary.task_count} tasks, "
-        f"{summary.active_hours:.1f} active hours. "
         # ``DailySummary.tasks`` holds ``TaskBoundary`` records.
-        + " ".join(t.intent for t in summary.tasks if t.intent)[:2000],
+        summary_text(
+            day, summary.task_count, summary.active_hours,
+            [t.intent for t in summary.tasks],
+        ),
     )
     if len(kb.list_daily_summaries(limit=5)) >= 3:
         _learn_from_summaries(ctx)
@@ -150,6 +150,18 @@ def _daily_batch(ctx: Any, day: str) -> None:
         logger.info("Daily digest generated for %s", day)
     except Exception:
         logger.debug("Digest generation failed", exc_info=True)
+
+
+def summary_text(
+    day: str, task_count: int, active_hours: float, intents: list[str],
+) -> str:
+    """A daily summary's text for semantic search (its vector's text)."""
+    return (
+        f"Daily summary for {day}: "
+        f"{task_count} tasks, "
+        f"{active_hours:.1f} active hours. "
+        + " ".join(i for i in intents if i)[:2000]
+    )
 
 
 def _learn_from_summaries(ctx: Any) -> None:

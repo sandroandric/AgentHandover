@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 # The daemon's schema this worker reads and writes: ``CURRENT_SCHEMA_VERSION``
 # in ``crates/storage/src/schema.rs``.  The daemon creates and migrates
 # every table (``crates/storage/src/migrations``); the worker never does.
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 
 class SchemaVersionError(RuntimeError):

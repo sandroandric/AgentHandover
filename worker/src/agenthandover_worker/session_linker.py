@@ -107,6 +107,14 @@ class SessionLinker:
         self._links: list[LinkedTask] = []
         self._load_links()
 
+    def use_vector_kb(self, vector_kb: "VectorKB | None") -> None:
+        """Embed intents with *vector_kb* from now on (the switch of
+        ``embedding_upgrade``): the intents embedded so far are in the old
+        model's space, so they are forgotten."""
+        self._vector_kb = vector_kb
+        self._embeddings = {}
+        self._not_embedded = set()
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------

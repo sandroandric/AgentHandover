@@ -41,9 +41,12 @@ def run(ctx: Any, tick: Any) -> int:
 def submit_model_jobs(ctx: Any, tick: Any) -> list:
     """Hand this tick's model work to the inference thread, decided from
     what the control thread sees now: a stopped recording (P0), its tail
-    once its Skill ran (P1), Memory, passive annotation and generation (P2).
+    once its Skill ran (P1), Memory, passive annotation, the embedding
+    upgrade and generation (P2).
     Returns the jobs, also recorded on *tick*."""
-    from agenthandover_worker.stages import annotate, daily, memory, segment, synthesize
+    from agenthandover_worker.stages import (
+        annotate, daily, memory, segment, synthesize, upgrade,
+    )
 
     def generation() -> None:
         segment.run(ctx, tick)
@@ -63,6 +66,9 @@ def submit_model_jobs(ctx: Any, tick: Any) -> list:
     if ctx.memory_writer is not None and ctx.cfg.memory.enabled:
         jobs.append(("memory", P2, lambda: memory.run(ctx, tick)))
     jobs.append(("passive-annotation", P2, lambda: annotate.run(ctx, tick)))
+    # "Upgrade everything": the background re-embed, then the switch.
+    if upgrade.due(ctx):
+        jobs.append(("embedding-upgrade", P2, lambda: upgrade.run(ctx, tick)))
     jobs.append(("passive-generation", P2, generation))
     tick.jobs = jobs
     if ctx.runner is not None:

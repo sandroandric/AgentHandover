@@ -1375,6 +1375,102 @@ def migrate_embedding_file(
     return True, wanted, _replace_with_backup(target, original, new_text, now)
 
 
+def set_embedding_model(config_text: str, model: str) -> str | None:
+    """*config_text* with ``[embedding] model = "<model>"``, or None when
+    the edit cannot be made safely (the text is not TOML, or the edited
+    text does not read as the old one with only that key set).  Returns
+    *config_text* itself when it already says so.
+
+    The key's line in ``[embedding]`` is replaced; without one, the line
+    goes right after the header; without the section, the section is
+    appended.  Every other line and section is kept byte for byte.
+    """
+    try:
+        before = tomllib.loads(config_text)
+    except tomllib.TOMLDecodeError:
+        return None
+    embedding = before.get("embedding", {})
+    if not isinstance(embedding, dict):
+        return None
+    if embedding.get("model") == model:
+        return config_text
+    lines = _config_lines(config_text)
+    newline = "\r\n" if any(line.endswith("\r\n") for line in lines) else "\n"
+    entry = f"model = {json.dumps(model)}{newline}"
+    header = next(
+        (i for i, line in enumerate(lines) if line.strip() == "[embedding]"), None,
+    )
+    if header is None:
+        text = config_text
+        if text and not text.endswith("\n"):
+            text += newline
+        new_text = text + (newline if text else "") + f"[embedding]{newline}" + entry
+    else:
+        end = next(
+            (i for i in range(header + 1, len(lines)) if lines[i].strip().startswith("[")),
+            len(lines),
+        )
+        at = next(
+            (
+                i for i in range(header + 1, end)
+                if lines[i].strip().partition("=")[1]
+                and lines[i].strip().partition("=")[0].strip() == "model"
+            ),
+            None,
+        )
+        if at is None:
+            if not lines[header].endswith("\n"):
+                lines[header] += newline
+            lines.insert(header + 1, entry)
+        else:
+            lines[at] = entry
+        new_text = "".join(lines)
+    try:
+        after = tomllib.loads(new_text)
+    except tomllib.TOMLDecodeError:
+        return None
+    if after != {**before, "embedding": {**embedding, "model": model}}:
+        return None
+    return new_text
+
+
+def switch_embedding_file(
+    path: Path, model: str, now: datetime | None = None,
+) -> Path | None:
+    """Write ``[embedding] model = "<model>"`` into the config file at
+    *path* (:func:`set_embedding_model`): after a timestamped backup, as
+    :func:`migrate_vlm_file` does, or as a new file when there is none.
+    Returns the backup's path (None when there was no file or nothing to
+    change).  Raises ValueError when the edit cannot be made safely and
+    OSError when the file cannot be read or written."""
+    target = Path(path).resolve()
+    if not target.exists():
+        new_text = set_embedding_model("", model)
+        assert new_text is not None
+        target.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_name = tempfile.mkstemp(
+            dir=target.parent, prefix=f".{target.name}.", suffix=".tmp",
+        )
+        try:
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(new_text.encode("utf-8"))
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp_name, target)
+        except BaseException:
+            Path(tmp_name).unlink(missing_ok=True)
+            raise
+        return None
+    original = target.read_bytes()
+    text = original.decode("utf-8")
+    new_text = set_embedding_model(text, model)
+    if new_text is None:
+        raise ValueError(f"{target} cannot be edited safely to set [embedding] model")
+    if new_text == text:
+        return None
+    return _replace_with_backup(target, original, new_text, now)
+
+
 # ``upgrade-apply``'s exit status when it refuses: Ollama does not answer
 # or does not serve every model of the new pair.
 EXIT_MODELS_MISSING = 3

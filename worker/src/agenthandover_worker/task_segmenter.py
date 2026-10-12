@@ -146,6 +146,21 @@ class AnnotatedFrame:
         )
 
 
+def frame_text(frame: AnnotatedFrame) -> str:
+    """The text a frame is embedded from (with the clustering prefix):
+    what the user was doing, the app, the location and, when the
+    annotation has one, the start of its visual text proxy."""
+    parts = [frame.what_doing or frame.app]
+    if frame.app and frame.what_doing:
+        parts.append(frame.app)
+    if frame.location:
+        parts.append(frame.location)
+    proxy = frame.annotation.get("_visual_text_proxy", "") if frame.annotation else ""
+    if proxy and len(proxy) > 20:
+        parts.append(proxy[:500])
+    return " | ".join(parts)
+
+
 @dataclass
 class TaskSegment:
     """A contiguous segment of frames belonging to the same task.
@@ -650,6 +665,15 @@ class TaskSegmenter:
             )
         return self._profile.thresholds.segmenter
 
+    def use_embedding_model(self, model: str, vector_kb: "VectorKB | None") -> None:
+        """Embed with *model* from now on (its clustering prefix and
+        threshold), sharing frame vectors with *vector_kb*: the switch of
+        ``embedding_upgrade``, after which the frame vectors it re-embedded
+        are this segmenter's cache."""
+        self.config.embedding_model = model
+        self._profile = embedding_profile(model)
+        self._vector_kb = vector_kb
+
     def _shared_kb(self) -> "VectorKB | None":
         """The vector KB when it embeds with the segmenter's model (the
         frame vectors it holds are then the segmenter's own), else None."""
@@ -716,18 +740,7 @@ class TaskSegmenter:
 
         # Step 2: Compute embeddings — include app, location, and visual
         # proxy when available for richer semantic representation
-        texts = []
-        for f in frames:
-            parts = [f.what_doing or f.app]
-            if f.app and f.what_doing:
-                parts.append(f.app)
-            if f.location:
-                parts.append(f.location)
-            # Include visual text proxy if present in annotation
-            proxy = f.annotation.get("_visual_text_proxy", "") if f.annotation else ""
-            if proxy and len(proxy) > 20:
-                parts.append(proxy[:500])
-            texts.append(" | ".join(parts))
+        texts = [frame_text(f) for f in frames]
 
         # A frame embedded by an earlier pass keeps its vector in the vector
         # KB (keyed by event id and text); only the others go to Ollama, so
