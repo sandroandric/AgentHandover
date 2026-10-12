@@ -207,6 +207,31 @@ def test_startup_migrates_a_config_on_an_earlier_tier_default(
     assert backups[0].read_text(encoding="utf-8") == old
 
 
+def test_startup_removes_image_embeddings_and_records_that_it_was_on(
+    once_home: Path, tmp_db_path: Path, tmp_path: Path,
+) -> None:
+    """WP-E1: main() removes ``[embedding] image_embeddings`` (the
+    removed Visual search option) before it reads the config, once, with
+    a backup, and leaves ``memory-offer.json`` in the status dir for the
+    app's Memory offer."""
+    config = worker_main._status_dir() / "config.toml"
+    if worker_main._platform.system() != "Darwin":
+        config = once_home / ".config" / "agenthandover" / "config.toml"
+    old = config.read_text(encoding="utf-8") + (
+        '\n[embedding]\nmodel = "nomic-embed-text"\nimage_embeddings = true\n'
+    )
+    config.write_text(old, encoding="utf-8")
+
+    for _ in range(2):
+        _run_once(tmp_db_path, tmp_path)
+
+    assert config.read_text(encoding="utf-8") == old.replace("image_embeddings = true\n", "")
+    backups = list(config.parent.glob("config.toml.*.bak"))
+    assert [b.read_text(encoding="utf-8") for b in backups] == [old]
+    offer = worker_main._status_dir() / "memory-offer.json"
+    assert json.loads(offer.read_text(encoding="utf-8")) == {"wanted_visual_search": True}
+
+
 def _run_once(db_path: Path, tmp_path: Path) -> None:
     worker_main.main([
         "--once",

@@ -17,7 +17,6 @@ from agenthandover_worker.vector_kb import (
     CLUSTERING_PREFIX,
     DOCUMENT_PREFIX,
     QUERY_PREFIX,
-    ImageEmbedder,
     VectorKB,
     VectorKBConfig,
     VectorSearchResult,
@@ -347,18 +346,19 @@ class TestMaintenance:
 
     def test_purge_drops_vectors_from_another_model(self, kb: VectorKB):
         kb.upsert("annotation", "e1", "task one")
+        # The removed SigLIP embedder's model is no longer exempt.
         kb.upsert(
-            "visual", "e2", "image:e2", embedding=[0.1, 0.2, 0.3, 0.4],
-            prefix="", model=ImageEmbedder.MODEL_NAME,
+            "annotation", "e2", "task two", embedding=[0.1, 0.2, 0.3, 0.4],
+            prefix="", model="mlx-community/siglip-so400m-patch14-384",
         )
         kb.config.embedding_model = "new-model"
         kb.upsert("annotation", "e3", "task three")
 
-        assert kb.purge_stale() == 1
+        assert kb.purge_stale() == 2
         kept = {
             row[0] for row in kb._conn.execute("SELECT source_id FROM vector_store")
         }
-        assert kept == {"e2", "e3"}
+        assert kept == {"e3"}
 
     def test_reset_cycle_budget(self, kb: VectorKB):
         kb._cycle_embed_count = 100
@@ -437,6 +437,35 @@ class TestUnitVectorsAndCap:
             hits = vkb.search_by_vector([0.0, 1.0, 0.0, 0.0])
             assert hits[0].source_id == "p"
             assert hits[0].score == pytest.approx(1.0)
+
+    def test_siglip_visual_rows_are_deleted_on_open(
+        self, tmp_db: Path, config: VectorKBConfig, caplog,
+    ):
+        # What the removed SigLIP image embedder left: 1152d 'visual' rows
+        # (written normalised with their 8-bit copy, as v0.5 did).
+        siglip = [1.0] + [0.0] * 1151
+        with VectorKB(tmp_db, config) as vkb:
+            for i in range(3):
+                vkb.upsert(
+                    "visual", f"e{i}", f"image:e{i}", embedding=siglip,
+                    prefix="", model="mlx-community/siglip-so400m-patch14-384",
+                )
+            vkb.upsert("annotation", "e0", "t", embedding=[1.0, 0.0, 0.0, 0.0])
+            assert vkb.count("visual") == 3
+
+        with caplog.at_level("INFO", logger="agenthandover_worker.vector_kb"):
+            with VectorKB(tmp_db, config) as vkb:
+                assert vkb.count("visual") == 0
+                assert vkb.count("annotation") == 1
+        assert sum("screenshot vector" in r.message for r in caplog.records) == 1
+        assert "Deleted 3 screenshot vector(s)" in caplog.text
+
+        # Idempotent: nothing left to delete, nothing logged again.
+        caplog.clear()
+        with caplog.at_level("INFO", logger="agenthandover_worker.vector_kb"):
+            with VectorKB(tmp_db, config) as vkb:
+                assert vkb.count() == 1
+        assert "screenshot vector" not in caplog.text
 
     def test_cap_holds_after_an_over_filling_upsert(self, tmp_db: Path):
         kb = VectorKB(tmp_db, VectorKBConfig(embedding_model="test-model", max_rows=5))
@@ -647,12 +676,12 @@ class TestModelAndPrefix:
 
     def test_purge_by_model_resets_the_search_index(self, kb: VectorKB):
         kb.upsert("procedure", "p1", "task one")
-        kb.upsert("visual", "e1", "image:e1", embedding=[1.0, 0.0, 0.0, 0.0],
-                  prefix="", model=ImageEmbedder.MODEL_NAME)
+        kb.upsert("annotation", "e1", "task two", embedding=[1.0, 0.0, 0.0, 0.0],
+                  model="nomic-embed-text-v2")
         kb.search_by_vector([1.0, 0.0, 0.0, 0.0])  # builds the index
         kb.config.embedding_model = "nomic-embed-text-v2"
         assert kb.purge_stale() == 1
-        assert kb.count("procedure") == 0 and kb.count("visual") == 1
+        assert kb.count("procedure") == 0 and kb.count("annotation") == 1
         assert [h.source_id for h in kb.search_by_vector([1.0, 0.0, 0.0, 0.0])] == ["e1"]
 
     def test_compute_embeddings_sends_the_prefix(self, tmp_db: Path, config: VectorKBConfig):

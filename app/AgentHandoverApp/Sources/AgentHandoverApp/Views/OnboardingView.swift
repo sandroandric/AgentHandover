@@ -15,7 +15,6 @@ struct OnboardingView: View {
     @State private var vlmPullInProgress = false
     @State private var vlmPullOutput = ""
 
-    @State private var enableImageEmbeddings = false
     @State private var useCustomModels = false
     @State private var customAnnotationModel = ""
     @State private var customSOPModel = ""
@@ -1622,32 +1621,6 @@ struct OnboardingView: View {
                         }
                     }
 
-                        // Image embeddings toggle
-                        HStack(spacing: 10) {
-                            Toggle("", isOn: $enableImageEmbeddings)
-                                .toggleStyle(.switch)
-                                .labelsHidden()
-
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text("Visual search (recommended)")
-                                    .font(.system(size: 13, weight: .semibold, design: .rounded))
-                                    .foregroundColor(darkNavy)
-                                Text("Embeds screenshots so agents can find visually similar screens. Downloads ~1 GB SigLIP model on first use. Requires Apple Silicon.")
-                                    .font(.system(size: 11))
-                                    .foregroundColor(darkNavy.opacity(0.5))
-                                    .lineLimit(3)
-                            }
-                        }
-                        .padding(12)
-                        .background(
-                            RoundedRectangle(cornerRadius: 10)
-                                .fill(enableImageEmbeddings ? goldenYellow.opacity(0.15) : lightGray)
-                        )
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 10)
-                                .stroke(enableImageEmbeddings ? warmOrange.opacity(0.5) : darkNavy.opacity(0.1), lineWidth: 1)
-                        )
-
                         Button(ollamaHasRequiredModels ? "Refresh Models" : "Pull All Models") {
                             pullOllamaModel()
                         }
@@ -2453,27 +2426,11 @@ struct OnboardingView: View {
                 }
             }
 
-            // Image embeddings need the optional embeddings-apple extra,
-            // which the installer no longer installs up front (it is large
-            // and Apple-Silicon-only). Install it now, only if asked for.
-            var imageEmbEnabled = self.enableImageEmbeddings
-            var embeddingsNote = ""
-            if imageEmbEnabled {
-                if let failure = Self.installImageEmbeddingsExtra(progress: { line in
-                    DispatchQueue.main.async {
-                        vlmPullOutput = "Image embeddings: \(String(line.prefix(60)))"
-                    }
-                }) {
-                    imageEmbEnabled = false
-                    embeddingsNote = " Image embeddings stay off: \(failure)"
-                }
-            }
-
-            self.saveEmbeddingConfig(imageEmbeddings: imageEmbEnabled, model: table.embeddingModel)
+            self.saveEmbeddingConfig(model: table.embeddingModel)
 
             DispatchQueue.main.async {
                 vlmPullInProgress = false
-                vlmPullOutput = "All models downloaded successfully!" + embeddingsNote
+                vlmPullOutput = "All models downloaded successfully!"
                 refreshVLMSetupState(force: true)
             }
         }
@@ -2566,88 +2523,19 @@ struct OnboardingView: View {
         }
     }
 
-    /// `pip install "<lib>/worker[embeddings-apple]"` into the worker venv,
-    /// streaming pip's output lines to `progress` and appending them to
-    /// logs/pip-install.log. Returns nil on success, else a short reason.
-    /// Blocking: call off the main thread.
-    static func installImageEmbeddingsExtra(progress: @escaping (String) -> Void) -> String? {
-        let libDir = ServiceController.daemonExecutableURL.deletingLastPathComponent()
-        let pip = libDir.appendingPathComponent("venv/bin/pip")
-        guard FileManager.default.isExecutableFile(atPath: pip.path) else {
-            return "the worker environment is missing (\(pip.path))"
-        }
-        let logURL = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Application Support/agenthandover/logs/pip-install.log")
-        try? FileManager.default.createDirectory(
-            at: logURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-        if !FileManager.default.fileExists(atPath: logURL.path) {
-            FileManager.default.createFile(atPath: logURL.path, contents: nil)
-        }
-        let log = try? FileHandle(forWritingTo: logURL)
-        log?.seekToEndOfFile()
-        defer { try? log?.close() }
-
-        let process = Process()
-        process.executableURL = pip
-        process.arguments = [
-            "install", "--disable-pip-version-check", "--progress-bar", "off",
-            libDir.appendingPathComponent("worker").path + "[embeddings-apple]",
-        ]
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = pipe
-        pipe.fileHandleForReading.readabilityHandler = { handle in
-            let data = handle.availableData
-            guard !data.isEmpty else { return }
-            log?.write(data)
-            if let text = String(data: data, encoding: .utf8),
-               let last = text.split(separator: "\n").last {
-                progress(String(last))
-            }
-        }
-        do {
-            try process.run()
-        } catch {
-            pipe.fileHandleForReading.readabilityHandler = nil
-            return "could not run pip (\(error.localizedDescription))"
-        }
-        process.waitUntilExit()
-        pipe.fileHandleForReading.readabilityHandler = nil
-        return process.terminationStatus == 0
-            ? nil
-            : "pip failed (see logs/pip-install.log)"
-    }
-
-    private func saveEmbeddingConfig(imageEmbeddings: Bool, model: String) {
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        let configDir = home
+    /// Write `[embedding] model` into config.toml, keeping the section's
+    /// other keys (`ModelTierTable.applyEmbeddingModel`).
+    private func saveEmbeddingConfig(model: String) {
+        let configDir = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Application Support/agenthandover")
         let configPath = configDir.appendingPathComponent("config.toml")
-
         try? FileManager.default.createDirectory(at: configDir, withIntermediateDirectories: true)
 
-        var content = (try? String(contentsOf: configPath, encoding: .utf8)) ?? ""
-
-        let embeddingSection = """
-
-        [embedding]
-        model = "\(model)"
-        image_embeddings = \(imageEmbeddings)
-
-        """
-
-        // Remove existing [embedding] section if present
-        if let range = content.range(of: "[embedding]") {
-            let afterSection = content[range.lowerBound...]
-            if let nextSection = afterSection.range(of: "\n[", range: content.index(after: range.lowerBound)..<content.endIndex) {
-                content.removeSubrange(range.lowerBound..<nextSection.lowerBound)
-            } else {
-                content.removeSubrange(range.lowerBound..<content.endIndex)
-            }
+        let current = (try? String(contentsOf: configPath, encoding: .utf8)) ?? ""
+        let updated = ModelTierTable.applyEmbeddingModel(model, to: current)
+        if updated != current {
+            try? updated.write(to: configPath, atomically: true, encoding: .utf8)
         }
-
-        content += embeddingSection
-        try? content.write(to: configPath, atomically: true, encoding: .utf8)
     }
 
     /// Write the chosen tier and models into `[vlm]` of config.toml, in

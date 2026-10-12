@@ -1189,7 +1189,18 @@ def migrate_vlm_file(
     new_text, changed, reason = migrate_vlm_block(original.decode("utf-8"), served, ram_gb)
     if not changed:
         return False, reason, None
+    return True, reason, _replace_with_backup(target, original, new_text, now)
 
+
+def _replace_with_backup(
+    target: Path, original: bytes, new_text: str, now: datetime | None,
+) -> Path:
+    """Write *new_text* over the config file *target* (resolved) whose
+    bytes were *original*: first a timestamped copy of them
+    (``config.toml.<YYYYmmdd-HHMMSS>.bak`` beside it), then the new text
+    atomically (temporary file in the same directory, then
+    ``os.replace``) with the old file's permissions.  Returns the backup's
+    path."""
     stamp = (now or datetime.now()).strftime("%Y%m%d-%H%M%S")
     backup = target.with_name(f"{target.name}.{stamp}.bak")
     n = 1
@@ -1214,7 +1225,118 @@ def migrate_vlm_file(
     except BaseException:
         Path(tmp_name).unlink(missing_ok=True)
         raise
-    return True, reason, backup
+    return backup
+
+
+# What the upgrade offer of Memory (the app, after updating) reads: the
+# file beside the worker's status files, a JSON object.  The embedding
+# migration sets ``wanted_visual_search`` to true when the config it
+# migrated had ``[embedding] image_embeddings = true`` (the removed
+# "Visual search" option); other keys are kept.
+MEMORY_OFFER_FILE = "memory-offer.json"
+
+
+def drop_image_embeddings(config_text: str) -> tuple[str, bool | None]:
+    """*config_text* without ``[embedding] image_embeddings`` (the SigLIP
+    "Visual search" option, removed in 0.6.0), and whether it was on;
+    ``(config_text, None)`` when there is nothing to remove or the edit
+    cannot be made safely.
+
+    The key's line goes, with the comment lines right above it when they
+    begin with "# Image embeddings" (the installer's note on it); every
+    other line and section is kept byte for byte.  The result must read,
+    as TOML, as the old file minus that one key; otherwise nothing
+    changes.  "On" is what the config loader read: the value as a bool.
+    """
+    lines = _config_lines(config_text)
+    header = next(
+        (i for i, line in enumerate(lines) if line.strip() == "[embedding]"), None,
+    )
+    if header is None:
+        return config_text, None
+    try:
+        before = tomllib.loads(config_text)
+    except tomllib.TOMLDecodeError:
+        return config_text, None
+    embedding = before.get("embedding")
+    if not isinstance(embedding, dict) or "image_embeddings" not in embedding:
+        return config_text, None
+
+    end = next(
+        (i for i in range(header + 1, len(lines)) if lines[i].strip().startswith("[")),
+        len(lines),
+    )
+    drop: set[int] = set()
+    for i in range(header + 1, end):
+        key, sep, _ = lines[i].strip().partition("=")
+        if not (sep and key.strip() == "image_embeddings"):
+            continue
+        drop.add(i)
+        first = i
+        while first - 1 > header and lines[first - 1].lstrip().startswith("#"):
+            first -= 1
+        if lines[first].lstrip().lower().startswith("# image embeddings"):
+            drop.update(range(first, i))
+    new_text = "".join(line for i, line in enumerate(lines) if i not in drop)
+    try:
+        after = tomllib.loads(new_text)
+    except tomllib.TOMLDecodeError:
+        return config_text, None
+    expected = {
+        **before,
+        "embedding": {k: v for k, v in embedding.items() if k != "image_embeddings"},
+    }
+    if after != expected:
+        return config_text, None
+    from agenthandover_worker.config import _coerce
+
+    return new_text, _coerce(embedding["image_embeddings"], False) is True
+
+
+def _record_wanted_visual_search(state_dir: Path) -> None:
+    """Set ``wanted_visual_search`` in :data:`MEMORY_OFFER_FILE` under
+    *state_dir* (atomic write; other keys of an existing object kept)."""
+    path = Path(state_dir) / MEMORY_OFFER_FILE
+    try:
+        state = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        state = {}
+    if not isinstance(state, dict):
+        state = {}
+    state["wanted_visual_search"] = True
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(state, fh, indent=2, sort_keys=True)
+            fh.write("\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp_name, path)
+    except BaseException:
+        Path(tmp_name).unlink(missing_ok=True)
+        raise
+
+
+def migrate_embedding_file(
+    path: Path, state_dir: Path, now: datetime | None = None,
+) -> tuple[bool, bool, Path | None]:
+    """Remove ``[embedding] image_embeddings`` from the config file at
+    *path* (:func:`drop_image_embeddings`).  When it was on, first record
+    that in :data:`MEMORY_OFFER_FILE` under *state_dir*, so the Memory
+    offer can say the user wanted visual search; then the config is
+    rewritten after a timestamped backup, as :func:`migrate_vlm_file`
+    does.  Nothing happens when the key is absent (so a second run changes
+    nothing).  Returns ``(changed, wanted_visual_search, backup_path)``.
+    """
+    target = Path(path).resolve()
+    original = target.read_bytes()
+    new_text, wanted = drop_image_embeddings(original.decode("utf-8"))
+    if wanted is None:
+        return False, False, None
+    if wanted:
+        _record_wanted_visual_search(state_dir)
+    return True, wanted, _replace_with_backup(target, original, new_text, now)
 
 
 # ``upgrade-apply``'s exit status when it refuses: Ollama does not answer

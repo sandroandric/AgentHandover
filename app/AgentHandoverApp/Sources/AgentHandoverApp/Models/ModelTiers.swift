@@ -209,4 +209,14 @@ struct ModelTierTable: Decodable {
         }
         return out
     }
+
+    /// `config` with `[embedding] model` set to `model`; every other key
+    /// of `[embedding]` (`retention_days`, `max_rows`, ...) and every other
+    /// section kept.  Onboarding's write of the embedding model.
+    static func applyEmbeddingModel(_ model: String, to config: String) -> String {
+        applyVLMBlock(
+            "[embedding]\nmodel = \"\(model)\"\n",
+            to: config, managedKeys: ["model"], sectionHeader: "[embedding]"
+        )
+    }
 }

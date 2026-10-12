@@ -191,6 +191,50 @@ final class ModelTiersTests: XCTestCase {
         XCTAssertEqual(ModelTierTable.applyVLMBlock(block, to: updated), updated)
     }
 
+    /// WP-E1: onboarding's embedding write sets `[embedding] model` only;
+    /// the section's other keys (an earlier writer replaced the whole
+    /// section and dropped `retention_days`/`max_rows`) and every other
+    /// section stay.
+    func testEmbeddingModelWriteKeepsTheOtherEmbeddingKeys() {
+        let config = """
+        [embedding]
+        # keep a year of vectors
+        retention_days = 365
+        model = "old-model"
+        max_rows = 80000
+
+        [vlm]
+        mode = "local"
+        model = "untouched"
+
+        """
+        let updated = ModelTierTable.applyEmbeddingModel("nomic-embed-text", to: config)
+        XCTAssertEqual(updated, """
+        [embedding]
+        model = "nomic-embed-text"
+        # keep a year of vectors
+        retention_days = 365
+        max_rows = 80000
+
+        [vlm]
+        mode = "local"
+        model = "untouched"
+
+        """)
+        XCTAssertEqual(ModelTierTable.applyEmbeddingModel("nomic-embed-text", to: updated), updated)
+    }
+
+    func testEmbeddingModelWriteAppendsTheSectionWhenMissing() {
+        XCTAssertEqual(
+            ModelTierTable.applyEmbeddingModel("nomic-embed-text", to: "[vlm]\nmode = \"local\"\n"),
+            "[vlm]\nmode = \"local\"\n\n[embedding]\nmodel = \"nomic-embed-text\"\n"
+        )
+        XCTAssertEqual(
+            ModelTierTable.applyEmbeddingModel("nomic-embed-text", to: ""),
+            "\n[embedding]\nmodel = \"nomic-embed-text\"\n"
+        )
+    }
+
     func testAnEmptyTableIsAnError() {
         let json = #"{"schema_version": 1, "minimum_ollama_version_for_gemma4": "0.34.0", "embedding_model": "e", "model_sizes_gb": {}, "tiers": []}"#
         XCTAssertThrowsError(try ModelTierTable.decode(Data(json.utf8)))

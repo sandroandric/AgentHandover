@@ -84,9 +84,6 @@ json_export = false
 
 [embedding]
 model = "nomic-embed-text"
-# Image embeddings need the optional embeddings-apple extra; onboarding
-# installs it when you turn the option on.
-image_embeddings = false
 TOML
     chown "${CONSOLE_USER}" "${DATA_DIR}/config.toml"
 fi

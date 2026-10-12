@@ -994,13 +994,9 @@ class SceneAnnotator:
     def __init__(
         self,
         config: AnnotationConfig | None = None,
-        image_embedder=None,
-        vector_kb=None,
         cache: "AnnotationCache | None" = None,
     ) -> None:
         self.config = config or AnnotationConfig()
-        self._image_embedder = image_embedder
-        self._vector_kb = vector_kb
         self._cache = cache
         self._stats = {
             "annotated": 0,
@@ -1308,20 +1304,6 @@ class SceneAnnotator:
             if injection_record:
                 annotation["_ocr_injection"] = injection_record
             annotation = redact_value(annotation)
-
-        # --- Embed screenshot before deletion (SigLIP image embedding) ---
-        if self._image_embedder and self._vector_kb and screenshot_path:
-            try:
-                vec = self._image_embedder.embed_image(screenshot_path)
-                if vec:
-                    from agenthandover_worker.vector_kb import ImageEmbedder
-
-                    self._vector_kb.upsert(
-                        "visual", event_id, f"image:{event_id}",
-                        embedding=vec, prefix="", model=ImageEmbedder.MODEL_NAME,
-                    )
-            except Exception:
-                logger.debug("Image embedding failed for %s", event_id, exc_info=True)
 
         # --- Delete screenshot after VLM processing (success or failure) ---
         # The raw JPEG has no further value — only the structured annotation

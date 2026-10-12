@@ -72,7 +72,6 @@ reasoning_max_compute_minutes_per_day = 90    # wall-clock minutes of those call
 
 [embedding]
 model = "nomic-embed-text"         # text embeddings (search_document:/search_query:/clustering: prefixes)
-image_embeddings = false           # SigLIP screenshot embeddings (optional embeddings-apple extra)
 retention_days = 90                # vectors not updated for this long are purged daily
 max_rows = 50000                   # hard cap; the least recently updated vectors are evicted
 

@@ -68,7 +68,6 @@ def test_missing_file_gives_every_default(tmp_path):
     assert cfg.sop.auto_approve is False
     assert cfg.knowledge.query_api_enabled is True
     assert cfg.knowledge.query_api_port == 9477
-    assert cfg.embedding.image_embeddings is False
     assert cfg.export.skills_dir == Path.home() / ".claude" / "skills"
     assert cfg.privacy_zones == {} and cfg.raw == {}
 
@@ -249,7 +248,7 @@ def test_other_sections(tmp_path):
         "timeout_seconds = 30\ntemperature = 1\nmax_tokens = 100\n"
         "[sop]\nauto_approve = true\n"
         "[knowledge]\nquery_api_enabled = false\nquery_api_port = 9999\n"
-        "[embedding]\nimage_embeddings = true\n"
+        "[embedding]\nretention_days = 30\n"
         '[openclaw]\nworkspace_path = "~/ws"\n'
     )))
     assert cfg.llm.enhance_sops is False
@@ -261,7 +260,7 @@ def test_other_sections(tmp_path):
     assert cfg.sop.auto_approve is True
     assert cfg.knowledge.query_api_enabled is False
     assert cfg.knowledge.query_api_port == 9999
-    assert cfg.embedding.image_embeddings is True
+    assert cfg.embedding.retention_days == 30
     assert cfg.openclaw.workspace_path == "~/ws"
 
 

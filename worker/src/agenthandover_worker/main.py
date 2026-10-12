@@ -40,7 +40,9 @@ from agenthandover_worker.inference_runner import (
     P2, STATE_LOCK, InferenceRunner, model_wait, model_work,
 )
 from agenthandover_worker.negative_demo import NegativeDemoPruner
-from agenthandover_worker.model_profiles import migrate_vlm_file, served_models, upgrade_plan
+from agenthandover_worker.model_profiles import (
+    migrate_embedding_file, migrate_vlm_file, served_models, upgrade_plan,
+)
 from agenthandover_worker.ops_telemetry import COMPUTE, MODEL_USAGE
 from agenthandover_worker.export_adapter import SOPExportAdapter
 from agenthandover_worker.openclaw_writer import OpenClawWriter
@@ -719,6 +721,43 @@ def _migrate_vlm_config(path: Path | None = None) -> bool:
     elif waits:
         logger.log(level, "Kept the [vlm] models in %s: %s", target, reason)
     return changed
+
+
+def _migrate_embedding_config(
+    path: Path | None = None, state_dir: Path | None = None,
+) -> bool:
+    """Remove ``[embedding] image_embeddings`` (the "Visual search" option
+    removed in 0.6.0) from config.toml, recording in the status dir's
+    ``memory-offer.json`` that it was on
+    (``model_profiles.migrate_embedding_file``: backup first, atomic
+    write, only when the key is there).  One INFO line when it changes
+    something; a failure is a warning and never stops the worker.
+    Returns whether the file changed."""
+    target = config_path() if path is None else path
+    if not target.is_file():
+        return False
+    try:
+        changed, wanted, backup = migrate_embedding_file(
+            target, _status_dir() if state_dir is None else state_dir,
+        )
+    except (OSError, UnicodeDecodeError) as exc:
+        logger.warning("Could not migrate [embedding] in %s: %s", target, exc)
+        return False
+    if changed:
+        logger.info(
+            "Removed [embedding] image_embeddings from %s (it was %s; visual "
+            "search is now part of Memory); backup: %s",
+            target, "on" if wanted else "off", backup,
+        )
+    return changed
+
+
+def _migrate_config() -> None:
+    """The upgrade's edits of config.toml, before the worker reads it:
+    the model switch (once Ollama serves the models), then the removed
+    ``[embedding] image_embeddings`` key."""
+    _migrate_vlm_config()
+    _migrate_embedding_config()
 
 
 def _atomic_write_result(path: Path, data: dict) -> None:
@@ -4210,8 +4249,8 @@ def main(argv: list[str] | None = None) -> None:
     from agenthandover_worker.context import build_context, start
     from agenthandover_worker.stages import export
 
-    # The upgrade's model switch (once Ollama serves the models), then one read.
-    _migrate_vlm_config()
+    # The upgrade's edits of config.toml, then one read.
+    _migrate_config()
     cfg = load_config()
     if args.adapter is None:
         args.adapter = cfg.export.adapter
