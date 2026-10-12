@@ -48,7 +48,8 @@ enum MemoryForgetRequest: Equatable {
             return Confirmation(
                 title: "Forget this moment?",
                 message: "This deletes \(what.isEmpty ? "this moment" : "\u{201C}\(what)\u{201D}")\(when): "
-                    + "its screenshots, description, thumbnail and search entry. \(Self.skillsStay)",
+                    + "its screenshots, description, thumbnail and search entry, and that day's summary "
+                    + "(it may describe the moment). \(Self.skillsStay)",
                 button: "Forget Moment")
         case .everything:
             return Confirmation(

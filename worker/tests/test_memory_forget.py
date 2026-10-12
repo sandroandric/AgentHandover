@@ -200,6 +200,23 @@ def test_a_moment_id_forgets_its_rows_and_the_time_they_span(world):
         run(world, Selector(moment_id="nope"))
 
 
+def test_a_moment_id_keeps_other_windows_open_in_its_span(world):
+    """"Forget this moment" forgets that window, not a Slack message sent
+    while it was on screen."""
+    title = "Q3 plan - Docs"
+    world.frame("d1", NOW - 40 * M, "Google Chrome", title, "Editing", memory=False)
+    world.frame("s1", NOW - 38 * M, "Slack", "#design", "Chatting", memory=False)
+    world.frame("d2", NOW - 36 * M, "Google Chrome", title, "Editing", memory=False)
+    world.moment("d1", NOW - 40 * M, NOW - 36 * M, "Google Chrome", title, "Editing")
+    world.moment("s1", NOW - 38 * M, NOW - 38 * M, "Slack", "#design", "Chatting")
+
+    counts = run(world, Selector(moment_id="d1"))
+
+    assert world.ids("SELECT id FROM memory_frames") == {"s1"}
+    assert world.ids("SELECT id FROM events") == {"s1"}
+    assert counts["memory_moments"] == 1 and counts["events"] == 2
+
+
 def test_all_forgets_everything_but_skills_and_the_profile(world):
     three_frames(world)
     # What outlived its event: an index entry and an annotation vector of

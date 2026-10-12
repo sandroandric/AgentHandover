@@ -98,6 +98,10 @@ enum MemoryAPIError: Error, Equatable {
     case modelUnavailable(String)
     /// 400: the request was refused, with the worker's reason.
     case badRequest(String)
+    /// 503 `busy`: a forget waited for other work and gave up; try again.
+    case busy
+    /// 404: the moment to forget is gone (already forgotten or purged).
+    case momentGone
     /// Any other answer.
     case unexpected(status: Int, body: String)
 }
@@ -231,6 +235,10 @@ struct MemoryAPI {
             throw MemoryAPIError.modelUnavailable(error?.detail ?? "")
         case (400, let reason?):
             throw MemoryAPIError.badRequest(reason)
+        case (503, "busy"):
+            throw MemoryAPIError.busy
+        case (404, _):
+            throw MemoryAPIError.momentGone
         default:
             throw MemoryAPIError.unexpected(status: status, body: text)
         }

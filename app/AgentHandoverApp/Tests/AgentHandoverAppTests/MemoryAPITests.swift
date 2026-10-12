@@ -225,6 +225,14 @@ final class MemoryAPITests: XCTestCase {
         XCTAssertEqual(refused, .unexpected(status: 403, body: #"{"error": "forbidden"}"#))
         let garbage = await error(200, "not json")
         XCTAssertEqual(garbage, .unexpected(status: 200, body: "not json"))
+        // The worker's forget: busy after waiting for other work; an
+        // unknown moment.
+        let busy = await error(503, #"{"error": "busy"}"#)
+        XCTAssertEqual(busy, .busy)
+        let gone = await error(404, #"{"error": "no Memory moment m1"}"#)
+        XCTAssertEqual(gone, .momentGone)
+        XCTAssertEqual(MemoryCenter.describe(MemoryAPIError.busy),
+                       "AgentHandover is busy with other work. Try again in a minute.")
     }
 
     func testNothingListeningMeansTheWorkerIsNotRunning() async {

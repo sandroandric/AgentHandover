@@ -99,7 +99,7 @@ final class MemoryCenter: ObservableObject {
         await save(settings, keys: [.enabled])
     }
 
-    static func describe(_ error: Error) -> String {
+    nonisolated static func describe(_ error: Error) -> String {
         switch error as? MemoryAPIError {
         case .workerNotRunning?, .noToken?:
             return "The worker is not running."
@@ -109,6 +109,10 @@ final class MemoryCenter: ObservableObject {
             return detail.isEmpty ? "Memory's model is not available." : detail
         case .badRequest(let reason)?:
             return reason
+        case .busy?:
+            return "AgentHandover is busy with other work. Try again in a minute."
+        case .momentGone?:
+            return "That moment is already gone."
         case .unexpected(let status, _)?:
             return "The worker answered \(status)."
         case nil:

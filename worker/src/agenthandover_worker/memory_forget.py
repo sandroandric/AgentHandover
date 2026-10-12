@@ -242,13 +242,20 @@ class _Forget:
         )
 
     def find(self) -> None:
+        app = self.sel.app
+        # A moment: its own rows and its window's frames in its span, not
+        # other windows that happened to be open at the same time.
+        window: tuple[str, str] | None = None
+        moment_ids: set[str] | None = None
         if self.sel.moment_id:
             rows = moment_rows(self.conn, self.sel.moment_id)
             if not rows:
                 raise LookupError(f"no Memory moment {self.sel.moment_id}")
             self.since = min(parse_timestamp(r["first_ts"]) for r in rows)
             self.until = max(parse_timestamp(r["last_ts"]) for r in rows)
-        app = self.sel.app
+            window = (rows[0]["app"], rows[0]["window_title"])
+            moment_ids = {r["id"] for r in rows}
+            app = rows[0]["app"]
 
         where, params = self._range_sql("first_ts", "last_ts")
         self.memory = [
@@ -258,6 +265,7 @@ class _Forget:
                 params,
             )
             if _app_matches(app, [row["app"].casefold()])
+            and (moment_ids is None or row["id"] in moment_ids)
         ]
 
         where, params = self._range_sql("timestamp")
@@ -265,7 +273,10 @@ class _Forget:
             f"SELECT id, timestamp, window_json, metadata_json FROM events WHERE {where}", params,
         ):
             event = dict(row)
-            if _app_matches(app, _app_names(parse_json_field(event, "window_json"))):
+            if window is not None:
+                if frame_window(event)[:2] == window:
+                    self.events.append(event)
+            elif _app_matches(app, _app_names(parse_json_field(event, "window_json"))):
                 self.events.append(event)
         # A moment is forgotten whole: the frames of its window in its span
         # (only a time range can cut through one; ``all`` and an app alone
@@ -285,7 +296,7 @@ class _Forget:
         self.event_ids |= {m["described_by"] for m in self.memory if m["described_by"]}
 
         where, params = self._range_sql("timestamp")
-        self.preserved = [
+        self.preserved = [] if window is not None else [
             row for row in self.conn.execute(
                 f"SELECT event_id, source, timestamp, app FROM preserved_text WHERE {where}",
                 params,

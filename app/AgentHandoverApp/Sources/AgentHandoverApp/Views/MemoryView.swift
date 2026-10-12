@@ -437,6 +437,7 @@ final class MemoryWindowModel: ObservableObject {
             case .memoryOff: phase = .problem(.off)
             case .modelUnavailable(let detail): phase = .problem(await Self.diagnose(detail))
             case .badRequest(let reason): phase = .failed(reason)
+            case .busy, .momentGone: phase = .failed(MemoryCenter.describe(error))
             case .unexpected(let status, _): phase = .failed("The worker answered \(status). Try again.")
             }
         } catch {
