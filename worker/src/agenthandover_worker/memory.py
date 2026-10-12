@@ -58,8 +58,10 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import sqlite3
+import tempfile
 import time
 from collections import deque
 from dataclasses import dataclass
@@ -159,6 +161,49 @@ def paused(data_dir: Path, now: datetime) -> bool:
     return now < when
 
 
+def pause_until(data_dir: Path, now: datetime) -> tuple[bool, datetime | None]:
+    """``(paused, until)`` at *now*: *until* is when a timed pause ends
+    (None while paused until resumed, and when not paused)."""
+    if not paused(data_dir, now):
+        return False, None
+    try:
+        until = json.loads(pause_file(data_dir).read_text(encoding="utf-8")).get("paused_until")
+    except (OSError, ValueError, AttributeError):
+        return True, None
+    when = parse_timestamp(until) if isinstance(until, str) else None
+    if when is not None and when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return True, when
+
+
+def write_pause(data_dir: Path, until: datetime | None) -> None:
+    """Pause Memory until *until* (None: until resumed): writes
+    ``{"paused_until": "YYYY-MM-DDTHH:MM:SSZ" | null}`` atomically (a
+    private temp file renamed into place, mode 0600), the format the
+    daemon (``status::memory_paused``) and :func:`paused` read."""
+    if until is not None and until.tzinfo is None:
+        until = until.replace(tzinfo=timezone.utc)
+    stamp = None if until is None else until.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    path = pause_file(data_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=f".{PAUSE_FILE}.", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump({"paused_until": stamp}, fh)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+
+
+def clear_pause(data_dir: Path) -> None:
+    """Resume Memory: the pause file goes."""
+    pause_file(data_dir).unlink(missing_ok=True)
+
+
 def utc_text(moment: datetime) -> str:
     """*moment* as the UTC text memory rows store (millisecond precision,
     ``Z``), which sorts and compares as time."""
@@ -235,6 +280,7 @@ def _unit(vector: list[float] | np.ndarray) -> np.ndarray | None:
 
 def ollama_embedder(
     host: str, model: str, dimensions: int, *, prefix: str = "",
+    timeout: float = EMBED_TIMEOUT_SECONDS,
 ) -> Callable[[list[str | dict]], list[list[float]]]:
     """``items -> vectors`` through Ollama's ``/api/embed``: one request
     for the items given, truncated to *dimensions* and unit length."""
@@ -242,8 +288,7 @@ def ollama_embedder(
 
     def embed(items: list[str | dict]) -> list[list[float]]:
         return client.embed(
-            model, items, prefix=prefix, dimensions=dimensions,
-            timeout=EMBED_TIMEOUT_SECONDS,
+            model, items, prefix=prefix, dimensions=dimensions, timeout=timeout,
         )
 
     return embed
@@ -582,6 +627,14 @@ class MemoryWriter:
         )
         self._conn.execute("BEGIN IMMEDIATE")
         try:
+            gone = self._conn.execute(
+                "SELECT 1 FROM events WHERE id = ?", (event_id,),
+            ).fetchone() is None
+            if gone:
+                # Forgotten while it was being embedded: it stays forgotten.
+                self._set_cursor(rowid, event)
+                self._conn.execute("COMMIT")
+                return False
             if merge:
                 assert latest is not None
                 sets = ["frames = frames + 1", "last_ts = MAX(last_ts, ?)"]
@@ -592,11 +645,13 @@ class MemoryWriter:
                 if has_thumb and not latest.has_thumb:
                     sets.append("thumb_id = ?")
                     params.append(event_id)
-                self._conn.execute(
+                # The row is gone when it was forgotten meanwhile: the
+                # frame starts a new one.
+                merge = self._conn.execute(
                     f"UPDATE memory_frames SET {', '.join(sets)} WHERE id = ?",
                     (*params, latest.id),
-                )
-            else:
+                ).rowcount > 0
+            if not merge:
                 self._conn.execute(
                     "INSERT OR REPLACE INTO memory_frames (id, first_ts, last_ts, frames, "
                     "app, window_title, url_host, description, described_by, embedding, "
@@ -629,6 +684,12 @@ class MemoryWriter:
                 described=bool(described), has_thumb=has_thumb,
             )
         return merge
+
+    def forgotten(self) -> None:
+        """Rows were forgotten: the latest row is read again before the
+        next frame may extend it."""
+        self._latest = None
+        self._latest_loaded = False
 
     def _load_latest(self) -> _Latest | None:
         if self._latest_loaded:
@@ -744,6 +805,21 @@ def _epoch(text: str) -> float:
 
 
 _WORD = re.compile(r"\w{3,}", re.UNICODE)
+_LIKE_DESCRIPTION = "lower(description) LIKE ? ESCAPE '\\'"
+_STOPWORDS = frozenset(
+    "the and for with from into that this what was were when where which who how "
+    "did does had has have about after before".split()
+)
+
+
+def _words(query: str) -> list[str]:
+    """The distinct words (3+ letters) of *query*, lowercased."""
+    return list(dict.fromkeys(w.lower() for w in _WORD.findall(query)))
+
+
+def _like(word: str) -> str:
+    """A LIKE pattern (``ESCAPE '\\'``) for *word* anywhere in the text."""
+    return "%" + word.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
 
 
 class MemoryIndex:
@@ -794,6 +870,11 @@ class MemoryIndex:
 
     def __len__(self) -> int:
         return len(self._ids)
+
+    def reload(self) -> None:
+        """Forget the matrix: the next search reads every row again (after
+        rows were forgotten)."""
+        self._reset()
 
     def refresh(self) -> int:
         """Bring the matrix up to date with the table; returns the rows read."""
@@ -863,14 +944,11 @@ class MemoryIndex:
     def _keyword_rows(self, query: str, candidates: list[str]) -> set[str]:
         """Of *candidates*, the rows whose description holds every word
         (3+ letters) of *query*."""
-        words = list(dict.fromkeys(w.lower() for w in _WORD.findall(query)))
+        words = _words(query)
         if not words or not candidates:
             return set()
-        clauses = " AND ".join(["lower(description) LIKE ? ESCAPE '\\'"] * len(words))
-        patterns = [
-            "%" + w.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
-            for w in words
-        ]
+        clauses = " AND ".join([_LIKE_DESCRIPTION] * len(words))
+        patterns = [_like(w) for w in words]
         found: set[str] = set()
         for start in range(0, len(candidates), 500):
             chunk = candidates[start:start + 500]
@@ -978,10 +1056,61 @@ class MemoryIndex:
         return moments
 
 
-def query_embedder(host: str, model: str, dim: int) -> Callable[[str], list[float]]:
+def keyword_search(
+    index: MemoryIndex,
+    query: str,
+    *,
+    since: datetime | None = None,
+    until: datetime | None = None,
+    app: str | None = None,
+    limit: int = 10,
+) -> list[dict]:
+    """The rows of *index*'s model whose description holds words (3+
+    letters) of *query*, scored by the share of the words held, best (then
+    newest) first: the search when the query cannot be embedded.  Same
+    filters and fields as :meth:`MemoryIndex.search`, one row per moment.
+    Words that say nothing about a screen ("the", "what", "was") are not
+    matched."""
+    words = [w for w in _words(query) if w not in _STOPWORDS]
+    if not words or limit <= 0:
+        return []
+    where = ["model = ?", "dim = ?"]
+    params: list[Any] = [index.model, index.dim]
+    if since is not None:
+        where.append("julianday(last_ts) >= julianday(?)")
+        params.append(utc_text(since))
+    if until is not None:
+        where.append("julianday(first_ts) <= julianday(?)")
+        params.append(utc_text(until))
+    where.append("(" + " OR ".join([_LIKE_DESCRIPTION] * len(words)) + ")")
+    params += [_like(w) for w in words]
+    found = []
+    for row in index._conn.execute(
+        "SELECT id, first_ts, last_ts, frames, app, window_title, url_host, description, "
+        f"thumb_id FROM memory_frames WHERE {' AND '.join(where)}",
+        params,
+    ):
+        if app and row["app"].casefold() != app.casefold():
+            continue
+        text = row["description"].lower()
+        found.append({
+            "id": row["id"], "first_ts": row["first_ts"], "last_ts": row["last_ts"],
+            "frames": int(row["frames"]), "app": row["app"],
+            "window_title": row["window_title"], "url_host": row["url_host"],
+            "description": row["description"], "thumb_id": row["thumb_id"],
+            "score": round(sum(w in text for w in words) / len(words), 4),
+            "rows": [row["id"]],
+        })
+    found.sort(key=lambda m: (m["score"], _epoch(m["last_ts"])), reverse=True)
+    return found[:limit]
+
+
+def query_embedder(
+    host: str, model: str, dim: int, *, timeout: float = EMBED_TIMEOUT_SECONDS,
+) -> Callable[[str], list[float]]:
     """``query -> vector`` with the model's query prefix (its profile)."""
     profile = EMBEDDING_PROFILES.get(model)
     embed = ollama_embedder(
-        host, model, dim, prefix=profile.query_prefix if profile else "",
+        host, model, dim, prefix=profile.query_prefix if profile else "", timeout=timeout,
     )
     return lambda query: embed([query])[0]

@@ -235,6 +235,8 @@ class QueryAPIHandler(http.server.BaseHTTPRequestHandler):
                 self._handle_telemetry_trend()
             elif path == "/version":
                 self._handle_version()
+            elif path == "/memory/status":
+                self._handle_memory("status")
             else:
                 self._send_error(404, f"Not found: {path}")
         except Exception:
@@ -270,6 +272,8 @@ class QueryAPIHandler(http.server.BaseHTTPRequestHandler):
                 self._handle_semantic_search()
             elif path == "/recall":
                 self._handle_recall()
+            elif path in ("/memory/search", "/memory/pause", "/memory/resume", "/memory/forget"):
+                self._handle_memory(path.rsplit("/", 1)[1])
             elif _BUNDLE_SLUG_RE.match(path):
                 slug = _BUNDLE_SLUG_RE.match(path).group(1)  # type: ignore[union-attr]
                 self._handle_bundle_compile(slug)
@@ -480,6 +484,30 @@ class QueryAPIHandler(http.server.BaseHTTPRequestHandler):
             ],
             "count": len(results),
         })
+
+    def _handle_memory(self, action: str) -> None:
+        """``/memory/*`` (``memory_api.MemoryService``): the body (empty is
+        ``{}``) goes to the service, whose answer is sent as is."""
+        service = getattr(self.server, "memory", None)
+        if service is None:
+            self._send_error(501, "Memory is not available in this worker")
+            return
+        if action == "status":
+            status, reply = service.status()
+            self._send_json(reply, status=status)
+            return
+        content_length = int(self.headers.get("Content-Length", 0) or 0)
+        raw = self.rfile.read(content_length) if content_length else b""
+        try:
+            body = json.loads(raw) if raw.strip() else {}
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            self._send_error(400, f"Invalid JSON: {exc}")
+            return
+        if action == "resume":
+            status, reply = service.resume()
+        else:
+            status, reply = getattr(service, action)(body)
+        self._send_json(reply, status=status)
 
     def _bundle_extras(self, slug: str) -> tuple[dict | None, dict | None]:
         """Preflight summary and execution stats for the bundle responses."""
@@ -1014,6 +1042,8 @@ class QueryAPIServer:
         Optional RuntimeValidator for ``/validate/{slug}`` endpoint.
     ops_telemetry:
         Optional OpsTelemetry for ``/health/detailed`` and ``/telemetry/trend`` endpoints.
+    memory:
+        Optional ``memory_api.MemoryService`` for the ``/memory/*`` endpoints.
     token_path:
         File holding the POST token (created 0600 if absent).  ``None``
         keeps a random token in memory only (tests read ``token``).
@@ -1032,6 +1062,7 @@ class QueryAPIServer:
         ops_telemetry: Any = None,
         vector_kb: Any = None,
         token_path: Path | None = None,
+        memory: Any = None,
     ) -> None:
         self._token_path = token_path
         self._token: str | None = None
@@ -1045,6 +1076,7 @@ class QueryAPIServer:
         self._runtime_validator = runtime_validator
         self._ops_telemetry = ops_telemetry
         self._vector_kb = vector_kb
+        self._memory = memory
         self._httpd: http.server.HTTPServer | None = None
         self._thread: threading.Thread | None = None
         self._running = False
@@ -1077,6 +1109,7 @@ class QueryAPIServer:
         self._httpd.runtime_validator = self._runtime_validator  # type: ignore[attr-defined]
         self._httpd.ops_telemetry = self._ops_telemetry  # type: ignore[attr-defined]
         self._httpd.vector_kb = self._vector_kb  # type: ignore[attr-defined]
+        self._httpd.memory = self._memory  # type: ignore[attr-defined]
 
         self._thread = threading.Thread(
             target=self._httpd.serve_forever,

@@ -610,3 +610,26 @@ fn test_memory_paused_reads_the_pause_file() {
     write("not json".into());
     assert!(memory_paused(dir.path(), now), "a broken record fails closed");
 }
+
+/// The files the worker's pause writer (`memory.write_pause`, used by the
+/// query API's `POST /memory/pause` and the CLI) produces, byte for byte
+/// (`worker/tests/test_memory_api.py` writes the same bytes): the daemon
+/// reads them as the worker does.
+#[test]
+fn test_memory_paused_reads_the_files_the_worker_writes() {
+    use agenthandover_common::status::{memory_paused, MEMORY_PAUSE_FILE};
+    use chrono::TimeZone;
+    let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/memory_pause");
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join(MEMORY_PAUSE_FILE);
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+
+    std::fs::copy(fixtures.join("timed.json"), &file).unwrap();
+    let until = Utc.with_ymd_and_hms(2026, 10, 12, 13, 30, 0).unwrap();
+    assert!(memory_paused(dir.path(), until - chrono::Duration::seconds(1)));
+    assert!(!memory_paused(dir.path(), until), "the pause ends at paused_until");
+
+    std::fs::copy(fixtures.join("until_resumed.json"), &file).unwrap();
+    assert!(memory_paused(dir.path(), until + chrono::Duration::days(365)));
+}

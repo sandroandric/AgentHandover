@@ -87,13 +87,18 @@ class CacheKey:
     ocr_simhash: int  # unsigned
 
 
+def title_hash(title: str) -> str:
+    """The stored hash of a window title (``annotation_cache.title_hash``)."""
+    return hashlib.sha256(title.encode()).hexdigest()[:32]
+
+
 def cache_key(app: str, title: str, ocr_text: str) -> CacheKey | None:
     """The key for a frame, or None when it must not be cached."""
     if len(ocr_text.strip()) < MIN_OCR_CHARS:
         return None
     return CacheKey(
         app=app,
-        title_hash=hashlib.sha256(title.encode()).hexdigest()[:32],
+        title_hash=title_hash(title),
         ocr_simhash=simhash64(normalise_screen_text(ocr_text)),
     )
 

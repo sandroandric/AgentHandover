@@ -4158,9 +4158,15 @@ def _start_query_api(ctx) -> "object | None":
         if not ctx.cfg.knowledge.query_api_enabled:
             logger.info("Query API server disabled (knowledge.query_api_enabled = false)")
             return None
+        from agenthandover_worker.memory_api import MemoryService
         from agenthandover_worker.query_api import TOKEN_FILE, QueryAPIServer
 
         port = ctx.cfg.knowledge.query_api_port
+        memory = MemoryService(
+            ctx.cfg, db_path=ctx.db_path, data_dir=_status_dir(),
+            knowledge_dir=ctx.knowledge_dir, writer=ctx.memory_writer,
+            vector_kb=ctx.vector_kb, local_tz=ctx.local_tz, now=ctx.now,
+        )
         server = QueryAPIServer(
             knowledge_base=ctx.knowledge_base,
             port=port,
@@ -4173,6 +4179,7 @@ def _start_query_api(ctx) -> "object | None":
             ops_telemetry=ctx.ops_telemetry,
             vector_kb=ctx.vector_kb,
             token_path=_status_dir() / TOKEN_FILE,
+            memory=memory,
         )
         server.start()
         logger.info(

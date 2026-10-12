@@ -278,6 +278,93 @@ def build_mcp_server():
             "results": _keyword_search(query, limit),
         }, indent=2)
 
+    def _memory_index(cfg):
+        """The Memory index for ``[memory]``'s model (one per model)."""
+        from agenthandover_worker.memory import MemoryIndex, query_embedder
+
+        key = (cfg.memory.model, cfg.memory.dimensions, cfg.vlm.ollama_host)
+        if _state.get("memory_key") != key:
+            if "memory" in _state:
+                _state.pop("memory").close()
+            _state["memory"] = MemoryIndex(
+                _get_db_path(), model=cfg.memory.model, dim=cfg.memory.dimensions,
+                embed_query=query_embedder(
+                    cfg.vlm.ollama_host, cfg.memory.model, cfg.memory.dimensions,
+                    timeout=QUERY_EMBED_TIMEOUT_S,
+                ),
+            )
+            _state["memory_key"] = key
+        return _state["memory"]
+
+    @mcp.tool()
+    def search_memory(
+        query: str,
+        since: str | None = None,
+        until: str | None = None,
+        app: str | None = None,
+        limit: int = 5,
+    ) -> str:
+        """Search the user's Memory: what was on their screen, by meaning.
+
+        Use this to find something the user saw or worked on ("the invoice
+        from Acme last week", "the error in the terminal this morning").
+        *since* / *until* are ISO-8601 times; *app* keeps one app.
+
+        Returns ``{"mode", "reason", "results"}``: each result has ``app``,
+        ``window_title``, ``url_host``, ``description``, ``first_ts``,
+        ``last_ts`` and ``score`` (never images).  ``mode`` is
+        ``"semantic"``, ``"keyword_fallback"`` (words matched in the
+        descriptions; ``reason`` says why), or ``"not_allowed"`` when the
+        user has not let agents search Memory.
+        """
+        from agenthandover_worker.config import load_config
+        from agenthandover_worker.memory import keyword_search
+        from agenthandover_worker.memory_forget import parse_time
+        from agenthandover_worker.ollama import OllamaError
+
+        cfg = load_config()  # read on every call: the switch applies at once
+
+        def answer(mode: str, reason: str, moments: list[dict]) -> str:
+            fields = ("app", "window_title", "url_host", "description", "first_ts", "last_ts", "score")
+            return json.dumps({
+                "mode": mode,
+                "reason": reason,
+                "results": [{k: m[k] for k in fields} for m in moments],
+            }, indent=2)
+
+        if not cfg.memory.agents_access:
+            return answer("not_allowed", (
+                "The user has not let agents search their Memory. They can turn it on "
+                "in AgentHandover's Settings (Memory: \"Agents may search Memory\") or "
+                "with `agenthandover memory agents on`."
+            ), [])
+        if not cfg.memory.enabled:
+            return answer("not_allowed", (
+                "Memory is off. The user can turn it on in AgentHandover's Settings."
+            ), [])
+        if not _get_db_path().exists():
+            return answer("not_allowed", f"no worker database at {_get_db_path()}", [])
+        try:
+            since_at = parse_time(since, "since") if since else None
+            until_at = parse_time(until, "until") if until else None
+        except ValueError as exc:
+            return json.dumps({"error": str(exc)})
+        limit = max(1, min(int(limit), 50))
+        index = _memory_index(cfg)
+        filters = {"since": since_at, "until": until_at, "app": app or None, "limit": limit}
+        down_until, reason = _state.get("memory_embed_down", (0.0, ""))
+        if time.monotonic() >= down_until:
+            try:
+                return answer("semantic", "", index.search(query, **filters))
+            except (ConnectionError, TimeoutError, OllamaError, ValueError) as exc:
+                reason = f"the Memory model is unavailable: {exc}"
+                logger.warning("search_memory: %s", reason)
+                _state["memory_embed_down"] = (
+                    time.monotonic() + EMBED_RETRY_AFTER_S,
+                    f"{reason} (retrying after {EMBED_RETRY_AFTER_S:.0f}s)",
+                )
+        return answer("keyword_fallback", reason, keyword_search(index, query, **filters))
+
     @mcp.tool()
     def get_user_profile() -> str:
         """Get the user's profile — tools, working hours, writing style.
