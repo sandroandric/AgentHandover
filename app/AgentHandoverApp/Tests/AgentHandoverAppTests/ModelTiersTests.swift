@@ -28,8 +28,15 @@ final class ModelTiersTests: XCTestCase {
 
         XCTAssertEqual(table.schemaVersion, raw["schema_version"] as? Int)
         XCTAssertEqual(table.minimumOllamaVersionForGemma4, raw["minimum_ollama_version_for_gemma4"] as? String)
+        XCTAssertEqual(table.minimumOllamaVersionForMemory, raw["minimum_ollama_version_for_memory"] as? String)
+        XCTAssertEqual(table.minimumOllamaVersionForMemory, "0.40.0")
         XCTAssertEqual(table.embeddingModel, raw["embedding_model"] as? String)
+        XCTAssertEqual(table.memoryModel, raw["memory_model"] as? String)
+        XCTAssertEqual(table.memoryModel, "embeddinggemma-2:440m")
         XCTAssertEqual(table.modelSizesGB, raw["model_sizes_gb"] as? [String: Double])
+        XCTAssertEqual(table.sizeLabel("embeddinggemma-2:440m"), "710 MB")
+        // Memory's model is not one a tier pulls.
+        XCTAssertFalse(table.tiers.contains { table.models(for: $0).contains("embeddinggemma-2:440m") })
         let rawTiers = try XCTUnwrap(raw["tiers"] as? [[String: Any]])
         XCTAssertEqual(table.tiers.count, rawTiers.count)
         for (tier, rawTier) in zip(table.tiers, rawTiers) {
@@ -65,6 +72,9 @@ final class ModelTiersTests: XCTestCase {
             """
         let table = try ModelTierTable.decode(Data(json.utf8))
         XCTAssertEqual(table.tiers[0].previousDefaults, [])
+        // Nor did it name Memory's model or its Ollama minimum (0.5 and earlier).
+        XCTAssertNil(table.memoryModel)
+        XCTAssertNil(table.minimumOllamaVersionForMemory)
     }
 
     func testRecommendsByRAM() throws {

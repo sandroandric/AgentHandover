@@ -58,7 +58,13 @@ struct ModelPair: Decodable, Hashable {
 struct ModelTierTable: Decodable {
     let schemaVersion: Int
     let minimumOllamaVersionForGemma4: String
+    /// The Ollama that runs `memoryModel`; nil in a tiers.json written
+    /// before Memory (0.5 and earlier).
+    let minimumOllamaVersionForMemory: String?
     let embeddingModel: String
+    /// The model Memory embeds kept frames with (not a tier model); nil in
+    /// a tiers.json written before Memory.
+    let memoryModel: String?
     let modelSizesGB: [String: Double]
     /// Ascending by `minRAMGB`; the first row takes any Mac.
     let tiers: [ModelTier]
@@ -66,7 +72,9 @@ struct ModelTierTable: Decodable {
     enum CodingKeys: String, CodingKey {
         case schemaVersion = "schema_version"
         case minimumOllamaVersionForGemma4 = "minimum_ollama_version_for_gemma4"
+        case minimumOllamaVersionForMemory = "minimum_ollama_version_for_memory"
         case embeddingModel = "embedding_model"
+        case memoryModel = "memory_model"
         case modelSizesGB = "model_sizes_gb"
         case tiers
     }
