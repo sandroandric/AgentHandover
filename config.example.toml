@@ -71,9 +71,18 @@ reasoning_max_calls_per_day = 300             # LLM reasoner + behavioral synthe
 reasoning_max_compute_minutes_per_day = 90    # wall-clock minutes of those calls per local day
 
 [embedding]
-model = "nomic-embed-text"         # text embeddings (search_document:/search_query:/clustering: prefixes)
+model = "nomic-embed-text"         # text embeddings, with the model's task prefixes and thresholds
 retention_days = 90                # vectors not updated for this long are purged daily
 max_rows = 50000                   # hard cap; the least recently updated vectors are evicted
+
+[memory]
+enabled = false                    # embed every kept screen into a private, searchable memory
+model = "embeddinggemma-2:440m"    # needs Ollama 0.40 or later
+dimensions = 256                   # stored vector size
+retention_days = 365               # memory rows older than this are deleted
+thumbnail_days = 7                 # encrypted thumbnails older than this are deleted
+agents_access = false              # let agents search memory over MCP (never images)
+max_frames_per_hour = 600          # embedding budget
 
 [focus]
 max_session_hours = 4              # a recording never stopped is closed as stale after this long
