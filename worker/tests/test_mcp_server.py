@@ -163,13 +163,18 @@ class TestMCPResourceLogic:
 
 def test_mcp_db_path_matches_worker():
     """The MCP server reads the database and knowledge base the worker writes."""
-    from agenthandover_worker import knowledge_base, mcp_server
+    from agenthandover_worker import knowledge_base, mcp_server, paths
     from agenthandover_worker import main as worker_main
 
-    assert mcp_server._get_db_path() == worker_main.DEFAULT_DB_PATH
+    # Both resolve through paths: the functions now (HOME as it is now),
+    # the worker's defaults from the same module's import-time values (a
+    # test run that changed HOME after import must not compare the two).
+    assert mcp_server._get_db_path() == paths.db_path()
     assert mcp_server._get_db_path().name == "events.db"
-    assert mcp_server._get_kb_root() == worker_main.KNOWLEDGE_BASE_DIR
-    assert knowledge_base.DEFAULT_KNOWLEDGE_DIR == worker_main.KNOWLEDGE_BASE_DIR
+    assert mcp_server._get_kb_root() == paths.knowledge_base_dir()
+    assert worker_main.DEFAULT_DB_PATH is paths.DEFAULT_DB_PATH
+    assert worker_main.KNOWLEDGE_BASE_DIR is paths.KNOWLEDGE_BASE_DIR
+    assert knowledge_base.DEFAULT_KNOWLEDGE_DIR is paths.KNOWLEDGE_BASE_DIR
 
 
 def _fake_embed(self, texts, **_):
