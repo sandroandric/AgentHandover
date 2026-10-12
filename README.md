@@ -28,7 +28,8 @@
   <a href="#what-you-can-automate">Use Cases</a> &middot;
   <a href="#what-a-skill-looks-like">What a Skill Looks Like</a> &middot;
   <a href="#how-it-works">How It Works</a> &middot;
-  <a href="#v050">What's New</a> &middot;
+  <a href="#memory">Memory</a> &middot;
+  <a href="#v060">What's New</a> &middot;
   <a href="#connect-your-agent">Connect Your Agent</a> &middot;
   <a href="#install">Install</a> &middot;
   <a href="#privacy">Privacy</a> &middot;
@@ -58,6 +59,8 @@ AgentHandover watches how you work on your Mac, turns your workflows into reusab
 Each Skill captures the *what*, the *why*, and the *how* — steps, strategy, decision logic, guardrails, and your writing voice — and says plainly what it doesn't know yet. And they **learn from use**: agents report back after every run, runs that follow the steps confirm them, and a run that deviates where a decision was only a guess turns into a question for you.
 
 You already know how to do your work. Now your agents can too.
+
+**New in 0.6: [Memory](#memory).** Everything AgentHandover sees on your screen also goes into a private memory on your Mac that you can search by describing it: *"the invoice from Acme"*, *"that orange news site"*. If you allow it, your agents can search it too.
 
 ## Why this matters
 
@@ -149,6 +152,22 @@ Every Skill starts as a draft in your menu bar app. An agent sees it only when a
 | **Fresh** | You did it recently: freshness halves every 30 days since it was last observed |
 
 An approved Skill that fails a check is listed by `list_ready_skills` as held back, with the reason. Nothing auto-promotes; the system only suggests.
+
+## Memory
+
+New in 0.6. Find anything you saw on your Mac by describing it. Each screen AgentHandover keeps is embedded, the screenshot together with its app and window title, by Google's [EmbeddingGemma 2](https://huggingface.co/google/embeddinggemma-2) running in Ollama on your Mac. Near-identical screens of the same window in a row become one moment, so a long day stays a short list.
+
+- **Search** from the menu bar (**Search Memory…**), from the CLI (`agenthandover memory search "the Acme invoice"`), or let your agents search it (below).
+- **What is kept.** For each moment: a short redacted description (the screen's annotation, or its screen text until one exists), the app and window title, the time and a search vector. The screenshot is deleted once it is embedded. A small thumbnail (about 480 px) is kept for 7 days to show in results, encrypted with a key in your Keychain that only the app and the capture daemon use. After that the description and vector remain, for a year by default.
+- **Never kept.** What the privacy zones block: password managers, macOS password prompts, Keychain Access, banking, payroll and sign-in pages, and the apps, sites and hours you add to `[privacy.zones]`.
+- **Forget and pause.** Forget the last hour, today, one moment, one app or everything, from the menu, the Memory window or `agenthandover memory forget`. Forget deletes the screens, descriptions, vectors, thumbnails, search entries and that day's summaries; your approved Skills stay. Pause Memory for an hour, until tomorrow or until you resume; Skills still learn from what you do.
+- **Agents.** One switch, off by default: **Let agents search my Memory** (Memory Settings, or `agenthandover memory agents on`). Agents then get `search_memory` over MCP: descriptions, apps, window titles and times, never images or file paths.
+- **Light.** Embedding is a low-priority background job, about half a second a screen. It waits while the Mac has less than 2 GB of memory free or swap is growing, while a two-model tier is writing Skills, and after 600 screens in an hour.
+- **Needs** Ollama 0.40 or later (EmbeddingGemma 2 runs on Ollama's MLX runner) and `embeddinggemma-2:440m` (710 MB), which setup or the upgrade offer downloads.
+
+**How well it finds things.** On the 16 GB test Mac (Ollama 0.40.3), 26 screens (20 public web pages in look-alike pairs and 6 app screens) and 52 questions, half about what a screen said and half about how it looked, run through Memory's own writer and search: the right screen came first for 90% of the questions and was in the top five for all of them; for questions about the look, 88% first. Embedding the same screens' title and screen text with `nomic-embed-text`, the model 0.5 searches with, found 75% first, and 65% of the questions about the look. One small set, so indicative.
+
+**Upgrading from 0.5**, the app asks once: **Memory only** (Skill search keeps `nomic-embed-text`), **Upgrade everything** (Skill search, task grouping and session linking move to EmbeddingGemma 2 too: your Skills are re-indexed in the background and switched over in one step when it is done, and search keeps working meanwhile), or **Not now**. New installs use EmbeddingGemma 2 for everything.
 
 ## The Knowledge Base
 
@@ -290,7 +309,7 @@ curl -X POST http://localhost:9477/search/semantic \
 
 ### Download and run
 
-Download the latest `.pkg` from [**Releases**](https://github.com/sandroandric/AgentHandover/releases) and double-click. Requires macOS 14 (Sonoma) or later and [Ollama](https://ollama.com/download).
+Download the latest `.pkg` from [**Releases**](https://github.com/sandroandric/AgentHandover/releases) and double-click. Requires macOS 14 (Sonoma) or later and [Ollama](https://ollama.com/download); [Memory](#memory) needs Ollama 0.40 or later.
 
 The onboarding app walks you through: permissions, AI model downloads (it recommends a tier for your Mac's RAM and shows the memory each tier needs against what is free now), Chrome extension, and your first recording.
 
@@ -310,7 +329,7 @@ agenthandover start all  # Start daemon + worker
 
 ### AI Models
 
-AgentHandover picks a tier from your Mac's RAM during onboarding; you can choose another tier, or name your own models, in onboarding or in `config.toml` (`[vlm] annotation_model` / `sop_model`). The table lives in one place (`TIERS` in `worker/src/agenthandover_worker/model_profiles.py`, installed as `tiers.json`); onboarding, `agenthandover setup --vlm [--tier ID]`, `agenthandover doctor` and the worker all read it. Every tier also pulls `nomic-embed-text` for search.
+AgentHandover picks a tier from your Mac's RAM during onboarding; you can choose another tier, or name your own models, in onboarding or in `config.toml` (`[vlm] annotation_model` / `sop_model`). The table lives in one place (`TIERS` in `worker/src/agenthandover_worker/model_profiles.py`, installed as `tiers.json`); onboarding, `agenthandover setup --vlm [--tier ID]`, `agenthandover doctor` and the worker all read it. Every tier also pulls an embedding model for search: `embeddinggemma-2:440m` (EmbeddingGemma 2, 710 MB, which also powers [Memory](#memory)) with Ollama 0.40 or later, `nomic-embed-text` with an older Ollama (Memory then waits for the update).
 
 <!-- tiers:start -->
 | RAM | Tier | Screen annotation | Skill writing | Download |
@@ -337,7 +356,8 @@ Where a tier's two models differ, the worker runs one at a time: annotation firs
 ```bash
 # Or pull manually (Recommended tier):
 ollama pull qwen3.5:4b          # Screen annotation and Skills (~3.4 GB)
-ollama pull nomic-embed-text    # Semantic search (~274 MB)
+ollama pull embeddinggemma-2:440m  # Search and Memory, Ollama 0.40+ (~710 MB)
+ollama pull nomic-embed-text    # Search with an older Ollama (~274 MB)
 # Standard tier (8 GB) adds:
 ollama pull qwen3.5:2b-q4_K_M   # Screen annotation (~1.9 GB)
 # Performance tier (24 GB) adds:
@@ -389,6 +409,7 @@ AgentHandover lives in your menu bar:
 - **Attention items** -- questions waiting, drafts ready for review
 - **Record** -- one click to start a focus recording
 - **Workflows** -- browse all Skills, approve drafts, see what each Skill knows and what it doesn't
+- **Memory** -- search what you saw, pause Memory, forget the last hour or today, and Memory Settings
 - **Digest** -- daily summary of what was learned, and the questions still open
 
 Review the strategy, steps, and guardrails. Click "Approve for Agents" when it looks right. One click. No Skill reaches agents without your sign-off.
@@ -398,7 +419,8 @@ Review the strategy, steps, and guardrails. Click "Approve for Agents" when it l
 Everything runs on your machine:
 
 - **Local-only models.** Every model runs through Ollama on your Mac (or the Ollama host you configure). No cloud model API is called and no API key is stored.
-- **Screenshots are temporary.** Each frame is a JPEG of the focused window at half its native pixel resolution (one pixel per point on a Retina display), deleted after annotation. Frames never annotated are deleted by the daily maintenance run once they are older than `job_ttl_days` (default 7). Only structured text survives.
+- **Screenshots are temporary.** Each frame is a JPEG of the focused window at half its native pixel resolution (one pixel per point on a Retina display), deleted after annotation and, with Memory on, after it is embedded (Memory gives up on a frame it could not embed within 48 hours). Frames never annotated are deleted by the daily maintenance run once they are older than `job_ttl_days` (default 7). Only structured text, Memory's vectors and its encrypted thumbnails survive.
+- **Memory stays on your Mac.** Its descriptions, vectors and thumbnails are stored with the rest of your data, and the thumbnails are AES-256-GCM encrypted with a key kept in your Keychain. A Memory vector encodes what was on screen, so treat it like the screenshot it came from: it never leaves the Mac, agents get descriptions only when you allow it, and forget deletes it.
 - **Redaction where the data flows.** API keys, tokens, passwords (including "password is …" phrasings) and card numbers are scrubbed by the daemon before anything is stored, and again by the worker before any text goes into a model prompt. URLs keep their origin and path; query strings are dropped except for a short allow-list of harmless keys.
 - **Blocked by default.** Password managers, macOS password and Touch ID prompts, permission dialogs, the login window, Apple's Passwords app, and banking, payroll and login pages are never captured. Add your own apps, URLs and quiet hours as privacy zones (`[privacy.zones]`): the daemon checks them before it takes a frame and again after, and the worker once more on stored events.
 - **Secure field exclusion.** Password and credit card inputs are never captured, and form values are left out of browser snapshots unless you turn on `capture_input_values`.
@@ -406,7 +428,7 @@ Everything runs on your machine:
 - **Clipboard.** A copy is recorded as an event; the copied text itself is kept only if you turn on `enable_clipboard_preview`.
 - **Reading app state is opt-in.** Reading the open document, page or message from Safari, Mail, Notes and a few other apps needs macOS's per-app Automation consent, so it is off until you turn it on in onboarding.
 - **Knowledge base is local.** Vector store, voice profiles, and all Skills live on your machine. Never uploaded.
-- **No encryption at rest of its own.** Screenshots, the event database and the knowledge base are stored as plain files under your home folder; turn on FileVault to encrypt them on disk.
+- **No encryption at rest of its own**, except Memory's thumbnails. Screenshots, the event database and the knowledge base are stored as plain files under your home folder; turn on FileVault to encrypt them on disk.
 - **Configurable retention.** Raw events are deleted after 14 days (`retention_days_raw`); the Skills keep the evidence they cite.
 - **No telemetry.** AgentHandover sends no usage data and none of your content anywhere. The only request the app makes on its own is Sparkle's daily update check against `www.agenthandover.com/appcast.xml`; turn it off with `defaults write com.agenthandover.app SUEnableAutomaticChecks -bool false`.
 
@@ -587,6 +609,17 @@ GitHub [Discussions](https://github.com/sandroandric/AgentHandover/discussions) 
 [sandro@sandric.co](mailto:sandro@sandric.co)
 
 ## Changelog
+
+### v0.6.0
+
+AgentHandover grows from Skills into a private memory of your work, with Skills on top. Numbers are measurements on the 16 GB test Mac with Ollama 0.40.3 unless stated.
+
+- **Memory.** Search anything you saw by describing it, from the menu bar, the CLI or (if you allow it) your agents. Each kept screen is embedded with its app and window title by EmbeddingGemma 2 on your Mac; near-identical screens of one window become one moment. On 52 questions about 26 screens: the right screen first 90% of the time, in the top five every time, 88% first for questions about how a screen looked (0.5's text search: 75% and 65%). See [Memory](#memory).
+- **Private by construction.** Thumbnails are AES-256-GCM encrypted with a Keychain key and kept 7 days; descriptions are redacted; privacy zones are never kept; forget deletes a time range, an app, a moment or everything, including the day's summaries; agents' access is a separate switch, off by default, and returns text, never images.
+- **EmbeddingGemma 2 for search.** New installs use it for Skill search, task grouping and session linking too; upgraders choose Memory only or Upgrade everything (a background re-index that switches over in one step). Every threshold was measured on labelled sets for both models: with EmbeddingGemma, session linking separates same-task from different-task pairs completely (nomic: two thirds), and Skill search ranked 15 of 16 agent questions first (nomic: 16 of 16).
+- **Fixes in search.** Search compared vectors of different models when they had the same size, and the daily vector purge would have deleted the vectors of any model but the configured one; `/search/semantic` answers malformed requests with 400 instead of crashing.
+- **Removed.** The SigLIP "Visual search" option: it stored image vectors that nothing ever searched. If you had it on, the upgrade offer says Memory replaces it.
+- **Needs Ollama 0.40 or later** for Memory and EmbeddingGemma 2; with an older Ollama everything else works as in 0.5 and `agenthandover doctor` says what to update.
 
 ### v0.5.0
 

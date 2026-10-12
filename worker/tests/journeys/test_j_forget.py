@@ -33,6 +33,7 @@ from datetime import timedelta
 
 from agenthandover_worker import main as worker_main
 from agenthandover_worker.mcp_server import build_mcp_server
+from agenthandover_worker.model_scheduler import ModelScheduler
 from agenthandover_worker.ollama import OllamaClient, OllamaUnavailable
 from agenthandover_worker.query_api import TOKEN_HEADER
 from memory_world import World, axis
@@ -85,6 +86,9 @@ def _found(srv, mcp_search) -> dict[str, set[str]]:
 
 def test_j_forget(temp_home, kb_root, worker, clock, monkeypatch) -> None:
     monkeypatch.setattr(OllamaClient, "_request", fake_ollama)
+    # Memory's memory-pressure check reads this Mac's swap and free memory
+    # and watches swap for a minute first; this journey is about forget.
+    monkeypatch.setattr(ModelScheduler, "_embedding_pressure", lambda self: None)
     temp_home.configure(
         ollama_host="http://127.0.0.1:9",
         extra="[memory]\nenabled = true\nagents_access = true\n",

@@ -7,6 +7,76 @@ and the project follows [Semantic Versioning](https://semver.org/) within the 0.
 (minor bumps may include breaking changes; the README's Changelog section has the
 prose version of every release).
 
+## [0.6.0] — unreleased
+
+Memory: a private, searchable record of what was on screen, with Skills on
+top. Every claim names the test that proves it (`worker/tests/journeys/`
+replays recorded model output) or the measurement behind it (single runs on
+the 16 GB test Mac with Ollama 0.40.3).
+
+### Added
+- **Memory.** Each kept frame (screenshot plus "app — title") is embedded
+  with `embeddinggemma-2:440m` at 512 dimensions into `memory_frames`
+  (migration v008) before its screenshot is deleted; consecutive frames of
+  one window with cosine ≥ 0.97 within 10 minutes extend one moment.
+  Searched by meaning or look (numpy, with a keyword boost). Product-path
+  benchmark, 26 screens and 52 questions: R@1 0.90, R@5 1.00, MRR 0.952
+  (look 0.88; 256 dimensions lose recall by look, 0.81). Proof: J-memory,
+  `test_memory.py`, scratch benchmark in LOG.md.
+- **Encrypted thumbnails.** The daemon writes `thumbs/<event>.ahthumb`
+  (480 px JPEG, AES-256-GCM) with a key the app keeps in the Keychain and
+  hands only to the signed daemon over the capture socket; kept
+  `[memory] thumbnail_days` (7). Proof: `thumbnail.rs` tests, a sample
+  pinned in Rust and Swift, `test_thumbnails.py`.
+- **Forget and pause.** `agenthandover memory forget|pause|resume`, the
+  menu and the Memory window. Forget removes events, search entries,
+  annotation and preserved-text vectors, Memory rows, thumbnails,
+  screenshots and the summaries of the days touched; Skills stay. Proof:
+  J-forget, `test_memory_forget.py`.
+- **Search surfaces.** Query API `/memory/search|status|pause|resume|forget`,
+  CLI `agenthandover memory search|status|agents`, the Memory window, and MCP
+  `search_memory` behind `[memory] agents_access` (off by default; text
+  only). Proof: `test_memory_api.py`, `test_mcp_search_memory.py`, J-mcp.
+- **Setup and upgrade.** Setup has a Memory step (on by default). An
+  upgrade offers Memory only, Upgrade everything or Not now, once. Upgrade
+  everything re-embeds every vector into a staging table (migration v009)
+  and swaps it in one transaction; resumable, never mixing models in a
+  search. Proof: J-upgrade-everything, `test_embedding_upgrade.py`, Swift
+  `MemoryOfferTests`.
+
+### Changed
+- **Embedding profiles.** Prefixes, sizes and thresholds per model. For
+  EmbeddingGemma 2 (text paths at 768 dimensions, its document prefix for
+  clustering: the model card's clustering prefix squeezed task texts into
+  0.92–0.98): segmenter 0.845, linker 0.86 (band 0.04), dedup 0.76,
+  matcher 0.73, search floor 0.4, each measured on labelled sets. Session
+  linking separates same- from different-task pairs completely (nomic 0.67);
+  Skill search ranks 15 of 16 questions first (nomic 16 of 16). nomic's
+  matcher moves from 0.50 to 0.69 (0.50 matched labels to other
+  procedures; the vector matcher has no production caller yet). Proof:
+  `test_segmenter_threshold.py`, `test_linker_threshold.py`,
+  `test_search_threshold.py`.
+- **Background embedding waits on current pressure.** Memory and the
+  re-index wait while less than 2 GB is free, swap grew more than 256 MB in
+  5 minutes, or the disk is under its floor; swap merely in use (often
+  above 8 GB all day on 16 GB Macs) no longer blocks them. The Skill models
+  keep the 8 GB swap limit. Proof: `test_memory.py`.
+- **Ollama 0.40 or later** for Memory (`tiers.json`
+  `minimum_ollama_version_for_memory`); doctor warns when Memory is on and
+  Ollama is older.
+
+### Fixed
+- Vector search compared rows of different models of the same size; it
+  now filters by model and size. The daily purge would have deleted any
+  model's vectors but the configured one's. `/search/semantic` crashed on
+  malformed bodies (now 400). Proof: `test_vector_kb.py`, `test_query_api.py`.
+
+### Removed
+- The SigLIP image embedder and the "Visual search" setup toggle (its
+  vectors were never searched); the `embeddings-apple` extra. The config
+  key is migrated with a backup and the old vectors are deleted once.
+  Proof: `test_embedding_migration.py`.
+
 ## [0.5.0] — 2026-09-25
 
 The release where the product does what the README says. Every claim below
