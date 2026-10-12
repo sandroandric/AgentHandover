@@ -22,7 +22,7 @@ from agenthandover_worker.memory_api import MemoryService
 from agenthandover_worker.ollama import OllamaUnavailable
 from agenthandover_worker.query_api import TOKEN_HEADER, QueryAPIServer
 from daemon_db import REPO_ROOT
-from memory_world import NOW, World, axis
+from memory_world import DIM, NOW, World, axis
 
 PAUSE_FIXTURES = REPO_ROOT / "tests" / "fixtures" / "memory_pause"
 
@@ -208,7 +208,7 @@ def test_status_reports_what_memory_holds(api):
         "waiting": "Ollama failed; retrying after a backoff",
     }
     thumb = (api.world.thumbs / "inv.ahthumb").stat().st_size
-    assert body["disk_bytes"] > 3 * 256 * 4 + thumb
+    assert body["disk_bytes"] > 3 * DIM * 4 + thumb
 
 
 def test_status_reads_the_agents_switch_from_the_file_each_time(api):

@@ -22,13 +22,15 @@ import numpy as np
 
 from agenthandover_worker.activity_search import ActivitySearcher
 from agenthandover_worker.annotation_cache import title_hash
+from agenthandover_worker.config import MemoryConfig
 from agenthandover_worker.knowledge_base import KnowledgeBase
 from agenthandover_worker.memory import utc_text
 from agenthandover_worker.model_profiles import MEMORY_MODEL
 from agenthandover_worker.vector_kb import VectorKB
 from daemon_db import create_daemon_db
 
-DIM = 256
+# The configured size of Memory vectors.
+DIM = MemoryConfig().dimensions
 
 
 def ts(moment: datetime) -> str:
