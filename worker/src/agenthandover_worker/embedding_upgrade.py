@@ -123,7 +123,8 @@ class EmbeddingUpgrade:
     writes.  *preflight* returns why the new model cannot run (Ollama too
     old, the model not downloaded) or None, and raises
     :class:`OllamaError` when Ollama does not answer; the default asks
-    Ollama.
+    Ollama.  *client* (default: an ``OllamaClient`` for *ollama_host*)
+    embeds.
     """
 
     def __init__(
@@ -140,6 +141,7 @@ class EmbeddingUpgrade:
         rows_per_job: int = ROWS_PER_JOB,
         batch_size: int = BATCH_SIZE,
         preflight: Callable[[], str | None] | None = None,
+        client: Any = None,
     ) -> None:
         self._conn = sqlite3.connect(str(db_path), check_same_thread=False, isolation_level=None)
         self._conn.execute("PRAGMA busy_timeout = 5000;")
@@ -147,7 +149,7 @@ class EmbeddingUpgrade:
         self.data_dir = Path(data_dir)
         self.config_file = Path(config_file)
         self.model = model
-        self._client = OllamaClient(ollama_host)
+        self._client = client or OllamaClient(ollama_host)
         self._blocker = blocker
         self._monotonic = monotonic
         self.rows_per_job = rows_per_job
