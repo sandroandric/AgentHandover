@@ -348,3 +348,19 @@ def test_the_selector_describes_itself():
     assert Selector(app="Slack").describe() == "app Slack"
     assert "moment m1" == Selector(moment_id="m1").describe()
     assert json.dumps(Selector(since=NOW - H, until=NOW).describe())
+
+
+def test_a_staged_upgrade_copy_is_forgotten_with_its_row(world):
+    """While "Upgrade everything" runs, vector_store_next holds re-embedded
+    copies of vector_store rows: forgetting a row drops its copy at once."""
+    three_frames(world)
+    world.sql(
+        "INSERT INTO vector_store_next (id, source_type, source_id, embedding, model, dim, "
+        "text_hash, prefix, from_hash) SELECT id, source_type, source_id, embedding, "
+        "'embeddinggemma-2:440m', dim, text_hash, prefix, text_hash FROM vector_store"
+    )
+    staged = world.ids("SELECT id FROM vector_store_next")
+    assert staged
+    run(world, Selector(all=True))
+    left = world.ids("SELECT id FROM vector_store_next")
+    assert left == world.ids("SELECT id FROM vector_store") & staged

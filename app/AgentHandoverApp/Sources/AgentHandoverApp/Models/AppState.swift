@@ -165,6 +165,32 @@ struct WorkerStatusFile: Codable {
     /// The configured models Ollama does not serve; absent when Ollama did
     /// not answer (and in the early "starting" status).
     let missing_models: [String]?
+    /// "Upgrade everything": the background re-embed of the Skills index
+    /// with EmbeddingGemma 2; absent unless the user chose it.
+    let embedding_upgrade: EmbeddingUpgradeStatus?
+}
+
+/// worker-status.json's `embedding_upgrade` (worker embedding_upgrade.py).
+struct EmbeddingUpgradeStatus: Codable, Equatable {
+    let state: String
+    let done: Int
+    let total: Int
+    let dropped: Int
+    let error: String?
+
+    /// One plain line for Memory Settings.
+    var line: String {
+        switch state {
+        case "running":
+            return "Re-indexing your Skills with EmbeddingGemma 2: \(done) of \(total). Search keeps working meanwhile."
+        case "done":
+            return "Your Skills are indexed with EmbeddingGemma 2."
+        case "failed":
+            return "Re-indexing stopped: \(error ?? "unknown error"). Your Skills still work with the previous model."
+        default:
+            return "Re-indexing your Skills with EmbeddingGemma 2 starts shortly."
+        }
+    }
 }
 
 @MainActor

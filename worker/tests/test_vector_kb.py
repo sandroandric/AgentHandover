@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import sqlite3
@@ -54,12 +55,18 @@ def config() -> VectorKBConfig:
     )
 
 
+def _stable_hash(text: str) -> int:
+    """32 bits of the text's SHA-256: the same in every process (``hash()``
+    is salted per process, which made scores differ between runs)."""
+    return int.from_bytes(hashlib.sha256(text.encode("utf-8")).digest()[:4], "little")
+
+
 def _fake_embed_response(texts: list[str], dim: int = 4) -> bytes:
     """Build a fake Ollama /api/embed JSON response."""
     embeddings = []
     for i, t in enumerate(texts):
         # Deterministic embeddings based on text hash
-        h = hash(t) & 0xFFFFFFFF
+        h = _stable_hash(t)
         vec = [(h >> (j * 8) & 0xFF) / 255.0 for j in range(dim)]
         norm = math.sqrt(sum(x * x for x in vec))
         vec = [x / norm if norm > 0 else 0.0 for x in vec]
@@ -83,7 +90,7 @@ def kb(tmp_db: Path, config: VectorKBConfig) -> VectorKB:
         vkb.embed_calls.append((vkb.config.embedding_model, prefix, list(texts)))
         embeddings = []
         for t in texts:
-            h = hash(t) & 0xFFFFFFFF
+            h = _stable_hash(t)
             vec = [(h >> (j * 8) & 0xFF) / 255.0 for j in range(_DIM)]
             norm = math.sqrt(sum(x * x for x in vec))
             vec = [x / norm if norm > 0 else 0.0 for x in vec]

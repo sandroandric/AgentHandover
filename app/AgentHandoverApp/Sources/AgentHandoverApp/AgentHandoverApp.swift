@@ -67,6 +67,7 @@ struct AgentHandoverApp: App {
 
         Window("Memory Settings", id: "memory-settings") {
             MemorySettingsView()
+                .environmentObject(delegate.sharedAppState)
         }
         .windowResizability(.contentSize)
     }

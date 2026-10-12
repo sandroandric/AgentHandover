@@ -58,7 +58,7 @@ struct MemoryOfferView: View {
                 }
             }
 
-            Text("Find anything you saw on your Mac by describing it. AgentHandover keeps a short description and a search vector of each screen it keeps, and a small encrypted thumbnail for 7 days. Everything stays on this Mac; password managers, private windows and the apps you exclude are never kept.")
+            Text("Find anything you saw on your Mac by describing it. AgentHandover keeps a short description and a search vector of each screen it keeps, and a small encrypted thumbnail for 7 days. Everything stays on this Mac; password managers, password prompts, banking and sign-in pages, and the apps and sites you exclude are never kept.")
                 .font(.system(size: 13))
                 .fixedSize(horizontal: false, vertical: true)
 

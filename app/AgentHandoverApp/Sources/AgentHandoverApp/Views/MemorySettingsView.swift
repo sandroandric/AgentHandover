@@ -8,6 +8,7 @@ import SwiftUI
 /// for the agents switch, which the MCP server reads on every search.
 struct MemorySettingsView: View {
     @ObservedObject private var center = MemoryCenter.shared
+    @EnvironmentObject private var appState: AppState
     @State private var settings = MemorySettings.defaults
     @State private var saved = MemorySettings.defaults
     @State private var loaded = false
@@ -54,6 +55,18 @@ struct MemorySettingsView: View {
             }
             .disabled(!settings.enabled)
 
+            if let upgrade = appState.workerStatus?.embedding_upgrade {
+                Section("Skills index") {
+                    Text(upgrade.line)
+                        .font(.system(size: 12))
+                        .foregroundStyle(upgrade.state == "failed" ? .red : .secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if upgrade.state == "running", upgrade.total > 0 {
+                        ProgressView(value: Double(upgrade.done), total: Double(upgrade.total))
+                    }
+                }
+            }
+
             Section("Agents") {
                 Toggle(isOn: $settings.agentsAccess) {
                     VStack(alignment: .leading, spacing: 2) {
@@ -67,7 +80,7 @@ struct MemorySettingsView: View {
             }
 
             Section("Privacy") {
-                Text("Password managers, macOS password prompts, private browser windows and banking or login pages are never kept. To exclude more apps or sites, add them to [privacy.zones] in config.toml (blocked, blocked_urls); AgentHandover reads it when it restarts.")
+                Text("Password managers, macOS password prompts, Keychain Access, and banking, payroll and sign-in pages are never kept. To exclude more apps or sites, add them to [privacy.zones] in config.toml (blocked, blocked_urls); AgentHandover reads it when it restarts.")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)

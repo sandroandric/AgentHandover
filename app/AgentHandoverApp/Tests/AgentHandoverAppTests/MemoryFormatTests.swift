@@ -124,4 +124,16 @@ final class MemoryFormatTests: XCTestCase {
         XCTAssertEqual(MemoryProblem.modelMissing(model).message,
                        "Memory needs the embeddinggemma-2:440m model, which is not downloaded yet.")
     }
+
+    func testTheWorkerStatusCarriesTheUpgradeProgress() throws {
+        let json = #"{"pid": 1, "version": "0.6.0", "started_at": "", "heartbeat": "", "events_processed_today": 0, "sops_generated": 0, "consecutive_errors": 0, "vlm_available": true, "embedding_upgrade": {"state": "running", "done": 120, "total": 400, "dropped": 2, "error": null}}"#
+        let status = try JSONDecoder().decode(WorkerStatusFile.self, from: Data(json.utf8))
+        XCTAssertEqual(status.embedding_upgrade, EmbeddingUpgradeStatus(state: "running", done: 120, total: 400, dropped: 2, error: nil))
+        XCTAssertEqual(status.embedding_upgrade?.line,
+                       "Re-indexing your Skills with EmbeddingGemma 2: 120 of 400. Search keeps working meanwhile.")
+        let old = #"{"pid": 1, "version": "0.5.0", "started_at": "", "heartbeat": "", "events_processed_today": 0, "sops_generated": 0, "consecutive_errors": 0, "vlm_available": true}"#
+        XCTAssertNil(try JSONDecoder().decode(WorkerStatusFile.self, from: Data(old.utf8)).embedding_upgrade)
+        let failed = EmbeddingUpgradeStatus(state: "failed", done: 3, total: 9, dropped: 0, error: "Ollama 0.34.2 is older than 0.40")
+        XCTAssertEqual(failed.line, "Re-indexing stopped: Ollama 0.34.2 is older than 0.40. Your Skills still work with the previous model.")
+    }
 }

@@ -411,6 +411,11 @@ class _Forget:
             ).rowcount
         else:
             self._delete_sessions()
+        # "Upgrade everything" stages re-embedded copies of vector_store rows
+        # (vector_store_next, same ids): a forgotten row's copy goes with it.
+        conn.execute(
+            "DELETE FROM vector_store_next WHERE id NOT IN (SELECT id FROM vector_store)"
+        )
         return artifact_files
 
     def _delete_sessions(self) -> None:

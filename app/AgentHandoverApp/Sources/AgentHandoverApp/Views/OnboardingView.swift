@@ -1413,7 +1413,7 @@ struct OnboardingView: View {
                         memoryFact("lock.laptopcomputer", "Where",
                                    "Only on this Mac. Nothing is uploaded.")
                         memoryFact("eye.slash", "Never kept",
-                                   "Password managers, private browser windows, and the apps and sites you exclude.")
+                                   "Password managers, password prompts, banking and sign-in pages, and the apps and sites you exclude.")
                     }
 
                     Divider()

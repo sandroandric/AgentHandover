@@ -79,8 +79,27 @@ def build_mcp_server():
         return _state["kb"]
 
     def _vector_kb():
-        """``(VectorKB | None, reason)``; the reason says why it is unavailable."""
+        """``(VectorKB | None, reason)``; the reason says why it is unavailable.
+
+        Re-opened when ``[embedding] model`` changed since it was opened:
+        "Upgrade everything" switches the worker's vectors while an MCP
+        session may be running, and a search with the old model would find
+        nothing (search filters rows by model)."""
+        try:
+            from agenthandover_worker.config import load_config
+
+            model = load_config().embedding.model
+        except Exception:
+            model = _state.get("vkb_model")
+        if "vkb" in _state and model != _state.get("vkb_model"):
+            old = _state.pop("vkb")[0]
+            if old is not None:
+                try:
+                    old.close()
+                except Exception:
+                    logger.debug("Closing the old VectorKB failed", exc_info=True)
         if "vkb" not in _state:
+            _state["vkb_model"] = model
             db_path = _get_db_path()
             if not db_path.exists():
                 _state["vkb"] = (None, f"no worker database at {db_path}")

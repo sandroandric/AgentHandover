@@ -7,6 +7,7 @@ functions directly.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -245,6 +246,31 @@ class TestSearchSkillsMode:
         assert result["results"] == [
             {"slug": "reddit-marketing", "title": "Reddit Community Marketing", "score": 1.0},
         ]
+
+    def test_a_running_session_follows_an_embedding_model_switch(self, server):
+        """"Upgrade everything" switches [embedding] model while an MCP
+        session runs: the next search opens the store with the new model
+        (searching with the old one would match no row)."""
+        from agenthandover_worker import config as config_mod
+        from agenthandover_worker.vector_kb import VectorKB
+
+        search, db = server
+        self._embed_skill(db)
+        real = config_mod.load_config()
+        models: list[str] = []
+
+        def embed(self, texts, **_):
+            models.append(self.config.embedding_model)
+            return _fake_embed(self, texts)
+
+        with patch.object(VectorKB, "compute_embeddings", embed):
+            search("reddit")
+            switched = dataclasses.replace(
+                real, embedding=dataclasses.replace(real.embedding, model="embeddinggemma-2:440m"),
+            )
+            with patch.object(config_mod, "load_config", return_value=switched):
+                search("reddit")
+        assert models == ["nomic-embed-text", "embeddinggemma-2:440m"]
 
     def test_query_prefix_and_floor_are_the_embedding_profiles(self, server):
         """nomic-embed-text (the default ``[embedding] model``): the query
