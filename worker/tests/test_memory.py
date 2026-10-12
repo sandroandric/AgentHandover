@@ -548,20 +548,51 @@ def test_the_model_schedulers_guard_makes_frames_wait(env):
     assert rows(env) == []
 
 
-def test_embedding_blocker_reports_pressure_and_a_generation_phase():
-    client = SimpleNamespace()
-    swapping = ModelScheduler(
-        client, annotation_model="a", sop_model="b",
-        free_memory=lambda: 8 * GB, swap_used=lambda: 20 * GB, free_disk=lambda: 100 * GB,
+def _embedding_scheduler(*, free=8 * GB, swap=lambda: 0, disk=100 * GB, clock=None):
+    return ModelScheduler(
+        SimpleNamespace(), annotation_model="a", sop_model="b",
+        clock=clock or (lambda: 0.0),
+        free_memory=lambda: free, swap_used=swap, free_disk=lambda: disk,
     )
-    assert "swap" in swapping.embedding_blocker()
-    calm = ModelScheduler(
-        client, annotation_model="a", sop_model="b",
-        free_memory=lambda: 8 * GB, swap_used=lambda: 0, free_disk=lambda: 100 * GB,
-    )
+
+
+def test_embedding_waits_until_swap_has_been_watched_for_a_minute():
+    now = [1000.0]
+    calm = _embedding_scheduler(clock=lambda: now[0])
+    assert calm.embedding_blocker() == "checking that the Mac is not short of memory"
+    now[0] += 61
     assert calm.embedding_blocker() is None
     calm._generating = True
     assert calm.embedding_blocker() == "b is writing Skills"
+
+
+def test_swap_left_in_use_does_not_block_embedding_but_growing_swap_does():
+    """12 GB of swap in use from earlier pressure (the test Mac all day):
+    the small embedding model runs; swap growing now: it waits."""
+    now = [1000.0]
+    swap = [12 * GB]
+    sched = _embedding_scheduler(clock=lambda: now[0], swap=lambda: swap[0])
+    sched.embedding_blocker()
+    now[0] += 61
+    assert sched.embedding_blocker() is None, "stale swap is no reason"
+    now[0] += 60
+    swap[0] += 300_000_000
+    assert "swap grew by 300 MB" in sched.embedding_blocker()
+    # Five minutes later with no further growth the window has moved on.
+    now[0] += 301
+    assert sched.embedding_blocker() == "checking that the Mac is not short of memory"
+    now[0] += 61
+    assert sched.embedding_blocker() is None
+
+
+def test_little_free_memory_or_a_full_disk_blocks_embedding():
+    assert "of memory free (needs 2.0 GB)" in _embedding_scheduler(free=1 * GB).embedding_blocker()
+    assert "of disk free" in _embedding_scheduler(disk=5 * GB).embedding_blocker()
+
+
+def test_the_sop_model_keeps_the_swap_limit():
+    sched = _embedding_scheduler(swap=lambda: 20 * GB)
+    assert "swap in use" in sched._pressure()
 
 
 def test_held_paths_keep_the_orphan_sweep_off_memorys_frames(env):

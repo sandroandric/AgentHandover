@@ -106,6 +106,17 @@ FALLBACK_AFTER_SECONDS = 6 * 3600
 SWAP_LIMIT_BYTES = 8 * GB
 DISK_FLOOR_BYTES = 10 * GB
 
+# Memory's embedding model is small (~0.7 GB), and swap in use stays high
+# long after the pressure that caused it has passed (many 16 GB Macs sit
+# above SWAP_LIMIT_BYTES all day).  So background embedding waits on what
+# says the Mac is short of memory now: little free memory, or swap that
+# is growing; the disk floor applies as above.
+EMBED_FREE_FLOOR_BYTES = 2 * GB
+SWAP_GROWTH_WINDOW_SECONDS = 300.0
+SWAP_GROWTH_LIMIT_BYTES = 256_000_000
+# Embedding starts only once swap has been watched this long.
+SWAP_WATCH_MIN_SECONDS = 60.0
+
 # A failed SOP-model load is retried after this, doubling up to the cap.
 LOAD_BACKOFF_SECONDS = 60.0
 LOAD_BACKOFF_MAX_SECONDS = 30 * 60.0
@@ -258,6 +269,9 @@ class ModelScheduler:
         self._load_failures = 0
         # The loaded size (bytes) Ollama reported for a model, from /api/ps.
         self._sizes: dict[str, int] = {}
+        # ``(time, swap in use)`` samples over the last
+        # SWAP_GROWTH_WINDOW_SECONDS, for :meth:`embedding_blocker`.
+        self._swap_samples: list[tuple[float, int]] = []
         # Why generation is not running (or runs on the fallback), for the
         # worker status; None while it runs normally.
         self.reason: str | None = None
@@ -457,15 +471,55 @@ class ModelScheduler:
             self._unload(model)
 
     def embedding_blocker(self) -> str | None:
-        """Why background embedding (Memory) must wait now, or None: the
-        Mac is short of memory (:meth:`_pressure`), or a generation phase
-        has the SOP model loaded on a two-model tier, where another model
-        beside it is what the memory guard exists to prevent."""
-        pressure = self._pressure()
+        """Why background embedding (Memory, and the "Upgrade everything"
+        re-embed) must wait now, or None: the Mac is short of memory now
+        (:meth:`_embedding_pressure`), or a generation phase has the SOP
+        model loaded on a two-model tier, where another model beside it is
+        what the memory guard exists to prevent."""
+        pressure = self._embedding_pressure()
         if pressure is not None:
             return pressure
         if self.split and self._generating:
             return f"{self._plan_model} is writing Skills"
+        return None
+
+    def _embedding_pressure(self) -> str | None:
+        """For the small embedding model: free memory under
+        :data:`EMBED_FREE_FLOOR_BYTES`, swap grown by more than
+        :data:`SWAP_GROWTH_LIMIT_BYTES` within
+        :data:`SWAP_GROWTH_WINDOW_SECONDS` (or not watched for
+        :data:`SWAP_WATCH_MIN_SECONDS` yet), or free disk under
+        :data:`DISK_FLOOR_BYTES`.  Swap merely in use is no reason: unlike
+        the SOP model's :meth:`_pressure`.  An unknown value is no reason."""
+        disk = self._free_disk()
+        if disk is not None and disk < DISK_FLOOR_BYTES:
+            return (
+                f"{_gb(disk)} of disk free (floor {_gb(DISK_FLOOR_BYTES)}): "
+                "swap cannot grow"
+            )
+        free = self._free_memory()
+        if free is not None and free < EMBED_FREE_FLOOR_BYTES:
+            return (
+                f"{_gb(free)} of memory free (needs {_gb(EMBED_FREE_FLOOR_BYTES)}): "
+                "the Mac is short of memory"
+            )
+        swap = self._swap_used()
+        if swap is None:
+            return None
+        now = self._clock()
+        self._swap_samples = [
+            (t, b) for t, b in self._swap_samples if now - t <= SWAP_GROWTH_WINDOW_SECONDS
+        ]
+        self._swap_samples.append((now, swap))
+        first = self._swap_samples[0][0]
+        growth = swap - min(b for _, b in self._swap_samples)
+        if growth > SWAP_GROWTH_LIMIT_BYTES:
+            return (
+                f"swap grew by {growth / 1_000_000:.0f} MB in the last "
+                f"{SWAP_GROWTH_WINDOW_SECONDS / 60:.0f} minutes: the Mac is short of memory"
+            )
+        if now - first < SWAP_WATCH_MIN_SECONDS:
+            return "checking that the Mac is not short of memory"
         return None
 
     # -- internals ------------------------------------------------------
