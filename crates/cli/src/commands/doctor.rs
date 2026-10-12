@@ -187,6 +187,7 @@ pub fn run() -> Result<()> {
     // Check 10: Heartbeat freshness (advisory — does not affect counts)
     check_heartbeat_freshness("Daemon", "daemon-status.json");
     check_heartbeat_freshness("Worker", "worker-status.json");
+    check_embedding_upgrade(&mut counts);
 
     // Check 11: Disk space
     if free_disk_gb() > 1 {
@@ -679,6 +680,26 @@ fn check_warn(counts: &mut CheckCounts, name: &str) {
 fn check_skip(counts: &mut CheckCounts, name: &str, reason: &str) {
     counts.record_skip();
     println!("  {} {} ({})", "SKIP".yellow(), name, reason);
+}
+
+/// "Upgrade everything" (the worker's re-embed with EmbeddingGemma 2), in
+/// one line when it was asked for: a warning when it failed (text search
+/// stays on its current model until it is fixed), else information.
+fn check_embedding_upgrade(counts: &mut CheckCounts) {
+    let Ok(worker) = agenthandover_common::status::read_status_file::<serde_json::Value>(
+        "worker-status.json",
+    ) else {
+        return;
+    };
+    let Some(line) = super::status::embedding_upgrade_line(&worker) else {
+        return;
+    };
+    let name = format!("Embedding upgrade: {line}");
+    if line.starts_with("failed") {
+        check_warn(counts, &name);
+    } else {
+        println!("  {} {}", "info".dimmed(), name);
+    }
 }
 
 /// Advisory heartbeat freshness check for a service status file

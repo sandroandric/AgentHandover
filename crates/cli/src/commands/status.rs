@@ -47,6 +47,35 @@ fn counts(map: Option<&serde_json::Value>) -> String {
         .join(", ")
 }
 
+/// One line on "Upgrade everything" (the worker's re-embed of its text
+/// vectors with EmbeddingGemma 2), from worker-status.json's
+/// `embedding_upgrade`; None when the upgrade was never asked for.
+pub fn embedding_upgrade_line(worker: &serde_json::Value) -> Option<String> {
+    let upgrade = worker.get("embedding_upgrade")?;
+    let state = upgrade.get("state").and_then(|v| v.as_str())?;
+    let done = u64_at(upgrade, "done");
+    let total = u64_at(upgrade, "total");
+    let dropped = u64_at(upgrade, "dropped");
+    let error = upgrade.get("error").and_then(|v| v.as_str());
+    let progress = format!("{done} / {total} vectors");
+    Some(match (state, error) {
+        ("done", _) => format!(
+            "done: text search uses EmbeddingGemma 2 ({total} vectors{})",
+            if dropped > 0 { format!(", {dropped} dropped") } else { String::new() }
+        ),
+        ("failed", error) => format!(
+            "failed: {} (text search stays on its current model)",
+            error.unwrap_or("unknown error")
+        ),
+        ("running", None) => format!("re-embedding with EmbeddingGemma 2: {progress}"),
+        ("running", Some(error)) => {
+            format!("re-embedding with EmbeddingGemma 2: {progress}, waiting: {error}")
+        }
+        (_, None) => "waiting to start".to_string(),
+        (_, Some(error)) => format!("waiting to start: {error}"),
+    })
+}
+
 /// The last-hour report for `status --compute` (plain text, no colour).
 fn format_compute(daemon: Option<&serde_json::Value>, worker: Option<&serde_json::Value>) -> String {
     let mut out = String::new();
@@ -308,6 +337,9 @@ fn print_service_status(name: &str, status_file: &str, pid_name: &str) {
                 };
                 println!("    VLM:        {}", vlm_str);
             }
+            if let Some(line) = embedding_upgrade_line(&value) {
+                println!("    Upgrade:    {line}");
+            }
 
             if let Some(errors) = value.get("consecutive_errors").and_then(|v| v.as_u64()) {
                 if errors > 0 {
@@ -332,8 +364,47 @@ fn print_service_status(name: &str, status_file: &str, pid_name: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::format_compute;
+    use super::{embedding_upgrade_line, format_compute};
     use serde_json::json;
+
+    #[test]
+    fn the_embedding_upgrade_is_one_line_per_state() {
+        let line = |upgrade: serde_json::Value| {
+            embedding_upgrade_line(&json!({"pid": 1, "embedding_upgrade": upgrade}))
+        };
+        assert_eq!(embedding_upgrade_line(&json!({"pid": 1})), None);
+        assert_eq!(
+            line(json!({"state": "pending", "done": 0, "total": 9, "dropped": 0, "error": null})),
+            Some("waiting to start".to_string())
+        );
+        assert_eq!(
+            line(json!({"state": "running", "done": 120, "total": 400, "dropped": 0, "error": null})),
+            Some("re-embedding with EmbeddingGemma 2: 120 / 400 vectors".to_string())
+        );
+        assert_eq!(
+            line(json!({"state": "running", "done": 3, "total": 8, "dropped": 0,
+                        "error": "Ollama failed: not reachable"})),
+            Some(
+                "re-embedding with EmbeddingGemma 2: 3 / 8 vectors, waiting: Ollama failed: \
+                 not reachable"
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            line(json!({"state": "failed", "done": 0, "total": 8, "dropped": 0,
+                        "error": "embeddinggemma-2:440m is not downloaded: download it \
+                                  (ollama pull embeddinggemma-2:440m)"})),
+            Some(
+                "failed: embeddinggemma-2:440m is not downloaded: download it (ollama pull \
+                 embeddinggemma-2:440m) (text search stays on its current model)"
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            line(json!({"state": "done", "done": 398, "total": 398, "dropped": 2, "error": null})),
+            Some("done: text search uses EmbeddingGemma 2 (398 vectors, 2 dropped)".to_string())
+        );
+    }
 
     #[test]
     fn compute_report_reads_the_last_hour_of_both_files() {
