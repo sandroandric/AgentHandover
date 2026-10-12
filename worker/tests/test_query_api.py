@@ -566,6 +566,152 @@ class TestSearchEndpoint:
 
 
 # ---------------------------------------------------------------------------
+# POST /search/semantic
+# ---------------------------------------------------------------------------
+
+def _post_raw(srv: QueryAPIServer, path: str, raw: bytes) -> tuple[int, dict]:
+    """POST *raw* bytes with the server's token; return (status, json_body)."""
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{srv.port}{path}",
+        data=raw,
+        headers={"Content-Type": "application/json", TOKEN_HEADER: srv.token},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req) as resp:
+            return resp.status, json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        return exc.code, json.loads(exc.read().decode("utf-8"))
+
+
+# The query embeds to this vector; the stored rows are scored against it.
+_QUERY_VECTOR = [1.0, 0.0, 0.0]
+
+
+@pytest.fixture()
+def semantic(populated_kb: KnowledgeBase, tmp_path: Path, monkeypatch):
+    """A query API over a real nomic-embed-text vector KB whose Ollama
+    answers every /api/embed with ``_QUERY_VECTOR`` and records the
+    request bodies.  Rows (cosine with the query): deploy 1.0, review 0.8,
+    an annotation 0.6, payroll 0.2, and a row of another model that would
+    score 1.0."""
+    from agenthandover_worker.ollama import OllamaClient
+    from agenthandover_worker.vector_kb import VectorKB
+    from daemon_db import create_daemon_db
+
+    requests: list[dict] = []
+
+    def fake_request(self, method, path, payload, timeout):
+        requests.append({"path": path, "payload": payload})
+        return {"embeddings": [_QUERY_VECTOR] * len(payload["input"])}
+
+    monkeypatch.setattr(OllamaClient, "_request", fake_request)
+    vkb = VectorKB(create_daemon_db(tmp_path / "vectors.db"))
+    vkb.upsert("procedure", "deploy", "deploy", embedding=[1.0, 0.0, 0.0])
+    vkb.upsert("procedure", "review", "review", embedding=[0.8, 0.6, 0.0])
+    vkb.upsert("annotation", "e1", "frame", embedding=[0.6, 0.8, 0.0])
+    vkb.upsert("procedure", "payroll", "payroll", embedding=[0.2, 0.0, 0.98])
+    vkb.upsert("procedure", "elsewhere", "x", embedding=[1.0, 0.0, 0.0],
+               model="embeddinggemma-2:440m")
+    srv = QueryAPIServer(populated_kb, port=_free_port(), vector_kb=vkb)
+    srv.start()
+    time.sleep(0.1)
+    yield srv, requests
+    srv.stop()
+    vkb.close()
+
+
+class TestSemanticSearchEndpoint:
+    """POST /search/semantic: the vector KB's search over the configured
+    embedding model's rows."""
+
+    def test_without_a_vector_kb_returns_501(self, server: QueryAPIServer) -> None:
+        status, body = _post(server, "/search/semantic", {"query": "deploy"})
+        assert status == 501
+        assert "Semantic search not available" in body["error"]
+
+    def test_ranks_by_cosine_above_the_profiles_floor(self, semantic) -> None:
+        srv, requests = semantic
+        status, body = _post(srv, "/search/semantic", {"query": "ship it"})
+        assert status == 200
+        assert body == {
+            "query": "ship it",
+            "results": [
+                {"source_type": "procedure", "source_id": "deploy",
+                 "score": 1.0, "model": "nomic-embed-text"},
+                {"source_type": "procedure", "source_id": "review",
+                 "score": 0.8, "model": "nomic-embed-text"},
+                {"source_type": "annotation", "source_id": "e1",
+                 "score": 0.6, "model": "nomic-embed-text"},
+            ],
+            "count": 3,
+        }
+        # payroll (0.2) is under nomic's min_score 0.3; the EmbeddingGemma
+        # row is in another space.  The query was embedded once, with
+        # nomic's query prefix and no "dimensions" (v0.5's request bytes).
+        assert requests == [{
+            "path": "/api/embed",
+            "payload": {"model": "nomic-embed-text", "input": ["search_query: ship it"]},
+        }]
+
+    def test_limit_source_types_and_min_score_are_honoured(self, semantic) -> None:
+        srv, _ = semantic
+        status, body = _post(srv, "/search/semantic", {"query": "q", "limit": 1})
+        assert status == 200
+        assert [r["source_id"] for r in body["results"]] == ["deploy"]
+
+        status, body = _post(
+            srv, "/search/semantic", {"query": "q", "source_types": ["annotation"]},
+        )
+        assert [r["source_id"] for r in body["results"]] == ["e1"]
+
+        status, body = _post(srv, "/search/semantic", {"query": "q", "min_score": 0.0})
+        assert [r["source_id"] for r in body["results"]] == [
+            "deploy", "review", "e1", "payroll",
+        ]
+
+        status, body = _post(srv, "/search/semantic", {"query": "q", "min_score": 0.9})
+        assert [r["source_id"] for r in body["results"]] == ["deploy"]
+
+    @pytest.mark.parametrize("payload, message", [
+        ({}, "Missing 'query' field"),
+        ({"query": ""}, "Missing 'query' field"),
+        ({"query": 7}, "Missing 'query' field"),
+        ({"query": "q", "limit": 0}, "'limit' must be a positive integer"),
+        ({"query": "q", "limit": "5"}, "'limit' must be a positive integer"),
+        ({"query": "q", "limit": True}, "'limit' must be a positive integer"),
+        ({"query": "q", "source_types": "procedure"},
+         "'source_types' must be a list of strings"),
+        ({"query": "q", "source_types": [1]}, "'source_types' must be a list of strings"),
+        ({"query": "q", "min_score": "high"}, "'min_score' must be a number"),
+        ([], "Request body must be a JSON object"),
+    ])
+    def test_a_malformed_request_is_a_400(self, semantic, payload, message) -> None:
+        srv, requests = semantic
+        status, body = _post_raw(srv, "/search/semantic", json.dumps(payload).encode())
+        assert (status, body["error"]) == (400, message)
+        assert requests == []  # nothing was embedded
+
+    def test_invalid_json_and_an_empty_body_are_400(self, semantic) -> None:
+        srv, _ = semantic
+        status, body = _post_raw(srv, "/search/semantic", b"{not json")
+        assert status == 400 and body["error"].startswith("Invalid JSON")
+        status, body = _post_raw(srv, "/search/semantic", b"")
+        assert (status, body["error"]) == (400, "Request body is required")
+
+    def test_an_unreachable_model_returns_no_results(self, semantic, monkeypatch) -> None:
+        from agenthandover_worker.ollama import OllamaClient
+
+        def down(self, method, path, payload, timeout):
+            raise ConnectionError("Ollama unreachable")
+
+        monkeypatch.setattr(OllamaClient, "_request", down)
+        srv, _ = semantic
+        status, body = _post(srv, "/search/semantic", {"query": "q"})
+        assert (status, body["results"], body["count"]) == (200, [], 0)
+
+
+# ---------------------------------------------------------------------------
 # Error handling & routing
 # ---------------------------------------------------------------------------
 

@@ -470,6 +470,50 @@ class TestThresholdConfigurable:
         assert len(matches_high) <= len(matches_low)
 
 
+class _RecordingVectorKB:
+    """A vector KB whose search records its arguments and returns *hits*,
+    with nomic-embed-text's thresholds."""
+
+    def __init__(self, hits):
+        from agenthandover_worker.model_profiles import EMBEDDING_PROFILES
+
+        self.thresholds = EMBEDDING_PROFILES["nomic-embed-text"].thresholds
+        self.hits = hits
+        self.calls: list[tuple[str, dict]] = []
+
+    def search(self, query, **kwargs):
+        self.calls.append((query, kwargs))
+        return self.hits
+
+
+class TestSemanticMatchThreshold:
+    """A semantic match is held to the embedding profile's ``matcher``
+    cosine; ``match_threshold`` is the fingerprint fallback's."""
+
+    def test_vector_search_uses_the_profiles_matcher_cosine(self, kb):
+        from agenthandover_worker.vector_kb import VectorSearchResult
+
+        hit = VectorSearchResult("procedure", "github-pr", 0.61, "nomic-embed-text")
+        vkb = _RecordingVectorKB([hit])
+        segment = _make_segment("s", ["Chrome"], [{"what_doing": "Review a PR"}])
+        matcher = ProcedureMatcher(kb, match_threshold=0.9, vector_kb=vkb)
+        assert matcher.match_segment(segment) == [("github-pr", 0.61)]
+        assert vkb.calls == [("Review a PR", {
+            "top_k": 5, "source_types": ["procedure"], "min_score": 0.50,
+        })]
+
+    def test_no_semantic_hit_falls_back_to_fingerprints_at_match_threshold(self, kb):
+        kb.save_procedure(_github_pr_procedure())
+        segment = _make_segment("seg-thresh", ["Chrome"], [
+            {"what_doing": "Open documentation page", "app": "Chrome",
+             "location": "https://docs.example.com/guide"},
+        ])
+        vkb = _RecordingVectorKB([])
+        strict = ProcedureMatcher(kb, match_threshold=0.95, vector_kb=vkb)
+        assert strict.match_segment(segment) == []
+        assert vkb.calls[0][1]["min_score"] == 0.50
+
+
 class TestMatchBoundary:
     """Daily task boundaries match procedures on apps, domains and intent."""
 

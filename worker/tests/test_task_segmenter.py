@@ -451,7 +451,14 @@ class TestTaskSegmenterSegment:
         with patch("agenthandover_worker.task_segmenter.OllamaClient") as client:
             _compute_embeddings(["a"], model="emb-x")
         client.return_value.embed.assert_called_once_with(
-            "emb-x", ["a"], prefix="clustering: ", timeout=30.0,
+            "emb-x", ["a"], prefix="clustering: ", dimensions=None, timeout=30.0,
+        )
+        # EmbeddingGemma 2: its own clustering prefix, at its stored size.
+        with patch("agenthandover_worker.task_segmenter.OllamaClient") as client:
+            _compute_embeddings(["a"], model="embeddinggemma-2:440m")
+        client.return_value.embed.assert_called_once_with(
+            "embeddinggemma-2:440m", ["a"], prefix="task: clustering | query: ",
+            dimensions=256, timeout=30.0,
         )
 
     @patch("agenthandover_worker.task_segmenter._compute_embeddings", side_effect=_mock_embeddings)
@@ -1141,3 +1148,58 @@ class TestPassiveWindowAndVectorReuse:
         frames = {f.event_id: f for s in result.segments for f in s.frames}
         assert frames["e1"].embedding and frames["e2"].embedding
         assert len(result.clusters) == 1
+
+    def test_a_vector_kb_of_another_model_is_neither_read_nor_written(self, tmp_path):
+        """Its rows are labelled with its own model: the segmenter's vectors
+        stored there would claim the wrong space."""
+        from agenthandover_worker.vector_kb import VectorKB, VectorKBConfig
+
+        events = [_make_event("e1", "2026-03-04T10:00:00Z", what_doing="Filing expense report")]
+        with VectorKB(
+            create_daemon_db(tmp_path / "v.db"), VectorKBConfig(embedding_model="other"),
+        ) as vkb, patch(
+            "agenthandover_worker.task_segmenter._compute_embeddings",
+            side_effect=_mock_embeddings,
+        ) as embed:
+            seg = TaskSegmenter(vector_kb=vkb)
+            seg.segment(events)
+            seg.segment(events)
+            assert vkb.count() == 0
+        assert embed.call_count == 2
+
+
+class TestSegmenterThreshold:
+    """The clustering threshold is the embedding profile's unless set."""
+
+    def test_nomic_clusters_at_its_profiles_0_83(self):
+        from agenthandover_worker.model_profiles import EMBEDDING_PROFILES
+
+        seg = TaskSegmenter()
+        assert seg.config.similarity_threshold is None
+        assert seg._similarity_threshold() == 0.83
+        assert seg._similarity_threshold() == (
+            EMBEDDING_PROFILES["nomic-embed-text"].thresholds.segmenter
+        )
+
+    def test_a_configured_threshold_wins(self):
+        seg = TaskSegmenter(SegmenterConfig(similarity_threshold=0.5))
+        assert seg._similarity_threshold() == 0.5
+
+    def test_the_threshold_reaches_the_clustering(self):
+        events = [
+            _make_event("e1", "2026-03-04T10:00:00Z", what_doing="Filing expense report"),
+            _make_event("e2", "2026-03-04T10:01:00Z", what_doing="Submitting expense form"),
+        ]
+        with patch(
+            "agenthandover_worker.task_segmenter._compute_embeddings",
+            side_effect=_mock_embeddings,
+        ), patch(
+            "agenthandover_worker.task_segmenter._cluster_frames", return_value={},
+        ) as cluster:
+            TaskSegmenter().segment(events)
+        assert cluster.call_args.args[1] == 0.83
+
+    def test_an_uncalibrated_model_has_no_threshold(self):
+        seg = TaskSegmenter(SegmenterConfig(embedding_model="embeddinggemma-2:440m"))
+        with pytest.raises(ValueError, match="no calibrated segmenter threshold"):
+            seg._similarity_threshold()

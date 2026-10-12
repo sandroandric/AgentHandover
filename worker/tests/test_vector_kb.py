@@ -13,10 +13,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from daemon_db import create_daemon_db
+from agenthandover_worker.model_profiles import EMBEDDING_PROFILES, MEMORY_MODEL
 from agenthandover_worker.vector_kb import (
-    CLUSTERING_PREFIX,
-    DOCUMENT_PREFIX,
-    QUERY_PREFIX,
     VectorKB,
     VectorKBConfig,
     VectorSearchResult,
@@ -25,6 +23,16 @@ from agenthandover_worker.vector_kb import (
     _text_hash,
     _vector_id,
 )
+
+
+# nomic-embed-text's task prefixes: a model without a profile of its own
+# ("test-model") embeds with them.
+_NOMIC = EMBEDDING_PROFILES["nomic-embed-text"]
+DOCUMENT_PREFIX = _NOMIC.doc_prefix
+QUERY_PREFIX = _NOMIC.query_prefix
+CLUSTERING_PREFIX = _NOMIC.cluster_prefix
+# The fake vectors' size.
+_DIM = 4
 
 
 # ---------------------------------------------------------------------------
@@ -41,7 +49,6 @@ def tmp_db(tmp_path: Path) -> Path:
 def config() -> VectorKBConfig:
     return VectorKBConfig(
         embedding_model="test-model",
-        embedding_dim=4,
         batch_size=2,
         max_embeds_per_cycle=10,
     )
@@ -70,12 +77,14 @@ def kb(tmp_db: Path, config: VectorKBConfig) -> VectorKB:
     vkb = VectorKB(tmp_db, config)
     vkb.embed_calls = []
 
-    def mock_compute(texts, *, prefix=DOCUMENT_PREFIX):
+    def mock_compute(texts, *, prefix=None):
+        if prefix is None:
+            prefix = vkb.profile.doc_prefix
         vkb.embed_calls.append((vkb.config.embedding_model, prefix, list(texts)))
         embeddings = []
         for t in texts:
             h = hash(t) & 0xFFFFFFFF
-            vec = [(h >> (j * 8) & 0xFF) / 255.0 for j in range(config.embedding_dim)]
+            vec = [(h >> (j * 8) & 0xFF) / 255.0 for j in range(_DIM)]
             norm = math.sqrt(sum(x * x for x in vec))
             vec = [x / norm if norm > 0 else 0.0 for x in vec]
             embeddings.append(vec)
@@ -691,8 +700,136 @@ class TestModelAndPrefix:
                 client.return_value.embed.return_value = [[0.0] * 4]
                 vkb.compute_embeddings(["x"], prefix=QUERY_PREFIX)
             client.return_value.embed.assert_called_once_with(
-                "test-model", ["x"], prefix=QUERY_PREFIX,
+                "test-model", ["x"], prefix=QUERY_PREFIX, dimensions=None,
                 batch_size=config.batch_size, timeout=config.timeout_seconds,
             )
         finally:
             vkb.close()
+
+
+# ---------------------------------------------------------------------------
+# Embedding models: one space per model (WP-E2)
+# ---------------------------------------------------------------------------
+
+class TestOneSpacePerModel:
+
+    def test_rows_of_another_model_are_never_ranked_with_the_query(self, kb: VectorKB):
+        # Same size, and the other model's row is the closer one by the
+        # numbers: it is still not a result, its space is not the query's.
+        kb.upsert("procedure", "mine", "t", embedding=[0.6, 0.8, 0.0, 0.0])
+        kb.upsert("procedure", "theirs", "t2", embedding=[1.0, 0.0, 0.0, 0.0],
+                  model="other-model")
+        hits = kb.search_by_vector([1.0, 0.0, 0.0, 0.0])
+        assert [(h.source_id, h.model) for h in hits] == [("mine", "test-model")]
+        # Asked for the other model's space, only its row answers.
+        hits = kb.search_by_vector([1.0, 0.0, 0.0, 0.0], model="other-model")
+        assert [(h.source_id, h.model, h.score) for h in hits] == [
+            ("theirs", "other-model", 1.0),
+        ]
+
+    def test_search_ranks_only_the_configured_models_rows(self, kb: VectorKB):
+        query = kb.compute_embeddings(["deploy to production"])[0]
+        kb.upsert("procedure", "p1", "deploy to production")
+        kb.upsert("procedure", "p2", "x", embedding=query, model=MEMORY_MODEL)
+        assert [h.source_id for h in kb.search("deploy to production")] == ["p1"]
+
+    def test_a_row_that_changes_model_leaves_the_querys_space(self, kb: VectorKB):
+        kb.upsert("procedure", "p1", "t", embedding=[1.0, 0.0, 0.0, 0.0])
+        assert [h.source_id for h in kb.search_by_vector([1.0, 0.0, 0.0, 0.0])] == ["p1"]
+        kb.upsert("procedure", "p1", "t2", embedding=[1.0, 0.0, 0.0, 0.0],
+                  model="other-model")
+        assert kb.search_by_vector([1.0, 0.0, 0.0, 0.0]) == []
+
+    def test_purge_keeps_the_embedding_and_the_memory_models_rows(self, kb: VectorKB):
+        kb.upsert("procedure", "text", "t", embedding=[1.0, 0.0, 0.0, 0.0])
+        kb.upsert("procedure", "memory", "t", embedding=[0.0, 1.0, 0.0, 0.0],
+                  model=MEMORY_MODEL)
+        kb.upsert("procedure", "gone", "t", embedding=[0.0, 0.0, 1.0, 0.0],
+                  model="retired-model")
+        assert kb.purge_stale() == 1
+        kept = {row[0] for row in kb._conn.execute("SELECT source_id FROM vector_store")}
+        assert kept == {"text", "memory"}
+
+    def test_purge_keeps_the_configured_memory_model(self, tmp_db: Path):
+        with VectorKB(tmp_db, VectorKBConfig(
+            embedding_model="test-model", memory_model="memory-x",
+        )) as kb:
+            kb.upsert("procedure", "a", "t", embedding=[1.0, 0.0], model="memory-x")
+            kb.upsert("procedure", "b", "t", embedding=[1.0, 0.0], model=MEMORY_MODEL)
+            assert kb.purge_stale() == 1
+            assert [r[0] for r in kb._conn.execute(
+                "SELECT source_id FROM vector_store")] == ["a"]
+
+    def test_age_still_purges_the_memory_models_rows(self, kb: VectorKB):
+        kb.upsert("procedure", "m", "t", embedding=[1.0, 0.0, 0.0, 0.0],
+                  model=MEMORY_MODEL)
+        kb._conn.execute(
+            "UPDATE vector_store SET updated_at = "
+            "strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-100 days')"
+        )
+        kb._conn.commit()
+        assert kb.purge_stale(max_age_days=90) == 1
+
+
+class TestProfile:
+
+    def test_nomic_requests_are_todays_bytes(self, tmp_db: Path):
+        """On nomic-embed-text the /api/embed body is exactly v0.5's:
+        model and prefixed input, no ``dimensions``."""
+        bodies = []
+
+        def fake_request(self, method, path, payload, timeout):
+            bodies.append(json.dumps(payload))
+            return {"embeddings": [[0.0, 1.0]] * len(payload["input"])}
+
+        with patch("agenthandover_worker.ollama.OllamaClient._request", fake_request):
+            with VectorKB(tmp_db, VectorKBConfig()) as kb:
+                kb.compute_embeddings(["health check"])
+                kb.search("deploy")
+        assert bodies == [
+            '{"model": "nomic-embed-text", "input": ["search_document: health check"]}',
+            '{"model": "nomic-embed-text", "input": ["search_query: deploy"]}',
+        ]
+
+    def test_embeddinggemma_is_asked_for_its_stored_size_with_its_prefixes(
+        self, tmp_db: Path,
+    ):
+        payloads = []
+
+        def fake_request(self, method, path, payload, timeout):
+            payloads.append(payload)
+            return {"embeddings": [[3.0, 4.0]] * len(payload["input"])}
+
+        with patch("agenthandover_worker.ollama.OllamaClient._request", fake_request):
+            with VectorKB(tmp_db, VectorKBConfig(embedding_model=MEMORY_MODEL)) as kb:
+                assert kb.profile.dimensions == 256
+                vectors = kb.compute_embeddings(["a"])
+                kb.search("b")
+        assert payloads == [
+            {"model": MEMORY_MODEL, "input": ["title: none | text: a"], "dimensions": 256},
+            {"model": MEMORY_MODEL, "input": ["task: search result | query: b"],
+             "dimensions": 256},
+        ]
+        assert vectors == [pytest.approx([0.6, 0.8])]
+
+    def test_documents_are_stored_with_the_models_prefix(self, tmp_db: Path):
+        with patch("agenthandover_worker.ollama.OllamaClient._request",
+                   lambda self, m, p, payload, t: {"embeddings": [[1.0, 0.0]]}):
+            with VectorKB(tmp_db, VectorKBConfig(embedding_model=MEMORY_MODEL)) as kb:
+                assert kb.upsert("procedure", "p", "deploy")
+                (prefix,) = kb._conn.execute("SELECT prefix FROM vector_store").fetchone()
+        assert prefix == "title: none | text: "
+
+    def test_an_uncalibrated_model_has_no_thresholds(self, tmp_db: Path):
+        with VectorKB(tmp_db, VectorKBConfig(embedding_model=MEMORY_MODEL)) as kb:
+            with pytest.raises(ValueError, match="no calibrated thresholds"):
+                kb.thresholds
+        with VectorKB(tmp_db, VectorKBConfig()) as kb:
+            assert kb.thresholds is _NOMIC.thresholds
+
+    def test_a_model_without_a_profile_is_used_as_nomic_was(self, tmp_db: Path):
+        with VectorKB(tmp_db, VectorKBConfig(embedding_model="mxbai-embed-large")) as kb:
+            assert kb.profile.model == "mxbai-embed-large"
+            assert kb.profile.doc_prefix == DOCUMENT_PREFIX
+            assert kb.profile.dimensions is None
+            assert kb.thresholds == _NOMIC.thresholds

@@ -1,9 +1,11 @@
-"""The embedding profiles table (WP-E0).
+"""The embedding profiles table (WP-E0, readers rewired in WP-E2).
 
-nomic-embed-text's row must carry exactly the numbers today's readers hold
-(WP-E2 rewires them to the table; until then a drift on either side would
-silently change behaviour when it does).  EmbeddingGemma 2's row has its
-model card's prefixes, 256 dimensions and no thresholds until WP-E3
+nomic-embed-text's row carries exactly the numbers v0.5's readers held
+(task_segmenter, session_linker, sop_dedup, procedure_matcher, mcp_server,
+query_api, vector_kb's prefixes): every reader now takes them from the row,
+so these literals are what keeps nomic's behaviour byte-identical.
+EmbeddingGemma 2's row has its model card's prefixes, 256 dimensions
+(asked of Ollama with ``dimensions``) and no thresholds until WP-E3
 calibrates them.
 """
 
@@ -14,31 +16,50 @@ import inspect
 from agenthandover_worker import model_profiles as mp
 
 
-def test_nomic_profile_carries_todays_reader_numbers():
-    from agenthandover_worker import mcp_server, query_api, session_linker, sop_dedup, vector_kb
-    from agenthandover_worker.procedure_matcher import ProcedureMatcher
-    from agenthandover_worker.task_segmenter import SegmenterConfig
-
+def test_nomic_profile_carries_the_v05_reader_numbers():
     profile = mp.EMBEDDING_PROFILES["nomic-embed-text"]
     assert profile.model == mp.EMBEDDING_MODEL == "nomic-embed-text"
-    assert profile.dim == vector_kb.VectorKBConfig().embedding_dim == 768
-    assert profile.doc_prefix == vector_kb.DOCUMENT_PREFIX == "search_document: "
-    assert profile.query_prefix == vector_kb.QUERY_PREFIX == "search_query: "
-    assert profile.cluster_prefix == vector_kb.CLUSTERING_PREFIX == "clustering: "
+    assert profile.dim == 768
+    assert profile.dimensions is None  # requests carry no "dimensions"
+    assert profile.doc_prefix == "search_document: "
+    assert profile.query_prefix == "search_query: "
+    assert profile.cluster_prefix == "clustering: "
+    assert profile.thresholds == mp.EmbeddingThresholds(
+        segmenter=0.83,
+        linker_cos=0.89,
+        linker_band=0.08,
+        dedup=0.70,
+        matcher=0.50,
+        min_score=0.3,
+    )
 
-    t = profile.thresholds
-    assert t is not None
-    assert t.segmenter == SegmenterConfig().similarity_threshold == 0.83
-    assert t.linker_cos == session_linker._COSINE_THRESHOLD == 0.89
-    assert t.linker_band == session_linker._LLM_BAND["cosine"] == 0.08
-    assert t.dedup == sop_dedup._DEFAULT_THRESHOLD == 0.70
-    assert t.dedup_family == sop_dedup._FAMILY_THRESHOLD == 0.60
-    matcher_default = inspect.signature(ProcedureMatcher).parameters["match_threshold"].default
-    assert t.matcher == matcher_default == 0.50
-    # Skill search's default floor is an inline literal in both readers.
-    assert t.min_score == 0.3
-    assert "min_score=0.3," in inspect.getsource(mcp_server)
-    assert 'body.get("min_score", 0.3)' in inspect.getsource(query_api)
+
+def test_readers_hold_no_copy_of_a_profile_number():
+    """The v0.5 copies are gone: a reader that kept one would not follow
+    the configured model."""
+    from agenthandover_worker import mcp_server, query_api, session_linker, vector_kb
+    from agenthandover_worker.task_segmenter import SegmenterConfig
+
+    for name in ("DOCUMENT_PREFIX", "QUERY_PREFIX", "CLUSTERING_PREFIX"):
+        assert not hasattr(vector_kb, name)
+    assert not hasattr(vector_kb.VectorKBConfig(), "embedding_dim")
+    for name in ("_COSINE_THRESHOLD", "_LLM_BAND", "_THRESHOLDS"):
+        assert not hasattr(session_linker, name)
+    assert SegmenterConfig().similarity_threshold is None
+    assert "min_score=0.3" not in inspect.getsource(mcp_server)
+    assert "0.3)" not in inspect.getsource(query_api.QueryAPIHandler._handle_semantic_search)
+
+
+def test_a_model_without_a_row_is_embedded_as_nomic_was():
+    profile = mp.embedding_profile("mxbai-embed-large")
+    nomic = mp.EMBEDDING_PROFILES[mp.EMBEDDING_MODEL]
+    assert profile.model == "mxbai-embed-large"
+    assert (profile.doc_prefix, profile.query_prefix, profile.cluster_prefix) == (
+        nomic.doc_prefix, nomic.query_prefix, nomic.cluster_prefix,
+    )
+    assert profile.thresholds == nomic.thresholds
+    assert profile.dimensions is None
+    assert mp.embedding_profile(mp.MEMORY_MODEL) is mp.EMBEDDING_PROFILES[mp.MEMORY_MODEL]
 
 
 def test_memory_profile_is_embeddinggemma_2_at_256_dims_uncalibrated():
@@ -50,6 +71,7 @@ def test_memory_profile_is_embeddinggemma_2_at_256_dims_uncalibrated():
     assert profile.query_prefix == "task: search result | query: "
     assert profile.cluster_prefix == "task: clustering | query: "
     assert profile.thresholds is None
+    assert profile.truncated and profile.dimensions == 256
     assert mp.MODEL_SIZES_GB[mp.MEMORY_MODEL] == 0.71
 
 

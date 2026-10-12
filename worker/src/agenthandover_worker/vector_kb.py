@@ -185,8 +185,6 @@ class VectorKB:
         config: VectorKBConfig | None = None,
     ) -> None:
         self.config = config or VectorKBConfig()
-        # How this KB embeds: task prefixes, stored size, thresholds.
-        self.profile: EmbeddingProfile = embedding_profile(self.config.embedding_model)
         self._db_path = str(db_path)
         # Shared by the control, inference and query-API threads
         # (inference_runner); SQLite itself is serialized.
@@ -237,6 +235,12 @@ class VectorKB:
         if cur.rowcount:
             logger.info("Deleted %d screenshot vector(s) of the removed "
                         "image embedder", cur.rowcount)
+
+    @property
+    def profile(self) -> EmbeddingProfile:
+        """How the configured model embeds: task prefixes, stored size,
+        thresholds."""
+        return embedding_profile(self.config.embedding_model)
 
     @property
     def thresholds(self) -> EmbeddingThresholds:

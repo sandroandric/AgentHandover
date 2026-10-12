@@ -419,6 +419,25 @@ class TestMatching:
         idx = find_matching_sop(new, existing, threshold=0.95)
         assert idx is None
 
+    def test_semantic_match_uses_the_profiles_dedup_cosine(self):
+        """With a vector KB, the semantic search is held to the embedding
+        profile's ``dedup`` cosine, not the fingerprint *threshold*."""
+        from agenthandover_worker.model_profiles import EMBEDDING_PROFILES
+        from agenthandover_worker.vector_kb import VectorSearchResult
+
+        vkb = MagicMock()
+        vkb.thresholds = EMBEDDING_PROFILES["nomic-embed-text"].thresholds
+        vkb.search.return_value = [
+            VectorSearchResult("procedure", "search-product-ebay", 0.74, "nomic-embed-text"),
+        ]
+        existing = [_amazon_sop(), _ebay_sop()]
+        new = {"slug": "new", "title": "List an item", "description": "on a marketplace"}
+        assert find_matching_sop(new, existing, threshold=0.95, vector_kb=vkb) == 1
+        vkb.search.assert_called_once_with(
+            "List an item | on a marketplace",
+            top_k=3, source_types=["procedure"], min_score=0.70,
+        )
+
 
 # ------------------------------------------------------------------
 # Tests: Merging
