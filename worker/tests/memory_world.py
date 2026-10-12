@@ -39,20 +39,26 @@ def axis(i: int) -> list[float]:
     """A unit vector of ``DIM`` values along axis *i*."""
     v = np.zeros(DIM, dtype=np.float32)
     v[i % DIM] = 1.0
-    return list(v)
+    return [float(x) for x in v]
 
 
 class World:
-    def __init__(self, tmp_path: Path) -> None:
+    """*data_dir* and *knowledge_dir* default to directories in *tmp_path*;
+    the database is ``<data_dir>/events.db``."""
+
+    def __init__(
+        self, tmp_path: Path, *, data_dir: Path | None = None,
+        knowledge_dir: Path | None = None,
+    ) -> None:
         self.tmp = tmp_path
-        self.db = create_daemon_db(tmp_path / "events.db")
-        self.data_dir = tmp_path / "data"
+        self.data_dir = data_dir or tmp_path / "data"
         self.shots = self.data_dir / "screenshots"
         self.thumbs = self.data_dir / "thumbs"
         self.artifacts = self.data_dir / "artifacts"
         for d in (self.shots, self.thumbs, self.artifacts, self.data_dir / "status"):
             d.mkdir(parents=True, exist_ok=True)
-        self.kb = KnowledgeBase(root=tmp_path / "knowledge", db_path=self.db)
+        self.db = create_daemon_db(self.data_dir / "events.db")
+        self.kb = KnowledgeBase(root=knowledge_dir or tmp_path / "knowledge", db_path=self.db)
         self.kb.ensure_structure()
         self.vkb = VectorKB(self.db)
         self._axis = 0
@@ -82,7 +88,10 @@ class World:
         *,
         memory: bool = True,
         url: str | None = None,
+        vector: list[float] | None = None,
     ) -> None:
+        """*vector* is the annotation's and the screen text's embedding
+        (default: the next axis for each)."""
         shot = self.shots / f"{eid}.jpg"
         shot.write_bytes(b"jpeg " + eid.encode())
         (self.thumbs / f"{eid}.ahthumb").write_bytes(b"sealed " + eid.encode())
@@ -117,8 +126,9 @@ class World:
             "VALUES (?, 'ocr', ?, ?, ?)",
             (eid, ts(at), screen_text, f"pid:7:{app}"),
         )
-        self.vkb.upsert("annotation", eid, doing, embedding=self.next_axis())
-        self.vkb.upsert("preserved_text", f"{eid}:ocr", screen_text, embedding=self.next_axis())
+        self.vkb.upsert("annotation", eid, doing, embedding=vector or self.next_axis())
+        self.vkb.upsert("preserved_text", f"{eid}:ocr", screen_text,
+                        embedding=vector or self.next_axis())
         self.sql(
             "INSERT OR REPLACE INTO annotation_cache (app, title_hash, ocr_simhash, "
             "annotation_json) VALUES (?, ?, 1, ?)",
