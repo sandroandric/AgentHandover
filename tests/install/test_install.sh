@@ -189,7 +189,8 @@ check_installed_prefix() {
     check "mlx-embeddings not installed by the installer" \
         "${py}" -c "import importlib.util, sys; sys.exit(importlib.util.find_spec('mlx_embeddings') is not None)"
     check "pip output logged to logs/pip-install.log" test -s "${dd}/logs/pip-install.log"
-    check "default config disables image embeddings" contains "${dd}/config.toml" "image_embeddings = false"
+    check "default config has no image_embeddings key (removed in 0.6.0)" \
+        bash -c '! grep -q "image_embeddings" "$1"' _ "${dd}/config.toml"
     check "tiers.json is the worker's tier table" \
         cmp -s "${dd}/tiers.json" "${REPO_ROOT}/resources/tiers.json"
     check "config names the standard tier" contains "${dd}/config.toml" 'tier = "standard"'

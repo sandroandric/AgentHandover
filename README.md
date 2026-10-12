@@ -156,7 +156,7 @@ Everything AgentHandover learns lives in a local knowledge base on your machine.
 
 **Knowledge ledger** -- Every Skill tracks what it knows: each slot (goal, steps, done criteria, trigger, decisions, verification, inputs, exceptions, guardrails, voice, context) is *known*, a *hypothesis*, or *unknown*, with pointers to the frames, answers or agent runs behind it. Questions come from the gaps (unknown or guessed slots, and steps the recording didn't settle), within a budget of 5 a week (`weekly_question_budget`), and no model writes them.
 
-**Vector store** -- Every observation is embedded (nomic-embed-text, 768d) so the system finds similar workflows by meaning, deduplicates Skills that describe the same task differently, and links activity across sessions. Optional image embeddings (SigLIP, 1152d) capture what your screen looked like.
+**Vector store** -- Every observation is embedded (nomic-embed-text, 768d) so the system finds similar workflows by meaning, deduplicates Skills that describe the same task differently, and links activity across sessions.
 
 **Voice profiles** -- Your writing style accumulates per workflow and strengthens over sessions. One reply is a guess. Twenty replies is a fingerprint the agent can match. Casual on Reddit, formal in client emails -- the system knows the difference.
 
@@ -397,7 +397,7 @@ Review the strategy, steps, and guardrails. Click "Approve for Agents" when it l
 Everything runs on your machine:
 
 - **Local-only models.** Every model runs through Ollama on your Mac (or the Ollama host you configure). No cloud model API is called and no API key is stored.
-- **Screenshots are temporary.** Each frame is a JPEG of the focused window at half its native pixel resolution (one pixel per point on a Retina display), deleted after annotation. Frames never annotated are deleted by the daily maintenance run once they are older than `job_ttl_days` (default 7). Only structured text survives. Image embeddings, when you turn them on, are computed before deletion.
+- **Screenshots are temporary.** Each frame is a JPEG of the focused window at half its native pixel resolution (one pixel per point on a Retina display), deleted after annotation. Frames never annotated are deleted by the daily maintenance run once they are older than `job_ttl_days` (default 7). Only structured text survives.
 - **Redaction where the data flows.** API keys, tokens, passwords (including "password is …" phrasings) and card numbers are scrubbed by the daemon before anything is stored, and again by the worker before any text goes into a model prompt. URLs keep their origin and path; query strings are dropped except for a short allow-list of harmless keys.
 - **Blocked by default.** Password managers, macOS password and Touch ID prompts, permission dialogs, the login window, Apple's Passwords app, and banking, payroll and login pages are never captured. Add your own apps, URLs and quiet hours as privacy zones (`[privacy.zones]`): the daemon checks them before it takes a frame and again after, and the worker once more on stored events.
 - **Secure field exclusion.** Password and credit card inputs are never captured, and form values are left out of browser snapshots unless you turn on `capture_input_values`.
@@ -420,7 +420,7 @@ This is not a screen recorder with ChatGPT on top. AgentHandover runs a pipeline
 | **2. Text-first annotation** | A small local model reads each frame's OCR text and page elements -- what app, what URL, what you're doing -- and looks at the image only when the text isn't enough. An annotation cache answers screens it has already seen for free |
 | **3. Compute caps** | Passive annotation stays within 60 frames and 10 model-minutes per hour and 1,500 frames and 60 minutes per day; focus recordings are exempt |
 | **4. Activity classification** | 8-class taxonomy separates work from noise. Your expense filing is "work." Your YouTube break is "entertainment." |
-| **5. Embeddings** | Every annotation embedded into a vector knowledge base (nomic-embed-text, 768d); optional SigLIP image embeddings (1152d) |
+| **5. Embeddings** | Every annotation embedded into a vector knowledge base (nomic-embed-text, 768d) |
 | **6. Sessions and recurrence** | Groups activity into work sessions, links the same task across days, and measures how often and how regularly it recurs |
 | **7. Recognition** | A session or recording that matches an existing Skill becomes a run of it; where it differs, a branch |
 | **8. Skill generation** | Writes the Skill with semantic dedup (won't create duplicates even if you describe the same workflow differently) |
@@ -462,7 +462,6 @@ Chrome Extension -----> Daemon (Rust) ---SQLite WAL---> Worker (Python)
                                               |  Skills (v3 schema)    |
                                               |  Knowledge ledger      |
                                               |  Vector store (768d)   |
-                                              |  Image vectors (1152d) |
                                               |  Voice profiles        |
                                               |  User profile          |
                                               |  Evidence + runs       |

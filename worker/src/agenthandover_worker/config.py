@@ -182,7 +182,6 @@ class EmbeddingConfig:
     and the task segmenter), always used with nomic's task prefixes."""
 
     model: str = "nomic-embed-text"
-    image_embeddings: bool = False
     # Vectors not updated for this many days are purged once a day.
     retention_days: int = 90
     # Hard cap on stored vectors; the least recently updated go first.
