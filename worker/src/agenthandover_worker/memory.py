@@ -76,6 +76,8 @@ from agenthandover_worker.ollama import OllamaClient, OllamaError
 from agenthandover_worker.privacy_zones import ObservationTier, is_system_ui
 from agenthandover_worker.redaction import redact
 from agenthandover_worker.scene_annotator import SceneAnnotator, find_screenshot
+from agenthandover_worker.thumbnails import EXTENSION as THUMB_EXTENSION
+from agenthandover_worker.thumbnails import delete_thumbnails, thumbs_dir
 
 logger = logging.getLogger(__name__)
 
@@ -83,7 +85,6 @@ logger = logging.getLogger(__name__)
 CURSOR_STATE_KEY = "memory_cursor"
 # Pause state, written by the app and the CLI: {"paused_until": ISO | null}.
 PAUSE_FILE = "memory-pause.json"
-THUMB_SUFFIX = ".ahthumb"
 
 # A frame extends the latest row when it shows the same window this close
 # to it, at most this long after it.
@@ -131,27 +132,31 @@ def pause_file(data_dir: Path) -> Path:
 def paused(data_dir: Path, now: datetime) -> bool:
     """True while ``memory-pause.json`` says Memory is paused at *now*.
 
-    A missing or unreadable file is not paused; ``"paused_until": null``
-    is paused until resumed."""
+    A missing file is not paused; ``"paused_until": null`` is paused until
+    resumed.  A file that cannot be read or understood counts as paused,
+    as in the daemon (``status::memory_paused``): a broken record never
+    resumes Memory on its own."""
     try:
-        state = json.loads(pause_file(data_dir).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        text = pause_file(data_dir).read_text(encoding="utf-8")
+    except FileNotFoundError:
         return False
+    except OSError:
+        return True
+    try:
+        state = json.loads(text)
+    except ValueError:
+        return True
     if not isinstance(state, dict) or "paused_until" not in state:
-        return False
+        return True
     until = state["paused_until"]
     if until is None:
         return True
-    when = parse_timestamp(until)
+    when = parse_timestamp(until) if isinstance(until, str) else None
     if when is None:
-        return False
+        return True
     if when.tzinfo is None:
         when = when.replace(tzinfo=timezone.utc)
     return now < when
-
-
-def thumbs_dir(data_dir: Path) -> Path:
-    return Path(data_dir) / "thumbs"
 
 
 def utc_text(moment: datetime) -> str:
@@ -488,6 +493,8 @@ class MemoryWriter:
             if when is None or path is None or self._never_kept(event):
                 if path is not None:
                     self._release(event, path)
+                # No moment will show this frame's thumbnail.
+                delete_thumbnails([event.get("id")], thumbs_dir(self.data_dir))
                 passed = (rowid, event)
                 stats["passed"] += 1
                 continue
@@ -495,6 +502,7 @@ class MemoryWriter:
                 # Waited too long: given up on, its JPEG freed if nothing
                 # else needs it.
                 self._release(event, path)
+                delete_thumbnails([event.get("id")], thumbs_dir(self.data_dir))
                 passed = (rowid, event)
                 stats["passed"] += 1
                 continue
@@ -564,7 +572,7 @@ class MemoryWriter:
         described = annotation_description(annotation)
         latest = self._load_latest()
         event_id = str(event["id"])
-        has_thumb = (thumbs_dir(self.data_dir) / f"{event_id}{THUMB_SUFFIX}").is_file()
+        has_thumb = (thumbs_dir(self.data_dir) / f"{event_id}{THUMB_EXTENSION}").is_file()
         merge = (
             latest is not None
             and latest.app == app
@@ -613,7 +621,7 @@ class MemoryWriter:
             latest.described = latest.described or bool(described)
             if has_thumb and latest.has_thumb:
                 # The moment shows its first thumbnail; this one is a copy.
-                _unlink(thumbs_dir(self.data_dir) / f"{event_id}{THUMB_SUFFIX}")
+                _unlink(thumbs_dir(self.data_dir) / f"{event_id}{THUMB_EXTENSION}")
             latest.has_thumb = latest.has_thumb or has_thumb
         else:
             self._latest = _Latest(
@@ -671,52 +679,43 @@ class MemoryWriter:
 
     def purge(self) -> dict:
         """Daily: delete rows past ``[memory] retention_days`` with their
-        thumbnails, and thumbnails past ``[memory] thumbnail_days``.
-        Returns the counts."""
+        thumbnails, and forget the thumbnails that are gone (expired by
+        ``thumbnails.expire_thumbnails``, which runs first).  Returns the
+        counts."""
         now = self._now()
         rows_cutoff = utc_text(now - timedelta(days=self.config.retention_days))
-        thumbs = thumbs_dir(self.data_dir)
         old = self._conn.execute(
             "SELECT id, thumb_id FROM memory_frames WHERE last_ts < ?", (rows_cutoff,),
         ).fetchall()
-        for row in old:
-            if row["thumb_id"]:
-                _unlink(thumbs / f"{row['thumb_id']}{THUMB_SUFFIX}")
+        delete_thumbnails(
+            [row["thumb_id"] for row in old if row["thumb_id"]], thumbs_dir(self.data_dir),
+        )
         self._conn.execute("DELETE FROM memory_frames WHERE last_ts < ?", (rows_cutoff,))
         if self._latest is not None and any(r["id"] == self._latest.id for r in old):
             self._latest = None
             self._latest_loaded = False
 
-        expired_thumbs = 0
-        thumb_cutoff = (now - timedelta(days=self.config.thumbnail_days)).timestamp()
-        if thumbs.is_dir():
-            gone: list[str] = []
-            for path in thumbs.iterdir():
-                if path.suffix != THUMB_SUFFIX or not path.is_file():
-                    continue
-                try:
-                    if path.stat().st_mtime >= thumb_cutoff:
-                        continue
-                    path.unlink()
-                except OSError:
-                    logger.debug("Could not expire thumbnail %s", path, exc_info=True)
-                    continue
-                gone.append(path.stem)
-                expired_thumbs += 1
-            self._conn.executemany(
-                "UPDATE memory_frames SET thumb_id = NULL WHERE thumb_id = ?",
-                [(name,) for name in gone],
-            )
-            if self._latest is not None and self._latest.id in gone:
-                self._latest.has_thumb = False
-        if old or expired_thumbs:
+        thumbs = thumbs_dir(self.data_dir)
+        gone = [
+            row["thumb_id"]
+            for row in self._conn.execute(
+                "SELECT thumb_id FROM memory_frames WHERE thumb_id IS NOT NULL"
+            ).fetchall()
+            if not (thumbs / f"{row['thumb_id']}{THUMB_EXTENSION}").is_file()
+        ]
+        self._conn.executemany(
+            "UPDATE memory_frames SET thumb_id = NULL WHERE thumb_id = ?",
+            [(name,) for name in gone],
+        )
+        if self._latest is not None and self._latest.id in gone:
+            self._latest.has_thumb = False
+        if old or gone:
             logger.info(
-                "Memory retention: %d row(s) older than %d days, %d thumbnail(s) "
-                "older than %d days deleted",
-                len(old), self.config.retention_days, expired_thumbs,
-                self.config.thumbnail_days,
+                "Memory retention: %d row(s) older than %d days deleted; "
+                "%d moment(s) no longer have a thumbnail",
+                len(old), self.config.retention_days, len(gone),
             )
-        return {"rows": len(old), "thumbnails": expired_thumbs}
+        return {"rows": len(old), "thumbnails": len(gone)}
 
 
 class _BadVector(OllamaError):

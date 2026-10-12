@@ -297,3 +297,31 @@ pub fn read_status_file<T: serde::de::DeserializeOwned>(filename: &str) -> std::
     serde_json::from_str(&content)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
 }
+
+/// Where a memory pause is recorded, relative to the data dir:
+/// `{"paused_until": "<ISO-8601 UTC>" | null}`. The worker's `memory pause`
+/// writes it; a missing file means not paused.
+pub const MEMORY_PAUSE_FILE: &str = "status/memory-pause.json";
+
+/// Whether memory (embedding and thumbnails) is paused at `now`, from
+/// `<data_dir>/status/memory-pause.json`: no file is not paused; a
+/// `paused_until` in the future, or `null` (paused until resumed), is
+/// paused; one in the past is over. A file that cannot be read or parsed
+/// counts as paused: the user asked for a pause, and a broken record of it
+/// must not resume capture.
+pub fn memory_paused(data_dir: &Path, now: DateTime<Utc>) -> bool {
+    #[derive(Deserialize)]
+    struct Pause {
+        paused_until: Option<DateTime<Utc>>,
+    }
+    let content = match std::fs::read_to_string(data_dir.join(MEMORY_PAUSE_FILE)) {
+        Ok(content) => content,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return false,
+        Err(_) => return true,
+    };
+    match serde_json::from_str::<Pause>(&content) {
+        Ok(Pause { paused_until: None }) => true,
+        Ok(Pause { paused_until: Some(until) }) => until > now,
+        Err(_) => true,
+    }
+}

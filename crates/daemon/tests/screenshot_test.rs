@@ -3,8 +3,8 @@
 #![cfg(target_os = "macos")]
 
 use agenthandover_daemon::capture::screenshot::{
-    capture_frame_at, capture_frame_blocking, decode_jpeg_to_bgra, request_line, CaptureError,
-    FRAME_MAGIC,
+    capture_frame_at, capture_frame_blocking, decode_jpeg_to_bgra, request_line,
+    thumbnail_key_blocking, CaptureError, FRAME_MAGIC, THUMBNAIL_KEY_REQUEST,
 };
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixListener;
@@ -181,4 +181,37 @@ async fn wedged_app_times_out_without_blocking_the_runtime() {
     assert!(!CaptureError::Timeout(Duration::ZERO).is_retryable());
     assert!(elapsed < Duration::from_millis(900), "took {elapsed:?}");
     assert!(ticks.load(std::sync::atomic::Ordering::Relaxed) >= 10, "runtime was blocked");
+}
+
+#[test]
+fn thumbnail_key_is_read_from_the_app() {
+    let key: Vec<u8> = (0u8..32).collect();
+    let mut reply = 32u32.to_le_bytes().to_vec();
+    reply.extend_from_slice(&key);
+    let (_dir, path, server) = fake_app(reply);
+
+    let got = thumbnail_key_blocking(&path, Duration::from_secs(2)).unwrap();
+
+    assert_eq!(server.join().unwrap(), THUMBNAIL_KEY_REQUEST);
+    assert_eq!(got.to_vec(), key);
+}
+
+#[test]
+fn thumbnail_key_refusal_or_wrong_length_is_an_error() {
+    // An app that does not know the command (an older app) answers an error.
+    let (_dir, path, _server) = fake_app(b"{\"error\":\"unknown command\"}\n".to_vec());
+    match thumbnail_key_blocking(&path, Duration::from_secs(2)) {
+        Err(CaptureError::App(message)) => assert_eq!(message, "unknown command"),
+        other => panic!("expected an app error, got {:?}", other.map(|_| ())),
+    }
+    let mut short = 16u32.to_le_bytes().to_vec();
+    short.extend_from_slice(&[1u8; 16]);
+    let (_dir, path, _server) = fake_app(short);
+    assert!(matches!(
+        thumbnail_key_blocking(&path, Duration::from_secs(2)),
+        Err(CaptureError::Protocol(_))
+    ));
+    // A peer the app refuses sees the connection closed without a key.
+    let (_dir, path, _server) = fake_app(Vec::new());
+    assert!(thumbnail_key_blocking(&path, Duration::from_secs(2)).is_err());
 }

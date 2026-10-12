@@ -29,6 +29,8 @@ pub struct AppConfig {
     pub trust: TrustConfig,
     #[serde(default)]
     pub constraints: ConstraintsConfig,
+    #[serde(default)]
+    pub memory: MemoryConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -226,6 +228,7 @@ impl Default for AppConfig {
             knowledge: KnowledgeConfig::default(),
             trust: TrustConfig::default(),
             constraints: ConstraintsConfig::default(),
+            memory: MemoryConfig::default(),
         }
     }
 }
@@ -449,6 +452,51 @@ impl Default for ConstraintsConfig {
             require_confirmation_for: Vec::new(),
             max_autonomous_actions_per_hour: default_max_autonomous_actions(),
         }
+    }
+}
+
+/// `[memory]`: the private memory of kept frames (v0.6). The daemon reads
+/// `enabled` and `thumbnail_days` (whether it writes encrypted thumbnails);
+/// the worker owns the rest. Same keys and defaults as the worker's
+/// `MemoryConfig`. Pausing is not config: see `status::memory_paused`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MemoryConfig {
+    /// Off unless setup (new installs) or the upgrade offer turned it on.
+    pub enabled: bool,
+    /// Embedding model for memory rows (separate from `[embedding] model`).
+    pub model: String,
+    /// Embedding dimensions kept per row.
+    pub dimensions: u32,
+    /// Days memory rows are kept.
+    pub retention_days: u32,
+    /// Days encrypted thumbnails are kept; 0 keeps none.
+    pub thumbnail_days: u32,
+    /// Whether agents may search memory (MCP `search_memory`).
+    pub agents_access: bool,
+    /// Embedding budget: frames embedded per hour at most.
+    pub max_frames_per_hour: u32,
+}
+
+impl Default for MemoryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            model: "embeddinggemma-2:440m".into(),
+            dimensions: 256,
+            retention_days: 365,
+            thumbnail_days: 7,
+            agents_access: false,
+            max_frames_per_hour: 600,
+        }
+    }
+}
+
+impl MemoryConfig {
+    /// Whether the daemon writes an encrypted thumbnail for each kept frame
+    /// (memory on and thumbnails kept at all; a pause is checked per frame).
+    pub fn writes_thumbnails(&self) -> bool {
+        self.enabled && self.thumbnail_days > 0
     }
 }
 

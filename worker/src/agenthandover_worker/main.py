@@ -402,16 +402,27 @@ def _run_daily_maintenance(
     activity_searcher: "ActivitySearcher | None" = None,
     annotation_cache: "AnnotationCache | None" = None,
     memory_writer: "MemoryWriter | None" = None,
+    db: "WorkerDB | None" = None,
+    thumbnail_days: int | None = None,
 ) -> None:
     """Prune what grows with time: vectors past their retention or from
     another embedding model (the row cap is enforced on every upsert),
     search-index entries of events the
-    daemon deleted, unused annotation-cache rows, and Memory rows and
-    thumbnails past ``[memory] retention_days`` / ``thumbnail_days``."""
+    daemon deleted, unused annotation-cache rows, Memory thumbnails older
+    than ``[memory] thumbnail_days`` (with *db* and *thumbnail_days*; they
+    expire even while Memory is off), then Memory rows past ``[memory]
+    retention_days``."""
+    from agenthandover_worker.thumbnails import expire_thumbnails
+
+    expire = (
+        db is not None and thumbnail_days is not None
+        and (lambda: expire_thumbnails(db, days=thumbnail_days))
+    )
     for name, job in (
         ("vector purge", vector_kb and vector_kb.purge_stale),
         ("search index prune", activity_searcher and activity_searcher.prune_index),
         ("annotation cache prune", annotation_cache and annotation_cache.prune),
+        ("thumbnail expiry", expire),
         ("memory purge", memory_writer and memory_writer.purge),
     ):
         if not job:

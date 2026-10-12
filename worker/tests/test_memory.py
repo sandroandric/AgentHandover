@@ -451,12 +451,14 @@ def test_paused_memory_embeds_nothing_and_skips_what_was_captured_meanwhile(env)
     assert [r["id"] for r in rows(env)] == [later["id"]]
 
 
-def test_a_missing_or_odd_pause_file_is_not_paused(env):
+def test_a_missing_pause_file_is_not_paused_and_a_broken_one_is(env):
+    """As the daemon (status::memory_paused): a broken record never resumes."""
     assert not paused(env.data_dir, NOW)
     path = env.data_dir / "status" / "memory-pause.json"
-    for text in ("not json", "[]", "{}", json.dumps({"paused_until": "soon"})):
+    for text in ("not json", "[]", "{}", json.dumps({"paused_until": "soon"}),
+                 json.dumps({"paused_until": 5})):
         path.write_text(text)
-        assert not paused(env.data_dir, NOW), text
+        assert paused(env.data_dir, NOW), text
     path.write_text(json.dumps({"paused_until": utc_text(NOW + timedelta(hours=1))}))
     assert paused(env.data_dir, NOW)
 
@@ -601,7 +603,7 @@ def test_the_cursor_follows_the_events_table_after_its_newest_rows_are_deleted(e
 # ---------------------------------------------------------------------------
 
 
-def test_purge_deletes_rows_past_retention_and_thumbnails_past_their_days(env):
+def test_purge_deletes_rows_past_retention_and_forgets_expired_thumbnails(env):
     clock = Clock()
     fake = FakeEmbedder({b"a": _basis(0), b"b": _basis(5), b"c": _basis(9)})
     writer = _writer(env, fake, clock, retention_days=30, thumbnail_days=7)
@@ -615,10 +617,9 @@ def test_purge_deletes_rows_past_retention_and_thumbnails_past_their_days(env):
     fresh = add_frame(env, at=NOW - timedelta(hours=1), image=b"c", thumb=True)
     writer.run()
     thumbs = env.data_dir / "thumbs"
-    ten_days = (NOW - timedelta(days=10)).timestamp()
-    os.utime(thumbs / f"{week['id']}.ahthumb", (ten_days, ten_days))
-    forty_days = (NOW - timedelta(days=40)).timestamp()
-    os.utime(thumbs / f"{old['id']}.ahthumb", (forty_days, forty_days))
+    # thumbnails.expire_thumbnails (run first by the daily maintenance)
+    # deleted the 10-day-old moment's thumbnail.
+    (thumbs / f"{week['id']}.ahthumb").unlink()
 
     assert writer.purge() == {"rows": 1, "thumbnails": 1}
 
@@ -626,6 +627,31 @@ def test_purge_deletes_rows_past_retention_and_thumbnails_past_their_days(env):
         (week["id"], None), (fresh["id"], fresh["id"]),
     ]
     assert sorted(p.name for p in thumbs.iterdir()) == [f"{fresh['id']}.ahthumb"]
+    assert writer.purge() == {"rows": 0, "thumbnails": 0}, "idempotent"
+
+
+def test_daily_maintenance_expires_thumbnails_before_the_memory_purge(monkeypatch):
+    from agenthandover_worker import thumbnails
+
+    calls = []
+    monkeypatch.setattr(
+        thumbnails, "expire_thumbnails",
+        lambda db, *, days: calls.append(("expire", days)),
+    )
+    wm._run_daily_maintenance(
+        db=object(), thumbnail_days=7,
+        memory_writer=SimpleNamespace(purge=lambda: calls.append(("purge",))),
+    )
+    assert calls == [("expire", 7), ("purge",)]
+
+
+def test_a_passed_over_frame_loses_its_thumbnail(env):
+    clock = Clock()
+    writer = _writer(env, FakeEmbedder({b"a": _basis(0)}), clock)
+    clock.now = NOW
+    stale = add_frame(env, at=NOW - timedelta(hours=49), image=b"a", thumb=True)
+    assert writer.run()["passed"] == 1
+    assert not (env.data_dir / "thumbs" / f"{stale['id']}.ahthumb").exists()
 
 
 def test_daily_maintenance_runs_the_memory_purge():
@@ -651,7 +677,7 @@ def test_memory_config_defaults_and_validation(tmp_path):
     )
     memory = load_config(path).memory
     assert memory.enabled and memory.agents_access and memory.retention_days == 30
-    assert memory.thumbnail_days == 7, "not positive: the default"
+    assert memory.thumbnail_days == 0, "0 keeps no thumbnails, as in the daemon"
     assert memory.max_frames_per_hour == 600
 
 
@@ -876,3 +902,10 @@ def test_with_annotation_off_memory_deletes_every_jpeg_it_passes(env):
     assert [r["id"] for r in rows(env)] == [kept["id"], focus["id"]]
     for frame in (kept, blocked, focus):
         assert not frame["path"].exists()
+
+
+@pytest.mark.parametrize(("value", "days"), [("3", 3), ("0", 0), ("-1", 7), ("true", 7)])
+def test_thumbnail_days_is_a_whole_number_of_days_at_least_zero(tmp_path, value, days):
+    path = tmp_path / "config.toml"
+    path.write_text(f"[memory]\nthumbnail_days = {value}\n")
+    assert load_config(path).memory.thumbnail_days == days

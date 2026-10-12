@@ -9,6 +9,9 @@
 //! - request: `{"command":"capture","scale":0.5,"format":"jpeg","quality":70}\n`
 //! - success: `AHJ1` + width u32 LE + height u32 LE + byte length u32 LE + JPEG bytes
 //! - error:   `{"error":"..."}\n`
+//!
+//! Memory thumbnail key (v0.6): request `{"command":"thumbnail_key"}\n`,
+//! reply `length u32 LE` (32) + the raw AES-256 key, or the error line.
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -85,6 +88,18 @@ fn io_error(error: std::io::Error, io_timeout: Duration) -> CaptureError {
     }
 }
 
+/// The app's `{"error":"..."}` reply, whose first bytes are `prefix`.
+fn app_error(prefix: &[u8], mut stream: &std::os::unix::net::UnixStream) -> CaptureError {
+    let mut rest = String::new();
+    let _ = (&mut stream).take(64 * 1024).read_to_string(&mut rest);
+    let text = format!("{}{}", String::from_utf8_lossy(prefix), rest);
+    let message = serde_json::from_str::<serde_json::Value>(text.trim())
+        .ok()
+        .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(str::to_string))
+        .unwrap_or_else(|| text.trim().to_string());
+    CaptureError::App(message)
+}
+
 /// Blocking capture over the socket at `path`. Each socket operation is
 /// bounded by `io_timeout`.
 pub fn capture_frame_blocking(
@@ -109,14 +124,7 @@ pub fn capture_frame_blocking(
     let mut magic = [0u8; 4];
     (&stream).read_exact(&mut magic).map_err(|e| io_error(e, io_timeout))?;
     if magic[0] == b'{' {
-        let mut rest = String::new();
-        let _ = (&stream).take(64 * 1024).read_to_string(&mut rest);
-        let text = format!("{}{}", String::from_utf8_lossy(&magic), rest);
-        let message = serde_json::from_str::<serde_json::Value>(text.trim())
-            .ok()
-            .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(str::to_string))
-            .unwrap_or_else(|| text.trim().to_string());
-        return Err(CaptureError::App(message));
+        return Err(app_error(&magic, &stream));
     }
     if &magic != FRAME_MAGIC {
         return Err(CaptureError::Protocol(format!(
@@ -152,6 +160,55 @@ pub fn capture_frame_blocking(
         jpeg,
         bgra,
     })
+}
+
+/// The request for the Memory thumbnail key.
+pub const THUMBNAIL_KEY_REQUEST: &str = "{\"command\":\"thumbnail_key\"}\n";
+
+/// Ask the app for its Memory thumbnail key over the capture socket at
+/// `path`: reply `length u32 LE` (32) + the raw key, or `{"error":...}`.
+/// The app answers only peers its `PeerPolicy` accepts (the signed daemon).
+pub fn thumbnail_key_blocking(
+    path: &Path,
+    io_timeout: Duration,
+) -> Result<crate::capture::thumbnail::ThumbnailKey, CaptureError> {
+    use crate::capture::thumbnail::KEY_LEN;
+
+    let stream =
+        std::os::unix::net::UnixStream::connect(path).map_err(CaptureError::Unavailable)?;
+    stream.set_read_timeout(Some(io_timeout)).map_err(CaptureError::Io)?;
+    stream.set_write_timeout(Some(io_timeout)).map_err(CaptureError::Io)?;
+    (&stream)
+        .write_all(THUMBNAIL_KEY_REQUEST.as_bytes())
+        .map_err(|e| io_error(e, io_timeout))?;
+
+    let mut prefix = [0u8; 4];
+    (&stream).read_exact(&mut prefix).map_err(|e| io_error(e, io_timeout))?;
+    if prefix[0] == b'{' {
+        return Err(app_error(&prefix, &stream));
+    }
+    let length = u32::from_le_bytes(prefix) as usize;
+    if length != KEY_LEN {
+        return Err(CaptureError::Protocol(format!("thumbnail key of {length} bytes")));
+    }
+    let mut key = [0u8; KEY_LEN];
+    (&stream).read_exact(&mut key).map_err(|e| io_error(e, io_timeout))?;
+    Ok(key)
+}
+
+/// [`thumbnail_key_blocking`] on the blocking pool, bounded by `timeout`.
+pub async fn thumbnail_key_at(
+    path: PathBuf,
+    timeout: Duration,
+) -> Result<crate::capture::thumbnail::ThumbnailKey, CaptureError> {
+    let task = tokio::task::spawn_blocking(move || thumbnail_key_blocking(&path, timeout));
+    match tokio::time::timeout(timeout, task).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(join_error)) => Err(CaptureError::Protocol(format!(
+            "thumbnail key task failed: {join_error}"
+        ))),
+        Err(_) => Err(CaptureError::Timeout(timeout)),
+    }
 }
 
 /// Decode a JPEG into tightly packed BGRA pixels (the layout dHash and the

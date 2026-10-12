@@ -308,8 +308,12 @@ _POSITIVE = {
     ("embedding", "max_rows"),
     ("memory", "dimensions"),
     ("memory", "retention_days"),
-    ("memory", "thumbnail_days"),
     ("memory", "max_frames_per_hour"),
+}
+# Fields whose value must be a finite number >= 0 (0 turns the thing off:
+# ``thumbnail_days = 0`` keeps no thumbnails, as in the daemon).
+_NON_NEGATIVE = {
+    ("memory", "thumbnail_days"),
 }
 
 
@@ -325,6 +329,10 @@ def _build(cls: type, name: str, values: dict) -> Any:
         value = _coerce(values[key], default)
         if value is not None and (name, key) in _POSITIVE and not (
             0 < value < float("inf")
+        ):
+            value = None
+        if value is not None and (name, key) in _NON_NEGATIVE and not (
+            0 <= value < float("inf")
         ):
             value = None
         if value is None:

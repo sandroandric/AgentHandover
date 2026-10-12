@@ -237,6 +237,20 @@ class WorkerDB:
             results.extend(self._rows_to_dicts(cur.fetchall()))
         return results
 
+    def memory_thumb_ids(self, event_ids: list[str]) -> set[str]:
+        """The subset of *event_ids* that a Memory row shows as its
+        thumbnail (``memory_frames.thumb_id``)."""
+        found: set[str] = set()
+        for i in range(0, len(event_ids), 900):
+            batch = event_ids[i : i + 900]
+            placeholders = ",".join("?" for _ in batch)
+            cur = self._conn.execute(
+                f"SELECT thumb_id FROM memory_frames WHERE thumb_id IN ({placeholders})",
+                batch,
+            )
+            found.update(row[0] for row in cur.fetchall())
+        return found
+
     def get_focus_session_events(self, session_id: str) -> list[dict]:
         """Return all events tagged with the given focus session ID,
         PLUS any ClipboardChange and PasteDetected events that occurred

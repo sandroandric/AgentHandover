@@ -88,6 +88,12 @@ pub struct ObserverConfig {
     /// went down since the previous kept frame (`keys_since_prev_frame`):
     /// typed text needs keyboard evidence. Tests replace it, as for clicks.
     pub key_down_count: fn() -> u32,
+    /// `[memory]` on with thumbnails kept: each kept frame also gets an
+    /// encrypted thumbnail, unless memory is paused
+    /// (`<state_dir>/status/memory-pause.json`).
+    pub memory_thumbnails: bool,
+    /// Where the encrypted thumbnails go (`<data dir>/thumbs`).
+    pub thumbs_dir: PathBuf,
 }
 
 /// The system's time since the last left or right mouse-down.
@@ -140,6 +146,8 @@ impl Default for ObserverConfig {
             capture_stats: CaptureStats::shared(),
             seconds_since_last_click: system_seconds_since_last_click,
             key_down_count: system_key_down_count,
+            memory_thumbnails: false,
+            thumbs_dir: agenthandover_common::status::data_dir().join("thumbs"),
         }
     }
 }
@@ -203,6 +211,9 @@ pub async fn run_observer_loop(
     let state_dir = config.state_dir.clone();
     let mut active_focus_session_id: Option<String> = None;
     let mut browser_watch = BrowserTransitionWatch::since(Utc::now());
+    // The app's Memory thumbnail key, fetched when first needed and held
+    // in memory only.
+    let mut thumbnail_keys = ThumbnailKeyCache::default();
 
     // AppleScript throttle: at most once per 2 seconds per app
     #[cfg(target_os = "macos")]
@@ -481,8 +492,23 @@ pub async fn run_observer_loop(
                     warnings: &snapshot_warnings,
                     browser_url: browser_url.as_deref(),
                 };
-                let Some(kept) =
-                    capture_kept_frame(&mut policy, trigger, focus_recording, &config, &gate).await
+                // Memory on and not paused, and the app gave us its key.
+                let thumbnail_key = if config.memory_thumbnails
+                    && !agenthandover_common::status::memory_paused(&state_dir, Utc::now())
+                {
+                    thumbnail_keys.get(&config.capture_socket).await
+                } else {
+                    None
+                };
+                let Some(kept) = capture_kept_frame(
+                    &mut policy,
+                    trigger,
+                    focus_recording,
+                    thumbnail_key.is_some(),
+                    &config,
+                    &gate,
+                )
+                .await
                 else {
                     continue;
                 };
@@ -524,6 +550,9 @@ pub async fn run_observer_loop(
                     event.metadata["focus_capture"] = serde_json::Value::Bool(true);
                 }
                 tag_focus_session(&mut event, &active_focus_session_id);
+                if let (Some(key), Some(jpeg)) = (thumbnail_key, kept.thumbnail) {
+                    write_thumbnail_async(config.thumbs_dir.clone(), event.id, key, jpeg).await;
+                }
                 debug!(trigger = trigger.as_str(), "Frame kept");
                 let _ = tx.send(ObserverMessage::Event { event }).await;
             }
@@ -594,6 +623,96 @@ pub async fn run_storage_writer(
 struct KeptFrame {
     screenshot_path: Option<PathBuf>,
     ocr: Option<serde_json::Value>,
+    /// The plaintext thumbnail JPEG (in memory only) when one was asked for;
+    /// sealed and written once the frame's event id exists.
+    thumbnail: Option<Vec<u8>>,
+}
+
+/// Wait this long after a failed key request before asking the app again
+/// (the app may be restarting, or an older app may not know the command).
+const THUMBNAIL_KEY_RETRY: Duration = Duration::from_secs(60);
+
+/// The app's Memory thumbnail key, fetched lazily over the capture socket
+/// and kept in memory only (never written to disk). A failed request is
+/// retried after [`THUMBNAIL_KEY_RETRY`]; meanwhile frames get no thumbnail.
+#[derive(Default)]
+struct ThumbnailKeyCache {
+    key: Option<crate::capture::thumbnail::ThumbnailKey>,
+    retry_at: Option<Instant>,
+}
+
+impl ThumbnailKeyCache {
+    async fn get(&mut self, socket: &Path) -> Option<crate::capture::thumbnail::ThumbnailKey> {
+        if self.key.is_some() {
+            return self.key;
+        }
+        if self.retry_at.is_some_and(|at| Instant::now() < at) {
+            return None;
+        }
+        match fetch_thumbnail_key(socket).await {
+            Ok(key) => {
+                info!("Memory thumbnail key received from the app");
+                self.key = Some(key);
+                self.retry_at = None;
+            }
+            Err(e) => {
+                warn!(error = %e, "No Memory thumbnail key from the app; frames get no thumbnail for now");
+                self.retry_at = Some(Instant::now() + THUMBNAIL_KEY_RETRY);
+            }
+        }
+        self.key
+    }
+}
+
+#[cfg(target_os = "macos")]
+async fn fetch_thumbnail_key(socket: &Path) -> Result<crate::capture::thumbnail::ThumbnailKey, String> {
+    use crate::capture::screenshot::{thumbnail_key_at, CAPTURE_TIMEOUT};
+    thumbnail_key_at(socket.to_path_buf(), CAPTURE_TIMEOUT)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[cfg(not(target_os = "macos"))]
+async fn fetch_thumbnail_key(_socket: &Path) -> Result<crate::capture::thumbnail::ThumbnailKey, String> {
+    Err("the capture socket exists on macOS only".into())
+}
+
+/// Scale and JPEG-encode a kept frame's pixels for its thumbnail, on the
+/// blocking pool. `None` (warned) when encoding failed.
+async fn encode_thumbnail_async(pixels: Vec<u8>, width: usize, height: usize) -> Option<Vec<u8>> {
+    let encoded = tokio::task::spawn_blocking(move || {
+        crate::capture::thumbnail::encode_thumbnail(&pixels, width, height)
+    })
+    .await;
+    match encoded {
+        Ok(Ok(jpeg)) => Some(jpeg),
+        Ok(Err(e)) => {
+            warn!(error = %e, "Could not encode the Memory thumbnail");
+            None
+        }
+        Err(e) => {
+            warn!(error = %e, "Memory thumbnail task failed");
+            None
+        }
+    }
+}
+
+/// Seal and write `<thumbs_dir>/<event_id>.ahthumb` on the blocking pool.
+async fn write_thumbnail_async(
+    thumbs_dir: PathBuf,
+    event_id: Uuid,
+    key: crate::capture::thumbnail::ThumbnailKey,
+    jpeg: Vec<u8>,
+) {
+    let written = tokio::task::spawn_blocking(move || {
+        crate::capture::thumbnail::write_thumbnail(&thumbs_dir, event_id, &key, &jpeg)
+    })
+    .await;
+    match written {
+        Ok(Ok(path)) => debug!(path = %path.display(), "Memory thumbnail written"),
+        Ok(Err(e)) => warn!(error = %e, "Could not write the Memory thumbnail"),
+        Err(e) => warn!(error = %e, "Memory thumbnail task failed"),
+    }
 }
 
 /// The zone of the snapshot's focused window, or `None` when a secure
@@ -640,12 +759,14 @@ impl PrivacyGate<'_> {
 /// signature against the last kept frame, then
 /// (heartbeats only) fast OCR against the last kept frame's words, then, for
 /// a frame that is kept, accurate OCR and the JPEG write. Nothing reaches
-/// disk for a dropped frame. `None` when the capture failed or the frame
-/// was dropped.
+/// disk for a dropped frame. With `thumbnail`, a kept frame also carries
+/// its plaintext thumbnail JPEG (in memory). `None` when the capture failed
+/// or the frame was dropped.
 async fn capture_kept_frame(
     policy: &mut CapturePolicy,
     trigger: CaptureTrigger,
     focus_recording: bool,
+    thumbnail: bool,
     config: &ObserverConfig,
     gate: &PrivacyGate<'_>,
 ) -> Option<KeptFrame> {
@@ -692,7 +813,12 @@ async fn capture_kept_frame(
         FrameDecision::Keep => {}
     }
 
-    let (_, accurate) = timed_ocr(stats, pixels, width, height, OcrPass::Accurate).await;
+    let (pixels, accurate) = timed_ocr(stats, pixels, width, height, OcrPass::Accurate).await;
+    let thumbnail = if thumbnail {
+        encode_thumbnail_async(pixels, width, height).await
+    } else {
+        None
+    };
     let screenshot_path = write_vlm_jpeg(&jpeg, &config.screenshots_dir);
     let (words, ocr) = match accurate {
         Some((text, json)) => (Some(ocr_words(&text)), Some(json)),
@@ -700,7 +826,7 @@ async fn capture_kept_frame(
     };
     policy.record_kept(signature, words, focus_recording);
     with_stats(stats, |s| s.kept(Instant::now()));
-    Some(KeptFrame { screenshot_path, ocr })
+    Some(KeptFrame { screenshot_path, ocr, thumbnail })
 }
 
 /// [`ocr_frame`], its time counted in `stats`.

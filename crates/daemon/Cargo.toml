@@ -30,6 +30,8 @@ hex = "0.4"
 libc = "0.2"
 # Decodes the JPEG frames from capture.sock for dHash and OCR
 image = { version = "0.25", default-features = false, features = ["jpeg"] }
+# Seals the Memory thumbnails (AES-256-GCM; the app opens them with CryptoKit)
+aes-gcm = "0.10"
 
 [build-dependencies]
 cc = "1"

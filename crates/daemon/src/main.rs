@@ -186,6 +186,8 @@ async fn main() -> Result<()> {
         },
         capture_input_values: app_config.privacy.capture_input_values,
         read_app_state: app_config.privacy.read_app_state,
+        // `[memory]`: encrypted thumbnails of kept frames in `<data dir>/thumbs`.
+        memory_thumbnails: app_config.memory.writes_thumbnails(),
         // Sockets and the state dir: the standard locations.
         ..ObserverConfig::default()
     };
