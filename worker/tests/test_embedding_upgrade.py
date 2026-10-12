@@ -255,6 +255,25 @@ def test_the_status_object_counts_the_rows(world) -> None:
     }
 
 
+def test_the_job_is_submitted_at_p2_only_while_it_is_due(world) -> None:
+    from agenthandover_worker.inference_runner import P2
+    from agenthandover_worker.stages import Tick, control
+
+    upgrade = _upgrade(world)
+    ctx = SimpleNamespace(
+        cfg=SimpleNamespace(memory=SimpleNamespace(enabled=False)),
+        memory_writer=None, focus_processor=None, v2_schema_ok=True, runner=None,
+        embedding_upgrade=upgrade,
+    )
+
+    def jobs() -> dict:
+        return {key: priority for key, priority, _ in control.submit_model_jobs(ctx, Tick())}
+
+    assert "embedding-upgrade" not in jobs()
+    _choose(world)
+    assert jobs()["embedding-upgrade"] == P2
+
+
 def test_worker_status_carries_the_upgrade(world) -> None:
     status = {"state": "running", "done": 2, "total": 5, "dropped": 0, "error": None}
     wm._write_worker_status(
