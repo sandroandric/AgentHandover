@@ -96,7 +96,7 @@ HOLD_HOURS = 48.0
 # stopped recording) never waits long behind it.
 FRAMES_PER_JOB = 8
 # Events read per job (frames passed over count against this, not the above).
-EVENTS_PER_JOB = 200
+EVENTS_PER_JOB = 1000
 # Per embedding request.
 EMBED_TIMEOUT_SECONDS = 60.0
 # After an Ollama failure: wait this long, doubling to the cap.
@@ -305,23 +305,62 @@ class MemoryWriter:
         """True while Memory is on and not paused."""
         return bool(self.config.enabled) and not paused(self.data_dir, self._now())
 
-    def cursor(self) -> int:
+    def _cursor_state(self) -> dict:
         row = self._conn.execute(
             "SELECT value FROM worker_state WHERE key = ?", (CURSOR_STATE_KEY,),
         ).fetchone()
         try:
-            return int(row[0]) if row else 0
+            state = json.loads(row[0]) if row else {}
+            return state if isinstance(state, dict) and int(state.get("rowid", 0)) >= 0 else {}
         except (TypeError, ValueError):
-            return 0
+            return {}
 
-    def _set_cursor(self, rowid: int) -> None:
+    def cursor(self) -> int:
+        """The rowid of the last event the writer has passed (0: none)."""
+        return int(self._cursor_state().get("rowid", 0))
+
+    def _set_cursor(self, rowid: int, event: dict | None = None) -> None:
+        """Stand on *rowid*, the event *event* (its id and time are kept so
+        a cursor whose event was deleted can find its place again)."""
+        state = {"rowid": rowid}
+        if event is not None:
+            state.update(id=str(event.get("id") or ""), ts=str(event.get("timestamp") or ""))
         self._conn.execute(
             "INSERT OR REPLACE INTO worker_state (key, value) VALUES (?, ?)",
-            (CURSOR_STATE_KEY, str(rowid)),
+            (CURSOR_STATE_KEY, json.dumps(state)),
         )
 
-    def _max_rowid(self) -> int:
-        return int(self._conn.execute("SELECT COALESCE(MAX(rowid), 0) FROM events").fetchone()[0])
+    def _checked_cursor(self) -> int:
+        """The cursor, put back in place when the event it stood on was
+        deleted (forgotten, purged): rowids after the newest remaining
+        event are handed out again, so it moves to the newest event not
+        newer than the one it stood on."""
+        state = self._cursor_state()
+        rowid = int(state.get("rowid", 0))
+        if rowid == 0:
+            return 0
+        row = self._conn.execute("SELECT id FROM events WHERE rowid = ?", (rowid,)).fetchone()
+        if row is not None and row[0] == state.get("id", row[0]):
+            return rowid
+        found = self._conn.execute(
+            "SELECT rowid, id, timestamp FROM events "
+            "WHERE rowid <= ? AND julianday(timestamp) <= julianday(?) "
+            "ORDER BY rowid DESC LIMIT 1",
+            (rowid, state.get("ts") or "9999-12-31"),
+        ).fetchone()
+        if found is None:
+            self._set_cursor(0)
+            return 0
+        self._set_cursor(int(found[0]), {"id": found[1], "timestamp": found[2]})
+        return int(found[0])
+
+    def _newest_event(self) -> tuple[int, dict | None]:
+        row = self._conn.execute(
+            "SELECT rowid, id, timestamp FROM events ORDER BY rowid DESC LIMIT 1",
+        ).fetchone()
+        if row is None:
+            return 0, None
+        return int(row[0]), {"id": row[1], "timestamp": row[2]}
 
     def _cutoff(self) -> datetime:
         return self._now() - timedelta(hours=HOLD_HOURS)
@@ -413,16 +452,10 @@ class MemoryWriter:
             return stats
         if paused(self.data_dir, self._now()):
             # Frames captured while paused are never embedded.
-            self._set_cursor(self._max_rowid())
+            self._set_cursor(*self._newest_event())
             self.waiting = None
             return stats
-        cursor = self.cursor()
-        newest = self._max_rowid()
-        if cursor > newest:
-            # The events table lost its newest rows (forgotten): rowids
-            # will be handed out again from there.
-            cursor = newest
-            self._set_cursor(cursor)
+        cursor = self._checked_cursor()
         rows = self._conn.execute(
             "SELECT rowid, * FROM events WHERE rowid > ? "
             "AND json_extract(metadata_json, '$.screenshot_path') IS NOT NULL "
@@ -430,6 +463,8 @@ class MemoryWriter:
             (cursor, EVENTS_PER_JOB),
         ).fetchall()
         cutoff = self._cutoff()
+        # The last frame passed over and not yet written to the cursor.
+        passed: tuple[int, dict] | None = None
         for row in rows:
             event = dict(row)
             rowid = int(event.pop("rowid"))
@@ -438,13 +473,15 @@ class MemoryWriter:
                 when = when.replace(tzinfo=timezone.utc)
             path = find_screenshot(event, self.screenshots_dir)
             if when is None or path is None or self._never_kept(event):
-                self._pass(rowid, stats)
+                passed = (rowid, event)
+                stats["passed"] += 1
                 continue
             if when < cutoff:
                 # Waited too long: given up on, its JPEG freed if nothing
                 # else needs it.
                 self._release(event, path)
-                self._pass(rowid, stats)
+                passed = (rowid, event)
+                stats["passed"] += 1
                 continue
             if _focus_session(event) is not None and event.get("annotation_status") == "pending":
                 stats["waiting"] = "a focus recording's frames are not processed yet"
@@ -464,11 +501,14 @@ class MemoryWriter:
                 stats["waiting"] = f"Ollama failed ({exc}); retrying in {delay:.0f} s"
                 logger.warning("Memory embedding deferred: %s", stats["waiting"])
                 break
+            passed = None
             self._failures = 0
             self._embedded_at.append(self._monotonic())
             stats["embedded"] += 1
             stats["merged"] += int(merged)
             self._release(event, path)
+        if passed is not None:
+            self._set_cursor(*passed)
         if stats["waiting"] != self.waiting and stats["waiting"] is not None:
             logger.info("Memory waiting: %s", stats["waiting"])
         self.waiting = stats["waiting"]
@@ -478,10 +518,6 @@ class MemoryWriter:
                 stats["embedded"], stats["merged"], stats["passed"],
             )
         return stats
-
-    def _pass(self, rowid: int, stats: dict) -> None:
-        self._set_cursor(rowid)
-        stats["passed"] += 1
 
     def _release(self, event: dict, path: str) -> None:
         """Delete a frame's JPEG once its annotation (or the focus
@@ -547,7 +583,7 @@ class MemoryWriter:
                         event_id if has_thumb else None, _focus_session(event),
                     ),
                 )
-            self._set_cursor(rowid)
+            self._set_cursor(rowid, event)
             self._conn.execute("COMMIT")
         except BaseException:
             self._conn.execute("ROLLBACK")
