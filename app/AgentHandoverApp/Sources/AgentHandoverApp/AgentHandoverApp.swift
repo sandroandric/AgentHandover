@@ -57,6 +57,18 @@ struct AgentHandoverApp: App {
         }
         .defaultSize(width: 560, height: 700)
         .windowResizability(.contentMinSize)
+
+        Window("Memory", id: "memory") {
+            MemoryView()
+                .environmentObject(delegate)
+        }
+        .defaultSize(width: 960, height: 640)
+        .windowResizability(.contentMinSize)
+
+        Window("Memory Settings", id: "memory-settings") {
+            MemorySettingsView()
+        }
+        .windowResizability(.contentSize)
     }
 }
 
@@ -74,6 +86,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Obse
     private var setupForExistingInstall = false
     private var focusQAWindow: NSWindow?
     private var modelDownloadWindow: NSWindow?
+    private var memoryOfferWindow: NSWindow?
 
     /// Single shared AppState used by onboarding, menu bar, and all windows.
     @MainActor let sharedAppState = AppState()
@@ -361,8 +374,106 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Obse
                 DispatchQueue.main.async {
                     MainActor.assumeIsolated { self?.showModelDownload(plan: plan, missing: missing) }
                 }
+                // One question per launch: Memory's waits for the next.
+                return
+            }
+            self?.checkMemory()
+        }
+    }
+
+    /// After the model upgrade, Memory: the once-only offer to an updated
+    /// install (`MemoryDecisions.offer`), or turning on a Memory setup left
+    /// off for an Ollama that has since been updated
+    /// (`MemoryDecisions.deferredAction`).  Blocking; off the main thread.
+    private func checkMemory() {
+        let defaults = UserDefaults.standard
+        let config = MemorySettings.readConfig()
+        let enabled = MemorySettings.enabledValue(in: config)
+        let table = try? ModelTierTable.load(from: ModelTierTable.installedURL)
+        let version = OllamaModels.serverVersion()
+        let deferred = MemoryDecisions.deferredAction(
+            deferred: defaults.bool(forKey: MemoryDecisions.deferredKey), memoryEnabled: enabled,
+            ollamaVersion: version, installed: version == nil ? nil : ModelUpgrade.installedModels(), table: table
+        )
+        launchLog.notice("memory deferred: \(String(describing: deferred), privacy: .public)")
+        switch deferred {
+        case .enable:
+            MemoryDecisions.enableDeferredMemory()
+            return
+        case .download(let model):
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated { self.showMemoryModelDownload(model: model, turnOn: true) }
+            }
+            return
+        case .none:
+            break
+        }
+        let decision = MemoryDecisions.offer(
+            setupAnswered: defaults.bool(forKey: MemoryDecisions.setupAnsweredKey),
+            memoryEnabled: enabled, offer: MemoryOfferState.load(),
+            imageEmbeddingsInConfig: ConfigTOML.value(section: "embedding", key: "image_embeddings", in: config) == "true",
+            ollamaVersion: version, table: table
+        )
+        launchLog.notice("memory offer: \(String(describing: decision), privacy: .public)")
+        guard case .offer(let visualSearch, let tooOld) = decision, let table,
+              let model = table.memoryModel, let minimum = table.minimumOllamaVersionForMemory else { return }
+        DispatchQueue.main.async {
+            MainActor.assumeIsolated {
+                self.showMemoryOffer(MemoryOfferView(
+                    visualSearch: visualSearch, ollamaTooOld: tooOld, minimumOllama: minimum,
+                    memoryModel: model, memoryModelSize: table.sizeLabel(model),
+                    close: { [weak self] in self?.memoryOfferWindow?.close() }
+                ))
             }
         }
+    }
+
+    @MainActor
+    private func showMemoryOffer(_ view: MemoryOfferView) {
+        NSApp.setActivationPolicy(.regular)
+        NSApp.activate(ignoringOtherApps: true)
+        if let window = memoryOfferWindow {
+            window.makeKeyAndOrderFront(nil)
+            return
+        }
+        let window = NSWindow(contentViewController: NSHostingController(rootView: view))
+        window.title = "Memory"
+        window.styleMask = [.titled, .closable]
+        window.center()
+        window.isReleasedWhenClosed = false
+        window.delegate = self
+        memoryOfferWindow = window
+        window.makeKeyAndOrderFront(nil)
+        window.orderFrontRegardless()
+    }
+
+    /// Download Memory's model (the Memory window's "Download…", or a
+    /// Memory setup left off until Ollama was updated: then `turnOn`).
+    @MainActor
+    func showMemoryModelDownload(model: String, turnOn: Bool) {
+        let size = (try? ModelTierTable.load(from: ModelTierTable.installedURL))?.sizeLabel(model)
+        let view = ModelDownloadView(
+            question: turnOn
+                ? "Ollama can run Memory now. Download \(model)\(size.map { " (\($0))" } ?? "") and turn Memory on?"
+                : "Memory needs \(model)\(size.map { " (\($0))" } ?? ""). Download now?",
+            detail: "Memory picks up the screens that waited for it.",
+            missing: [model],
+            afterDownload: {
+                if turnOn {
+                    MemoryDecisions.enableDeferredMemory()
+                } else {
+                    MemorySettings.restartServices()
+                }
+                return .success("Downloaded. Memory is on.")
+            },
+            // Not now: Memory stays off; Memory Settings turns it on later.
+            notNow: { if turnOn { UserDefaults.standard.set(false, forKey: MemoryDecisions.deferredKey) } },
+            close: { [weak self] in
+                self?.modelDownloadWindow?.close()
+                Task { await MemoryCenter.shared.refresh() }
+            }
+        )
+        presentModelDownload(view)
     }
 
     /// The menu's "AI model missing" row: the upgrade's models when a
@@ -389,16 +500,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Obse
 
     @MainActor
     private func showModelDownload(plan: ModelUpgradePlan?, missing: [String]) {
+        presentModelDownload(ModelDownloadView(plan: plan, missing: missing, close: { [weak self] in
+            self?.modelDownloadWindow?.close()
+            self?.sharedAppState.refreshStatus()
+        }))
+    }
+
+    /// The models window, hosting `view` (one at a time).
+    @MainActor
+    private func presentModelDownload(_ view: ModelDownloadView) {
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
         if let window = modelDownloadWindow {
             window.makeKeyAndOrderFront(nil)
             return
         }
-        let view = ModelDownloadView(plan: plan, missing: missing, close: { [weak self] in
-            self?.modelDownloadWindow?.close()
-            self?.sharedAppState.refreshStatus()
-        })
         let window = NSWindow(contentViewController: NSHostingController(rootView: view))
         window.title = "AgentHandover Models"
         window.styleMask = [.titled, .closable]
@@ -414,8 +530,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Obse
     /// another window is open.
     func windowWillClose(_ notification: Notification) {
         guard let window = notification.object as? NSWindow,
-              window === focusQAWindow || window === modelDownloadWindow else { return }
-        if window === focusQAWindow { focusQAWindow = nil } else { modelDownloadWindow = nil }
+              window === focusQAWindow || window === modelDownloadWindow || window === memoryOfferWindow
+        else { return }
+        if window === focusQAWindow {
+            focusQAWindow = nil
+        } else if window === modelDownloadWindow {
+            modelDownloadWindow = nil
+        } else {
+            memoryOfferWindow = nil
+        }
         let others = NSApp.windows.contains {
             $0 !== window && $0.isVisible && $0.styleMask.contains(.titled)
         }

@@ -141,9 +141,11 @@ struct ModelTierTable: Decodable {
     }
 
     /// Every model `tier` needs pulled, annotation model first, no repeats.
-    func models(for tier: ModelTier) -> [String] {
+    /// `embeddingModel` replaces the table's text model (setup's Memory
+    /// plan puts a new install's text paths on Memory's model).
+    func models(for tier: ModelTier, embeddingModel: String? = nil) -> [String] {
         var out: [String] = []
-        for m in [tier.annotationModel, tier.sopModel, embeddingModel] where !out.contains(m) {
+        for m in [tier.annotationModel, tier.sopModel, embeddingModel ?? self.embeddingModel] where !out.contains(m) {
             out.append(m)
         }
         return out
@@ -156,8 +158,8 @@ struct ModelTierTable: Decodable {
     }
 
     /// "~11 GB": the download a tier needs.
-    func downloadLabel(for tier: ModelTier) -> String {
-        let total = models(for: tier).compactMap { modelSizesGB[$0] }.reduce(0, +)
+    func downloadLabel(for tier: ModelTier, embeddingModel: String? = nil) -> String {
+        let total = models(for: tier, embeddingModel: embeddingModel).compactMap { modelSizesGB[$0] }.reduce(0, +)
         return "~\(Int(total.rounded())) GB"
     }
 

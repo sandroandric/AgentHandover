@@ -11,6 +11,7 @@ struct MenuBarView: View {
     @EnvironmentObject var observationToggle: ObservationToggle
     @AppStorage("hasCompletedOnboarding") private var hasCompletedOnboarding = false
     @StateObject private var agentDetector = AgentDetector()
+    @ObservedObject private var memory = MemoryCenter.shared
     @Environment(\.openWindow) private var openWindow
 
     // Focus recording: the session itself lives in focus-session.json
@@ -54,6 +55,9 @@ struct MenuBarView: View {
 
                 // Quick links grid
                 quickLinksGrid
+
+                // Memory: search, pause, forget
+                memorySection
 
                 // Connected agents
                 agentsSection
@@ -115,6 +119,7 @@ struct MenuBarView: View {
         .onAppear {
             // Refresh immediately when user opens menu bar
             appState.refreshStatus()
+            Task { await memory.refresh() }
             agentDetector.detect()
             if !hasCompletedOnboarding && delegate.pendingOnboarding {
                 delegate.pendingOnboarding = false
@@ -693,6 +698,83 @@ struct MenuBarView: View {
         .buttonStyle(.plain)
     }
 
+    // MARK: - Memory
+
+    /// "Memory · Recording" with Search Memory…, Pause Memory (or Resume
+    /// Memory), Forget and Settings.  The state comes from the worker's
+    /// `/memory/status`, read each time the menu opens.
+    private var memorySection: some View {
+        let state = memory.menuState
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 4) {
+                Text("Memory")
+                    .font(.system(size: 10, weight: .bold, design: .rounded))
+                    .foregroundColor(.secondary)
+                Text("\u{00B7} \(state.label(now: Date()))")
+                    .font(.system(size: 10))
+                    .foregroundColor(.secondary)
+                Spacer()
+                Button {
+                    openAndActivate("memory-settings")
+                } label: {
+                    Image(systemName: "gearshape")
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("Memory Settings")
+            }
+            .padding(.leading, 2)
+
+            HStack(spacing: 6) {
+                compactLink("Search Memory\u{2026}") {
+                    openAndActivate("memory")
+                }
+                switch state {
+                case .recording:
+                    Menu {
+                        ForEach(MemoryPauseOption.allCases) { option in
+                            Button(option.title) { Task { await memory.pause(option) } }
+                        }
+                    } label: {
+                        Text("Pause Memory")
+                    }
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
+                case .paused:
+                    Button("Resume Memory") { Task { await memory.resume() } }
+                        .buttonStyle(.plain)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(.blue)
+                case .off:
+                    Button("Turn On\u{2026}") { openAndActivate("memory-settings") }
+                        .buttonStyle(.plain)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(.blue)
+                case .unavailable:
+                    EmptyView()
+                }
+                if state == .recording || state.isPaused {
+                    Menu {
+                        Button("Forget Last Hour\u{2026}") { Task { await memory.forget(.lastHour) } }
+                        Button("Forget Today\u{2026}") { Task { await memory.forget(.today) } }
+                    } label: {
+                        Text("Forget")
+                    }
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
+                }
+            }
+
+            if let notice = memory.notice {
+                Text(notice)
+                    .font(.system(size: 10))
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
     // MARK: - Connected Agents
 
     private var agentsSection: some View {
@@ -1023,6 +1105,8 @@ struct MenuBarView: View {
         "daily-digest": "Daily Digest",
         "micro-review": "Review Queue",
         "faq": "FAQ",
+        "memory": "Memory",
+        "memory-settings": "Memory Settings",
     ]
 
     private func openAndActivate(_ windowId: String) {

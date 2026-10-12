@@ -68,6 +68,39 @@ enum OllamaModels {
         models.filter { !installed.contains(canonical($0)) }
     }
 
+    /// The version the local Ollama service reports (`GET /api/version`),
+    /// or nil when it does not answer within a few seconds.  Blocking.
+    static func serverVersion(host: String = "http://localhost:11434") -> String? {
+        guard let url = URL(string: host + "/api/version") else { return nil }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 3
+        let done = DispatchSemaphore(value: 0)
+        var version: String?
+        URLSession.shared.dataTask(with: request) { data, _, _ in
+            if let data,
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                version = json["version"] as? String
+            }
+            done.signal()
+        }.resume()
+        done.wait()
+        return version
+    }
+
+    /// Whether Ollama `version` ("0.40.3", "0.41.0-rc1") is `minimum` or
+    /// later; a missing part counts as 0, an unreadable version as too old.
+    static func isVersion(_ version: String, atLeast minimum: String) -> Bool {
+        func parts(_ text: String) -> [Int]? {
+            let clean = text.components(separatedBy: "-").first ?? text
+            let numbers = clean.components(separatedBy: ".").map { Int($0) }
+            guard !numbers.isEmpty, numbers.allSatisfy({ $0 != nil }) else { return nil }
+            let values = numbers.compactMap { $0 }
+            return values + Array(repeating: 0, count: max(0, 3 - values.count))
+        }
+        guard let have = parts(version), let need = parts(minimum) else { return false }
+        return have.lexicographicallyPrecedes(need) == false
+    }
+
     /// `ollama pull model`, handing each chunk's last output line to
     /// `progress`.  Blocking.  Returns nil on success, else why it failed.
     static func pull(
