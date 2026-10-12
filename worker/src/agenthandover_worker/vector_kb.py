@@ -621,6 +621,11 @@ class VectorKB:
             self._index.pop(vid, None)
         return cur.rowcount > 0
 
+    def forgotten(self) -> None:
+        """Rows were deleted elsewhere (``memory_forget``): the next search
+        reads the index again."""
+        self._index = None
+
     def count(self, source_type: str | None = None) -> int:
         """Count vectors in the store, optionally filtered by source_type."""
         if source_type:
