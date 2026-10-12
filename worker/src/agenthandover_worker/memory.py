@@ -34,7 +34,8 @@ expiry, the startup orphan sweep) leaves its JPEG alone
 (:meth:`MemoryWriter.holds`), and once the writer has passed a frame
 whose annotation is done (or with annotation off) it deletes the JPEG
 itself.  The wait is bounded: a frame older than :data:`HOLD_HOURS` is
-given up on (not held, not embedded).  Blocked and metadata-only frames
+given up on (not held, not embedded), and after :data:`HOLD_FAILURES`
+failed embeddings in a row nothing is held until one succeeds.  Blocked and metadata-only frames
 are deleted at once by the annotation path, as before; they are never
 held.
 
@@ -104,10 +105,16 @@ EMBED_TIMEOUT_SECONDS = 60.0
 # After an Ollama failure: wait this long, doubling to the cap.
 BACKOFF_SECONDS = 60.0
 BACKOFF_MAX_SECONDS = 1800.0
+# After this many failed embeddings in a row (the model is not pulled,
+# Ollama is too old for image inputs) Memory stops holding screenshots, so
+# annotation deletes them as it did before Memory; the walk keeps retrying.
+HOLD_FAILURES = 3
 # Descriptions are search results' text, not documents.
 DESCRIPTION_MAX_CHARS = 1000
 # Search: added to the score of a row whose description holds every word.
 KEYWORD_BOOST = 0.05
+# Search: how many of the best-scoring rows the keyword boost looks at.
+SHORTLIST = 500
 # Search: rows of one window this close in time are one moment.
 MOMENT_GAP_SECONDS = MERGE_GAP_SECONDS
 
@@ -388,7 +395,7 @@ class MemoryWriter:
     def holds(self, event: dict) -> bool:
         """True while Memory still needs *event*'s screenshot: deleting it
         now would lose the frame before it is embedded."""
-        if not self.active():
+        if not self.active() or self._failures >= HOLD_FAILURES:
             return False
         row = self._conn.execute(
             "SELECT rowid, * FROM events WHERE id = ?", (event.get("id"),),
@@ -775,7 +782,10 @@ class MemoryIndex:
         self._matrix = np.zeros((0, self.dim), dtype=np.float32)
         self._first = np.zeros(0)
         self._last = np.zeros(0)
-        self._app: list[str] = []
+        self._app_codes: dict[str, int] = {}
+        self._app_code = np.zeros(0, dtype=np.int64)
+        # Row positions by first_ts, recomputed after rows change.
+        self._time_order: np.ndarray | None = None
         self._codes: dict[tuple[str, str], int] = {}
         self._window = np.zeros(0, dtype=np.int64)
         self._seen_created = ""
@@ -817,6 +827,7 @@ class MemoryIndex:
         new_first: list[float] = []
         new_last: list[float] = []
         new_window: list[int] = []
+        new_app: list[int] = []
         for row in rows:
             vector = np.frombuffer(row["embedding"], dtype="<f4")
             if vector.size != self.dim:
@@ -830,36 +841,44 @@ class MemoryIndex:
             if at is not None:
                 if at < self._first.size:
                     self._first[at], self._last[at] = first, last
+                    self._time_order = None
                 continue
             self._pos[row["id"]] = len(self._ids)
             self._ids.append(row["id"])
-            self._app.append(row["app"])
             new_vectors.append(vector)
             new_first.append(first)
             new_last.append(last)
             new_window.append(code)
+            new_app.append(self._app_codes.setdefault(row["app"].casefold(), len(self._app_codes)))
         if not new_vectors:
             return
         self._matrix = np.vstack([self._matrix, np.stack(new_vectors)])
         self._first = np.concatenate([self._first, new_first])
         self._last = np.concatenate([self._last, new_last])
         self._window = np.concatenate([self._window, np.asarray(new_window, dtype=np.int64)])
+        self._app_code = np.concatenate([self._app_code, np.asarray(new_app, dtype=np.int64)])
+        self._time_order = None
 
-    def _keyword_rows(self, query: str) -> set[str]:
-        """Rows whose description holds every word (3+ letters) of *query*."""
+    def _keyword_rows(self, query: str, candidates: list[str]) -> set[str]:
+        """Of *candidates*, the rows whose description holds every word
+        (3+ letters) of *query*."""
         words = list(dict.fromkeys(w.lower() for w in _WORD.findall(query)))
-        if not words:
+        if not words or not candidates:
             return set()
         clauses = " AND ".join(["lower(description) LIKE ? ESCAPE '\\'"] * len(words))
         patterns = [
             "%" + w.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
             for w in words
         ]
-        rows = self._conn.execute(
-            f"SELECT id FROM memory_frames WHERE model = ? AND dim = ? AND {clauses}",
-            (self.model, self.dim, *patterns),
-        ).fetchall()
-        return {r[0] for r in rows}
+        found: set[str] = set()
+        for start in range(0, len(candidates), 500):
+            chunk = candidates[start:start + 500]
+            found.update(r[0] for r in self._conn.execute(
+                f"SELECT id FROM memory_frames WHERE id IN ({','.join('?' * len(chunk))}) "
+                f"AND {clauses}",
+                (*chunk, *patterns),
+            ))
+        return found
 
     def search(
         self,
@@ -894,19 +913,21 @@ class MemoryIndex:
         if until is not None:
             mask &= self._first <= until.timestamp()
         if app:
-            wanted = app.casefold()
-            mask &= np.fromiter((a.casefold() == wanted for a in self._app), bool, len(self._app))
+            mask &= self._app_code == self._app_codes.get(app.casefold(), -1)
         idx = np.nonzero(mask)[0]
         if idx.size == 0:
             return []
         scores = self._matrix @ q
-        boosted = self._keyword_rows(query)
-        if boosted:
-            for row_id in boosted:
-                at = self._pos.get(row_id)
-                if at is not None:
-                    scores[at] += KEYWORD_BOOST
-        order = idx[np.argsort(self._first[idx], kind="stable")]
+        # The keyword boost re-ranks the vector shortlist.
+        shortlist = (
+            idx if idx.size <= SHORTLIST
+            else idx[np.argpartition(-scores[idx], SHORTLIST - 1)[:SHORTLIST]]
+        )
+        for row_id in self._keyword_rows(query, [self._ids[i] for i in shortlist]):
+            scores[self._pos[row_id]] += KEYWORD_BOOST
+        if self._time_order is None:
+            self._time_order = np.argsort(self._first, kind="stable")
+        order = self._time_order[mask[self._time_order]]
         same = (
             (self._window[order][1:] == self._window[order][:-1])
             & (self._first[order][1:] - self._last[order][:-1] < MOMENT_GAP_SECONDS)

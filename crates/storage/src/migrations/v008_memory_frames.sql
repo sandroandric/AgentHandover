@@ -33,4 +33,4 @@ CREATE TABLE IF NOT EXISTS memory_frames (
 CREATE INDEX IF NOT EXISTS idx_memory_frames_first_ts ON memory_frames(first_ts);
 CREATE INDEX IF NOT EXISTS idx_memory_frames_last_ts ON memory_frames(last_ts);
 CREATE INDEX IF NOT EXISTS idx_memory_frames_app ON memory_frames(app);
-CREATE INDEX IF NOT EXISTS idx_memory_frames_created ON memory_frames(created_at);
+CREATE INDEX IF NOT EXISTS idx_memory_frames_model ON memory_frames(model, dim, created_at);

@@ -506,6 +506,23 @@ def test_an_ollama_failure_backs_off_and_keeps_the_frames(env):
     assert not frame["path"].exists()
 
 
+def test_repeated_failures_stop_the_hold_so_annotation_deletes_as_before(env):
+    """A model that is not pulled (or an Ollama too old for images) must not
+    keep every screenshot on disk for two days."""
+    clock = Clock()
+    fake = FakeEmbedder({b"red": _basis(0)})
+    fake.fail = 3
+    writer = _writer(env, fake, clock)
+    frame = add_frame(env, at=NOW - timedelta(minutes=1))
+    for attempt in range(3):
+        assert writer.holds({"id": frame["id"]}), attempt
+        writer.run()
+        clock.mono += 3600
+    assert not writer.holds({"id": frame["id"]})
+    assert writer.run()["embedded"] == 1, "the walk keeps retrying"
+    assert writer.holds({"id": add_frame(env, at=NOW)["id"]})
+
+
 def test_a_vector_of_the_wrong_size_is_a_failure_not_a_row(env):
     clock = Clock()
     writer = _writer(env, FakeEmbedder({b"red": [1.0, 0.0]}), clock)
