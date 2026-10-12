@@ -11,8 +11,6 @@ from __future__ import annotations
 
 import json
 import logging
-import subprocess
-import sys
 from datetime import datetime
 from pathlib import Path
 
@@ -176,7 +174,7 @@ def test_a_symlinked_config_is_written_through(tmp_path):
     assert "image_embeddings" not in real.read_text(encoding="utf-8")
 
 
-# --- worker startup and the CLI ---------------------------------------------
+# --- worker startup ---------------------------------------------
 
 
 def test_worker_startup_migrates_with_one_info_line(tmp_path, caplog):
@@ -219,19 +217,3 @@ def test_worker_startup_warns_and_continues_on_a_bad_file(tmp_path, caplog):
         for r in caplog.records
     )
 
-
-def test_cli_migrate_embedding(tmp_path):
-    cfg = tmp_path / "config.toml"
-    cfg.write_text(ONBOARDED_ON, encoding="utf-8")
-    run = [sys.executable, "-m", "agenthandover_worker.model_profiles",
-           "migrate-embedding", str(cfg), str(tmp_path)]
-    first = subprocess.run(run, capture_output=True, text=True, check=True)
-    assert f"Removed [embedding] image_embeddings from {cfg.resolve()} (it was on)" in first.stdout
-    assert _offer(tmp_path) == {"wanted_visual_search": True}
-    second = subprocess.run(run, capture_output=True, text=True, check=True)
-    assert second.stdout == ""
-    missing = subprocess.run(
-        [*run[:4], str(tmp_path / "none.toml"), str(tmp_path)],
-        capture_output=True, text=True, check=True,
-    )
-    assert "no [embedding] keys to migrate" in missing.stdout

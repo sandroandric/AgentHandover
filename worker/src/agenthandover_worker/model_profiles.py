@@ -1291,33 +1291,14 @@ def _upgrade_apply(target: Path) -> int:
 
 def _main(argv: list[str]) -> int:
     """``write-tiers PATH`` | ``vlm-block TIER_ID`` | ``migrate-vlm PATH`` |
-    ``upgrade-plan PATH`` | ``upgrade-apply PATH`` |
-    ``migrate-embedding PATH STATE_DIR``.
+    ``upgrade-plan PATH`` | ``upgrade-apply PATH``.
 
     ``migrate-vlm`` is the installer's: it asks no Ollama, so it makes a
     cloud block local and leaves a model switch to the worker and the
     app.  ``upgrade-plan`` prints :func:`upgrade_plan` as JSON
     (``{"plan": ..., "reason": ...}``); ``upgrade-apply`` makes the switch
     when Ollama serves the models, else exits :data:`EXIT_MODELS_MISSING`.
-    ``migrate-embedding`` (the installer's too) is
-    :func:`migrate_embedding_file`.
     """
-    if len(argv) == 3 and argv[0] == "migrate-embedding":
-        target, state_dir = Path(argv[1]), Path(argv[2])
-        if not target.exists():
-            print(f"No {target}; no [embedding] keys to migrate")
-            return 0
-        try:
-            changed, wanted, backup = migrate_embedding_file(target, state_dir)
-        except (OSError, UnicodeDecodeError) as exc:
-            print(f"could not migrate [embedding] in {target}: {exc}", file=sys.stderr)
-            return 1
-        if changed:
-            print(
-                f"Removed [embedding] image_embeddings from {target} "
-                f"(it was {'on' if wanted else 'off'}); backup: {backup}"
-            )
-        return 0
     if len(argv) == 2 and argv[0] == "write-tiers":
         target = Path(argv[1])
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -1359,8 +1340,7 @@ def _main(argv: list[str]) -> int:
     print(
         "usage: python -m agenthandover_worker.model_profiles "
         "write-tiers PATH | vlm-block TIER_ID | migrate-vlm PATH | "
-        "upgrade-plan PATH | upgrade-apply PATH | "
-        "migrate-embedding PATH STATE_DIR",
+        "upgrade-plan PATH | upgrade-apply PATH",
         file=sys.stderr,
     )
     return 2

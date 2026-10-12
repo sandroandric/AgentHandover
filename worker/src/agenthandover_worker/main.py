@@ -752,6 +752,14 @@ def _migrate_embedding_config(
     return changed
 
 
+def _migrate_config() -> None:
+    """The upgrade's edits of config.toml, before the worker reads it:
+    the model switch (once Ollama serves the models), then the removed
+    ``[embedding] image_embeddings`` key."""
+    _migrate_vlm_config()
+    _migrate_embedding_config()
+
+
 def _atomic_write_result(path: Path, data: dict) -> None:
     """Atomically write a JSON result file (tmp + fsync + rename).
 
@@ -4241,10 +4249,8 @@ def main(argv: list[str] | None = None) -> None:
     from agenthandover_worker.context import build_context, start
     from agenthandover_worker.stages import export
 
-    # The upgrade's model switch (once Ollama serves the models) and the
-    # removed image_embeddings key, then one read.
-    _migrate_vlm_config()
-    _migrate_embedding_config()
+    # The upgrade's edits of config.toml, then one read.
+    _migrate_config()
     cfg = load_config()
     if args.adapter is None:
         args.adapter = cfg.export.adapter
