@@ -48,7 +48,7 @@ dependencies = [
 
 [[package]]
 name = "agenthandover-cli"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "agenthandover-common",
  "anyhow",
@@ -64,7 +64,7 @@ dependencies = [
 
 [[package]]
 name = "agenthandover-common"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "chrono",
  "directories",
@@ -84,7 +84,7 @@ dependencies = [
 
 [[package]]
 name = "agenthandover-daemon"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "accessibility-sys",
  "aes-gcm",
@@ -114,7 +114,7 @@ dependencies = [
 
 [[package]]
 name = "agenthandover-storage"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "agenthandover-common",
  "anyhow",
