@@ -144,3 +144,54 @@ enum MemoryDecisions {
             + "from ollama.com/download (or run: brew install --cask ollama-app), then turn on Memory."
     }
 }
+
+/// Setup's Memory step: the two switches, kept in UserDefaults until the
+/// AI model step knows the Ollama that will run them, then written into
+/// config.toml.
+enum MemorySetupChoice {
+    static let memoryOnKey = "memorySetupOn"
+    static let agentsAccessKey = "memorySetupAgentsAccess"
+
+    /// Memory is on by default for a new install.
+    static func wantsMemory(_ defaults: UserDefaults = .standard) -> Bool {
+        defaults.object(forKey: memoryOnKey) as? Bool ?? true
+    }
+
+    /// Agents' access is off by default.
+    static func agentsAccess(_ defaults: UserDefaults = .standard) -> Bool {
+        defaults.object(forKey: agentsAccessKey) as? Bool ?? false
+    }
+
+    /// The step's Next: keep both switches and mark this Mac as one whose
+    /// setup asked (it never sees the upgrade offer).
+    static func save(memoryOn: Bool, agentsAccess: Bool, defaults: UserDefaults = .standard) {
+        defaults.set(memoryOn, forKey: memoryOnKey)
+        defaults.set(agentsAccess, forKey: agentsAccessKey)
+        defaults.set(true, forKey: MemoryDecisions.setupAnsweredKey)
+    }
+
+    /// `config` with setup's plan: `[memory] enabled` and `agents_access`,
+    /// and `[embedding] model`; every other line kept.
+    static func apply(_ plan: MemorySetupPlan, agentsAccess: Bool, to config: String) -> String {
+        var settings = MemorySettings.parse(config)
+        settings.enabled = plan.memoryEnabled
+        settings.agentsAccess = agentsAccess
+        let withMemory = settings.apply([.enabled, .agentsAccess], to: config)
+        return ModelTierTable.applyEmbeddingModel(plan.embeddingModel, to: withMemory)
+    }
+
+    /// Write the plan into config.toml and remember whether Memory waits
+    /// for a newer Ollama (`MemoryDecisions.deferredAction`).
+    static func write(_ plan: MemorySetupPlan, agentsAccess: Bool, defaults: UserDefaults = .standard) {
+        let current = MemorySettings.readConfig()
+        let updated = apply(plan, agentsAccess: agentsAccess, to: current)
+        if updated != current {
+            let url = MemorySettings.configURL
+            try? FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(), withIntermediateDirectories: true
+            )
+            try? updated.write(to: url, atomically: true, encoding: .utf8)
+        }
+        defaults.set(plan.deferred, forKey: MemoryDecisions.deferredKey)
+    }
+}

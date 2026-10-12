@@ -119,6 +119,34 @@ final class MemoryOfferTests: XCTestCase {
         XCTAssertEqual(action(enabled: true), .none)
     }
 
+    func testSetupDefaultsAreMemoryOnAndAgentsOff() {
+        let defaults = UserDefaults(suiteName: "memory-setup-\(UUID().uuidString)")!
+        XCTAssertTrue(MemorySetupChoice.wantsMemory(defaults))
+        XCTAssertFalse(MemorySetupChoice.agentsAccess(defaults))
+        XCTAssertFalse(defaults.bool(forKey: MemoryDecisions.setupAnsweredKey))
+        MemorySetupChoice.save(memoryOn: false, agentsAccess: true, defaults: defaults)
+        XCTAssertFalse(MemorySetupChoice.wantsMemory(defaults))
+        XCTAssertTrue(MemorySetupChoice.agentsAccess(defaults))
+        // A Mac whose setup asked never sees the upgrade offer.
+        XCTAssertTrue(defaults.bool(forKey: MemoryDecisions.setupAnsweredKey))
+    }
+
+    func testSetupWritesOnlyMemoryAndTheEmbeddingModel() throws {
+        let example = try String(contentsOf: Self.repoRoot.appendingPathComponent("config.example.toml"), encoding: .utf8)
+        let plan = MemoryDecisions.setupPlan(wantsMemory: true, ollamaVersion: "0.40.3", table: table)
+        let updated = MemorySetupChoice.apply(plan, agentsAccess: false, to: example)
+        XCTAssertEqual(ConfigTOML.value(section: "memory", key: "enabled", in: updated), "true")
+        XCTAssertEqual(ConfigTOML.value(section: "memory", key: "agents_access", in: updated), "false")
+        XCTAssertEqual(ConfigTOML.value(section: "embedding", key: "model", in: updated), "embeddinggemma-2:440m")
+        let changed = updated.components(separatedBy: "\n").filter { !example.components(separatedBy: "\n").contains($0) }
+        XCTAssertEqual(Set(changed), ["enabled = true", "agents_access = false", "model = \"embeddinggemma-2:440m\""])
+        // An old Ollama: Memory off, text model unchanged.
+        let old = MemoryDecisions.setupPlan(wantsMemory: true, ollamaVersion: "0.34.2", table: table)
+        let kept = MemorySetupChoice.apply(old, agentsAccess: false, to: example)
+        XCTAssertEqual(ConfigTOML.value(section: "memory", key: "enabled", in: kept), "false")
+        XCTAssertEqual(ConfigTOML.value(section: "embedding", key: "model", in: kept), "nomic-embed-text")
+    }
+
     // MARK: - The offer file
 
     func testRecordingAChoiceKeepsTheOtherKeys() throws {

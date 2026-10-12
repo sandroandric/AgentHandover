@@ -1,9 +1,9 @@
 import SwiftUI
 
-/// Premium onboarding experience — 8 screens with progressive disclosure.
+/// Premium onboarding experience — 10 screens with progressive disclosure.
 ///
 /// Screens: Welcome → Two Ways to Teach → What You Get → Review Cycle →
-///          Permissions → AI Model → Browser Extension → Ready (First Recording)
+///          Permissions → Memory → AI Model → Browser Extension → Ready (First Recording)
 struct OnboardingView: View {
     @EnvironmentObject var appState: AppState
     @State private var currentStep = 0
@@ -37,6 +37,13 @@ struct OnboardingView: View {
     @State private var vlmStatusMessage = ""
     @State private var hasSeededVLMFromConfig = false
 
+    // Memory (v0.6): on by default for a new install, agents off.
+    @State private var setupMemoryOn = MemorySetupChoice.wantsMemory()
+    @State private var setupAgentsAccess = MemorySetupChoice.agentsAccess()
+    /// The version the local Ollama reports (nil until read, or when none
+    /// answers); decides whether this Mac can run Memory's model.
+    @State private var ollamaVersion: String? = nil
+
     // Clipboard copy feedback
     @State private var pathCopied = false
 
@@ -49,7 +56,13 @@ struct OnboardingView: View {
         self.onComplete = onComplete
     }
 
-    private let totalSteps = 9
+    private let totalSteps = 10
+
+    // The steps after the permissions (4 and 5, `OnboardingProgress`).
+    static let memoryStep = 6
+    static let vlmStep = 7
+    static let extensionStep = 8
+    static let readyStep = 9
 
     // MARK: - Design Tokens (Contra-inspired)
 
@@ -81,7 +94,7 @@ struct OnboardingView: View {
     /// footer so their inner ScrollViews can actually scroll instead of being
     /// squeezed by surrounding spacers.
     private var usesTopAlignedStepLayout: Bool {
-        currentStep >= 6
+        currentStep >= Self.memoryStep
     }
 
     var body: some View {
@@ -89,7 +102,7 @@ struct OnboardingView: View {
             // Background: solid orange for welcome, white for content screens, cream for ready
             if currentStep == 0 {
                 warmOrange.ignoresSafeArea()
-            } else if currentStep == 7 {
+            } else if currentStep == Self.extensionStep {
                 warmCream.ignoresSafeArea()
             } else {
                 Color.white.ignoresSafeArea()
@@ -121,34 +134,34 @@ struct OnboardingView: View {
             OnboardingProgress.save(step: currentStep, in: .standard)
             refreshExtensionReport()
             seedVLMStateFromConfigIfNeeded()
-            refreshVLMSetupState(force: currentStep == 6)
-            if currentStep >= 7 {
+            refreshVLMSetupState(force: currentStep == Self.vlmStep)
+            if currentStep >= Self.extensionStep {
                 ServiceController.installNativeMessagingHostManifest()
             }
         }
         .onChange(of: currentStep) { newStep in
             // Survives "Quit & Reopen" after the Screen Recording grant.
             OnboardingProgress.save(step: newStep, in: .standard)
-            if newStep == 6 {
+            if newStep == Self.vlmStep {
                 seedVLMStateFromConfigIfNeeded()
                 refreshVLMSetupState(force: true)
             }
 
-            if newStep >= 7 {
+            if newStep >= Self.extensionStep {
                 ServiceController.installNativeMessagingHostManifest()
             } else {
                 ServiceController.removeNativeMessagingHostManifest()
             }
-            if newStep == 7 {
+            if newStep == Self.extensionStep {
                 refreshExtensionReport()
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
-            if currentStep == 6 {
+            if currentStep == Self.vlmStep {
                 refreshVLMSetupState(force: true)
             }
             // Back from the browser's extensions page.
-            if currentStep == 7 {
+            if currentStep == Self.extensionStep {
                 refreshExtensionReport()
             }
         }
@@ -195,7 +208,7 @@ struct OnboardingView: View {
                 }
                 .buttonStyle(.plain)
                 .font(.system(size: 14, weight: .semibold, design: .rounded))
-                .foregroundColor(currentStep == 7 ? darkNavy.opacity(0.4) : darkNavy.opacity(0.4))
+                .foregroundColor(darkNavy.opacity(0.4))
                 .padding(.horizontal, 20)
                 .padding(.vertical, 11)
                 .background(
@@ -253,7 +266,13 @@ struct OnboardingView: View {
                     }
                 }
 
-            case 6:
+            case Self.memoryStep:
+                contraButton("Next", icon: "arrow.right", style: .darkFilled) {
+                    MemorySetupChoice.save(memoryOn: setupMemoryOn, agentsAccess: setupAgentsAccess)
+                    withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) { currentStep += 1 }
+                }
+
+            case Self.vlmStep:
                 // VLM Setup -- blocked until model ready
                 VStack(spacing: 4) {
                     if localVLMReady {
@@ -283,7 +302,7 @@ struct OnboardingView: View {
                     }
                 }
 
-            case 7:
+            case Self.extensionStep:
                 // Browser extension -- optional
                 HStack(spacing: 12) {
                     if !extensionInstalled {
@@ -297,7 +316,7 @@ struct OnboardingView: View {
                     }
                 }
 
-            case 8:
+            case Self.readyStep:
                 // Ready -- final step, no Next button
                 EmptyView()
 
@@ -389,9 +408,10 @@ struct OnboardingView: View {
         case 3: reviewCycleStep
         case 4: accessibilityStep
         case 5: screenRecordingStep
-        case 6: vlmSetupStep
-        case 7: chromeExtensionStep
-        case 8: readyStep
+        case Self.memoryStep: memorySetupStep
+        case Self.vlmStep: vlmSetupStep
+        case Self.extensionStep: chromeExtensionStep
+        case Self.readyStep: readyStep
         default: EmptyView()
         }
     }
@@ -984,9 +1004,11 @@ struct OnboardingView: View {
         return tierModel
     }
 
-    private var requiredLocalModels: [String] {
-        guard let table = tierTable, !resolvedAnnotationModel.isEmpty else { return [] }
-        return Array(Set([resolvedAnnotationModel, resolvedSOPModel, table.embeddingModel])).sorted()
+    /// Setup's Memory choice on the Ollama that answers now.
+    private var memoryPlan: MemorySetupPlan? {
+        tierTable.map {
+            MemoryDecisions.setupPlan(wantsMemory: setupMemoryOn, ollamaVersion: ollamaVersion, table: $0)
+        }
     }
 
     private var localVLMReady: Bool {
@@ -1353,7 +1375,115 @@ struct OnboardingView: View {
         }
     }
 
-    // MARK: - Screen 7: VLM Setup (Required, WHITE BACKGROUND)
+    // MARK: - Screen 7: Memory (WHITE BACKGROUND)
+
+    /// Memory, on by default: what it keeps, where, what it never keeps,
+    /// and whether agents may search it (off by default).  The switches
+    /// reach config.toml with the AI model step, which knows the Ollama
+    /// that will run Memory's model.
+    private var memorySetupStep: some View {
+        ScrollView(showsIndicators: false) {
+            VStack(spacing: 18) {
+                Image(systemName: "clock.arrow.circlepath")
+                    .font(.system(size: 40, weight: .medium))
+                    .foregroundColor(darkNavy)
+
+                Text("Memory")
+                    .font(titleFont)
+                    .foregroundColor(darkNavy)
+
+                Text("Find anything you saw on your Mac by describing it: \u{201C}the invoice from Acme\u{201D}, \u{201C}that chart about churn\u{201D}.")
+                    .font(bodyFont)
+                    .foregroundColor(darkNavy.opacity(0.5))
+                    .multilineTextAlignment(.center)
+                    .lineSpacing(5)
+                    .frame(maxWidth: 440)
+
+                VStack(alignment: .leading, spacing: 14) {
+                    Toggle(isOn: $setupMemoryOn) {
+                        Text("Turn on Memory")
+                            .font(.system(size: 14, weight: .bold, design: .rounded))
+                            .foregroundColor(darkNavy)
+                    }
+                    .toggleStyle(.switch)
+
+                    VStack(alignment: .leading, spacing: 10) {
+                        memoryFact("square.stack.3d.up", "What is kept",
+                                   "A short description and a search vector of each screen AgentHandover keeps, and a small encrypted thumbnail for 7 days.")
+                        memoryFact("lock.laptopcomputer", "Where",
+                                   "Only on this Mac. Nothing is uploaded.")
+                        memoryFact("eye.slash", "Never kept",
+                                   "Password managers, private browser windows, and the apps and sites you exclude.")
+                    }
+
+                    Divider()
+
+                    Toggle(isOn: $setupAgentsAccess) {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("Let agents search my Memory")
+                                .font(.system(size: 13, weight: .semibold, design: .rounded))
+                                .foregroundColor(darkNavy)
+                            Text("They see descriptions and times, never screenshots.")
+                                .font(.system(size: 11))
+                                .foregroundColor(darkNavy.opacity(0.5))
+                        }
+                    }
+                    .toggleStyle(.switch)
+                }
+                .padding(20)
+                .frame(maxWidth: 440)
+                .background(RoundedRectangle(cornerRadius: contraRadius).fill(Color.white))
+                .overlay(
+                    RoundedRectangle(cornerRadius: contraRadius)
+                        .stroke(darkNavy.opacity(0.15), lineWidth: contraBorder)
+                )
+
+                if setupMemoryOn, let minimum = tierTable?.minimumOllamaVersionForMemory,
+                   let version = ollamaVersion, !OllamaModels.isVersion(version, atLeast: minimum) {
+                    Text("Memory needs Ollama \(minimum) or later; this Mac has \(version). It stays off until Ollama is updated, and the next step shows how.")
+                        .font(.system(size: 12))
+                        .foregroundColor(warmOrange)
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: 440)
+                }
+
+                Text("You can pause Memory, forget a moment or an hour, or turn it off at any time from the menu bar.")
+                    .font(captionFont)
+                    .foregroundColor(darkNavy.opacity(0.45))
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 440)
+            }
+            .frame(maxWidth: 520)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .onAppear {
+            seedVLMStateFromConfigIfNeeded()
+            DispatchQueue.global(qos: .userInitiated).async {
+                let version = OllamaModels.serverVersion()
+                DispatchQueue.main.async { if let version { ollamaVersion = version } }
+            }
+        }
+    }
+
+    private func memoryFact(_ icon: String, _ title: String, _ text: String) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: icon)
+                .font(.system(size: 13))
+                .foregroundColor(darkNavy.opacity(0.6))
+                .frame(width: 18)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.system(size: 12, weight: .bold, design: .rounded))
+                    .foregroundColor(darkNavy)
+                Text(text)
+                    .font(.system(size: 12))
+                    .foregroundColor(darkNavy.opacity(0.6))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    // MARK: - Screen 8: VLM Setup (Required, WHITE BACKGROUND)
 
     private var vlmSetupStep: some View {
         ScrollView(showsIndicators: false) {
@@ -1565,7 +1695,7 @@ struct OnboardingView: View {
                                                     .background(Capsule().fill(warmOrange))
                                             }
                                         }
-                                        Text("\(tier.subtitle) \u{00B7} \(tierTable?.downloadLabel(for: tier) ?? "")")
+                                        Text("\(tier.subtitle) \u{00B7} \(tierTable?.downloadLabel(for: tier, embeddingModel: memoryPlan?.embeddingModel) ?? "")")
                                             .font(.system(size: 11))
                                             .foregroundColor(darkNavy.opacity(0.5))
                                         if let memory = ollamaReport?.memoryLabel(forTier: tier.id) {
@@ -1595,7 +1725,7 @@ struct OnboardingView: View {
                         Image(systemName: ollamaHasRequiredModels ? "checkmark.circle.fill" : "arrow.down.circle.fill")
                             .foregroundColor(ollamaHasRequiredModels ? brightGreen : warmOrange)
                             .font(.system(size: 16))
-                        Text(ollamaHasRequiredModels ? "Required models ready." : "\(selectedTier.flatMap { tierTable?.downloadLabel(for: $0) } ?? "") download \u{00B7} Runs on Apple Silicon")
+                        Text(ollamaHasRequiredModels ? "Required models ready." : "\(selectedTier.flatMap { tierTable?.downloadLabel(for: $0, embeddingModel: memoryPlan?.embeddingModel) } ?? "") download \u{00B7} Runs on Apple Silicon")
                             .font(.system(size: 13, weight: .medium))
                             .foregroundColor(darkNavy.opacity(0.5))
                     }
@@ -1617,7 +1747,17 @@ struct OnboardingView: View {
                                 modelRow(tier.annotationModel, table.sizeLabel(tier.annotationModel) ?? "", "Screen annotation")
                                 modelRow(tier.sopModel, table.sizeLabel(tier.sopModel) ?? "", "Skill generation")
                             }
-                            modelRow(table.embeddingModel, table.sizeLabel(table.embeddingModel) ?? "", "Semantic search")
+                            let embeddingModel = memoryPlan?.embeddingModel ?? table.embeddingModel
+                            modelRow(embeddingModel, table.sizeLabel(embeddingModel) ?? "",
+                                     embeddingModel == table.memoryModel ? "Memory and Skill search" : "Skill search")
+                            if setupMemoryOn, memoryPlan?.deferred == true {
+                                Text(ollamaVersion.map {
+                                    "Memory needs Ollama \(table.minimumOllamaVersionForMemory ?? "") or later (this Mac has \($0)). It stays off until Ollama is updated; AgentHandover turns it on then."
+                                } ?? "Memory waits for Ollama: it turns on once Ollama runs here.")
+                                    .font(.system(size: 11))
+                                    .foregroundColor(darkNavy.opacity(0.5))
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
                         }
                     }
 
@@ -1756,7 +1896,7 @@ struct OnboardingView: View {
         }
     }
 
-    // MARK: - Screen 8: Browser Extension (Optional, Load Unpacked, WHITE BACKGROUND)
+    // MARK: - Screen 9: Browser Extension (Optional, Load Unpacked, WHITE BACKGROUND)
 
     private var chromeExtensionStep: some View {
         ScrollView(showsIndicators: false) {
@@ -2104,7 +2244,7 @@ struct OnboardingView: View {
             )
     }
 
-    // MARK: - Screen 9: Ready -- First Recording (WARM CREAM BACKGROUND)
+    // MARK: - Screen 10: Ready -- First Recording (WARM CREAM BACKGROUND)
 
     private var readyStep: some View {
         VStack(spacing: 24) {
@@ -2288,7 +2428,7 @@ struct OnboardingView: View {
 
     private func getOllamaVersion(_ ollamaPath: String) -> String? {
         // Prefer the server version from the API (most accurate)
-        if let apiVersion = getOllamaVersionFromAPI() {
+        if let apiVersion = OllamaModels.serverVersion() {
             return apiVersion
         }
 
@@ -2310,26 +2450,6 @@ struct OnboardingView: View {
         } catch {
             return nil
         }
-    }
-
-    private func getOllamaVersionFromAPI() -> String? {
-        guard let url = URL(string: "http://localhost:11434/api/version"),
-              let data = try? Data(contentsOf: url),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let version = json["version"] as? String else {
-            return nil
-        }
-        return version
-    }
-
-    private func isOllamaVersionSufficient(_ version: String, minimum: String) -> Bool {
-        let clean = version.components(separatedBy: "-").first ?? version // strip -rc1
-        let vParts = clean.components(separatedBy: ".").compactMap { Int($0) }
-        let mParts = minimum.components(separatedBy: ".").compactMap { Int($0) }
-        guard vParts.count >= 3, mParts.count >= 3 else { return false }
-        if vParts[0] != mParts[0] { return vParts[0] > mParts[0] }
-        if vParts[1] != mParts[1] { return vParts[1] > mParts[1] }
-        return vParts[2] >= mParts[2]
     }
 
     private func modelRow(_ name: String, _ size: String, _ description: String) -> some View {
@@ -2366,13 +2486,18 @@ struct OnboardingView: View {
         }
         let annModel = resolvedAnnotationModel
         let sopModel = resolvedSOPModel
+        let version = getOllamaVersion(ollamaPath)
+        ollamaVersion = version
+        // Memory's model runs from its own minimum Ollama; below it the
+        // text paths stay on the text model and Memory waits.
+        let plan = MemoryDecisions.setupPlan(wantsMemory: setupMemoryOn, ollamaVersion: version, table: table)
+        let agentsAccess = setupAgentsAccess
 
         // The QAT Gemma 4 tags need a recent Ollama (older ones answer the
         // pull with HTTP 412, "requires a newer version of Ollama").
         let minimum = table.minimumOllamaVersionForGemma4
         if table.needsNewOllama([annModel, sopModel]) {
-            let ollamaVersion = getOllamaVersion(ollamaPath)
-            if let version = ollamaVersion, !isOllamaVersionSufficient(version, minimum: minimum) {
+            if let version, !OllamaModels.isVersion(version, atLeast: minimum) {
                 vlmPullInProgress = false
                 vlmPullOutput = "Gemma 4 QAT models require Ollama \(minimum)+. You have \(version). "
                     + "Update the official app at ollama.com/download (or run: "
@@ -2388,7 +2513,7 @@ struct OnboardingView: View {
 
         var models = [
             (annModel, "scene annotation"),
-            (table.embeddingModel, "semantic search"),
+            (plan.embeddingModel, plan.embeddingModel == table.memoryModel ? "Memory and Skill search" : "Skill search"),
         ]
         // Only add SOP model separately if different from annotation model
         if sopModel != annModel {
@@ -2426,7 +2551,7 @@ struct OnboardingView: View {
                 }
             }
 
-            self.saveEmbeddingConfig(model: table.embeddingModel)
+            MemorySetupChoice.write(plan, agentsAccess: agentsAccess)
 
             DispatchQueue.main.async {
                 vlmPullInProgress = false
@@ -2460,8 +2585,11 @@ struct OnboardingView: View {
     }
 
     private func refreshVLMSetupState(force: Bool = false) {
-        guard force || currentStep == 6 else { return }
-        let requiredModels = requiredLocalModels.map(OllamaModels.canonical)
+        guard force || currentStep == Self.vlmStep else { return }
+        let table = tierTable
+        let wantsMemory = setupMemoryOn
+        let agentsAccess = setupAgentsAccess
+        let tierModels = resolvedAnnotationModel.isEmpty ? [] : [resolvedAnnotationModel, resolvedSOPModel]
         vlmStateRefreshing = true
         appState.refreshStatus()
 
@@ -2471,6 +2599,14 @@ struct OnboardingView: View {
             var running = false
             var hasRequiredModels = false
             var statusMessage = ""
+            // The Ollama that answers decides the embedding model setup pulls.
+            let version = ollamaPath == nil ? nil : OllamaModels.serverVersion()
+            let plan = table.map {
+                MemoryDecisions.setupPlan(wantsMemory: wantsMemory, ollamaVersion: version, table: $0)
+            }
+            let requiredModels = plan.map { plan in
+                tierModels.isEmpty ? [] : Array(Set(tierModels + [plan.embeddingModel])).sorted()
+            }.map { $0.map(OllamaModels.canonical) } ?? []
 
             if let ollamaPath {
                 switch OllamaModels.installed(ollamaPath: ollamaPath) {
@@ -2500,9 +2636,13 @@ struct OnboardingView: View {
                 self.ollamaInstalled = installed
                 self.ollamaRunning = running
                 self.ollamaHasRequiredModels = hasRequiredModels
+                self.ollamaVersion = version
                 self.vlmStatusMessage = statusMessage
                 if hasRequiredModels {
                     self.persistModelChoice()
+                    if let plan {
+                        MemorySetupChoice.write(plan, agentsAccess: agentsAccess)
+                    }
                 }
                 self.vlmStateRefreshing = false
                 self.appState.vlmAvailable = self.localVLMReady
@@ -2520,21 +2660,6 @@ struct OnboardingView: View {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
                 refreshVLMSetupState(force: true)
             }
-        }
-    }
-
-    /// Write `[embedding] model` into config.toml, keeping the section's
-    /// other keys (`ModelTierTable.applyEmbeddingModel`).
-    private func saveEmbeddingConfig(model: String) {
-        let configDir = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Application Support/agenthandover")
-        let configPath = configDir.appendingPathComponent("config.toml")
-        try? FileManager.default.createDirectory(at: configDir, withIntermediateDirectories: true)
-
-        let current = (try? String(contentsOf: configPath, encoding: .utf8)) ?? ""
-        let updated = ModelTierTable.applyEmbeddingModel(model, to: current)
-        if updated != current {
-            try? updated.write(to: configPath, atomically: true, encoding: .utf8)
         }
     }
 

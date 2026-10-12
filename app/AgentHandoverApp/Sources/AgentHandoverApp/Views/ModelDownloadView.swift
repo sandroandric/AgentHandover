@@ -1,13 +1,60 @@
 import SwiftUI
 
 /// "0.5 uses a faster model (<name>, <size>). Download now?": downloads the
-/// missing models with a progress bar, then makes the model switch (with a
-/// plan) or restarts the worker (a model the config names went missing).
-/// Until the download finishes the Mac keeps the models it has.
+/// missing models with a progress bar, then runs `afterDownload` (the model
+/// switch with a plan, a worker restart when a model the config names went
+/// missing, turning Memory on).  Until the download finishes the Mac keeps
+/// the models it has.
 struct ModelDownloadView: View {
-    let plan: ModelUpgradePlan?
+    let question: String
+    let detail: String?
     let missing: [String]
+    /// Off the main thread once every model is pulled: the message to show,
+    /// or why that last step failed.
+    let afterDownload: () -> Result<String, ModelDownloadFailure>
+    /// "Not now" (the window closes after it).
+    let notNow: () -> Void
     let close: () -> Void
+
+    /// The model upgrade (WP-F16) and the menu's "AI model missing" row.
+    init(plan: ModelUpgradePlan?, missing: [String], close: @escaping () -> Void) {
+        self.question = ModelUpgrade.question(plan: plan, missing: missing)
+        self.detail = plan.map { plan in
+            "Until the download finishes, AgentHandover keeps running \(plan.current.annotationModel)"
+                + (plan.current.sopModel == plan.current.annotationModel ? "" : " and \(plan.current.sopModel)")
+                + ". Then it switches to the \(plan.label) models."
+        }
+        self.missing = missing
+        self.afterDownload = {
+            if let plan {
+                return ModelUpgrade.apply()
+                    ? .success("AgentHandover now runs the \(plan.label) models.")
+                    : .failure(ModelDownloadFailure("Downloaded, but the switch did not happen. Run: agenthandover doctor"))
+            }
+            ServiceController.restartWorker()
+            return .success("Downloaded. AgentHandover processes your recordings again.")
+        }
+        // Keep the current models; ask again after the next upgrade.
+        self.notNow = {
+            if plan != nil {
+                UserDefaults.standard.set(ModelUpgrade.appVersion, forKey: ModelUpgrade.declinedVersionKey)
+            }
+        }
+        self.close = close
+    }
+
+    init(
+        question: String, detail: String?, missing: [String],
+        afterDownload: @escaping () -> Result<String, ModelDownloadFailure>,
+        notNow: @escaping () -> Void = {}, close: @escaping () -> Void
+    ) {
+        self.question = question
+        self.detail = detail
+        self.missing = missing
+        self.afterDownload = afterDownload
+        self.notNow = notNow
+        self.close = close
+    }
 
     private enum Phase: Equatable {
         case asking
@@ -20,13 +67,11 @@ struct ModelDownloadView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text(ModelUpgrade.question(plan: plan, missing: missing))
+            Text(question)
                 .font(.system(size: 13, weight: .semibold))
                 .fixedSize(horizontal: false, vertical: true)
-            if let plan {
-                Text("Until the download finishes, AgentHandover keeps running \(plan.current.annotationModel)"
-                     + (plan.current.sopModel == plan.current.annotationModel ? "" : " and \(plan.current.sopModel)")
-                     + ". Then it switches to the \(plan.label) models.")
+            if let detail {
+                Text(detail)
                     .font(.system(size: 11))
                     .foregroundColor(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -35,8 +80,11 @@ struct ModelDownloadView: View {
             case .asking:
                 HStack {
                     Spacer()
-                    Button("Not now") { notNow() }
-                        .keyboardShortcut(.cancelAction)
+                    Button("Not now") {
+                        notNow()
+                        close()
+                    }
+                    .keyboardShortcut(.cancelAction)
                     Button("Download") { download() }
                         .keyboardShortcut(.defaultAction)
                 }
@@ -63,21 +111,13 @@ struct ModelDownloadView: View {
         .frame(width: 420)
     }
 
-    /// Keep the current models; ask again after the next upgrade.
-    private func notNow() {
-        if plan != nil {
-            UserDefaults.standard.set(ModelUpgrade.appVersion, forKey: ModelUpgrade.declinedVersionKey)
-        }
-        close()
-    }
-
     private func download() {
         guard let ollamaPath = OllamaModels.executablePath() else {
             phase = .failed("Ollama is not installed. Install it from ollama.com/download, then try again.")
             return
         }
         let models = missing
-        let plan = plan
+        let afterDownload = afterDownload
         phase = .downloading(status: "Starting download\u{2026}", fraction: 0)
         DispatchQueue.global(qos: .userInitiated).async {
             for (index, model) in models.enumerated() {
@@ -96,15 +136,17 @@ struct ModelDownloadView: View {
                 }
             }
             let result: Phase
-            if let plan {
-                result = ModelUpgrade.apply()
-                    ? .done("AgentHandover now runs the \(plan.label) models.")
-                    : .failed("Downloaded, but the switch did not happen. Run: agenthandover doctor")
-            } else {
-                ServiceController.restartWorker()
-                result = .done("Downloaded. AgentHandover processes your recordings again.")
+            switch afterDownload() {
+            case .success(let message): result = .done(message)
+            case .failure(let failure): result = .failed(failure.message)
             }
             DispatchQueue.main.async { phase = result }
         }
     }
+}
+
+/// Why the step after a download failed, in words for the window.
+struct ModelDownloadFailure: Error, Equatable {
+    let message: String
+    init(_ message: String) { self.message = message }
 }
