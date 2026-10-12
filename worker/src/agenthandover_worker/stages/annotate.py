@@ -74,6 +74,7 @@ def _annotate_passive_frames(ctx: Any) -> dict:
             privacy_checker=ctx.privacy_checker,
             activity_classifier=ctx.activity_classifier,
             budget=budget,
+            memory=ctx.memory_writer,
         )
     if not allowed:
         reason = why

@@ -14,6 +14,7 @@ thread, in this order:
 The model jobs run on the inference thread (``inference_runner``), one at a
 time, highest priority first: P0 :func:`synthesize.run` (a stopped focus
 recording, or its answered questions), P1 :func:`annotate.run_focus_tail`,
+P2 :func:`memory.run` (Memory's embeddings, while ``[memory] enabled``),
 P2 :func:`annotate.run` (passive annotation, frame diffs) and P2 the
 generation job (:func:`segment.run`, passive discovery, then
 :func:`daily.run`, the once-per-day pass).  Control stages never call
@@ -50,6 +51,7 @@ class Tick:
     jobs: list[tuple[str, int, Callable[[], None]]] = field(default_factory=list)
     focus_sops: int = 0
     annotations: dict | None = None
+    memory: dict | None = None
     diffs: dict | None = None
     passive_sops: int | None = None
     # The generation phase's plan and the local day it was made for.

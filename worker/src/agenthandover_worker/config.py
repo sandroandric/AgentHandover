@@ -8,7 +8,7 @@ The sections and defaults mirror ``crates/common/src/config.rs`` (the
 daemon's reader of the same file) for the fields the worker uses; the
 worker-only settings (``[vlm] ollama_host`` and
 ``annotation_timeout_seconds``, ``[focus]``, ``[features]``,
-``[embedding]``, ``[export] claude_skills_dir``) are documented in
+``[embedding]``, ``[memory]``, ``[export] claude_skills_dir``) are documented in
 ``config.example.toml``.
 
 A missing file gives the defaults.  A file that is not valid TOML gives
@@ -25,6 +25,8 @@ from dataclasses import dataclass, field, replace
 from datetime import time as dt_time
 from pathlib import Path
 from typing import Any
+
+from agenthandover_worker.model_profiles import MEMORY_MODEL
 
 logger = logging.getLogger(__name__)
 
@@ -192,15 +194,21 @@ class EmbeddingConfig:
 
 @dataclass(frozen=True)
 class MemoryConfig:
-    """``[memory]``: the private memory of kept screens.  ``model`` is
-    also the model whose vector-store rows the daily purge keeps."""
+    """``[memory]``: the searchable record of what was on screen (``memory``).
+
+    Off unless the file turns it on (setup writes ``enabled = true`` for new
+    installs).  ``crates/common/src/config.rs`` reads the same keys."""
 
     enabled: bool = False
-    model: str = "embeddinggemma-2:440m"
+    model: str = MEMORY_MODEL
     dimensions: int = 256
+    # Memory rows older than this are purged once a day.
     retention_days: int = 365
+    # Encrypted thumbnails older than this are deleted once a day.
     thumbnail_days: int = 7
+    # MCP ``search_memory`` answers only when this is on.
     agents_access: bool = False
+    # Frames embedded per rolling hour; past it, frames wait.
     max_frames_per_hour: int = 600
 
 
@@ -298,6 +306,10 @@ _POSITIVE = {
     ("focus", "max_session_hours"),
     ("embedding", "retention_days"),
     ("embedding", "max_rows"),
+    ("memory", "dimensions"),
+    ("memory", "retention_days"),
+    ("memory", "thumbnail_days"),
+    ("memory", "max_frames_per_hour"),
 }
 
 

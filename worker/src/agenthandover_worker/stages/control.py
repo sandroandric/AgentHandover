@@ -41,9 +41,9 @@ def run(ctx: Any, tick: Any) -> int:
 def submit_model_jobs(ctx: Any, tick: Any) -> list:
     """Hand this tick's model work to the inference thread, decided from
     what the control thread sees now: a stopped recording (P0), its tail
-    once its Skill ran (P1), passive annotation and generation (P2).
+    once its Skill ran (P1), Memory, passive annotation and generation (P2).
     Returns the jobs, also recorded on *tick*."""
-    from agenthandover_worker.stages import annotate, daily, segment, synthesize
+    from agenthandover_worker.stages import annotate, daily, memory, segment, synthesize
 
     def generation() -> None:
         segment.run(ctx, tick)
@@ -59,6 +59,9 @@ def submit_model_jobs(ctx: Any, tick: Any) -> list:
         and ctx.focus_processor.has_remaining
     ):
         jobs.append(("focus-tail", P1, lambda: annotate.run_focus_tail(ctx, tick)))
+    # Memory embeds a frame before annotation may delete its screenshot.
+    if ctx.memory_writer is not None and ctx.cfg.memory.enabled:
+        jobs.append(("memory", P2, lambda: memory.run(ctx, tick)))
     jobs.append(("passive-annotation", P2, lambda: annotate.run(ctx, tick)))
     jobs.append(("passive-generation", P2, generation))
     tick.jobs = jobs

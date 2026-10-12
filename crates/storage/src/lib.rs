@@ -229,6 +229,7 @@ const MIGRATIONS: &[(u32, &str, Option<MigrationStep>)] = &[
     (5, include_str!("migrations/v005_add_focused_element.sql"), None),
     (6, include_str!("migrations/v006_worker_tables.sql"), Some(reconcile_columns)),
     (7, include_str!("migrations/v007_procedures.sql"), None),
+    (8, include_str!("migrations/v008_memory_frames.sql"), None),
 ];
 
 /// Columns v006's `CREATE TABLE IF NOT EXISTS` cannot give a table the
