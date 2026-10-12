@@ -354,7 +354,7 @@ def build_mcp_server():
         if not cfg.memory.agents_access:
             return answer("not_allowed", (
                 "The user has not let agents search their Memory. They can turn it on "
-                "in AgentHandover's Settings (Memory: \"Agents may search Memory\") or "
+                "in AgentHandover's Memory Settings (\"Let agents search my Memory\") or "
                 "with `agenthandover memory agents on`."
             ), [])
         if not cfg.memory.enabled:
