@@ -610,24 +610,6 @@ def _v2_pipeline(
         return parts
 
     parts["annotation_cache"] = AnnotationCache(db_path)
-    # Image embedder (SigLIP via mlx-embeddings), only when the user opted
-    # in with [embedding] image_embeddings = true.
-    image_embedder = None
-    if cfg.embedding.image_embeddings:
-        try:
-            from agenthandover_worker.vector_kb import ImageEmbedder
-
-            image_embedder = ImageEmbedder()
-            if image_embedder.available:
-                logger.info("Image embedder enabled (SigLIP %dd)", image_embedder.DIM)
-            else:
-                logger.info("Image embeddings enabled but mlx-embeddings not installed")
-                image_embedder = None
-        except Exception:
-            logger.debug("Image embedder init failed", exc_info=True)
-    else:
-        logger.info("Image embeddings disabled (enable in config.toml [embedding] image_embeddings = true)")
-
     scene_annotator = SceneAnnotator(
         config=AnnotationConfig(
             model=vlm_cfg.annotation_model,
@@ -635,8 +617,6 @@ def _v2_pipeline(
             sliding_window_max_age_sec=vlm_cfg.sliding_window_max_age_sec,
             timeout_seconds=vlm_cfg.annotation_timeout_seconds,
         ),
-        image_embedder=image_embedder,
-        vector_kb=vector_kb,
         cache=parts["annotation_cache"],
     )
     # Load the annotation model now (with keep_alive) so the first real

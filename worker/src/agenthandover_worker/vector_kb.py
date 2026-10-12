@@ -186,6 +186,7 @@ class VectorKB:
         self._conn.execute("PRAGMA busy_timeout = 5000;")
         self._conn.execute("PRAGMA journal_mode = WAL;")
         self._quantize_old_rows()
+        self._drop_visual_rows()
         self._cycle_embed_count = 0
         # Search index: vector id -> _Row, and the newest updated_at read.
         self._index: dict[str, _Row] | None = None
@@ -214,6 +215,20 @@ class VectorKB:
         if stale:
             logger.info("Normalised %d stored vector(s)", len(stale))
         self._conn.commit()
+
+    def _drop_visual_rows(self) -> None:
+        """Screenshot vectors of the SigLIP image embedder, which earlier
+        versions wrote with ``[embedding] image_embeddings = true``
+        (``source_type 'visual'``, 1152d): nothing ever searched them, and
+        the embedder is gone.  Delete them once; afterwards none are left.
+        """
+        cur = self._conn.execute(
+            "DELETE FROM vector_store WHERE source_type = 'visual'"
+        )
+        self._conn.commit()
+        if cur.rowcount:
+            logger.info("Deleted %d screenshot vector(s) of the removed "
+                        "image embedder", cur.rowcount)
 
     # ------------------------------------------------------------------
     # Embedding computation (Ollama /api/embed)
@@ -574,15 +589,14 @@ class VectorKB:
     def purge_stale(self, max_age_days: int | None = None) -> int:
         """Remove entries not updated for *max_age_days* (default
         ``config.retention_days``), and every vector made by a model other
-        than the configured text model (or the image embedder): after a
-        model change they are in another space."""
+        than the configured embedding model: after a model change they are
+        in another space."""
         days = self.config.retention_days if max_age_days is None else max_age_days
         cur = self._conn.execute(
             "DELETE FROM vector_store "
             "WHERE updated_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?) "
-            "OR model NOT IN (?, ?)",
-            (f"-{days} days", self.config.embedding_model,
-             ImageEmbedder.MODEL_NAME),
+            "OR model != ?",
+            (f"-{days} days", self.config.embedding_model),
         )
         self._conn.commit()
         deleted = cur.rowcount
@@ -629,101 +643,3 @@ class VectorKB:
 
     def __exit__(self, *exc: object) -> None:
         self.close()
-
-
-# ---------------------------------------------------------------------------
-# Image embedder (SigLIP via mlx-embeddings)
-# ---------------------------------------------------------------------------
-
-class ImageEmbedder:
-    """Embed images via SigLIP on Apple Silicon (mlx-embeddings).
-
-    Lazily loads the model on first call.  Produces 1152-dim vectors
-    in a separate vector space from text embeddings (768d nomic).
-    Requires ``pip install mlx-embeddings`` — gracefully unavailable
-    if the dependency is missing.
-
-    Usage::
-
-        embedder = ImageEmbedder()
-        vec = embedder.embed_image("/path/to/screenshot.jpg")
-        if vec:
-            vector_kb.upsert("visual", event_id, "image", embedding=vec)
-    """
-
-    MODEL_NAME = "mlx-community/siglip-so400m-patch14-384"
-    DIM = 1152
-
-    def __init__(self) -> None:
-        self._model = None
-        self._processor = None
-        self._available: bool | None = None
-
-    @property
-    def available(self) -> bool:
-        """Check if mlx-embeddings + SigLIP are importable."""
-        if self._available is None:
-            try:
-                import mlx.core  # noqa: F401
-                from mlx_embeddings.utils import load  # noqa: F401
-                from PIL import Image  # noqa: F401
-                self._available = True
-            except ImportError:
-                self._available = False
-                logger.info(
-                    "Image embeddings unavailable — "
-                    "install mlx-embeddings: pip install mlx-embeddings"
-                )
-        return self._available
-
-    def _ensure_model(self) -> bool:
-        """Load model on first use.  Returns True if ready."""
-        if self._model is not None:
-            return True
-        if not self.available:
-            return False
-        try:
-            from mlx_embeddings.utils import load
-            self._model, self._processor = load(self.MODEL_NAME)
-            logger.info("SigLIP model loaded: %s", self.MODEL_NAME)
-            return True
-        except Exception:
-            logger.warning("Failed to load SigLIP model", exc_info=True)
-            self._available = False
-            return False
-
-    def embed_image(self, image_path: str) -> list[float] | None:
-        """Embed a single image file.  Returns 1152-dim vector or None."""
-        if not self._ensure_model():
-            return None
-        try:
-            import mlx.core as mx
-            from PIL import Image
-
-            image = Image.open(image_path).convert("RGB")
-            inputs = self._processor(images=image, return_tensors="np")
-            pixel_values = mx.array(inputs.pixel_values)
-            # Transpose from NCHW to NHWC if needed
-            if pixel_values.shape[1] == 3:
-                pixel_values = pixel_values.transpose(0, 2, 3, 1)
-            pixel_values = pixel_values.astype(mx.float32)
-
-            outputs = self._model.vision_model(pixel_values=pixel_values)
-
-            # Extract pooled embedding — shape varies by model version
-            if hasattr(outputs, "pooler_output") and outputs.pooler_output is not None:
-                emb = outputs.pooler_output[0]
-            elif hasattr(outputs, "last_hidden_state"):
-                # Mean pool over spatial tokens
-                emb = outputs.last_hidden_state[0].mean(axis=0)
-            else:
-                logger.debug("Unknown SigLIP output format")
-                return None
-
-            vec = emb.tolist()
-            if isinstance(vec, list) and len(vec) > 0:
-                return vec
-            return None
-        except Exception:
-            logger.debug("Image embedding failed for %s", image_path, exc_info=True)
-            return None
