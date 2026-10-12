@@ -65,11 +65,13 @@ struct MemoryOfferView: View {
             if visualSearch {
                 Text("You had Visual search on; Memory replaces it.")
                     .font(.system(size: 13, weight: .medium))
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             Text("Agents cannot search your Memory unless you allow it in Memory Settings.")
                 .font(.system(size: 12))
                 .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
 
             if let version = ollamaTooOld {
                 tooOld(version)
@@ -90,13 +92,18 @@ struct MemoryOfferView: View {
                 Text("Either one downloads \(memoryModel)\(memoryModelSize.map { " (\($0))" } ?? "") if it is not on this Mac yet.")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             .padding(12)
             .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Color.primary.opacity(0.04)))
 
             HStack {
-                Button("Not Now") { choose(.declined) }
-                    .keyboardShortcut(.cancelAction)
+                // Once a choice is made, "Not Now" would overwrite it.
+                if case .done = phase {
+                } else {
+                    Button("Not Now") { choose(.declined) }
+                        .keyboardShortcut(.cancelAction)
+                }
                 Spacer()
                 if phase == .working {
                     ProgressView().controlSize(.small)
@@ -143,7 +150,7 @@ struct MemoryOfferView: View {
 
     static func doneMessage(_ choice: MemoryOfferState.Choice) -> String {
         choice == .everything
-            ? "Memory is on. Your Skills are re-indexed in the background."
+            ? "Memory is on. Your Skills are being re-indexed in the background."
             : "Memory is on. Search it from the menu bar: Search Memory."
     }
 

@@ -3,6 +3,9 @@ import Foundation
 /// Memory's state as the menu shows it.
 enum MemoryMenuState: Equatable {
     case recording
+    /// On and capturing, but the worker cannot index yet (the Mac is short
+    /// of memory, Skills are being written, Ollama is down...).
+    case waiting
     /// Paused until a time, or until resumed (nil).
     case paused(until: Date?)
     case off
@@ -15,10 +18,15 @@ enum MemoryMenuState: Equatable {
             self = .off
         } else if status.paused {
             self = .paused(until: status.pausedUntilDate)
+        } else if status.waiting != nil {
+            self = .waiting
         } else {
             self = .recording
         }
     }
+
+    /// Recording or waiting: pause and forget apply.
+    var isOn: Bool { self == .recording || self == .waiting }
 
     var isPaused: Bool {
         if case .paused = self { return true }
@@ -30,6 +38,7 @@ enum MemoryMenuState: Equatable {
     func label(now: Date, format: MemoryFormat = MemoryFormat()) -> String {
         switch self {
         case .recording: return "Recording"
+        case .waiting: return "Recording; indexing waits"
         case .off: return "Off"
         case .unavailable: return "Not available"
         case .paused(nil): return "Paused until you resume"

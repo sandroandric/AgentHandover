@@ -18,10 +18,11 @@ final class MemoryFormatTests: XCTestCase {
     private let now = Date(timeIntervalSince1970: 1_791_812_400)
 
     private func status(enabled: Bool = true, paused: Bool = false, until: String? = nil,
-                        moments: Int = 0, bytes: Int64 = 0, oldest: String? = nil) -> MemoryStatus {
+                        moments: Int = 0, bytes: Int64 = 0, oldest: String? = nil,
+                        waiting: String? = nil) -> MemoryStatus {
         MemoryStatus(enabled: enabled, paused: paused, pausedUntil: until, agentsAccess: false,
                      model: "embeddinggemma-2:440m", moments: moments, frames: moments, oldest: oldest,
-                     newest: nil, thumbnails: 0, diskBytes: bytes, waiting: nil)
+                     newest: nil, thumbnails: 0, diskBytes: bytes, waiting: waiting)
     }
 
     private func moment(_ first: String, _ last: String, frames: Int) -> MemoryMoment {
@@ -41,6 +42,12 @@ final class MemoryFormatTests: XCTestCase {
                        .paused(until: Date(timeIntervalSince1970: 1_791_819_600)))
         XCTAssertTrue(MemoryMenuState.paused(until: nil).isPaused)
         XCTAssertFalse(MemoryMenuState.recording.isPaused)
+        // On, but the worker cannot index yet: say so instead of "Recording".
+        let waiting = status(waiting: "11.4 GB of swap in use (limit 8.0 GB)")
+        XCTAssertEqual(MemoryMenuState(status: waiting), .waiting)
+        XCTAssertEqual(MemoryMenuState.waiting.label(now: now, format: format), "Recording; indexing waits")
+        XCTAssertTrue(MemoryMenuState.waiting.isOn)
+        XCTAssertEqual(MemoryMenuState(status: status(paused: true, waiting: "x")), .paused(until: nil))
     }
 
     func testTheMenuLabels() {

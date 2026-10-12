@@ -437,9 +437,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Obse
             window.makeKeyAndOrderFront(nil)
             return
         }
-        let window = NSWindow(contentViewController: NSHostingController(rootView: view))
+        let controller = NSHostingController(rootView: view)
+        // Follow SwiftUI's size: the window opened before the wrapped text
+        // was measured and clipped the last line of each paragraph.
+        controller.sizingOptions = [.preferredContentSize]
+        let window = NSWindow(contentViewController: controller)
         window.title = "Memory"
         window.styleMask = [.titled, .closable]
+        window.setContentSize(controller.view.fittingSize)
         window.center()
         window.isReleasedWhenClosed = false
         window.delegate = self

@@ -731,7 +731,7 @@ struct MenuBarView: View {
                     openAndActivate("memory")
                 }
                 switch state {
-                case .recording:
+                case .recording, .waiting:
                     Menu {
                         ForEach(MemoryPauseOption.allCases) { option in
                             Button(option.title) { Task { await memory.pause(option) } }
@@ -754,7 +754,7 @@ struct MenuBarView: View {
                 case .unavailable:
                     EmptyView()
                 }
-                if state == .recording || state.isPaused {
+                if state.isOn || state.isPaused {
                     Menu {
                         Button("Forget Last Hour\u{2026}") { Task { await memory.forget(.lastHour) } }
                         Button("Forget Today\u{2026}") { Task { await memory.forget(.today) } }
