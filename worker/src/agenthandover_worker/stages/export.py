@@ -41,7 +41,8 @@ def heartbeat(ctx: Any) -> None:
 def _write_heartbeat(ctx: Any) -> None:
     """The running totals, the passive annotation budget and why passive
     annotation is paused, the reasoning budget and whether it is spent,
-    the model schedule and the inference thread's queue."""
+    the model schedule, the inference thread's queue and the embedding
+    upgrade's progress."""
     db = ctx.db
     runner = ctx.runner
     inference = None
@@ -77,4 +78,7 @@ def _write_heartbeat(ctx: Any) -> None:
         model_schedule=ctx.model_scheduler.status(),
         inference=inference,
         missing_models=ctx.missing_models,
+        embedding_upgrade=(
+            ctx.embedding_upgrade.status() if ctx.embedding_upgrade is not None else None
+        ),
     )

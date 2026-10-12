@@ -130,6 +130,8 @@ class WorkerContext:
     # Memory's writer (``memory.MemoryWriter``); its job runs only while
     # ``[memory] enabled``, its daily purge always.
     memory_writer: Any = None
+    # "Upgrade everything"'s re-embed and switch (``embedding_upgrade``).
+    embedding_upgrade: Any = None
 
     now: Callable[[], datetime] = _utc_now
     # The user's time zone for the local day; None is the system's.
@@ -208,6 +210,8 @@ class WorkerContext:
             self.annotation_cache.close()
         if self.memory_writer is not None:
             self.memory_writer.close()
+        if self.embedding_upgrade is not None:
+            self.embedding_upgrade.close()
 
 
 def build_context(
@@ -238,9 +242,11 @@ def build_context(
     from agenthandover_worker.bundle_compiler import BundleCompiler
     from agenthandover_worker.config_validator import ConfigValidator
     from agenthandover_worker.constraint_manager import ConstraintManager
+    from agenthandover_worker.config import config_path
     from agenthandover_worker.continuity_tracker import ContinuityTracker
     from agenthandover_worker.correction_detector import CorrectionDetector
     from agenthandover_worker.daily_processor import DailyBatchProcessor
+    from agenthandover_worker.embedding_upgrade import EmbeddingUpgrade
     from agenthandover_worker.evidence_normalizer import EvidenceNormalizer
     from agenthandover_worker.evidence_tracker import EvidenceTracker
     from agenthandover_worker.execution_monitor import ExecutionMonitor
@@ -373,6 +379,16 @@ def build_context(
     memory_writer = _memory_writer(
         cfg, db_path, privacy_checker, model_scheduler, v2["scene_annotator"], now, monotonic,
     )
+    embedding_upgrade = EmbeddingUpgrade(
+        db_path,
+        knowledge_base=knowledge_base,
+        data_dir=wm._status_dir(),
+        config_file=cfg.path or config_path(),
+        ollama_host=host,
+        model=cfg.embedding.model,
+        blocker=model_scheduler.embedding_blocker,
+        monotonic=monotonic,
+    )
 
     return WorkerContext(
         cfg=cfg,
@@ -448,6 +464,7 @@ def build_context(
         model_scheduler=model_scheduler,
         db=WorkerDB(db_path),
         memory_writer=memory_writer,
+        embedding_upgrade=embedding_upgrade,
         now=now,
         local_tz=local_tz,
         monotonic=monotonic,
@@ -463,9 +480,12 @@ def start(ctx: WorkerContext) -> None:
     persisted state, the trigger handlers and the Skills index."""
     from agenthandover_worker import trigger_spool
     from agenthandover_worker.evidence_extractor import EvidenceExtractor
-    from agenthandover_worker.stages import control
+    from agenthandover_worker.stages import control, upgrade
 
     db = ctx.db
+    # A switch whose config write a restart interrupted: completed before
+    # anything embeds with the old model.
+    upgrade.finish(ctx)
     wm._sweep_orphan_screenshots(
         db, ctx.screenshots_dir,
         keep=ctx.memory_writer.held_screenshot_paths() if ctx.memory_writer else frozenset(),
@@ -502,6 +522,34 @@ def start(ctx: WorkerContext) -> None:
 
     # At startup the app sees the latest data (including new fields).
     wm._write_sops_index(db, ctx.knowledge_base, force=True)
+
+
+def use_embedding_model(ctx: WorkerContext, model: str) -> None:
+    """Embed and search every text path with *model* from now on: the
+    in-process half of ``embedding_upgrade``'s switch, right after the
+    vector store's rows became *model*'s.
+
+    The vector KB switches its model (Skill search, dedup, the procedure
+    matcher and writer, the query API share it); the session linker forgets
+    the intents it embedded with the old model; the task segmenter takes
+    the new model's prefix and threshold.  Without a vector KB (the old
+    model was not served at start) one is built for *model* and handed to
+    them; the query API then gains Skill search at the next start.
+    """
+    ctx.cfg = dataclasses.replace(
+        ctx.cfg, embedding=dataclasses.replace(ctx.cfg.embedding, model=model),
+    )
+    vkb = ctx.vector_kb
+    if vkb is not None:
+        vkb.use_model(model)
+    else:
+        vkb = ctx.vector_kb = _vector_kb(ctx.cfg, ctx.db_path)
+        ctx.procedure_matcher._vector_kb = vkb
+        ctx.procedure_writer._vector_kb = vkb
+    ctx.session_linker.use_vector_kb(vkb)
+    if ctx.task_segmenter is not None:
+        ctx.task_segmenter.use_embedding_model(model, vkb)
+    logger.info("Text embeddings now use %s", model)
 
 
 def _vector_kb(cfg: Any, db_path: Path) -> Any:

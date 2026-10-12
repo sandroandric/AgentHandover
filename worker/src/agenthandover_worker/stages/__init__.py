@@ -15,7 +15,8 @@ The model jobs run on the inference thread (``inference_runner``), one at a
 time, highest priority first: P0 :func:`synthesize.run` (a stopped focus
 recording, or its answered questions), P1 :func:`annotate.run_focus_tail`,
 P2 :func:`memory.run` (Memory's embeddings, while ``[memory] enabled``),
-P2 :func:`annotate.run` (passive annotation, frame diffs) and P2 the
+P2 :func:`annotate.run` (passive annotation, frame diffs), P2
+:func:`upgrade.run` ("Upgrade everything"'s re-embed, while it is due) and P2 the
 generation job (:func:`segment.run`, passive discovery, then
 :func:`daily.run`, the once-per-day pass).  Control stages never call
 a model; model stages run only as those jobs.
@@ -52,6 +53,8 @@ class Tick:
     focus_sops: int = 0
     annotations: dict | None = None
     memory: dict | None = None
+    # The embedding upgrade's status after its job ran.
+    embedding_upgrade: dict | None = None
     diffs: dict | None = None
     passive_sops: int | None = None
     # The generation phase's plan and the local day it was made for.

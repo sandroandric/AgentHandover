@@ -829,8 +829,14 @@ def _write_worker_status(
     model_schedule: dict | None = None,
     inference: dict | None = None,
     missing_models: list[str] | None = None,
+    embedding_upgrade: dict | None = None,
 ) -> None:
     """Atomically write worker-status.json (tmp + fsync + rename).
+
+    ``embedding_upgrade`` ("Upgrade everything"'s re-embed with
+    EmbeddingGemma 2, ``EmbeddingUpgrade.status``) is ``{"state":
+    "pending" | "running" | "failed" | "done", "done", "total", "dropped",
+    "error"}``, written once the upgrade was asked for.
 
     ``missing_models`` (written when Ollama answered) lists the configured
     annotation and Skills models it does not serve; the app's menu offers
@@ -879,6 +885,8 @@ def _write_worker_status(
         status["model_schedule"] = model_schedule
     if inference is not None:
         status["inference"] = inference
+    if embedding_upgrade is not None:
+        status["embedding_upgrade"] = embedding_upgrade
     # Tokens and Ollama timings per model since the worker started, and
     # model seconds per call type (since start and in the last hour).
     status["model_calls"] = MODEL_USAGE.snapshot()
@@ -1023,8 +1031,12 @@ def _embed_procedure(vector_kb, procedure: dict) -> None:
     slug = procedure.get("id", procedure.get("slug", ""))
     if not slug:
         return
+    _embed_in_vector_kb(vector_kb, "procedure", slug, _procedure_text(procedure))
 
-    # Build a rich text representation for semantic search
+
+def _procedure_text(procedure: dict) -> str:
+    """A procedure's text for semantic search: title, description,
+    strategy and step actions, one per line."""
     parts = []
     title = procedure.get("title", "")
     if title:
@@ -1039,9 +1051,7 @@ def _embed_procedure(vector_kb, procedure: dict) -> None:
         action = step.get("action", step.get("description", ""))
         if action:
             parts.append(action)
-
-    text = "\n".join(parts)
-    _embed_in_vector_kb(vector_kb, "procedure", slug, text)
+    return "\n".join(parts)
 
 
 def _refresh_claude_commands(

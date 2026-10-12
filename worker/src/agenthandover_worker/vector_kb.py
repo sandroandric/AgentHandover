@@ -50,9 +50,9 @@ class VectorKBConfig:
     """Configuration for the vector knowledge base."""
 
     embedding_model: str = EMBEDDING_MODEL
-    # ``[memory] model``: ``purge_stale`` keeps its rows too, so vectors a
-    # background re-embed writes with it survive the daily maintenance
-    # until the switch.
+    # ``[memory] model``: ``purge_stale`` keeps its rows too.  (The
+    # "Upgrade everything" re-embed stages its vectors in
+    # ``vector_store_next``, which no purge touches, until the switch.)
     memory_model: str = MEMORY_MODEL
     ollama_host: str = "http://localhost:11434"
     batch_size: int = 32
@@ -235,6 +235,13 @@ class VectorKB:
         if cur.rowcount:
             logger.info("Deleted %d screenshot vector(s) of the removed "
                         "image embedder", cur.rowcount)
+
+    def use_model(self, model: str) -> None:
+        """Embed and search with *model* from now on: the switch of
+        ``embedding_upgrade``, made right after the table's rows were
+        replaced by *model*'s.  The search index is reloaded."""
+        self.config.embedding_model = model
+        self._index = None
 
     @property
     def profile(self) -> EmbeddingProfile:
@@ -637,8 +644,7 @@ class VectorKB:
         ``config.retention_days``), and every vector made by a model that is
         neither the configured embedding model nor the memory model: after
         a model change those are in a space nothing searches.  The memory
-        model's rows stay (a background re-embed with it is kept until the
-        switch)."""
+        model's rows stay."""
         days = self.config.retention_days if max_age_days is None else max_age_days
         kept = (self.config.embedding_model, self.config.memory_model)
         cur = self._conn.execute(
