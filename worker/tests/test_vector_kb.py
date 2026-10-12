@@ -791,7 +791,7 @@ class TestProfile:
             '{"model": "nomic-embed-text", "input": ["search_query: deploy"]}',
         ]
 
-    def test_embeddinggemma_is_asked_for_its_stored_size_with_its_prefixes(
+    def test_embeddinggemma_is_asked_at_its_native_size_with_its_prefixes(
         self, tmp_db: Path,
     ):
         payloads = []
@@ -802,15 +802,14 @@ class TestProfile:
 
         with patch("agenthandover_worker.ollama.OllamaClient._request", fake_request):
             with VectorKB(tmp_db, VectorKBConfig(embedding_model=MEMORY_MODEL)) as kb:
-                assert kb.profile.dimensions == 256
+                assert kb.profile.dimensions is None
                 vectors = kb.compute_embeddings(["a"])
                 kb.search("b")
         assert payloads == [
-            {"model": MEMORY_MODEL, "input": ["title: none | text: a"], "dimensions": 256},
-            {"model": MEMORY_MODEL, "input": ["task: search result | query: b"],
-             "dimensions": 256},
+            {"model": MEMORY_MODEL, "input": ["title: none | text: a"]},
+            {"model": MEMORY_MODEL, "input": ["task: search result | query: b"]},
         ]
-        assert vectors == [pytest.approx([0.6, 0.8])]
+        assert vectors == [[3.0, 4.0]], "native size: as Ollama answers, like nomic"
 
     def test_documents_are_stored_with_the_models_prefix(self, tmp_db: Path):
         with patch("agenthandover_worker.ollama.OllamaClient._request",
@@ -820,8 +819,15 @@ class TestProfile:
                 (prefix,) = kb._conn.execute("SELECT prefix FROM vector_store").fetchone()
         assert prefix == "title: none | text: "
 
-    def test_an_uncalibrated_model_has_no_thresholds(self, tmp_db: Path):
-        with VectorKB(tmp_db, VectorKBConfig(embedding_model=MEMORY_MODEL)) as kb:
+    def test_an_uncalibrated_model_has_no_thresholds(self, tmp_db: Path, monkeypatch):
+        from dataclasses import replace
+
+        from agenthandover_worker import model_profiles as mp
+
+        monkeypatch.setitem(mp.EMBEDDING_PROFILES, "uncal-embed", replace(
+            mp.EMBEDDING_PROFILES[MEMORY_MODEL], model="uncal-embed", thresholds=None,
+        ))
+        with VectorKB(tmp_db, VectorKBConfig(embedding_model="uncal-embed")) as kb:
             with pytest.raises(ValueError, match="no calibrated thresholds"):
                 kb.thresholds
         with VectorKB(tmp_db, VectorKBConfig()) as kb:

@@ -300,15 +300,27 @@ def test_an_embedding_model_with_a_profile_or_none_is_kept(tmp_path):
     assert cfg.embedding.model == "mxbai-embed-large"
 
 
-def test_an_uncalibrated_embedding_model_is_refused(tmp_path, caplog):
-    """EmbeddingGemma 2 has no measured thresholds yet: as ``[embedding]
-    model`` every threshold applied to its vectors would be nomic's."""
+def test_an_uncalibrated_embedding_model_is_refused(tmp_path, caplog, monkeypatch):
+    """A profile without measured thresholds: as ``[embedding] model``
+    every threshold applied to its vectors would be another model's."""
+    from dataclasses import replace
+
+    from agenthandover_worker import model_profiles as mp
+
+    monkeypatch.setitem(mp.EMBEDDING_PROFILES, "uncal-embed", replace(
+        mp.EMBEDDING_PROFILES[mp.MEMORY_MODEL], model="uncal-embed", thresholds=None,
+    ))
     cfg = load_config(_write(tmp_path, (
-        '[embedding]\nmodel = "embeddinggemma-2:440m"\nretention_days = 30\n'
+        '[embedding]\nmodel = "uncal-embed"\nretention_days = 30\n'
     )))
     assert cfg.embedding.model == "nomic-embed-text"
     assert cfg.embedding.retention_days == 30
     assert "has no calibrated thresholds" in caplog.text
+
+
+def test_embeddinggemma_is_accepted_as_the_embedding_model(tmp_path):
+    cfg = load_config(_write(tmp_path, '[embedding]\nmodel = "embeddinggemma-2:440m"\n'))
+    assert cfg.embedding.model == "embeddinggemma-2:440m"
 
 
 # ---------------------------------------------------------------------------

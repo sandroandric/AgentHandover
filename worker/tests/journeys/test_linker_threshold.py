@@ -28,17 +28,19 @@ from pathlib import Path
 import pytest
 
 from agenthandover_worker.knowledge_base import KnowledgeBase
-from agenthandover_worker.model_profiles import EMBEDDING_PROFILES
+from agenthandover_worker.model_profiles import EMBEDDING_MODEL, EMBEDDING_PROFILES, MEMORY_MODEL
 from agenthandover_worker.session_linker import SessionLinker
 from agenthandover_worker.vector_kb import VectorKB, VectorKBConfig
 from journeys.cassette import open_cassette
 from daemon_db import create_daemon_db, kb_db
 
 JOURNEY = "linker_threshold"
-# The linker's cosine threshold and LLM band: nomic-embed-text's profile.
-_THRESHOLDS = EMBEDDING_PROFILES["nomic-embed-text"].thresholds
-_COSINE_THRESHOLD = _THRESHOLDS.linker_cos
-_COSINE_BAND = _THRESHOLDS.linker_band
+# Every embedding model the worker can use, each with its own profile.
+MODELS = [EMBEDDING_MODEL, MEMORY_MODEL]
+
+
+def _thresholds(model: str):
+    return EMBEDDING_PROFILES[model].thresholds
 
 # (task, intent as a daily summary words it)
 INTENTS = [
@@ -66,12 +68,15 @@ INTENTS = [
 ]
 
 
-def _scores(tmp_path: Path) -> list[tuple[str, str, float]]:
+def _scores(tmp_path: Path, model: str = EMBEDDING_MODEL) -> list[tuple[str, str, float]]:
     """``(task_a, task_b, cosine)`` for every pair, in a fixed order."""
     with open_cassette(JOURNEY) as tape:
         linker = SessionLinker(
             KnowledgeBase(root=tmp_path / "knowledge", db_path=kb_db(tmp_path / "knowledge")),
-            vector_kb=VectorKB(create_daemon_db(tmp_path / "vectors.db"), VectorKBConfig(ollama_host=tape.host)),
+            vector_kb=VectorKB(
+                create_daemon_db(tmp_path / "vectors.db"),
+                VectorKBConfig(ollama_host=tape.host, embedding_model=model),
+            ),
         )
         out = []
         for (ta, a), (tb, b) in combinations(INTENTS, 2):
@@ -81,16 +86,20 @@ def _scores(tmp_path: Path) -> list[tuple[str, str, float]]:
         return out
 
 
-def test_no_two_tasks_reach_the_cosine_threshold(tmp_path: Path) -> None:
-    scores = _scores(tmp_path)
-    cross = [(ta, tb, round(s, 3)) for ta, tb, s in scores if ta != tb and s >= _COSINE_THRESHOLD]
+@pytest.mark.parametrize("model", MODELS)
+def test_no_two_tasks_reach_the_cosine_threshold(tmp_path: Path, model: str) -> None:
+    threshold = _thresholds(model).linker_cos
+    scores = _scores(tmp_path, model)
+    cross = [(ta, tb, round(s, 3)) for ta, tb, s in scores if ta != tb and s >= threshold]
     assert cross == []
 
 
-def test_most_same_task_pairs_link_or_reach_the_llm_band(tmp_path: Path) -> None:
-    same = [s for ta, tb, s in _scores(tmp_path) if ta == tb]
-    linked = sum(s >= _COSINE_THRESHOLD for s in same)
-    in_band = sum(_COSINE_THRESHOLD - _COSINE_BAND <= s < _COSINE_THRESHOLD for s in same)
+@pytest.mark.parametrize("model", MODELS)
+def test_most_same_task_pairs_link_or_reach_the_llm_band(tmp_path: Path, model: str) -> None:
+    threshold, band = _thresholds(model).linker_cos, _thresholds(model).linker_band
+    same = [s for ta, tb, s in _scores(tmp_path, model) if ta == tb]
+    linked = sum(s >= threshold for s in same)
+    in_band = sum(threshold - band <= s < threshold for s in same)
     assert linked >= len(same) // 2, (linked, len(same))
     assert linked + in_band >= 0.8 * len(same), (linked, in_band, len(same))
 

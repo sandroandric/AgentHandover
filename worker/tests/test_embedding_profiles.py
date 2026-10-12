@@ -16,7 +16,9 @@ import inspect
 from agenthandover_worker import model_profiles as mp
 
 
-def test_nomic_profile_carries_the_v05_reader_numbers():
+def test_nomic_profile_carries_the_v05_reader_numbers_and_the_measured_matcher():
+    """v0.5's numbers, except ``matcher``: 0.50 let task labels match other
+    procedures (journeys/test_search_threshold.py); 0.69 is measured."""
     profile = mp.EMBEDDING_PROFILES["nomic-embed-text"]
     assert profile.model == mp.EMBEDDING_MODEL == "nomic-embed-text"
     assert profile.dim == 768
@@ -29,7 +31,7 @@ def test_nomic_profile_carries_the_v05_reader_numbers():
         linker_cos=0.89,
         linker_band=0.08,
         dedup=0.70,
-        matcher=0.50,
+        matcher=0.69,
         min_score=0.3,
     )
 
@@ -62,16 +64,26 @@ def test_a_model_without_a_row_is_embedded_as_nomic_was():
     assert mp.embedding_profile(mp.MEMORY_MODEL) is mp.EMBEDDING_PROFILES[mp.MEMORY_MODEL]
 
 
-def test_memory_profile_is_embeddinggemma_2_at_256_dims_uncalibrated():
+def test_embeddinggemma_profile_is_native_768_with_the_document_prefix_and_calibrated():
+    """Measured (journeys/test_segmenter_threshold, test_linker_threshold,
+    test_search_threshold): the document prefix separates task texts that
+    the model card's clustering prefix squeezes together."""
     profile = mp.EMBEDDING_PROFILES[mp.MEMORY_MODEL]
     assert mp.MEMORY_MODEL == "embeddinggemma-2:440m"
     assert profile.model == mp.MEMORY_MODEL
-    assert profile.dim == 256
+    assert profile.dim == 768
     assert profile.doc_prefix == "title: none | text: "
     assert profile.query_prefix == "task: search result | query: "
-    assert profile.cluster_prefix == "task: clustering | query: "
-    assert profile.thresholds is None
-    assert profile.truncated and profile.dimensions == 256
+    assert profile.cluster_prefix == "title: none | text: "
+    assert profile.thresholds == mp.EmbeddingThresholds(
+        segmenter=0.845,
+        linker_cos=0.86,
+        linker_band=0.04,
+        dedup=0.76,
+        matcher=0.73,
+        min_score=0.4,
+    )
+    assert not profile.truncated and profile.dimensions is None
     assert mp.MODEL_SIZES_GB[mp.MEMORY_MODEL] == 0.71
 
 

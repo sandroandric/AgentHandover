@@ -453,12 +453,13 @@ class TestTaskSegmenterSegment:
         client.return_value.embed.assert_called_once_with(
             "emb-x", ["a"], prefix="clustering: ", dimensions=None, timeout=30.0,
         )
-        # EmbeddingGemma 2: its own clustering prefix, at its stored size.
+        # EmbeddingGemma 2: its clustering prefix (the document one, as
+        # measured), at its native size.
         with patch("agenthandover_worker.task_segmenter.OllamaClient") as client:
             _compute_embeddings(["a"], model="embeddinggemma-2:440m")
         client.return_value.embed.assert_called_once_with(
-            "embeddinggemma-2:440m", ["a"], prefix="task: clustering | query: ",
-            dimensions=256, timeout=30.0,
+            "embeddinggemma-2:440m", ["a"], prefix="title: none | text: ",
+            dimensions=None, timeout=30.0,
         )
 
     @patch("agenthandover_worker.task_segmenter._compute_embeddings", side_effect=_mock_embeddings)
@@ -1199,7 +1200,18 @@ class TestSegmenterThreshold:
             TaskSegmenter().segment(events)
         assert cluster.call_args.args[1] == 0.83
 
-    def test_an_uncalibrated_model_has_no_threshold(self):
-        seg = TaskSegmenter(SegmenterConfig(embedding_model="embeddinggemma-2:440m"))
+    def test_an_uncalibrated_model_has_no_threshold(self, monkeypatch):
+        from dataclasses import replace
+
+        from agenthandover_worker import model_profiles as mp
+
+        monkeypatch.setitem(mp.EMBEDDING_PROFILES, "uncal-embed", replace(
+            mp.EMBEDDING_PROFILES[mp.MEMORY_MODEL], model="uncal-embed", thresholds=None,
+        ))
+        seg = TaskSegmenter(SegmenterConfig(embedding_model="uncal-embed"))
         with pytest.raises(ValueError, match="no calibrated segmenter threshold"):
             seg._similarity_threshold()
+
+    def test_embeddinggemma_uses_its_measured_threshold(self):
+        seg = TaskSegmenter(SegmenterConfig(embedding_model="embeddinggemma-2:440m"))
+        assert seg._similarity_threshold() == 0.845

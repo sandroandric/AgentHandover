@@ -15,6 +15,12 @@ costs a demonstration, a merge produces a chimera Skill, so the pin is
 "no cluster holds two tasks".  The threshold is to be re-baselined on the
 three-week passive fixture when it exists.
 
+EmbeddingGemma 2 (document prefix, 768 dimensions; see model_profiles)
+merges the GitHub PR and issue tasks up to 0.844 and gives 9 clusters with
+no merge and both long tasks whole at 0.845, its threshold; from 0.846 the
+invoice task splits.  nomic-embed-text's 0.83 sits as close to its own
+merge point (0.828), so both are re-checked on a real day.
+
 Record: ``AH_RECORD=1 AH_RECORD_UPSTREAM=http://<ollama> pytest <this file>``.
 """
 
@@ -23,6 +29,9 @@ from __future__ import annotations
 import json
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
+from agenthandover_worker.model_profiles import EMBEDDING_MODEL, MEMORY_MODEL
 from agenthandover_worker.task_segmenter import (
     SegmenterConfig,
     TaskSegmenter,
@@ -80,14 +89,21 @@ def _partition(groups) -> set[frozenset[str]]:
     return {frozenset(FRAMES[i][0] for i in members) for members in groups}
 
 
-def _segment():
+# Every embedding model the worker can use, each with its own profile.
+MODELS = [EMBEDDING_MODEL, MEMORY_MODEL]
+
+
+def _segment(model: str = EMBEDDING_MODEL):
     with open_cassette(JOURNEY) as tape:
-        segmenter = TaskSegmenter(config=SegmenterConfig(ollama_host=tape.host))
+        segmenter = TaskSegmenter(
+            config=SegmenterConfig(ollama_host=tape.host, embedding_model=model),
+        )
         return segmenter.segment(_events())
 
 
-def test_default_threshold_never_merges_two_tasks() -> None:
-    result = _segment()
+@pytest.mark.parametrize("model", MODELS)
+def test_default_threshold_never_merges_two_tasks(model: str) -> None:
+    result = _segment(model)
 
     by_cluster: dict[int, list[int]] = {}
     for seg in result.segments:

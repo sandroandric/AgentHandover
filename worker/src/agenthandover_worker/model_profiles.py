@@ -601,10 +601,16 @@ class EmbeddingProfile:
 # prefix or a cosine threshold (vector_kb, task_segmenter, session_linker,
 # sop_dedup, procedure_matcher, mcp_server, query_api) takes it from the
 # row of the model it embeds with.  nomic-embed-text's numbers are the ones
-# those readers held before this table.  EmbeddingGemma 2's
-# prefixes are its model card's; it is stored truncated to 256 dimensions
-# (Matryoshka; measured near-lossless against 768), and its thresholds come
-# from the calibration recordings (WP-E3), never guessed.
+# those readers held before this table, except ``matcher`` (0.50 let task
+# labels match other procedures; 0.69 is the midpoint measured in
+# tests/journeys/test_search_threshold.py).  EmbeddingGemma 2 keeps its
+# native 768 dimensions and clusters with its document prefix: on the
+# labelled sets the model card's clustering prefix squeezed every pair of
+# task texts into 0.92-0.98 (same- and different-task pairs overlapping),
+# while the document prefix separates them (linker: every same-task pair
+# above every different-task pair).  Its thresholds come from those
+# recordings (test_segmenter_threshold, test_linker_threshold,
+# test_search_threshold), never guessed.
 EMBEDDING_PROFILES: dict[str, EmbeddingProfile] = {
     EMBEDDING_MODEL: EmbeddingProfile(
         model=EMBEDDING_MODEL,
@@ -617,18 +623,25 @@ EMBEDDING_PROFILES: dict[str, EmbeddingProfile] = {
             linker_cos=0.89,
             linker_band=0.08,
             dedup=0.70,
-            matcher=0.50,
+            matcher=0.69,
             min_score=0.3,
         ),
     ),
     MEMORY_MODEL: EmbeddingProfile(
         model=MEMORY_MODEL,
-        dim=256,
+        dim=768,
         doc_prefix="title: none | text: ",
         query_prefix="task: search result | query: ",
-        cluster_prefix="task: clustering | query: ",
-        thresholds=None,
-        truncated=True,
+        cluster_prefix="title: none | text: ",
+        thresholds=EmbeddingThresholds(
+            segmenter=0.845,
+            linker_cos=0.86,
+            linker_band=0.04,
+            dedup=0.76,
+            matcher=0.73,
+            min_score=0.4,
+        ),
+        truncated=False,
     ),
 }
 

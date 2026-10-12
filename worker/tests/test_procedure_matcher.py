@@ -493,13 +493,13 @@ class TestSemanticMatchThreshold:
     def test_vector_search_uses_the_profiles_matcher_cosine(self, kb):
         from agenthandover_worker.vector_kb import VectorSearchResult
 
-        hit = VectorSearchResult("procedure", "github-pr", 0.61, "nomic-embed-text")
+        hit = VectorSearchResult("procedure", "github-pr", 0.72, "nomic-embed-text")
         vkb = _RecordingVectorKB([hit])
         segment = _make_segment("s", ["Chrome"], [{"what_doing": "Review a PR"}])
         matcher = ProcedureMatcher(kb, match_threshold=0.9, vector_kb=vkb)
-        assert matcher.match_segment(segment) == [("github-pr", 0.61)]
+        assert matcher.match_segment(segment) == [("github-pr", 0.72)]
         assert vkb.calls == [("Review a PR", {
-            "top_k": 5, "source_types": ["procedure"], "min_score": 0.50,
+            "top_k": 5, "source_types": ["procedure"], "min_score": 0.69,
         })]
 
     def test_no_semantic_hit_falls_back_to_fingerprints_at_match_threshold(self, kb):
@@ -511,7 +511,7 @@ class TestSemanticMatchThreshold:
         vkb = _RecordingVectorKB([])
         strict = ProcedureMatcher(kb, match_threshold=0.95, vector_kb=vkb)
         assert strict.match_segment(segment) == []
-        assert vkb.calls[0][1]["min_score"] == 0.50
+        assert vkb.calls[0][1]["min_score"] == 0.69
 
 
 class TestMatchBoundary:
