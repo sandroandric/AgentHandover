@@ -8,7 +8,7 @@ The sections and defaults mirror ``crates/common/src/config.rs`` (the
 daemon's reader of the same file) for the fields the worker uses; the
 worker-only settings (``[vlm] ollama_host`` and
 ``annotation_timeout_seconds``, ``[focus]``, ``[features]``,
-``[embedding]``, ``[export] claude_skills_dir``) are documented in
+``[embedding]``, ``[memory]``, ``[export] claude_skills_dir``) are documented in
 ``config.example.toml``.
 
 A missing file gives the defaults.  A file that is not valid TOML gives
@@ -25,6 +25,8 @@ from dataclasses import dataclass, field, replace
 from datetime import time as dt_time
 from pathlib import Path
 from typing import Any
+
+from agenthandover_worker.model_profiles import MEMORY_MODEL
 
 logger = logging.getLogger(__name__)
 
@@ -189,6 +191,26 @@ class EmbeddingConfig:
 
 
 @dataclass(frozen=True)
+class MemoryConfig:
+    """``[memory]``: the searchable record of what was on screen (``memory``).
+
+    Off unless the file turns it on (setup writes ``enabled = true`` for new
+    installs).  ``crates/common/src/config.rs`` reads the same keys."""
+
+    enabled: bool = False
+    model: str = MEMORY_MODEL
+    dimensions: int = 256
+    # Memory rows older than this are purged once a day.
+    retention_days: int = 365
+    # Encrypted thumbnails older than this are deleted once a day.
+    thumbnail_days: int = 7
+    # MCP ``search_memory`` answers only when this is on.
+    agents_access: bool = False
+    # Frames embedded per rolling hour; past it, frames wait.
+    max_frames_per_hour: int = 600
+
+
+@dataclass(frozen=True)
 class FocusConfig:
     """``[focus]``."""
 
@@ -216,6 +238,7 @@ class Config:
     export: ExportConfig = field(default_factory=ExportConfig)
     knowledge: KnowledgeConfig = field(default_factory=KnowledgeConfig)
     embedding: EmbeddingConfig = field(default_factory=EmbeddingConfig)
+    memory: MemoryConfig = field(default_factory=MemoryConfig)
     focus: FocusConfig = field(default_factory=FocusConfig)
     openclaw: OpenClawConfig = field(default_factory=OpenClawConfig)
     # ``[privacy.zones]`` as written; ``privacy_zones.PrivacyZoneConfig``
@@ -261,6 +284,7 @@ def load_config(path: str | Path | None = None) -> Config:
         export=_export(section("export")),
         knowledge=_build(KnowledgeConfig, "knowledge", section("knowledge")),
         embedding=_build(EmbeddingConfig, "embedding", section("embedding")),
+        memory=_build(MemoryConfig, "memory", section("memory")),
         focus=_build(FocusConfig, "focus", section("focus")),
         openclaw=_build(OpenClawConfig, "openclaw", section("openclaw")),
         privacy_zones=zones if isinstance(zones, dict) else {},
@@ -280,6 +304,10 @@ _POSITIVE = {
     ("focus", "max_session_hours"),
     ("embedding", "retention_days"),
     ("embedding", "max_rows"),
+    ("memory", "dimensions"),
+    ("memory", "retention_days"),
+    ("memory", "thumbnail_days"),
+    ("memory", "max_frames_per_hour"),
 }
 
 

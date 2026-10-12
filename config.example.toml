@@ -75,8 +75,19 @@ model = "nomic-embed-text"         # text embeddings (search_document:/search_qu
 retention_days = 90                # vectors not updated for this long are purged daily
 max_rows = 50000                   # hard cap; the least recently updated vectors are evicted
 
+[memory]
+# Memory: every kept frame (screenshot + "app — title") embedded on this Mac
+# so you can search what you saw. Setup turns it on for new installs.
+enabled = false
+model = "embeddinggemma-2:440m"    # needs Ollama 0.40.0 or later
+dimensions = 256
+retention_days = 365               # memory rows older than this are purged daily
+thumbnail_days = 7                 # encrypted thumbnails older than this are deleted daily
+agents_access = false              # let agents search Memory (MCP search_memory); never images
+max_frames_per_hour = 600          # frames embedded per rolling hour; past it, frames wait
+
 [focus]
-max_session_hours = 4              # a recording never stopped is closed as stale after this long
+max_session_hours = 4             # a recording never stopped is closed as stale after this long
 
 [llm]
 # The SOP text enhancer of the older focus path, used only when

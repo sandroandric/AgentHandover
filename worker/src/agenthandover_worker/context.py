@@ -127,6 +127,9 @@ class WorkerContext:
     annotation_budget: Any
     model_scheduler: Any
     db: Any
+    # Memory's writer (``memory.MemoryWriter``); its job runs only while
+    # ``[memory] enabled``, its daily purge always.
+    memory_writer: Any = None
 
     now: Callable[[], datetime] = _utc_now
     # The user's time zone for the local day; None is the system's.
@@ -203,6 +206,8 @@ class WorkerContext:
             self.activity_searcher.close()
         if self.annotation_cache is not None:
             self.annotation_cache.close()
+        if self.memory_writer is not None:
+            self.memory_writer.close()
 
 
 def build_context(
@@ -364,6 +369,10 @@ def build_context(
         **(scheduler_probes or {}),
     )
     model_scheduler.register(v2["sop_generator"], behavioral_synthesizer, llm_reasoner)
+    privacy_checker = PrivacyZoneChecker(config=_privacy_zones(cfg, PrivacyZoneConfig))
+    memory_writer = _memory_writer(
+        cfg, db_path, privacy_checker, model_scheduler, v2["scene_annotator"], now, monotonic,
+    )
 
     return WorkerContext(
         cfg=cfg,
@@ -385,7 +394,7 @@ def build_context(
             llm_reasoner=llm_reasoner,
         ),
         kb_export_adapter=KnowledgeBaseExportAdapter(knowledge_base),
-        privacy_checker=PrivacyZoneChecker(config=_privacy_zones(cfg, PrivacyZoneConfig)),
+        privacy_checker=privacy_checker,
         staleness_detector=staleness_detector,
         profile_builder=ProfileBuilder(knowledge_base),
         activity_classifier=activity_classifier,
@@ -438,6 +447,7 @@ def build_context(
         annotation_budget=AnnotationBudget.from_config(vlm_cfg),
         model_scheduler=model_scheduler,
         db=WorkerDB(db_path),
+        memory_writer=memory_writer,
         now=now,
         local_tz=local_tz,
         monotonic=monotonic,
@@ -456,7 +466,10 @@ def start(ctx: WorkerContext) -> None:
     from agenthandover_worker.stages import control
 
     db = ctx.db
-    wm._sweep_orphan_screenshots(db, ctx.screenshots_dir)
+    wm._sweep_orphan_screenshots(
+        db, ctx.screenshots_dir,
+        keep=ctx.memory_writer.held_screenshot_paths() if ctx.memory_writer else frozenset(),
+    )
     ctx.evidence_extractor = EvidenceExtractor(kb=ctx.knowledge_base, db=db)
 
     # Checked once before the loop so a stopped focus recording takes the
@@ -528,6 +541,42 @@ def _vector_kb(cfg: Any, db_path: Path) -> Any:
     except Exception:
         logger.debug("Vector KB initialization failed — semantic search disabled", exc_info=True)
     return None
+
+
+def _memory_writer(
+    cfg: Any,
+    db_path: Path,
+    privacy_checker: Any,
+    model_scheduler: Any,
+    scene_annotator: Any,
+    now: Callable[[], datetime],
+    monotonic: Callable[[], float],
+) -> Any:
+    """Memory's writer, and the annotator asking it before a screenshot is
+    deleted (``memory`` module docstring)."""
+    from agenthandover_worker.memory import MemoryWriter, ollama_embedder
+
+    memory = cfg.memory
+    data_dir = wm._status_dir()
+    writer = MemoryWriter(
+        db_path,
+        memory,
+        embed=ollama_embedder(cfg.vlm.ollama_host, memory.model, memory.dimensions),
+        screenshots_dir=data_dir / "screenshots",
+        data_dir=data_dir,
+        privacy_checker=privacy_checker,
+        blocker=model_scheduler.embedding_blocker,
+        now=now,
+        monotonic=monotonic,
+    )
+    if scene_annotator is not None:
+        scene_annotator.keep_screenshot = writer.holds
+    if memory.enabled:
+        logger.info(
+            "Memory on (%s, %d dimensions, %d frames/hour)",
+            memory.model, memory.dimensions, memory.max_frames_per_hour,
+        )
+    return writer
 
 
 def _privacy_zones(cfg: Any, zone_config: type) -> Any:

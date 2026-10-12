@@ -34,6 +34,7 @@ import logging
 import os
 import re
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -1010,6 +1011,9 @@ class SceneAnnotator:
         # cached /api/tags probe.
         self._backoff_until = 0.0
         self._probe_ok_until = 0.0
+        # Asked before a screenshot is deleted: True keeps it for another
+        # reader (Memory, ``MemoryWriter.holds``), which deletes it later.
+        self.keep_screenshot: Callable[[dict], bool] | None = None
 
     @property
     def stats(self) -> dict:
@@ -1264,7 +1268,7 @@ class SceneAnnotator:
             )
         except Exception as exc:
             self._stats["failed"] += 1
-            self._delete_screenshot(screenshot_path)
+            self._delete_screenshot(screenshot_path, event)
             return AnnotationResult(
                 event_id=event_id,
                 status="failed",
@@ -1308,8 +1312,9 @@ class SceneAnnotator:
         # --- Delete screenshot after VLM processing (success or failure) ---
         # The raw JPEG has no further value — only the structured annotation
         # matters. Leaving unencrypted JPEGs on disk after failed annotations
-        # is a privacy risk that maintenance.rs cannot clean up.
-        self._delete_screenshot(screenshot_path)
+        # is a privacy risk that maintenance.rs cannot clean up.  (Memory
+        # may still need it: then Memory deletes it once it is embedded.)
+        self._delete_screenshot(screenshot_path, event)
 
         if annotation is None:
             self._stats["failed"] += 1
@@ -1399,14 +1404,18 @@ class SceneAnnotator:
     # Screenshot cleanup
     # ------------------------------------------------------------------
 
-    def _delete_screenshot(self, screenshot_path: str | None) -> None:
-        """Delete a screenshot file if configured to do so.
+    def _delete_screenshot(self, screenshot_path: str | None, event: dict) -> None:
+        """Delete *event*'s screenshot file if configured to do so and no
+        other reader keeps it (:attr:`keep_screenshot`).
 
         Called after the VLM has processed the image, regardless of whether
         the annotation succeeded or failed.  The annotation JSON is what
-        matters — the raw JPEG has no further value.
+        matters — the raw JPEG has no further value to annotation.
         """
         if not self.config.delete_screenshot_after_processing or not screenshot_path:
+            return
+        if self.keep_screenshot is not None and self.keep_screenshot(event):
+            logger.debug("Screenshot kept for Memory: %s", screenshot_path)
             return
         try:
             Path(screenshot_path).unlink(missing_ok=True)
@@ -1415,5 +1424,6 @@ class SceneAnnotator:
             logger.debug("Failed to delete screenshot %s", screenshot_path, exc_info=True)
 
     def discard_screenshot(self, event: dict, artifact_dir: str | Path | None) -> None:
-        """Delete the JPEG of a frame that will never be annotated."""
-        self._delete_screenshot(find_screenshot(event, artifact_dir))
+        """Delete the JPEG of a frame that will never be annotated (unless
+        :attr:`keep_screenshot` keeps it)."""
+        self._delete_screenshot(find_screenshot(event, artifact_dir), event)

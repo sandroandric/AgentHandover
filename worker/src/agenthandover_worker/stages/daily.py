@@ -83,6 +83,7 @@ def run(ctx: Any, tick: Any) -> bool:
         vector_kb=ctx.vector_kb,
         activity_searcher=ctx.activity_searcher,
         annotation_cache=ctx.annotation_cache,
+        memory_writer=ctx.memory_writer,
     )
     db.set_state(wm.DAILY_JOBS_STATE_KEY, today_local)
     ctx.daily_jobs_date = today_local

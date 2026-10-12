@@ -12,10 +12,11 @@ import json
 import logging
 import os
 import signal
+import sqlite3
 import sys
 import tempfile
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
@@ -207,6 +208,7 @@ def _process_annotations(
     privacy_checker: "PrivacyZoneChecker | None" = None,
     activity_classifier: "ActivityClassifier | None" = None,
     budget: "AnnotationBudget | None" = None,
+    memory: "MemoryWriter | None" = None,
 ) -> dict:
     """Process a batch of unannotated screenshots through the scene annotator.
 
@@ -237,6 +239,9 @@ def _process_annotations(
     keeps a blocked window from being captured at all) needs no model, so
     it runs first, Ollama up or not: a blocked or metadata-only frame's
     JPEG is deleted at once, never left waiting for the annotator.
+
+    A completed annotation describes the frame's Memory moment
+    (*memory*, ``MemoryWriter.annotated``).
     """
     stats = {
         "annotated": 0, "skipped": 0, "failed": 0, "blocked": 0, "deferred": 0,
@@ -333,6 +338,13 @@ def _process_annotations(
                 json.dumps(result.annotation),
                 status="completed",
             )
+            if memory is not None:
+                try:
+                    memory.annotated(event, result.annotation)
+                except sqlite3.Error:
+                    logger.warning(
+                        "Memory description of %s not updated", event_id[:8], exc_info=True,
+                    )
             stats["annotated"] += 1
             what_doing = (
                 result.annotation
@@ -389,15 +401,18 @@ def _run_daily_maintenance(
     vector_kb: "VectorKB | None" = None,
     activity_searcher: "ActivitySearcher | None" = None,
     annotation_cache: "AnnotationCache | None" = None,
+    memory_writer: "MemoryWriter | None" = None,
 ) -> None:
     """Prune what grows with time: vectors past their retention or from
     another embedding model (the row cap is enforced on every upsert),
     search-index entries of events the
-    daemon deleted, and unused annotation-cache rows."""
+    daemon deleted, unused annotation-cache rows, and Memory rows and
+    thumbnails past ``[memory] retention_days`` / ``thumbnail_days``."""
     for name, job in (
         ("vector purge", vector_kb and vector_kb.purge_stale),
         ("search index prune", activity_searcher and activity_searcher.prune_index),
         ("annotation cache prune", annotation_cache and annotation_cache.prune),
+        ("memory purge", memory_writer and memory_writer.purge),
     ):
         if not job:
             continue
@@ -430,21 +445,23 @@ def _sweep_orphan_screenshots(
     screenshots_dir: Path,
     *,
     min_age_seconds: float = ORPHAN_MIN_AGE_SECONDS,
+    keep: Collection[str] = frozenset(),
 ) -> int:
     """Delete JPEGs in *screenshots_dir* that no pending event refers to.
 
     Run at worker start.  A frame's JPEG is needed only until its event is
-    annotated (or blocked by a privacy zone); after that every path deletes
-    it.  Anything else in the directory is an orphan: frames of blocked or
-    metadata-only windows kept by an older worker, frames of events that
-    were purged, files left by a crash.  Files younger than
+    annotated (or blocked by a privacy zone) and, with Memory on, embedded
+    (*keep*: the resolved paths Memory still needs); after that every path
+    deletes it.  Anything else in the directory is an orphan: frames of
+    blocked or metadata-only windows kept by an older worker, frames of
+    events that were purged, files left by a crash.  Files younger than
     *min_age_seconds* are left alone.  Returns the number deleted.
     """
     if not screenshots_dir.is_dir():
         return 0
     referenced = {
         str(Path(p).resolve()) for p in db.pending_screenshot_paths()
-    }
+    } | set(keep)
     cutoff = time.time() - min_age_seconds
     removed = 0
     for path in screenshots_dir.iterdir():

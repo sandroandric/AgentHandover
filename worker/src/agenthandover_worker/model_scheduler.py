@@ -456,6 +456,18 @@ class ModelScheduler:
         if not _same_model(model, self.annotation_model):
             self._unload(model)
 
+    def embedding_blocker(self) -> str | None:
+        """Why background embedding (Memory) must wait now, or None: the
+        Mac is short of memory (:meth:`_pressure`), or a generation phase
+        has the SOP model loaded on a two-model tier, where another model
+        beside it is what the memory guard exists to prevent."""
+        pressure = self._pressure()
+        if pressure is not None:
+            return pressure
+        if self.split and self._generating:
+            return f"{self._plan_model} is writing Skills"
+        return None
+
     # -- internals ------------------------------------------------------
 
     def _run(self, model: str, jobs: frozenset[str], *, fallback: bool = False) -> GenerationPlan:
