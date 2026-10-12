@@ -463,7 +463,9 @@ class MemoryWriter:
             return stats
         if paused(self.data_dir, self._now()):
             # Frames captured while paused are never embedded.
-            self._set_cursor(*self._newest_event())
+            newest, event = self._newest_event()
+            if newest != self.cursor():
+                self._set_cursor(newest, event)
             self.waiting = None
             return stats
         cursor = self._checked_cursor()
