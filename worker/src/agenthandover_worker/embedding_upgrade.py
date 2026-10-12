@@ -272,10 +272,15 @@ class EmbeddingUpgrade:
             self._back_off(saved, f"Ollama failed: {exc}")
             return False
         self._failures = 0
+        if saved.get("state") != "running":
+            logger.info(
+                "Embedding upgrade: re-embedding %d vectors with %s in the background",
+                self._status["total"] if self._status else 0, TARGET_MODEL,
+            )
         self._set_state("running")
-        logger.info(
-            "Embedding upgrade: %d of %d vectors re-embedded with %s",
-            self._status["done"], self._status["total"], TARGET_MODEL,
+        logger.debug(
+            "Embedding upgrade: %d of %d vectors re-embedded",
+            self._status["done"], self._status["total"],
         )
         return False
 
