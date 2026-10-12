@@ -172,6 +172,34 @@ class TestKeys:
         assert chat["messages"][0]["images"] == material["images"]
         assert CHAT_BODY["messages"][0]["images"] == [PNG_1X1_B64]  # not mutated
 
+    def test_embed_image_inputs_are_keyed_by_their_bytes(self):
+        """A multimodal /api/embed item's image is hashed like the others;
+        its text, the plain-string items and ``dimensions`` stay."""
+        from journeys.cassette import normalise_request
+
+        body = {
+            "model": "embeddinggemma-2:440m",
+            "input": [{"text": "t: Safari", "image": PNG_1X1_B64}, "plain"],
+            "dimensions": 256,
+        }
+        material = normalise_request(body)
+        digest = normalise_request(self.BASE)["images"][0]
+        assert material == {
+            "model": "embeddinggemma-2:440m",
+            "input": [{"text": "t: Safari", "image": digest}, "plain"],
+            "dimensions": 256,
+        }
+        assert body["input"][0]["image"] == PNG_1X1_B64  # not mutated
+        other = dict(body, input=[{"text": "t: Safari", "image": PNG_1X1_B64[:-8] + "AAAAAA=="},
+                                  "plain"])
+        assert request_key("/api/embed", other) != request_key("/api/embed", body)
+
+    def test_text_embed_keys_are_unchanged(self):
+        """Text-only /api/embed requests keep the key they had before image
+        inputs were normalised (every recorded journey depends on it)."""
+        body = {"model": "nomic-embed-text", "input": ["clustering: a", "clustering: b"]}
+        assert request_key("/api/embed", body) == key_of("/api/embed", body)
+
 
 # ---------------------------------------------------------------------------
 # Replay through the production call sites
@@ -308,6 +336,14 @@ class _FakeOllama:
                 if body.get("model") == "missing":
                     self._send(404, {"error": "model 'missing' not found"})
                     return
+                if self.path == "/api/embed":
+                    self._send(200, {
+                        "model": body["model"],
+                        "embeddings": [[3.0, 4.0] for _ in body["input"]],
+                        "total_duration": 500_000_000,
+                        "prompt_eval_count": 7,
+                    })
+                    return
                 # Pretty-printed with spaces, unlike the cassette's encoding.
                 self._send(200, {
                     "model": body["model"],
@@ -379,6 +415,41 @@ def test_record_then_replay_is_byte_identical(tmp_path, fake_ollama):
                     _get(replay.host, "/api/version")]
     assert replayed == recorded
     assert replay.model_seconds() == 2.0
+
+
+def test_an_image_embed_records_its_digest_and_replays(tmp_path, fake_ollama):
+    """A multimodal embed through the production client: the cassette
+    stores the image's sha256, not its base64, and replays the same vectors
+    without the upstream."""
+    import base64
+
+    from journeys.cassette import normalise_request
+
+    path = tmp_path / "journey.jsonl"
+    items = [{"text": "Safari — Stripe payouts", "image": base64.b64decode(PNG_1X1_B64)}]
+
+    def embed(host):
+        return OllamaClient(host).embed(
+            "embeddinggemma-2:440m", items, prefix="title: none | text: ", dimensions=256,
+        )
+
+    with Cassette(path, record=True, upstream=fake_ollama.host) as rec:
+        recorded = embed(rec.host)
+    assert recorded == [[0.6, 0.8]]
+    sent = fake_ollama.requests[0][1]
+    assert sent["input"][0]["image"] == PNG_1X1_B64  # Ollama gets the image itself
+    (entry,) = load_entries(path).values()
+    assert entry["request"] == normalise_request(sent)
+    assert entry["request"]["input"] == [{
+        "text": "title: none | text: Safari — Stripe payouts",
+        "image": normalise_request(TestKeys.BASE)["images"][0],
+    }]
+    assert PNG_1X1_B64 not in path.read_text()
+
+    fake_ollama.close()
+    with Cassette(path, record=False) as replay:
+        assert embed(replay.host) == recorded
+    assert len(replay.served) == 1
 
 
 def test_record_mode_appends_only_new_entries(tmp_path, fake_ollama):

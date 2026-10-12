@@ -67,7 +67,13 @@ pub struct TierTable {
     pub schema_version: u32,
     pub basis: String,
     pub minimum_ollama_version_for_gemma4: String,
+    /// The Ollama that runs `memory_model` (EmbeddingGemma 2's image and
+    /// text embeddings).
+    pub minimum_ollama_version_for_memory: String,
     pub embedding_model: String,
+    /// The model Memory embeds kept frames with; not a tier model (no tier
+    /// pulls it until Memory is turned on).
+    pub memory_model: String,
     pub model_sizes_gb: BTreeMap<String, f64>,
     /// Ascending by `min_ram_gb`; the first row takes any Mac.
     pub tiers: Vec<Tier>,
@@ -247,6 +253,10 @@ mod tests {
         assert!(t.tiers.windows(2).all(|w| w[0].min_ram_gb <= w[1].min_ram_gb));
         assert_eq!(t.minimum_ollama_version_for_gemma4, "0.34.0");
         assert_eq!(t.embedding_model, "nomic-embed-text");
+        assert_eq!(t.minimum_ollama_version_for_memory, "0.40.0");
+        assert_eq!(t.memory_model, "embeddinggemma-2:440m");
+        assert_eq!(t.model_sizes_gb.get("embeddinggemma-2:440m"), Some(&0.71));
+        assert!(t.tiers.iter().all(|tier| !t.models(tier).contains(&"embeddinggemma-2:440m")));
     }
 
     #[test]

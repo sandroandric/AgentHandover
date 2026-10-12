@@ -103,6 +103,14 @@ def normalise_request(body: dict) -> dict:
             if isinstance(message, dict) and "images" in message:
                 message["images"] = [_image_digest(img) for img in message["images"]]
         material["messages"] = messages
+    # /api/embed's multimodal items ({"text"?, "image"?}); text items are
+    # plain strings and stay as they are.
+    if isinstance(material.get("input"), list):
+        material["input"] = [
+            dict(item, image=_image_digest(item["image"]))
+            if isinstance(item, dict) and "image" in item else item
+            for item in material["input"]
+        ]
     return material
 
 

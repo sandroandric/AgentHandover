@@ -7,7 +7,7 @@ name = "agenthandover-worker"
 version = "0.5.0"
 description = "AgentHandover worker — episode building, semantic translation, SOP induction"
 requires-python = ">=3.11"
-dependencies = ["pyyaml>=6.0"]
+dependencies = ["pyyaml>=6.0", "numpy>=2,<3"]
 
 [project.optional-dependencies]
 dev = ["pytest>=7.0", "pytest-cov"]

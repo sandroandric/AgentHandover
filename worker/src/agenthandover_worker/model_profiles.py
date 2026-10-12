@@ -500,6 +500,12 @@ def get_profile(model: str) -> ModelProfile:
 # tier table's models were measured on (test Mac, Ollama 0.34.2).
 MINIMUM_OLLAMA_VERSION_FOR_GEMMA4 = "0.34.0"
 
+# EmbeddingGemma 2 (:data:`MEMORY_MODEL`) runs from Ollama 0.40.0, which
+# added multimodal ``/api/embed`` inputs (verified on the test Mac with
+# Ollama 0.40.3).  Older Ollama: Memory is unavailable; the text paths stay
+# on nomic-embed-text.
+MINIMUM_OLLAMA_VERSION_FOR_MEMORY = "0.40.0"
+
 
 def version_at_least(version: str, minimum: str) -> bool:
     """True when *version* (e.g. ``"0.34.2-rc1"``) is >= *minimum*."""
@@ -538,6 +544,82 @@ def ollama_supports_gemma4(ollama_host: str = "http://localhost:11434") -> bool:
 
 EMBEDDING_MODEL = "nomic-embed-text"
 
+# Memory embeds every kept frame (screenshot + "app — title") with Google's
+# EmbeddingGemma 2 (text and image inputs; Ollama >=
+# :data:`MINIMUM_OLLAMA_VERSION_FOR_MEMORY`).
+MEMORY_MODEL = "embeddinggemma-2:440m"
+
+
+@dataclass(frozen=True)
+class EmbeddingThresholds:
+    """The cosine thresholds the worker applies to one embedding model's
+    vectors (each is meaningful only for the model it was measured on)."""
+
+    # Task segmenter: similarity to a cluster centroid for "same task".
+    segmenter: float
+    # Session linker: cosine at or above which two intents link, and the
+    # band just below it where an LLM verdict decides.
+    linker_cos: float
+    linker_band: float
+    # SOP dedup: a semantic match, and the lower edge of the family range
+    # ``[dedup_family, dedup)``.
+    dedup: float
+    dedup_family: float
+    # Procedure matcher: a match counts as supporting evidence.
+    matcher: float
+    # Skill search (MCP ``search_procedures`` and the query API's
+    # ``/search``): the default lowest score returned.
+    min_score: float
+
+
+@dataclass(frozen=True)
+class EmbeddingProfile:
+    """How the worker embeds with one model: the vector size it stores, the
+    task prefix for each kind of text, and the thresholds measured on it
+    (None until calibrated)."""
+
+    model: str
+    dim: int
+    doc_prefix: str
+    query_prefix: str
+    cluster_prefix: str
+    thresholds: EmbeddingThresholds | None
+
+
+# One row per embedding model the worker can use.  nomic-embed-text keeps
+# the numbers the readers hold today (task_segmenter, session_linker,
+# sop_dedup, procedure_matcher, mcp_server, query_api, and vector_kb's
+# prefixes); WP-E2 points the readers at this table.  EmbeddingGemma 2's
+# prefixes are its model card's; it is stored truncated to 256 dimensions
+# (Matryoshka; measured near-lossless against 768), and its thresholds come
+# from the calibration recordings (WP-E3), never guessed.
+EMBEDDING_PROFILES: dict[str, EmbeddingProfile] = {
+    EMBEDDING_MODEL: EmbeddingProfile(
+        model=EMBEDDING_MODEL,
+        dim=768,
+        doc_prefix="search_document: ",
+        query_prefix="search_query: ",
+        cluster_prefix="clustering: ",
+        thresholds=EmbeddingThresholds(
+            segmenter=0.83,
+            linker_cos=0.89,
+            linker_band=0.08,
+            dedup=0.70,
+            dedup_family=0.60,
+            matcher=0.50,
+            min_score=0.3,
+        ),
+    ),
+    MEMORY_MODEL: EmbeddingProfile(
+        model=MEMORY_MODEL,
+        dim=256,
+        doc_prefix="title: none | text: ",
+        query_prefix="task: search result | query: ",
+        cluster_prefix="task: clustering | query: ",
+        thresholds=None,
+    ),
+}
+
 # The per-frame annotator is the small resident model on every tier
 # (text-first annotation, WP-C3b); a larger model writes Skills and
 # behavioural syntheses, where quality matters and calls are rare.  16 GB
@@ -572,6 +654,7 @@ MODEL_SIZES_GB: dict[str, float] = {
     "gemma4:12b-it-qat": 7.2,
     "gemma4:31b-it-qat": 18.0,
     EMBEDDING_MODEL: 0.27,
+    MEMORY_MODEL: 0.71,
 }
 
 
@@ -719,7 +802,9 @@ def tiers_document() -> dict:
         "schema_version": 1,
         "basis": TIER_BASIS,
         "minimum_ollama_version_for_gemma4": MINIMUM_OLLAMA_VERSION_FOR_GEMMA4,
+        "minimum_ollama_version_for_memory": MINIMUM_OLLAMA_VERSION_FOR_MEMORY,
         "embedding_model": EMBEDDING_MODEL,
+        "memory_model": MEMORY_MODEL,
         "model_sizes_gb": MODEL_SIZES_GB,
         "tiers": [
             {

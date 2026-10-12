@@ -800,6 +800,31 @@ pub struct ConfiguredModels {
     pub tier_label: String,
     pub annotation: String,
     pub sop: String,
+    /// `[memory] enabled = true`: Memory's model needs the tier table's
+    /// `minimum_ollama_version_for_memory`.
+    pub memory_enabled: bool,
+}
+
+/// With Memory on, a service older than `minimum` (the tier table's
+/// `minimum_ollama_version_for_memory`) is a warning: EmbeddingGemma 2
+/// does not run there, so Memory is unavailable while Skills keep working.
+/// Nothing when Memory is off or the service does not answer (the service
+/// finding reports that).
+pub fn diagnose_memory(version: Option<&str>, minimum: &str, memory_enabled: bool) -> Option<Finding> {
+    let v = version.filter(|_| memory_enabled)?;
+    if ollama::version_at_least(v, minimum) {
+        return None;
+    }
+    Some(finding(
+        Level::Warn,
+        format!("Memory needs Ollama {minimum} or later (you have {v})"),
+        vec![
+            "Memory embeds what you see with EmbeddingGemma 2, which this Ollama cannot run, \
+             so Memory cannot work until Ollama is updated. Skills keep working."
+                .into(),
+            format!("Fix: update Ollama to {minimum} or later (https://ollama.com/download)."),
+        ],
+    ))
 }
 
 /// Probe this Mac and the service at `host_url`.
@@ -822,6 +847,11 @@ pub fn gather(host_url: &str, models: &ConfiguredModels) -> Report {
         launch_items: &launch_items,
         serving: serving.as_ref(),
     });
+    findings.extend(diagnose_memory(
+        version.as_deref(),
+        &table.minimum_ollama_version_for_memory,
+        models.memory_enabled,
+    ));
     let mut headroom = None;
     if host.local {
         if let Some(free) = free_memory_now() {
@@ -864,7 +894,8 @@ mod tests {
     fn tiers() -> TierTable {
         serde_json::from_str(
             r#"{"schema_version": 1, "basis": "", "minimum_ollama_version_for_gemma4": "0.34.0",
-                "embedding_model": "nomic-embed-text",
+                "minimum_ollama_version_for_memory": "0.40.0",
+                "embedding_model": "nomic-embed-text", "memory_model": "embeddinggemma-2:440m",
                 "model_sizes_gb": {"qwen3.5:4b": 3.4, "gemma4:12b-it-qat": 7.2,
                                    "gemma4:31b-it-qat": 18.0, "nomic-embed-text": 0.27},
                 "tiers": [
@@ -1089,6 +1120,30 @@ mod tests {
             assert_eq!(f[0].title, "Ollama 0.30.6 is older than 0.34.0");
             assert!(!text(&f[0]).contains("so this is a warning"), "{}", text(&f[0]));
         }
+    }
+
+    /// With Memory on, an Ollama older than the table's
+    /// `minimum_ollama_version_for_memory` warns (Skills still work); with
+    /// Memory off, or no service answering, there is nothing to say.
+    #[test]
+    fn memory_warns_on_an_ollama_older_than_its_minimum() {
+        let min = &tiers().minimum_ollama_version_for_memory;
+        assert_eq!(min, "0.40.0");
+        let f = diagnose_memory(Some("0.34.2"), min, true).unwrap();
+        assert_eq!(f.level, Level::Warn);
+        assert_eq!(f.title, "Memory needs Ollama 0.40.0 or later (you have 0.34.2)");
+        assert_eq!(
+            f.lines,
+            [
+                "Memory embeds what you see with EmbeddingGemma 2, which this Ollama cannot run, \
+                 so Memory cannot work until Ollama is updated. Skills keep working.",
+                "Fix: update Ollama to 0.40.0 or later (https://ollama.com/download).",
+            ]
+        );
+        assert_eq!(diagnose_memory(Some("0.34.2"), min, false), None);
+        assert_eq!(diagnose_memory(Some("0.40.0"), min, true), None);
+        assert_eq!(diagnose_memory(Some("0.40.3-rc1"), min, true), None);
+        assert_eq!(diagnose_memory(None, min, true), None);
     }
 
     /// Below the minimum only warns when no configured model is Gemma 4

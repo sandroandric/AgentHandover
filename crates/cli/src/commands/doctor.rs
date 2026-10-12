@@ -247,7 +247,8 @@ pub fn run() -> Result<()> {
     // Check 15: the Ollama service (the configured host), its version
     // against the minimum (a failure only when a configured model is
     // Gemma 4, a warning otherwise), the installs on this Mac and which one serves
-    // the port, and memory headroom for the configured tier.
+    // the port, with Memory on its own minimum (a warning), and memory
+    // headroom for the configured tier.
     let config_str = std::fs::read_to_string(&config_path).unwrap_or_default();
     let host_url = read_config_string_field(&config_str, "vlm", "ollama_host").unwrap_or_default();
     let report = machine::gather(&host_url, &configured_models(&config_str));
@@ -396,6 +397,8 @@ fn configured_models(config_str: &str) -> machine::ConfiguredModels {
         tier_label: tier.label.clone(),
         annotation,
         sop,
+        memory_enabled: read_config_string_field(config_str, "memory", "enabled")
+            .is_some_and(|v| v == "true"),
     }
 }
 
@@ -1005,6 +1008,29 @@ mod tests {
                  to TextEdit while it runs.",
             ]
         );
+    }
+
+    /// `[memory] enabled = true` asks for the shipped table's Memory
+    /// minimum: doctor warns "Memory needs Ollama 0.40.0 or later" on an
+    /// older service, and says nothing when Memory is off or absent.
+    #[test]
+    fn memory_on_warns_about_an_ollama_too_old_for_it() {
+        let warning = |config: &str, version: &str| {
+            machine::diagnose_memory(
+                Some(version),
+                &tiers::table().minimum_ollama_version_for_memory,
+                configured_models(config).memory_enabled,
+            )
+        };
+        let on = "[vlm]\ntier = \"recommended\"\n\n[memory]\nenabled = true  # setup\n";
+        let f = warning(on, "0.34.2").expect("a warning");
+        assert_eq!(f.level, machine::Level::Warn);
+        assert_eq!(f.title, "Memory needs Ollama 0.40.0 or later (you have 0.34.2)");
+        assert_eq!(warning(on, "0.40.3"), None);
+        assert_eq!(warning("[memory]\nenabled = false\n", "0.34.2"), None);
+        assert_eq!(warning("[vlm]\ntier = \"recommended\"\n", "0.34.2"), None);
+        // `enabled` under another section is not Memory's.
+        assert_eq!(warning("[privacy]\nenabled = true\n", "0.34.2"), None);
     }
 
     /// An old Ollama fails only when the models the worker would use (the
