@@ -376,6 +376,12 @@ def test_a_source_deleted_after_it_was_staged_stays_deleted(world) -> None:
     upgrade = _upgrade(world, rows_per_job=10)
     upgrade.step()
     world.vkb.delete_by_source("preserved_text", f"{world.event_id}:ocr")
+    # Forgotten means forgotten: the staged vector goes with the next job,
+    # even one that waits.
+    upgrade._retry_at = world.clock.t + 60
+    assert upgrade.step() is False
+    assert "preserved_text" not in {r[0] for r in _rows(world.db, "vector_store_next")}
+    world.clock.t += 60
     assert upgrade.step() is True
     assert "preserved_text" not in {r[0] for r in _rows(world.db)}
     assert _rows(world.db, "vector_store_next") == []

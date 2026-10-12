@@ -102,6 +102,8 @@ _PENDING = (
     "LEFT JOIN vector_store_next n ON n.id = v.id AND n.from_hash = v.text_hash "
     "WHERE n.id IS NULL ORDER BY v.rowid LIMIT ?"
 )
+# Staged rows whose vector_store row is gone.
+_ORPHANS = "DELETE FROM vector_store_next WHERE id NOT IN (SELECT id FROM vector_store)"
 
 
 def offer_choice(data_dir: Path) -> str | None:
@@ -242,6 +244,9 @@ class EmbeddingUpgrade:
         if not self.wanted():
             self._abandon(saved)
             return False
+        # A source deleted since it was staged (forgotten, purged, a
+        # deleted procedure): its new vector goes too.
+        self._conn.execute(_ORPHANS)
         if self._monotonic() < self._retry_at:
             return False
         self.waiting = self._blocker() if self._blocker is not None else None
@@ -363,11 +368,8 @@ class EmbeddingUpgrade:
             return False
         self._conn.execute("BEGIN IMMEDIATE")
         try:
-            # Sources deleted since they were staged (a forgotten range, a
-            # deleted procedure) stay deleted.
-            self._conn.execute(
-                "DELETE FROM vector_store_next WHERE id NOT IN (SELECT id FROM vector_store)"
-            )
+            # Sources deleted since they were staged stay deleted.
+            self._conn.execute(_ORPHANS)
             if self._conn.execute(_PENDING, (1,)).fetchone() is not None:
                 self._conn.execute("ROLLBACK")
                 return False
