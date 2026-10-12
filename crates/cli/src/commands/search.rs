@@ -22,14 +22,14 @@ const SEARCH_RESULT_FILE: &str = "search-query-result.json";
 const RECALL_RESULT_FILE: &str = "recall-query-result.json";
 
 /// The worker's query API (`knowledge.query_api_port`, default 9477).
-const QUERY_API_PORT: u16 = 9477;
+pub(crate) const QUERY_API_PORT: u16 = 9477;
 const QUERY_API_TIMEOUT: Duration = Duration::from_secs(15);
 /// File in the data dir holding the token every POST must carry.
 const QUERY_API_TOKEN_FILE: &str = "query-api-token";
 const QUERY_API_TOKEN_HEADER: &str = "X-AgentHandover-Token";
 
 /// The worker's API token, or `None` when it has not written one yet.
-fn read_query_api_token(dir: &Path) -> Option<String> {
+pub(crate) fn read_query_api_token(dir: &Path) -> Option<String> {
     let token = std::fs::read_to_string(dir.join(QUERY_API_TOKEN_FILE)).ok()?;
     let token = token.trim();
     (!token.is_empty()).then(|| token.to_string())
@@ -47,6 +47,19 @@ fn post_query_api(
     token: Option<&str>,
     body: &serde_json::Value,
 ) -> Result<Option<serde_json::Value>> {
+    Ok(call_query_api(port, "POST", path, token, Some(body))?.map(|(_, reply)| reply))
+}
+
+/// Send `method path` (with `body` as JSON, if any) to the local query API
+/// and return the HTTP status and the JSON reply; `Ok(None)` when nothing
+/// is listening (connection refused).
+pub(crate) fn call_query_api(
+    port: u16,
+    method: &str,
+    path: &str,
+    token: Option<&str>,
+    body: Option<&serde_json::Value>,
+) -> Result<Option<(u16, serde_json::Value)>> {
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
     let mut stream = match TcpStream::connect_timeout(&addr, Duration::from_secs(1)) {
         Ok(stream) => stream,
@@ -56,12 +69,15 @@ fn post_query_api(
     stream.set_read_timeout(Some(QUERY_API_TIMEOUT))?;
     stream.set_write_timeout(Some(QUERY_API_TIMEOUT))?;
 
-    let payload = serde_json::to_vec(body)?;
+    let payload = match body {
+        Some(body) => serde_json::to_vec(body)?,
+        None => Vec::new(),
+    };
     let token_header = token
         .map(|t| format!("{QUERY_API_TOKEN_HEADER}: {t}\r\n"))
         .unwrap_or_default();
     let mut request = format!(
-        "POST {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\
+        "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\
          Content-Type: application/json\r\nContent-Length: {}\r\n\
          {token_header}Connection: close\r\n\r\n",
         payload.len()
@@ -77,16 +93,15 @@ fn post_query_api(
         .position(|w| w == b"\r\n\r\n")
         .ok_or_else(|| anyhow::anyhow!("Malformed response from the query API"))?;
     let status_line = String::from_utf8_lossy(&response[..split]);
-    let status_ok = status_line
+    let Some(status) = status_line
         .lines()
         .next()
         .and_then(|l| l.split_whitespace().nth(1))
         .and_then(|code| code.parse::<u16>().ok())
-        .is_some();
-    if !status_ok {
+    else {
         bail!("Malformed response from the query API");
-    }
-    Ok(Some(serde_json::from_slice(&response[split + 4..])?))
+    };
+    Ok(Some((status, serde_json::from_slice(&response[split + 4..])?)))
 }
 
 /// Ask the query API; fall back to the trigger spool when it is not up.
@@ -407,6 +422,28 @@ mod tests {
         let reply = post_query_api(port, "/recall", None, &serde_json::json!({})).unwrap().unwrap();
         assert_eq!(reply["error"], "Search is not available");
         server.join().unwrap();
+    }
+
+    #[test]
+    fn a_get_without_a_body_returns_the_status_and_reply() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut conn, _) = listener.accept().unwrap();
+            let request = read_request(&mut conn);
+            let body = r#"{"error": "memory_off"}"#;
+            write!(conn, "HTTP/1.0 503 Service Unavailable\r\n\r\n{}", body).unwrap();
+            request
+        });
+        let (status, reply) = call_query_api(port, "GET", "/memory/status", Some("t"), None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(status, 503);
+        assert_eq!(reply["error"], "memory_off");
+        let request = server.join().unwrap();
+        assert!(request.starts_with("GET /memory/status HTTP/1.1\r\n"));
+        assert!(request.contains("\r\nContent-Length: 0\r\n"));
+        assert!(request.contains("\r\nX-AgentHandover-Token: t\r\n"));
     }
 
     #[test]

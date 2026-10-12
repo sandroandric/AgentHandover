@@ -524,6 +524,12 @@ Generated from the CLI's own definition (`agenthandover <command> --help` has th
 | `agenthandover search <QUERY>` | Search activity annotations (full-text search) | `--date` `--app` `--limit` |
 | `agenthandover connect <AGENT> [OPTIONS]...` | Connect an AI agent (claude-code, codex, openclaw, hermes, mcp) |  |
 | `agenthandover bench [OPTIONS]...` | Model bake-off: replay a journey cassette's prompts against a tier's live models and report tok/s and a golden-diff score | `--tier` |
+| `agenthandover memory search <QUERY>` | Search Memory by meaning ("the Acme invoice", "the error in the terminal") | `--since` `--until` `--app` `--limit` `--json` |
+| `agenthandover memory forget` | Forget a stretch of time, an app, a moment or everything (asks first) | `--last` `--today` `--since` `--until` `--app` `--moment` `--all` `--yes` |
+| `agenthandover memory pause` | Pause Memory (Skills still learn; pause observing in the app for that) | `--for` |
+| `agenthandover memory resume` | Resume Memory |  |
+| `agenthandover memory status` | What Memory holds, and whether it is on or paused | `--json` |
+| `agenthandover memory agents <STATE>` | Let agents search Memory over MCP (descriptions, never images), or stop them |  |
 | `agenthandover recall` | Recall what you were doing at a given time | `--date` `--app` `--start` `--end` |
 <!-- cli-table:end -->
 

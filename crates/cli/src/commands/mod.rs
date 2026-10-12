@@ -3,6 +3,7 @@ pub mod doctor;
 pub mod export;
 pub mod focus;
 pub mod logs;
+pub mod memory;
 pub mod search;
 pub mod service;
 pub mod setup;

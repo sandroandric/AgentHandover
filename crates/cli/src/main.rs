@@ -158,6 +158,11 @@ enum Commands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         options: Vec<String>,
     },
+    /// Memory: search, forget or pause what was on your screen
+    Memory {
+        #[command(subcommand)]
+        action: MemoryAction,
+    },
     /// Recall what you were doing at a given time
     Recall {
         /// Date to recall (YYYY-MM-DD, default: today)
@@ -172,6 +177,78 @@ enum Commands {
         /// End time filter (HH:MM)
         #[arg(long)]
         end: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum MemoryAction {
+    /// Search Memory by meaning ("the Acme invoice", "the error in the terminal")
+    Search {
+        /// What you are looking for
+        query: String,
+        /// Only moments after this time (2026-10-12 14:30, 14:30, 2026-10-12)
+        #[arg(long)]
+        since: Option<String>,
+        /// Only moments before this time
+        #[arg(long)]
+        until: Option<String>,
+        /// Only this app
+        #[arg(long)]
+        app: Option<String>,
+        /// Maximum moments to show (1-100)
+        #[arg(short = 'n', long, default_value = "20",
+              value_parser = clap::value_parser!(u32).range(1..=100))]
+        limit: u32,
+        /// Print the API's JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Forget a stretch of time, an app, a moment or everything (asks first)
+    Forget {
+        /// The last while (30m, 1h, 2d)
+        #[arg(long)]
+        last: Option<String>,
+        /// Today so far
+        #[arg(long)]
+        today: bool,
+        /// From this time (with --until, or up to now)
+        #[arg(long)]
+        since: Option<String>,
+        /// Up to this time (needs --since)
+        #[arg(long)]
+        until: Option<String>,
+        /// This app (on its own: on every day)
+        #[arg(long)]
+        app: Option<String>,
+        /// One moment, by the id `memory search` shows
+        #[arg(long)]
+        moment: Option<String>,
+        /// Everything Memory and the activity history hold
+        #[arg(long)]
+        all: bool,
+        /// Do not ask for confirmation
+        #[arg(short = 'y', long)]
+        yes: bool,
+    },
+    /// Pause Memory (Skills still learn; pause observing in the app for that)
+    Pause {
+        /// For how long (30m, 1h, 2d); default: until you resume
+        #[arg(long = "for", value_name = "DURATION")]
+        duration: Option<String>,
+    },
+    /// Resume Memory
+    Resume,
+    /// What Memory holds, and whether it is on or paused
+    Status {
+        /// Print the API's JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Let agents search Memory over MCP (descriptions, never images), or stop them
+    Agents {
+        /// on or off
+        #[arg(value_parser = ["on", "off"])]
+        state: String,
     },
 }
 
@@ -325,6 +402,7 @@ fn main() -> Result<()> {
             app,
             limit,
         } => commands::search::search(&query, date.as_deref(), app.as_deref(), limit),
+        Commands::Memory { action } => run_memory(action),
         Commands::Recall {
             date,
             app,
@@ -336,5 +414,42 @@ fn main() -> Result<()> {
             start.as_deref(),
             end.as_deref(),
         ),
+    }
+}
+
+fn run_memory(action: MemoryAction) -> Result<()> {
+    use commands::memory;
+    let api = memory::worker_api();
+    let (now, tz) = memory::now();
+    let out = &mut std::io::stdout();
+    match action {
+        MemoryAction::Search { query, since, until, app, limit, json } => {
+            let args = memory::SearchArgs {
+                query: &query,
+                since: since.as_deref(),
+                until: until.as_deref(),
+                app: app.as_deref(),
+                limit,
+                json,
+            };
+            memory::search(&api, out, &args, now, &tz)
+        }
+        MemoryAction::Forget { last, today, since, until, app, moment, all, yes } => {
+            let args = memory::ForgetArgs {
+                last: last.as_deref(),
+                today,
+                since: since.as_deref(),
+                until: until.as_deref(),
+                app: app.as_deref(),
+                moment: moment.as_deref(),
+                all,
+                yes,
+            };
+            memory::forget(&api, out, &mut std::io::stdin().lock(), &args, now, &tz)
+        }
+        MemoryAction::Pause { duration } => memory::pause(&api, out, duration.as_deref(), now, &tz),
+        MemoryAction::Resume => memory::resume(&api, out),
+        MemoryAction::Status { json } => memory::status(&api, out, json, now, &tz),
+        MemoryAction::Agents { state } => memory::agents_switch(state == "on"),
     }
 }
