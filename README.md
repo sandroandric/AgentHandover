@@ -215,6 +215,7 @@ It exposes these tools and resources (generated from the server):
 | `list_all_skills()` | List ALL Skills with their lifecycle state. |
 | `get_skill(slug)` | Get a full Skill by slug. |
 | `search_skills(query)` | Semantic search — find Skills by meaning, not just keywords. |
+| `search_memory(query)` | Search the user's Memory: what was on their screen, by meaning. |
 | `get_user_profile()` | Get the user's profile — tools, working hours, writing style. |
 | `report_execution_start(slug)` | Report that you are starting to execute a Skill. |
 | `report_step_result(execution_id, step_id)` | Report the result of a single step during Skill execution. |
