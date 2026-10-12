@@ -120,7 +120,9 @@ final class MemoryOfferTests: XCTestCase {
     }
 
     func testSetupDefaultsAreMemoryOnAndAgentsOff() {
-        let defaults = UserDefaults(suiteName: "memory-setup-\(UUID().uuidString)")!
+        let suite = "memory-setup-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
         XCTAssertTrue(MemorySetupChoice.wantsMemory(defaults))
         XCTAssertFalse(MemorySetupChoice.agentsAccess(defaults))
         XCTAssertFalse(defaults.bool(forKey: MemoryDecisions.setupAnsweredKey))
