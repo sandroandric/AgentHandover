@@ -85,13 +85,16 @@ pub fn encode_thumbnail(bgra: &[u8], width: usize, height: usize) -> Result<Vec<
 
 /// AES-256-GCM seal with a fresh random nonce: `nonce || ciphertext || tag`.
 pub fn seal(key: &ThumbnailKey, plaintext: &[u8]) -> Vec<u8> {
+    seal_with_nonce(key, &Aes256Gcm::generate_nonce(&mut OsRng).into(), plaintext)
+}
+
+fn seal_with_nonce(key: &ThumbnailKey, nonce: &[u8; NONCE_LEN], plaintext: &[u8]) -> Vec<u8> {
     let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key));
-    let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
     let ciphertext = cipher
-        .encrypt(&nonce, plaintext)
+        .encrypt(Nonce::from_slice(nonce), plaintext)
         .expect("AES-GCM encryption of an in-memory buffer cannot fail");
     let mut sealed = Vec::with_capacity(NONCE_LEN + ciphertext.len());
-    sealed.extend_from_slice(&nonce);
+    sealed.extend_from_slice(nonce);
     sealed.extend_from_slice(&ciphertext);
     sealed
 }
@@ -179,6 +182,23 @@ mod tests {
         assert_ne!(a[..NONCE_LEN], b[..NONCE_LEN], "a new nonce per seal");
         assert_eq!(open(&KEY, &a).unwrap(), plaintext);
         assert_eq!(open(&KEY, &b).unwrap(), plaintext);
+    }
+
+    /// The same vector is opened by the app's CryptoKit code
+    /// (`MemoryThumbnailTests.testOpensWhatTheDaemonSealed`): the file
+    /// layout is `nonce || ciphertext || tag`, CryptoKit's combined box.
+    #[test]
+    fn known_vector_is_the_cryptokit_combined_layout() {
+        let nonce: [u8; NONCE_LEN] = core::array::from_fn(|i| i as u8 + 1);
+        let sealed = seal_with_nonce(&[42u8; KEY_LEN], &nonce, b"AgentHandover thumbnail");
+        let hex: String = sealed.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(
+            hex,
+            "0102030405060708090a0b0c\
+             b5047c38fcde0aa4646a5dc99f77c00dd3b66d306cc023\
+             f4defdab4c7c39b4f2bfe1d324a2caf6"
+        );
+        assert_eq!(open(&[42u8; KEY_LEN], &sealed).unwrap(), b"AgentHandover thumbnail");
     }
 
     #[test]

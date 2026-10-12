@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 /// Unix socket server that serves screenshot capture requests to the daemon.
@@ -8,6 +9,12 @@ import Foundation
 /// - Server responds: magic `AHJ1` + width u32 LE + height u32 LE +
 ///   byte length u32 LE + JPEG bytes (the frame after downscaling)
 /// - Or error: `{"error": "..."}\n`
+///
+/// Memory thumbnail key (v0.6): `{"command":"thumbnail_key"}\n` is answered
+/// with byte length u32 LE (32) + the raw key (`MemoryThumbnailKey`), or the
+/// error line. Like every request it reaches only peers `policy` accepts:
+/// the daemon at its installed path and, in a signed build, signed by this
+/// team as `com.agenthandover.observer`.
 ///
 /// Each connection is handled on a concurrent queue, so one hung
 /// ScreenCaptureKit call never blocks the next request. After
@@ -38,6 +45,7 @@ final class ScreenCaptureServer {
     private let minRecycleInterval: TimeInterval
     private let makeCapture: () -> CaptureFunction
     private let policy: PeerPolicy
+    private let thumbnailKey: () -> SymmetricKey?
     private let handlerQueue = DispatchQueue(
         label: "com.agenthandover.capture-connections", qos: .userInitiated, attributes: .concurrent)
     private var listener: UnixSocketListener?
@@ -58,12 +66,14 @@ final class ScreenCaptureServer {
         minRecycleInterval: TimeInterval = ScreenCaptureServer.defaultMinRecycleInterval,
         policy: PeerPolicy = .production(
             paths: [PeerPolicy.daemonPath], identifiers: [PeerPolicy.daemonIdentifier]),
+        thumbnailKey: @escaping () -> SymmetricKey? = MemoryThumbnailKey.appKey,
         makeCapture: @escaping () -> CaptureFunction = ScreenCaptureServer.serviceCapture
     ) {
         self.socketPath = socketPath
         self.captureTimeout = captureTimeout
         self.minRecycleInterval = minRecycleInterval
         self.policy = policy
+        self.thumbnailKey = thumbnailKey
         self.makeCapture = makeCapture
         self.capture = makeCapture()
     }
@@ -73,10 +83,11 @@ final class ScreenCaptureServer {
         socketPath: String,
         captureTimeout: TimeInterval = ScreenCaptureServer.defaultCaptureTimeout,
         policy: PeerPolicy,
+        thumbnailKey: @escaping () -> SymmetricKey? = MemoryThumbnailKey.appKey,
         capture: @escaping CaptureFunction
     ) {
         self.init(socketPath: socketPath, captureTimeout: captureTimeout, policy: policy,
-                  makeCapture: { capture })
+                  thumbnailKey: thumbnailKey, makeCapture: { capture })
     }
 
     static func serviceCapture() -> CaptureFunction {
@@ -131,6 +142,15 @@ final class ScreenCaptureServer {
         guard let json = try? JSONSerialization.jsonObject(
             with: Data(buffer[0..<bytesRead])) as? [String: Any] else {
             sendError(fd, message: "invalid JSON")
+            return
+        }
+
+        if json["command"] as? String == "thumbnail_key" {
+            guard let key = thumbnailKey() else {
+                sendError(fd, message: "thumbnail key unavailable")
+                return
+            }
+            sendAll(fd, Self.encodeKeyResponse(key))
             return
         }
 
@@ -235,6 +255,13 @@ final class ScreenCaptureServer {
             withUnsafeBytes(of: value.littleEndian) { data.append(contentsOf: $0) }
         }
         data.append(frame.jpeg)
+        return data
+    }
+
+    static func encodeKeyResponse(_ key: SymmetricKey) -> Data {
+        var data = Data()
+        withUnsafeBytes(of: UInt32(key.bitCount / 8).littleEndian) { data.append(contentsOf: $0) }
+        key.withUnsafeBytes { data.append(contentsOf: $0) }
         return data
     }
 
