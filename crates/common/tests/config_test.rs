@@ -76,3 +76,30 @@ fn test_read_app_state_defaults_off() {
     let config = AppConfig::from_toml_str("[privacy]\nenable_inline_secret_redaction = true\nenable_clipboard_preview = false\nclipboard_preview_max_chars = 200\nsecure_field_drop = true\n").unwrap();
     assert!(!config.privacy.read_app_state);
 }
+
+#[test]
+fn test_memory_config_defaults_match_the_shared_contract() {
+    let memory = AppConfig::default().memory;
+    assert!(!memory.enabled);
+    assert_eq!(memory.model, "embeddinggemma-2:440m");
+    assert_eq!(memory.dimensions, 256);
+    assert_eq!(memory.retention_days, 365);
+    assert_eq!(memory.thumbnail_days, 7);
+    assert!(!memory.agents_access);
+    assert_eq!(memory.max_frames_per_hour, 600);
+    assert!(!memory.writes_thumbnails(), "off by default");
+    // A config without [memory] (every 0.5 install) loads the defaults.
+    assert_eq!(AppConfig::from_toml_str("").unwrap().memory, memory);
+}
+
+#[test]
+fn test_memory_config_partial_table_keeps_other_defaults() {
+    let config = AppConfig::from_toml_str("[memory]\nenabled = true\nthumbnail_days = 3\n").unwrap();
+    assert!(config.memory.enabled);
+    assert_eq!(config.memory.thumbnail_days, 3);
+    assert_eq!(config.memory.dimensions, 256);
+    assert!(config.memory.writes_thumbnails());
+    let none_kept =
+        AppConfig::from_toml_str("[memory]\nenabled = true\nthumbnail_days = 0\n").unwrap();
+    assert!(!none_kept.memory.writes_thumbnails(), "thumbnail_days = 0 keeps none");
+}

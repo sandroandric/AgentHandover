@@ -587,3 +587,26 @@ fn daemon_status_compute_shape_and_roundtrip() {
     let parsed: DaemonStatus = serde_json::from_value(old).unwrap();
     assert!(parsed.compute.is_none());
 }
+
+#[test]
+fn test_memory_paused_reads_the_pause_file() {
+    use agenthandover_common::status::{memory_paused, MEMORY_PAUSE_FILE};
+    let dir = tempfile::tempdir().unwrap();
+    let now = Utc::now();
+    assert!(!memory_paused(dir.path(), now), "no file: not paused");
+
+    let file = dir.path().join(MEMORY_PAUSE_FILE);
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    let write = |body: String| std::fs::write(&file, body).unwrap();
+
+    write(r#"{"paused_until": null}"#.into());
+    assert!(memory_paused(dir.path(), now), "null: paused until resumed");
+    let later = (now + chrono::Duration::hours(1)).to_rfc3339();
+    write(format!(r#"{{"paused_until": "{later}"}}"#));
+    assert!(memory_paused(dir.path(), now));
+    let earlier = (now - chrono::Duration::minutes(1)).to_rfc3339();
+    write(format!(r#"{{"paused_until": "{earlier}"}}"#));
+    assert!(!memory_paused(dir.path(), now), "a pause that ended");
+    write("not json".into());
+    assert!(memory_paused(dir.path(), now), "a broken record fails closed");
+}
