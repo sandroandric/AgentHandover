@@ -275,7 +275,7 @@ def test_memory_defaults_are_the_shared_contract(tmp_path):
     assert load_config(tmp_path / "missing.toml").memory == MemoryConfig(
         enabled=False,
         model="embeddinggemma-2:440m",
-        dimensions=256,
+        dimensions=512,
         retention_days=365,
         thumbnail_days=7,
         agents_access=False,

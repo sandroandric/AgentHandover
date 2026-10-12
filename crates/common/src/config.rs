@@ -483,7 +483,7 @@ impl Default for MemoryConfig {
         Self {
             enabled: false,
             model: "embeddinggemma-2:440m".into(),
-            dimensions: 256,
+            dimensions: 512,
             retention_days: 365,
             thumbnail_days: 7,
             agents_access: false,

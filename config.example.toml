@@ -80,7 +80,7 @@ max_rows = 50000                   # hard cap; the least recently updated vector
 # so you can search what you saw. Setup turns it on for new installs.
 enabled = false
 model = "embeddinggemma-2:440m"    # needs Ollama 0.40.0 or later
-dimensions = 256
+dimensions = 512                   # stored vector size (512 keeps recall by look; 256 loses it)
 retention_days = 365               # memory rows older than this are purged daily
 thumbnail_days = 7                 # encrypted thumbnails older than this are deleted daily
 agents_access = false              # let agents search Memory (MCP search_memory); never images

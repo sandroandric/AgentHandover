@@ -201,7 +201,7 @@ class MemoryConfig:
 
     enabled: bool = False
     model: str = MEMORY_MODEL
-    dimensions: int = 256
+    dimensions: int = 512
     # Memory rows older than this are purged once a day.
     retention_days: int = 365
     # Encrypted thumbnails older than this are deleted once a day.

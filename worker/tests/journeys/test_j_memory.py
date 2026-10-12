@@ -8,7 +8,7 @@ a 1Password window still pending (the privacy zone blocks it) and the
 Dock (system UI, skipped by the annotator).  Two consecutive frames of
 the Acme invoice show the same screen.  With ``[memory] enabled = true``
 the worker ticks over them on the recorded cassette (EmbeddingGemma 2 at
-256 dimensions); then:
+512 dimensions); then:
 
 * five moments are stored, the invoice's two frames in one row;
 * neither the 1Password nor the Dock frame is in Memory;
@@ -42,7 +42,7 @@ from journeys.cassette import CASSETTE_DIR, load_entries, request_key
 
 FRAMES_DIR = Path(__file__).parent / "fixtures" / "memory_frames"
 CASSETTE = "memory"
-DIM = 256
+DIM = 512
 
 ANNOTATED = "completed"
 # (id, seconds after the start, app, window title, image, annotation status,

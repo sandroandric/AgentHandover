@@ -44,7 +44,7 @@ from agenthandover_worker.privacy_zones import PrivacyZoneChecker
 from agenthandover_worker.scene_annotator import AnnotationConfig, SceneAnnotator
 from daemon_db import create_daemon_db
 
-DIM = 256
+DIM = 512
 NOW = datetime(2026, 10, 12, 12, 0, tzinfo=timezone.utc)
 
 
@@ -530,7 +530,7 @@ def test_a_vector_of_the_wrong_size_is_a_failure_not_a_row(env):
     writer = _writer(env, FakeEmbedder({b"red": [1.0, 0.0]}), clock)
     add_frame(env, at=NOW - timedelta(minutes=1))
     stats = writer.run()
-    assert stats["embedded"] == 0 and "not 256" in stats["waiting"]
+    assert stats["embedded"] == 0 and "not 512" in stats["waiting"]
     assert rows(env) == []
 
 
@@ -667,7 +667,7 @@ def test_daily_maintenance_runs_the_memory_purge():
 
 def test_memory_config_defaults_and_validation(tmp_path):
     assert Config().memory == MemoryConfig(
-        enabled=False, model="embeddinggemma-2:440m", dimensions=256, retention_days=365,
+        enabled=False, model="embeddinggemma-2:440m", dimensions=512, retention_days=365,
         thumbnail_days=7, agents_access=False, max_frames_per_hour=600,
     )
     path = tmp_path / "config.toml"

@@ -82,7 +82,7 @@ fn test_memory_config_defaults_match_the_shared_contract() {
     let memory = AppConfig::default().memory;
     assert!(!memory.enabled);
     assert_eq!(memory.model, "embeddinggemma-2:440m");
-    assert_eq!(memory.dimensions, 256);
+    assert_eq!(memory.dimensions, 512);
     assert_eq!(memory.retention_days, 365);
     assert_eq!(memory.thumbnail_days, 7);
     assert!(!memory.agents_access);
@@ -97,7 +97,7 @@ fn test_memory_config_partial_table_keeps_other_defaults() {
     let config = AppConfig::from_toml_str("[memory]\nenabled = true\nthumbnail_days = 3\n").unwrap();
     assert!(config.memory.enabled);
     assert_eq!(config.memory.thumbnail_days, 3);
-    assert_eq!(config.memory.dimensions, 256);
+    assert_eq!(config.memory.dimensions, 512);
     assert!(config.memory.writes_thumbnails());
     let none_kept =
         AppConfig::from_toml_str("[memory]\nenabled = true\nthumbnail_days = 0\n").unwrap();
