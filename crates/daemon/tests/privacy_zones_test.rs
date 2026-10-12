@@ -14,6 +14,7 @@ use agenthandover_common::browser_transition::{
 use agenthandover_common::config::PrivacyZonesConfig;
 use agenthandover_common::event::{Event, EventKind};
 use agenthandover_daemon::capture::screenshot::FRAME_MAGIC;
+use agenthandover_daemon::capture::thumbnail;
 use agenthandover_daemon::observer::event_loop::{run_observer_loop, ObserverConfig, ObserverMessage};
 use agenthandover_storage::artifact_store::ArtifactStore;
 use std::io::Write;
@@ -92,9 +93,13 @@ fn frame_response() -> Vec<u8> {
     out
 }
 
+/// The Memory thumbnail key the fake app hands out.
+const TEST_KEY: [u8; 32] = [42u8; 32];
+
 /// Count capture requests. By default each is answered by closing the
 /// connection (the capture fails; the count is what most tests check);
-/// with `serve_frames` each gets a real frame.
+/// with `serve_frames` each gets a real frame. A thumbnail key request is
+/// answered with `TEST_KEY` (length u32 LE + key) and not counted.
 fn fake_capture_server(path: &Path, serve_frames: bool) -> Arc<AtomicUsize> {
     let listener = UnixListener::bind(path).unwrap();
     let count = Arc::new(AtomicUsize::new(0));
@@ -103,10 +108,16 @@ fn fake_capture_server(path: &Path, serve_frames: bool) -> Arc<AtomicUsize> {
     tokio::spawn(async move {
         loop {
             let Ok((stream, _)) = listener.accept().await else { return };
-            seen.fetch_add(1, Ordering::SeqCst);
             let mut reader = BufReader::new(stream);
             let mut line = String::new();
             let _ = reader.read_line(&mut line).await;
+            if line.contains("\"thumbnail_key\"") {
+                let mut reply = (TEST_KEY.len() as u32).to_le_bytes().to_vec();
+                reply.extend_from_slice(&TEST_KEY);
+                let _ = reader.get_mut().write_all(&reply).await;
+                continue;
+            }
+            seen.fetch_add(1, Ordering::SeqCst);
             if serve_frames {
                 let _ = reader.get_mut().write_all(&frame).await;
             }
@@ -143,6 +154,9 @@ fn harness_with(zones: PrivacyZonesConfig, serve_frames: bool) -> Harness {
         state_dir,
         // No clicks: the real value would follow the person using this Mac.
         seconds_since_last_click: || f64::INFINITY,
+        // Memory on: every kept frame also gets an encrypted thumbnail.
+        memory_thumbnails: true,
+        thumbs_dir: root.join("thumbs"),
         ..Default::default()
     };
     Harness { _dir: dir, root, config, captures }
@@ -420,6 +434,20 @@ async fn a_failed_tick_does_not_fabricate_a_transition() {
     assert_eq!(h.captures.load(Ordering::SeqCst), 0);
 }
 
+/// The file names in the thumbnails dir (sorted; empty when it is absent).
+fn thumbnails_in(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .map(|entries| {
+            entries
+                .filter_map(|e| e.ok())
+                .map(|e| e.file_name().to_string_lossy().to_string())
+                .collect()
+        })
+        .unwrap_or_default();
+    names.sort();
+    names
+}
+
 fn jpegs_in(dir: &Path) -> usize {
     std::fs::read_dir(dir)
         .map(|entries| entries.filter_map(|e| e.ok()).count())
@@ -440,9 +468,19 @@ async fn an_allowed_window_keeps_its_frame() {
         ],
     );
     let stats = Arc::clone(&h.config.capture_stats);
+    let thumbs = h.config.thumbs_dir.clone();
     let events = run_loop(h.config, &h.root, Some(&served), Duration::from_millis(800)).await;
     assert_eq!(frames(&events), 1, "{events:?}");
     assert_eq!(jpegs_in(&shots), 1);
+    // v0.6 Memory: the kept frame has an encrypted thumbnail named by its
+    // event id, sealed with the app's key.
+    let frame = events.iter().find(|e| matches!(e.kind, EventKind::DwellSnapshot)).unwrap();
+    assert_eq!(thumbnails_in(&thumbs), vec![format!("{}.ahthumb", frame.id)]);
+    let sealed = std::fs::read(thumbs.join(format!("{}.ahthumb", frame.id))).unwrap();
+    let jpeg = thumbnail::open(&TEST_KEY, &sealed).unwrap();
+    let image = image::load_from_memory_with_format(&jpeg, image::ImageFormat::Jpeg).unwrap();
+    assert_eq!((image.width(), image.height()), (64, 40), "a small frame is not enlarged");
+    assert!(thumbnail::open(&[0u8; 32], &sealed).is_err());
     // WP-C1: daemon-status.json's capture counters see the same frame.
     let compute = stats.lock().unwrap().snapshot(Instant::now());
     assert_eq!(compute.since_start.frames_captured, 1);
@@ -502,10 +540,12 @@ async fn system_password_prompt_never_reaches_the_shutter() {
             window_reply("pid:9:SecurityAgent", "Password"),
         ],
     );
+    let thumbs = h.config.thumbs_dir.clone();
     let events = run_loop(h.config, &h.root, Some(&served), Duration::from_millis(800)).await;
     assert_eq!(h.captures.load(Ordering::SeqCst), 0, "no capture request for SecurityAgent");
     assert_eq!(frames(&events), 0, "no frame row: {events:?}");
     assert_eq!(jpegs_in(&shots), 0, "no file");
+    assert!(thumbnails_in(&thumbs).is_empty(), "no thumbnail");
     assert_eq!(
         app_switches(&events),
         vec![("pid:10:TextEdit".into(), "pid:9:SecurityAgent".into(), String::new())],
@@ -530,6 +570,7 @@ async fn a_switch_to_a_blocked_window_during_the_capture_drops_the_frame() {
         ],
     );
     let stats = Arc::clone(&h.config.capture_stats);
+    let thumbs = h.config.thumbs_dir.clone();
     let events = run_loop(h.config, &h.root, Some(&served), Duration::from_millis(800)).await;
     assert!(h.captures.load(Ordering::SeqCst) >= 1, "the capture was taken");
     let compute = stats.lock().unwrap().snapshot(Instant::now());
@@ -538,4 +579,76 @@ async fn a_switch_to_a_blocked_window_during_the_capture_drops_the_frame() {
     assert_eq!(compute.since_start.frames_gated_by_reason.get("privacy_changed"), Some(&1));
     assert_eq!(frames(&events), 0, "no frame row: {events:?}");
     assert_eq!(jpegs_in(&shots), 0, "no file");
+    assert!(thumbnails_in(&thumbs).is_empty(), "no thumbnail for a dropped frame");
+}
+
+/// A focused password field, as the app reports it.
+fn secure_field_reply(app_id: &str, title: &str) -> String {
+    let mut reply: serde_json::Value = serde_json::from_str(&window_reply(app_id, title)).unwrap();
+    reply["secure_field_focused"] = serde_json::Value::Bool(true);
+    reply.to_string()
+}
+
+/// v0.6 Memory, with frames on offer and Memory on: a blocked window, a
+/// metadata-only window and a focused password field never produce an
+/// encrypted thumbnail (nor a frame), while the same switch into an
+/// ordinary window does (the control in `an_allowed_window_keeps_its_frame`).
+#[tokio::test(flavor = "current_thread")]
+async fn private_windows_never_produce_a_thumbnail() {
+    let cases = [
+        ("blocked", PrivacyZonesConfig::default(), window_reply("pid:11:1Password", "Vault")),
+        (
+            "metadata-only",
+            PrivacyZonesConfig { metadata_only: vec!["Messages".into()], ..Default::default() },
+            window_reply("pid:13:Messages", "Alice"),
+        ),
+        ("secure field", PrivacyZonesConfig::default(), secure_field_reply("pid:12:Preview", "Sign in")),
+    ];
+    for (name, zones, private_window) in cases {
+        let h = harness_with(zones, true);
+        let thumbs = h.config.thumbs_dir.clone();
+        let served = fake_observation_server(
+            &h.config.observation_socket,
+            vec![window_reply("pid:10:TextEdit", "notes.txt"), private_window.clone(), private_window],
+        );
+        let events = run_loop(h.config, &h.root, Some(&served), Duration::from_millis(600)).await;
+        assert_eq!(h.captures.load(Ordering::SeqCst), 0, "{name}: no capture request");
+        assert_eq!(frames(&events), 0, "{name}: no frame row");
+        assert!(thumbnails_in(&thumbs).is_empty(), "{name}: no thumbnail");
+    }
+}
+
+/// Memory off, or paused (`status/memory-pause.json`), keeps the frame for
+/// Skills but writes no thumbnail; a pause that has ended writes one again.
+#[tokio::test(flavor = "current_thread")]
+async fn memory_off_or_paused_writes_no_thumbnail() {
+    let in_an_hour = (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
+    let an_hour_ago = (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
+    for (name, memory_on, pause, expect) in [
+        ("memory off", false, None, 0),
+        ("paused until resumed", true, Some(r#"{"paused_until": null}"#.to_string()), 0),
+        ("paused for an hour", true, Some(format!(r#"{{"paused_until": "{in_an_hour}"}}"#)), 0),
+        ("pause ended", true, Some(format!(r#"{{"paused_until": "{an_hour_ago}"}}"#)), 1),
+    ] {
+        let mut h = harness_with(PrivacyZonesConfig::default(), true);
+        h.config.memory_thumbnails = memory_on;
+        if let Some(body) = pause {
+            let file = h.config.state_dir.join("status/memory-pause.json");
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(file, body).unwrap();
+        }
+        let shots = h.config.screenshots_dir.clone();
+        let thumbs = h.config.thumbs_dir.clone();
+        let served = fake_observation_server(
+            &h.config.observation_socket,
+            vec![
+                window_reply("pid:10:TextEdit", "notes.txt"),
+                window_reply("pid:12:Preview", "invoice.pdf"),
+            ],
+        );
+        let events = run_loop(h.config, &h.root, Some(&served), Duration::from_millis(800)).await;
+        assert_eq!(frames(&events), 1, "{name}: the frame is kept for Skills");
+        assert_eq!(jpegs_in(&shots), 1, "{name}");
+        assert_eq!(thumbnails_in(&thumbs).len(), expect, "{name}");
+    }
 }
