@@ -28,8 +28,10 @@ both of which the worker publishes in ``worker-status.json``.
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
+import math
 import time
 import urllib.error
 import urllib.request
@@ -214,30 +216,41 @@ class OllamaClient:
     def embed(
         self,
         model: str,
-        texts: list[str],
+        texts: list[str | dict],
         *,
         prefix: str = "",
+        dimensions: int | None = None,
         batch_size: int | None = None,
         timeout: float | None = None,
     ) -> list[list[float]]:
-        """POST ``/api/embed``: one vector per text, in order.
+        """POST ``/api/embed``: one vector per input, in order.
 
-        *prefix* is prepended to every text (task prefixes such as
-        ``"search_document: "``).  *batch_size* splits the texts over
-        several requests; None sends them in one.  A reply with fewer
-        vectors than texts is padded with empty vectors.
+        Each input is a text, or a multimodal item ``{"text"?: str,
+        "image"?: bytes | str}`` with at least one of the two (an image as
+        raw bytes or already base64-encoded; Ollama >= 0.40).  *prefix* is
+        prepended to every text (task prefixes such as
+        ``"search_document: "``).  *dimensions* asks Ollama to truncate each
+        vector to that many dimensions (Matryoshka models); the truncated
+        vectors are L2-normalised here, so their cosine is their dot
+        product whether or not the server normalises them.  *batch_size*
+        splits the inputs over several requests; None sends them in one.
+        A reply with fewer vectors than inputs is padded with empty vectors.
+
+        For text-only inputs without *dimensions* the request is exactly
+        ``{"model", "input": [prefix + text, ...]}``.
         """
         if not texts:
             return []
-        inputs = [prefix + text for text in texts] if prefix else list(texts)
+        inputs = [_embed_input(item, prefix) for item in texts]
         step = batch_size or len(inputs)
         vectors: list[list[float]] = []
         for start in range(0, len(inputs), step):
             batch = inputs[start : start + step]
+            payload: dict[str, Any] = {"model": model, "input": batch}
+            if dimensions is not None:
+                payload["dimensions"] = dimensions
             began = time.monotonic()
-            reply = self._request(
-                "POST", "/api/embed", {"model": model, "input": batch}, timeout,
-            )
+            reply = self._request("POST", "/api/embed", payload, timeout)
             embeddings = list(reply.get("embeddings") or [])[: len(batch)]
             if len(embeddings) != len(batch):
                 logger.warning(
@@ -245,6 +258,8 @@ class OllamaClient:
                     model, len(batch), len(embeddings),
                 )
                 embeddings.extend([] for _ in range(len(batch) - len(embeddings)))
+            if dimensions is not None:
+                embeddings = [_unit(v) for v in embeddings]
             vectors.extend(embeddings)
             response = Response.from_reply(reply, time.monotonic() - began)
             ops_telemetry.MODEL_USAGE.record(model, "embed", response)
@@ -342,6 +357,33 @@ class OllamaClient:
                 f"Ollama at {self.host}{path} sent {type(reply).__name__}, not an object"
             )
         return reply
+
+
+def _embed_input(item: str | dict, prefix: str) -> str | dict:
+    """One ``/api/embed`` input: a text with *prefix*, or a multimodal item
+    with *prefix* on its text and its image base64-encoded."""
+    if isinstance(item, str):
+        return prefix + item
+    if not isinstance(item, dict) or not item or set(item) - {"text", "image"}:
+        raise ValueError(
+            f"an embed input is a str or a dict of 'text' and/or 'image', not {item!r:.80}"
+        )
+    out: dict[str, str] = {}
+    if "text" in item:
+        out["text"] = prefix + item["text"]
+    if "image" in item:
+        image = item["image"]
+        out["image"] = (
+            base64.b64encode(image).decode("ascii")
+            if isinstance(image, (bytes, bytearray)) else image
+        )
+    return out
+
+
+def _unit(vector: list[float]) -> list[float]:
+    """*vector* scaled to length 1 (an empty or zero vector unchanged)."""
+    norm = math.sqrt(sum(x * x for x in vector))
+    return [x / norm for x in vector] if norm else vector
 
 
 def _error_detail(exc: urllib.error.HTTPError) -> str:

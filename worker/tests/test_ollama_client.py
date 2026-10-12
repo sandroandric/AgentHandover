@@ -262,6 +262,65 @@ def test_embed_prefix_and_padding(caplog):
     assert OllamaClient(HOST).embed("e", []) == []
 
 
+def test_embed_text_request_bytes_are_unchanged():
+    """Text-only calls send the bytes they sent before multimodal inputs
+    and ``dimensions`` existed (the journeys' cassette keys hash them)."""
+    opener = _Urlopen({"embeddings": [[1.0], [2.0]]}, {"embeddings": [[3.0]]})
+    with patch("urllib.request.urlopen", opener):
+        vectors = OllamaClient(HOST).embed(
+            "nomic-embed-text", ["a", "b", "c"], prefix="clustering: ", batch_size=2,
+        )
+        OllamaClient(HOST).embed("nomic-embed-text", ["plain"])
+    assert [sent[2] for sent in opener.sent] == [
+        b'{"model": "nomic-embed-text", "input": ["clustering: a", "clustering: b"]}',
+        b'{"model": "nomic-embed-text", "input": ["clustering: c"]}',
+        b'{"model": "nomic-embed-text", "input": ["plain"]}',
+    ]
+    # Without ``dimensions`` the vectors come back as Ollama sent them.
+    assert vectors == [[1.0], [2.0], [3.0]]
+
+
+def test_embed_multimodal_request_shape():
+    """Image + text items: the prefix goes on the text, image bytes are
+    base64-encoded (a base64 str passes through), ``dimensions`` is a
+    top-level field, and the truncated vectors come back unit length."""
+    import base64
+
+    png = base64.b64decode(PNG_1X1_B64)
+    opener = _Urlopen({"embeddings": [[3.0, 4.0], [0.0, 2.0], [1.0, 0.0], [0.0, 0.0]]})
+    with patch("urllib.request.urlopen", opener):
+        vectors = OllamaClient(HOST).embed(
+            "embeddinggemma-2:440m",
+            [
+                {"text": "Safari — Stripe payouts", "image": png},
+                {"image": PNG_1X1_B64},
+                {"text": "only text"},
+                "a plain string",
+            ],
+            prefix="title: none | text: ",
+            dimensions=256,
+        )
+    assert json.loads(opener.sent[0][2]) == {
+        "model": "embeddinggemma-2:440m",
+        "input": [
+            {"text": "title: none | text: Safari — Stripe payouts", "image": PNG_1X1_B64},
+            {"image": PNG_1X1_B64},
+            {"text": "title: none | text: only text"},
+            "title: none | text: a plain string",
+        ],
+        "dimensions": 256,
+    }
+    assert vectors == [[0.6, 0.8], [0.0, 1.0], [1.0, 0.0], [0.0, 0.0]]
+
+
+@pytest.mark.parametrize("item", [{}, {"txt": "x"}, {"text": "x", "audio": b""}, 3])
+def test_embed_rejects_a_malformed_item(item):
+    with patch("urllib.request.urlopen", _Urlopen({"embeddings": [[1.0]]})) as opener:
+        with pytest.raises(ValueError, match="an embed input is"):
+            OllamaClient(HOST).embed("e", [item])
+    assert opener.sent == []
+
+
 def test_has_model():
     client = OllamaClient(HOST)
     with patch("urllib.request.urlopen", _Urlopen({"models": [{"name": "gemma4:latest"}]})):
