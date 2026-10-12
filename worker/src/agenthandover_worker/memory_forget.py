@@ -267,8 +267,10 @@ class _Forget:
             event = dict(row)
             if _app_matches(app, _app_names(parse_json_field(event, "window_json"))):
                 self.events.append(event)
-        # A moment is forgotten whole: the frames of its window in its span.
-        for moment in self.memory:
+        # A moment is forgotten whole: the frames of its window in its span
+        # (only a time range can cut through one; ``all`` and an app alone
+        # already hold all of its frames).
+        for moment in self.memory if self.since is not None else ():
             for row in self.conn.execute(
                 "SELECT id, timestamp, window_json, metadata_json FROM events "
                 "WHERE julianday(timestamp) BETWEEN julianday(?) AND julianday(?)",
@@ -385,9 +387,17 @@ class _Forget:
             )
 
         if self.sel.all:
-            for table in ("task_segments", "workflow_observations"):
+            # Also what outlived its event (purged by retention) and so
+            # could not be matched to a frame above.
+            for table in (
+                "task_segments", "workflow_observations", "annotation_cache",
+                "events_fts", "events_fts_ids", "preserved_text",
+            ):
                 conn.execute(f"DELETE FROM {table}")
-            conn.execute("DELETE FROM annotation_cache")
+            self.counts["vectors"] += conn.execute(
+                "DELETE FROM vector_store WHERE source_type IN "
+                "('annotation', 'preserved_text', 'daily_summary')"
+            ).rowcount
         else:
             self._delete_sessions()
         return artifact_files

@@ -202,6 +202,11 @@ def test_a_moment_id_forgets_its_rows_and_the_time_they_span(world):
 
 def test_all_forgets_everything_but_skills_and_the_profile(world):
     three_frames(world)
+    # What outlived its event: an index entry and an annotation vector of
+    # a frame retention already purged.
+    world.sql("INSERT INTO events_fts (event_id, what_doing, app, location) "
+              "VALUES ('purged', 'old work', 'Mail', '')")
+    world.vkb.upsert("annotation", "purged", "old work", embedding=world.next_axis())
     counts = run(world, Selector(all=True))
     left = everything_left(world)
     assert all(not v for v in left.values()), left
