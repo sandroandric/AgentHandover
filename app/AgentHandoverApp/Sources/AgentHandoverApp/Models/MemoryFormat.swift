@@ -67,6 +67,25 @@ enum MemoryPauseOption: CaseIterable, Identifiable {
     }
 }
 
+/// The Memory window's time filter.
+enum MemoryRange: String, CaseIterable, Identifiable {
+    case anyTime = "Any Time"
+    case today = "Today"
+    case thisWeek = "This Week"
+
+    var id: Self { self }
+
+    /// The search's `since`: nil for any time, the start of the local day,
+    /// or the start of the calendar's week.
+    func since(now: Date, calendar: Calendar = .current) -> Date? {
+        switch self {
+        case .anyTime: return nil
+        case .today: return calendar.startOfDay(for: now)
+        case .thisWeek: return calendar.dateInterval(of: .weekOfYear, for: now)?.start
+        }
+    }
+}
+
 /// How Memory's times, spans and sizes read. The calendar and locale are
 /// injected so tests read the same words on every Mac.
 struct MemoryFormat {

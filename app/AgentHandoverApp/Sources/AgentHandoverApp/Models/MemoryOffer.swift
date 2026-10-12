@@ -143,6 +143,18 @@ enum MemoryDecisions {
         "Memory needs Ollama \(minimum) or later; this Mac has \(version). Update the Ollama app "
             + "from ollama.com/download (or run: brew install --cask ollama-app), then turn on Memory."
     }
+
+    /// Turn on the Memory setup deferred for an old Ollama: write
+    /// `[memory] enabled = true`, forget the deferral, restart the worker
+    /// and the daemon.  Blocking.
+    static func enableDeferredMemory(defaults: UserDefaults = .standard) {
+        var settings = MemorySettings.load()
+        settings.enabled = true
+        if MemorySettings.write(settings, keys: [.enabled]) {
+            MemorySettings.restartServices()
+        }
+        defaults.set(false, forKey: deferredKey)
+    }
 }
 
 /// Setup's Memory step: the two switches, kept in UserDefaults until the

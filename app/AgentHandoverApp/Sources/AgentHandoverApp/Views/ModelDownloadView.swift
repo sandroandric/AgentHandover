@@ -46,15 +46,19 @@ struct ModelDownloadView: View {
     init(
         question: String, detail: String?, missing: [String],
         afterDownload: @escaping () -> Result<String, ModelDownloadFailure>,
-        notNow: @escaping () -> Void = {}, close: @escaping () -> Void
+        notNow: @escaping () -> Void = {}, autostart: Bool = false, close: @escaping () -> Void
     ) {
         self.question = question
         self.detail = detail
         self.missing = missing
         self.afterDownload = afterDownload
         self.notNow = notNow
+        self.autostart = autostart
         self.close = close
     }
+
+    /// Start downloading when shown (the question was already answered).
+    private var autostart = false
 
     private enum Phase: Equatable {
         case asking
@@ -109,6 +113,9 @@ struct ModelDownloadView: View {
         }
         .padding(20)
         .frame(width: 420)
+        .onAppear {
+            if autostart && phase == .asking { download() }
+        }
     }
 
     private func download() {
