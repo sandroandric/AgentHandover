@@ -40,7 +40,7 @@ from mcp.client.stdio import stdio_client  # noqa: E402
 TOOLS = {
     "list_ready_skills", "list_all_skills", "get_skill", "search_skills",
     "get_user_profile", "report_execution_start", "report_step_result",
-    "report_execution_complete",
+    "report_execution_complete", "search_memory",
 }
 
 

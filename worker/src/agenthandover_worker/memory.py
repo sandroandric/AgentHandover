@@ -806,6 +806,10 @@ def _epoch(text: str) -> float:
 
 _WORD = re.compile(r"\w{3,}", re.UNICODE)
 _LIKE_DESCRIPTION = "lower(description) LIKE ? ESCAPE '\\'"
+_STOPWORDS = frozenset(
+    "the and for with from into that this what was were when where which who how "
+    "did does had has have about after before".split()
+)
 
 
 def _words(query: str) -> list[str]:
@@ -1064,8 +1068,10 @@ def keyword_search(
     """The rows of *index*'s model whose description holds words (3+
     letters) of *query*, scored by the share of the words held, best (then
     newest) first: the search when the query cannot be embedded.  Same
-    filters and fields as :meth:`MemoryIndex.search`, one row per moment."""
-    words = _words(query)
+    filters and fields as :meth:`MemoryIndex.search`, one row per moment.
+    Words that say nothing about a screen ("the", "what", "was") are not
+    matched."""
+    words = [w for w in _words(query) if w not in _STOPWORDS]
     if not words or limit <= 0:
         return []
     where = ["model = ?", "dim = ?"]
