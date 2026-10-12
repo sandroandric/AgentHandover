@@ -192,8 +192,8 @@ class EmbeddingConfig:
 
 @dataclass(frozen=True)
 class MemoryConfig:
-    """``[memory]``: the private memory of kept screens (mirrors
-    ``MemoryConfig`` in ``crates/common/src/config.rs``)."""
+    """``[memory]``: the private memory of kept screens.  ``model`` is
+    also the model whose vector-store rows the daily purge keeps."""
 
     enabled: bool = False
     model: str = "embeddinggemma-2:440m"
