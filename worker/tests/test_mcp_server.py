@@ -390,6 +390,64 @@ class TestKeywordFallback:
         assert search("deploy kubernetes") == []
 
 
+class TestCommonplaceTool:
+    """``search_commonplace`` is the first tool an agent sees, and the
+    server's instructions tell the agent what Commonplace is."""
+
+    @pytest.fixture
+    def server(self, tmp_path: Path):
+        from agenthandover_worker.knowledge_base import KnowledgeBase
+        from agenthandover_worker.mcp_server import build_mcp_server
+
+        kb = KnowledgeBase(root=tmp_path / "knowledge", db_path=kb_db(tmp_path / "knowledge"))
+        kb.ensure_structure()
+        kb.save_procedure({
+            "id": "expense-report", "title": "Submit expense report",
+            "description": "Monthly receipts", "lifecycle_state": "draft",
+            "steps": [{"action": "Open Expensify"}],
+        })
+        kb.update_profile({"tools": {"expenses": "Expensify"}})
+        with patch("agenthandover_worker.mcp_server._get_kb_root", return_value=tmp_path / "knowledge"), \
+             patch("agenthandover_worker.mcp_server._get_db_path", return_value=kb.db_path):
+            yield build_mcp_server()
+
+    def test_listed_first_with_its_arguments(self, server):
+        import asyncio
+
+        tools = asyncio.run(server.list_tools())
+        assert tools[0].name == "search_commonplace"
+        assert list(tools[0].inputSchema["properties"]) == ["query", "kinds", "since", "until", "limit"]
+        assert tools[0].inputSchema["required"] == ["query"]
+        assert tools[0].description.startswith("Search Commonplace")
+
+    def test_the_instructions_introduce_commonplace(self, server):
+        text = server.instructions
+        assert "Commonplace" in text and "search_commonplace" in text
+        for held in ("Skills", "Memory", "daily summaries", "profile"):
+            assert held in text
+        assert "only when the user has let agents search it" in text
+        assert "never images" in text
+
+    def test_groups_by_kind_and_keeps_memory_behind_the_switch(self, server, tmp_path, monkeypatch):
+        config = tmp_path / "config.toml"
+        monkeypatch.setattr("agenthandover_worker.config.config_path", lambda: config)
+        tool = server._tool_manager.get_tool("search_commonplace").fn
+        result = json.loads(tool("expense receipts", kinds=["skills", "memory", "profile"]))
+        assert set(result) == {"query", "skills", "memory", "profile"}
+        assert result["skills"]["mode"] == "keyword_fallback"
+        assert [(s["slug"], s["handoff"]) for s in result["skills"]["results"]] == [
+            ("expense-report", "not_approved"),
+        ]
+        assert result["memory"]["mode"] == "not_allowed"
+        assert "agenthandover memory agents on" in result["memory"]["reason"]
+        assert result["profile"]["results"][0]["tools"] == {"expenses": "Expensify"}
+
+    def test_a_bad_request_is_an_error_object(self, server):
+        tool = server._tool_manager.get_tool("search_commonplace").fn
+        assert "unknown kind(s): emails" in json.loads(tool("x", kinds=["emails"]))["error"]
+        assert "'since' must be an ISO-8601 time" in json.loads(tool("x", since="soon"))["error"]
+
+
 class TestCommandLine:
     """``agenthandover-mcp`` parses its arguments before it builds a server:
     ``--help`` and ``--version`` answer and exit, an unknown argument is an
