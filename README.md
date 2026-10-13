@@ -29,6 +29,7 @@
   <a href="#what-a-skill-looks-like">What a Skill Looks Like</a> &middot;
   <a href="#how-it-works">How It Works</a> &middot;
   <a href="#memory">Memory</a> &middot;
+  <a href="#commonplace">Commonplace</a> &middot;
   <a href="#v060">What's New</a> &middot;
   <a href="#connect-your-agent">Connect Your Agent</a> &middot;
   <a href="#install">Install</a> &middot;
@@ -161,13 +162,22 @@ New in 0.6. Find anything you saw on your Mac by describing it. Each screen Agen
 - **What is kept.** For each moment: a short redacted description (the screen's annotation, or its screen text until one exists), the app and window title, the time and a search vector. The screenshot is deleted once it is embedded. A small thumbnail (about 480 px) is kept for 7 days to show in results, encrypted with a key in your Keychain that only the app and the capture daemon use. After that the description and vector remain, for a year by default.
 - **Never kept.** What the privacy zones block: password managers, macOS password prompts, Keychain Access, banking, payroll and sign-in pages, and the apps, sites and hours you add to `[privacy.zones]`.
 - **Forget and pause.** Forget the last hour, today, one moment, one app or everything, from the menu, the Memory window or `agenthandover memory forget`. Forget deletes the screens, descriptions, vectors, thumbnails, search entries and that day's summaries; your approved Skills stay. Pause Memory for an hour, until tomorrow or until you resume; Skills still learn from what you do.
-- **Agents.** One switch, off by default: **Let agents search my Memory** (Memory Settings, or `agenthandover memory agents on`). Agents then get `search_memory` over MCP: descriptions, apps, window titles and times, never images or file paths.
+- **Agents.** One switch, off by default: **Let agents search my Memory** (Memory Settings, or `agenthandover memory agents on`). Agents then find Memory through [Commonplace](#commonplace) (`search_commonplace`, or `search_memory`, over MCP; `agenthandover search` in a terminal): descriptions, apps, window titles and times, never images or file paths.
 - **Light.** Embedding is a low-priority background job, about half a second a screen. It waits while macOS reports memory pressure or less than 2 GB is free, while a two-model tier is writing Skills, and after 600 screens in an hour; its model is unloaded a minute after the last screen.
 - **Needs** Ollama 0.40 or later (EmbeddingGemma 2 runs on Ollama's MLX runner) and `embeddinggemma-2:440m` (710 MB), which setup or the upgrade offer downloads.
 
 **How well it finds things.** On the 16 GB test Mac (Ollama 0.40.3), 26 screens (20 public web pages in look-alike pairs and 6 app screens) and 52 questions, half about what a screen said and half about how it looked, run through Memory's own writer and search: the right screen came first for 90% of the questions and was in the top five for all of them; for questions about the look, 88% first. Embedding the same screens' title and screen text with `nomic-embed-text`, the model 0.5 searches with, found 75% first, and 65% of the questions about the look. One small set, so indicative. On real Safari windows captured by AgentHandover on the same Mac (16 pages, each opened from another app, so the window came up still showing the previous page), searched through the Memory window's search afterwards: all 16 questions about what a page said found it first; 14 of 16 about how it looked found it first and 15 of 16 were in the top three.
 
 **Upgrading from 0.5**, the app asks once: **Memory only** (Skill search keeps `nomic-embed-text`), **Upgrade everything** (Skill search, task grouping and session linking move to EmbeddingGemma 2 too: your Skills are re-indexed in the background and switched over in one step when it is done, and search keeps working meanwhile), or **Not now**. New installs use EmbeddingGemma 2 for everything.
+
+## Commonplace
+
+New in 0.6. Everything AgentHandover knows about your work, in one place your agents can search: **Skills** (the workflows it learned from you, and whether each may be handed off), **Memory** (what was on your screen, only when you let agents search it), **daily summaries** (what you worked on each day) and your **profile** (tools, working hours, writing style). All of it stays on your Mac.
+
+- **Agents know it exists.** The MCP server's instructions describe Commonplace to every connected agent, and `agenthandover connect` adds a short Commonplace note where each agent reads its instructions (Claude Code's `/agenthandover-list`, Codex's `AGENTS.md` block, an `agenthandover-commonplace` Skill for Hermes, `memory/apprentice/commonplace.md` in the OpenClaw workspace; `connect mcp` prints it for any other agent).
+- **One search, grouped by kind.** `search_commonplace(query, kinds?, since?, until?, limit?)` over MCP, `agenthandover search "…"` in a terminal (`--kinds skills,memory,days,profile`, `--since`, `--until`, `-n`, `--json`), or `POST /commonplace/search` on the REST API. Each kind is ranked by its own scorer and returned in its own group, so a Skill's score is never weighed against a Memory moment's. When an embedding model is busy or down, that kind falls back to matching the query's words and says so.
+- **What agents get.** Text: Skill titles, descriptions and hand-off status; Memory descriptions, apps, window titles and times; a day's date, apps and an excerpt of its tasks; the profile. Never vectors, images, thumbnails or file paths. Memory answers only while **Let agents search my Memory** is on; otherwise its group says how you can turn it on. The switch applies to the next search, no restart.
+- **What it is not.** A permission boundary against software that already runs as you: the data lives in files under your home folder, so any process with your user's file access can read the local database, as with any app's data.
 
 ## The Knowledge Base
 
@@ -209,7 +219,7 @@ The menu bar app detects installed agents (Claude Code, Cursor, Windsurf, Codex,
 | Hermes | `agenthandover connect hermes` | Skills in `~/.hermes/skills/agenthandover/` |
 | Anything MCP | `agenthandover connect mcp` | The MCP server config to paste |
 
-Every connector hands over only the Skills that pass the hand-off gate.
+Every connector hands over only the Skills that pass the hand-off gate, and tells the agent about [Commonplace](#commonplace).
 
 ### MCP Server (recommended)
 
@@ -230,6 +240,7 @@ It exposes these tools and resources (generated from the server):
 <!-- mcp-tools:start -->
 | Tool | What it does |
 |------|-------------|
+| `search_commonplace(query)` | Search Commonplace: everything AgentHandover knows about the user's work. |
 | `list_ready_skills()` | List the Skills an agent may run, and the approved ones held back. |
 | `list_all_skills()` | List ALL Skills with their lifecycle state. |
 | `get_skill(slug)` | Get a full Skill by slug. |
@@ -303,6 +314,9 @@ curl -X POST http://localhost:9477/bundle/my-workflow \
 curl -X POST http://localhost:9477/search/semantic \
   -H "X-AgentHandover-Token: $TOKEN" \
   -d '{"query": "deploy to production"}'      # Semantic search
+curl -X POST http://localhost:9477/commonplace/search \
+  -H "X-AgentHandover-Token: $TOKEN" \
+  -d '{"query": "the Acme invoice", "kinds": ["memory", "days"]}'  # Commonplace
 ```
 
 ## Install
@@ -615,6 +629,7 @@ GitHub [Discussions](https://github.com/sandroandric/AgentHandover/discussions) 
 AgentHandover grows from Skills into a private memory of your work, with Skills on top. Numbers are measurements on the 16 GB test Mac with Ollama 0.40.3 unless stated.
 
 - **Memory.** Search anything you saw by describing it, from the menu bar, the CLI or (if you allow it) your agents. Each kept screen is embedded with its app and window title by EmbeddingGemma 2 on your Mac; near-identical screens of one window become one moment. On 52 questions about 26 screens: the right screen first 90% of the time, in the top five every time, 88% first for questions about how a screen looked (0.5's text search: 75% and 65%). See [Memory](#memory).
+- **Commonplace.** Your Skills, Memory, daily summaries and profile as one hub your agents know about and can search (`search_commonplace` over MCP, `agenthandover search` in a terminal), grouped by kind, text only, Memory only when you allow it. See [Commonplace](#commonplace).
 - **Private by construction.** Thumbnails are AES-256-GCM encrypted with a Keychain key and kept 7 days; descriptions are redacted; privacy zones are never kept; forget deletes a time range, an app, a moment or everything, including the day's summaries; agents' access is a separate switch, off by default, and returns text, never images.
 - **EmbeddingGemma 2 for search.** New installs use it for Skill search, task grouping and session linking too; upgraders choose Memory only or Upgrade everything (a background re-index that switches over in one step). Every threshold was measured on labelled sets for both models: with EmbeddingGemma, session linking separates same-task from different-task pairs completely (nomic: two thirds), and Skill search ranked 15 of 16 agent questions first (nomic: 16 of 16).
 - **Frames show the right page.** A frame used to be taken the moment a window's title changed, before the app had drawn the new page, so it could show the page you were leaving. Capture now waits until the window has been still for a second (at most three), one frame per change.
