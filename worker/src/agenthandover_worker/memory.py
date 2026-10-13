@@ -47,11 +47,15 @@ backoff).  While paused (``<data dir>/status/memory-pause.json``) the
 cursor moves past every frame: what is captured during a pause is never
 embedded.
 
-:class:`MemoryIndex` is the search side: the rows' vectors in a numpy
-matrix, loaded lazily and refreshed incrementally, scored by dot product
-against the query's vector, with a small boost for rows whose description
-holds every word of the query, and adjacent rows of one window grouped
-into moments.
+:class:`MemoryIndex` is the search side: the rows' vectors held as 8-bit
+integers with one scale per row (a quarter of float32's RAM), loaded on
+the first search, refreshed incrementally, and released after
+:data:`INDEX_IDLE_SECONDS` without a search.  Every candidate is ranked by
+its approximate dot product with the query's vector; the best
+(:data:`RESCORE_MIN` or :data:`RESCORE_PER_RESULT` per result asked) are
+scored again from their stored float32 vectors, so rankings and scores
+are float32's.  Rows whose description holds every word of the query get
+a small boost, and adjacent rows of one window are grouped into moments.
 """
 
 from __future__ import annotations
@@ -62,7 +66,9 @@ import os
 import re
 import sqlite3
 import tempfile
+import threading
 import time
+import weakref
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -129,6 +135,15 @@ KEYWORD_BOOST = 0.05
 SHORTLIST = 500
 # Search: rows of one window this close in time are one moment.
 MOMENT_GAP_SECONDS = MERGE_GAP_SECONDS
+# Search: the best max(RESCORE_MIN, RESCORE_PER_RESULT x limit) rows and
+# moments by 8-bit score are scored again from their float32 vectors.
+RESCORE_MIN = 50
+RESCORE_PER_RESULT = 5
+# The index is released after this long without a search (the next search
+# loads it again: about half a second per 100,000 rows).
+INDEX_IDLE_SECONDS = 600.0
+# Rows per block when scoring the 8-bit matrix (bounds the float32 copy).
+SCORE_BLOCK_ROWS = 8192
 
 
 # ---------------------------------------------------------------------------
@@ -277,6 +292,16 @@ def _focus_session(event: dict) -> str | None:
 
 def _pack(vector: np.ndarray) -> bytes:
     return np.asarray(vector, dtype="<f4").tobytes()
+
+
+def _quantize(vectors: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Rows of *vectors* as int8 and a float32 scale per row (symmetric:
+    ``scale = max|v| / 127``; ``int8 * scale`` is the row again)."""
+    vectors = np.asarray(vectors, dtype=np.float32)
+    peak = np.abs(vectors).max(axis=1) if vectors.size else np.zeros(len(vectors), np.float32)
+    scale = np.where(peak > 0, peak / 127.0, 1.0).astype(np.float32)
+    q8 = np.clip(np.rint(vectors / scale[:, None]), -127, 127).astype(np.int8)
+    return q8, scale
 
 
 def _unit(vector: list[float] | np.ndarray) -> np.ndarray | None:
@@ -856,9 +881,14 @@ class MemoryIndex:
 
     *embed_query* turns the query text into a unit vector of *dim* values
     (:func:`query_embedder` in the product).  The rows' vectors are read
-    into a float32 matrix on the first search and refreshed on each:
-    rows added or extended since (``created_at``, ``last_ts``) are read
-    again; when rows were deleted the matrix is read whole.
+    on the first search into an int8 matrix with a float32 scale per row
+    (:func:`_quantize`) and refreshed on each: rows added or extended
+    since (``created_at``, ``last_ts``) are read again, a settling frame's
+    replaced vector quantized again; when rows were deleted everything is
+    read again.  After *idle_seconds* without a search a timer thread
+    releases the index (:meth:`release_if_idle`); the next search loads it
+    again.  One lock serializes searches, reloads and the release, and the
+    release never waits for a search.
     """
 
     def __init__(
@@ -868,10 +898,17 @@ class MemoryIndex:
         model: str,
         dim: int,
         embed_query: Callable[[str], list[float]],
+        idle_seconds: float = INDEX_IDLE_SECONDS,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self.model = model
         self.dim = dim
         self._embed_query = embed_query
+        self._idle_seconds = idle_seconds
+        self._clock = clock
+        self._used = clock()
+        self._lock = threading.Lock()
+        self._timer: threading.Timer | None = None
         self._conn = sqlite3.connect(
             f"{Path(db_path).resolve().as_uri()}?mode=ro", uri=True, check_same_thread=False,
         )
@@ -880,12 +917,18 @@ class MemoryIndex:
         self._reset()
 
     def close(self) -> None:
+        with self._lock:
+            if self._timer is not None:
+                self._timer.cancel()
+                self._timer = None
+            self._reset()
         self._conn.close()
 
     def _reset(self) -> None:
         self._ids: list[str] = []
         self._pos: dict[str, int] = {}
-        self._matrix = np.zeros((0, self.dim), dtype=np.float32)
+        self._q8 = np.zeros((0, self.dim), dtype=np.int8)
+        self._scale = np.zeros(0, dtype=np.float32)
         self._first = np.zeros(0)
         self._last = np.zeros(0)
         self._app_codes: dict[str, int] = {}
@@ -900,24 +943,72 @@ class MemoryIndex:
     def __len__(self) -> int:
         return len(self._ids)
 
+    @property
+    def nbytes(self) -> int:
+        """The bytes of the index's arrays (the ids and their dicts not
+        counted)."""
+        return sum(a.nbytes for a in (
+            self._q8, self._scale, self._first, self._last, self._app_code, self._window,
+        ))
+
     def reload(self) -> None:
         """Forget the matrix: the next search reads every row again (after
         rows were forgotten)."""
-        self._reset()
+        with self._lock:
+            self._reset()
+
+    # -- release when idle ----------------------------------------------
+
+    def release_if_idle(self, now: float | None = None) -> bool:
+        """Release the index when no search has run for *idle_seconds*
+        (*now* on the index's clock); True when it was released.  Returns
+        False at once while a search runs."""
+        if not self._lock.acquire(blocking=False):
+            return False
+        try:
+            if not self._ids:
+                return False
+            idle = (self._clock() if now is None else now) - self._used
+            if idle < self._idle_seconds:
+                return False
+            rows = len(self._ids)
+            self._reset()
+            logger.info("Memory index released (%d rows) after %.0f s without a search", rows, idle)
+            return True
+        finally:
+            self._lock.release()
+
+    def _arm(self) -> None:
+        """Start the idle timer if none runs (the lock is held)."""
+        if self._timer is not None:
+            return
+        delay = max(0.0, self._used + self._idle_seconds - self._clock())
+        # A weak reference: the timer does not keep a dropped index alive.
+        self._timer = threading.Timer(delay, MemoryIndex._idle_timer, args=(weakref.ref(self),))
+        self._timer.daemon = True
+        self._timer.start()
+
+    @staticmethod
+    def _idle_timer(ref: "weakref.ref[MemoryIndex]") -> None:
+        index = ref()
+        if index is None:
+            return
+        index.release_if_idle()
+        with index._lock:
+            index._timer = None
+            if index._ids:  # searched since, or a search held the lock
+                index._arm()
+
+    # -- loading --------------------------------------------------------
 
     def refresh(self) -> int:
-        """Bring the matrix up to date with the table; returns the rows read."""
+        """Bring the index up to date with the table; returns the rows read."""
         where = "model = ? AND dim = ?"
         params: list[Any] = [self.model, self.dim]
         if self._ids:
             where += " AND (created_at >= ? OR last_ts >= ?)"
             params += [self._seen_created, self._seen_last]
-        rows = self._conn.execute(
-            "SELECT id, first_ts, last_ts, app, window_title, embedding, created_at "
-            f"FROM memory_frames WHERE {where}",
-            params,
-        ).fetchall()
-        self._upsert(rows)
+        read = self._read(where, params)
         total = self._conn.execute(
             "SELECT count(*) FROM memory_frames WHERE model = ? AND dim = ?",
             (self.model, self.dim),
@@ -925,15 +1016,38 @@ class MemoryIndex:
         if total != len(self._ids):
             # Rows were deleted (retention, forget): read them all again.
             self._reset()
-            rows = self._conn.execute(
-                "SELECT id, first_ts, last_ts, app, window_title, embedding, created_at "
-                "FROM memory_frames WHERE model = ? AND dim = ?",
-                (self.model, self.dim),
-            ).fetchall()
-            self._upsert(rows)
-        return len(rows)
+            read = self._read("model = ? AND dim = ?", [self.model, self.dim])
+        return read
 
-    def _upsert(self, rows: list[sqlite3.Row]) -> None:
+    def _read(self, where: str, params: list[Any]) -> int:
+        """Read the rows matching *where* in blocks (the blobs of one block
+        in RAM at a time) and add them; returns the rows read."""
+        cursor = self._conn.execute(
+            "SELECT id, first_ts, last_ts, app, window_title, embedding, created_at "
+            f"FROM memory_frames WHERE {where}",
+            params,
+        )
+        parts = []
+        read = 0
+        while rows := cursor.fetchmany(SCORE_BLOCK_ROWS):
+            read += len(rows)
+            part = self._upsert(rows)
+            if part is not None:
+                parts.append(part)
+        if parts:
+            q8, scale, first, last, window, app = (np.concatenate(p) for p in zip(*parts))
+            self._q8 = np.concatenate([self._q8, q8])
+            self._scale = np.concatenate([self._scale, scale])
+            self._first = np.concatenate([self._first, first])
+            self._last = np.concatenate([self._last, last])
+            self._window = np.concatenate([self._window, window])
+            self._app_code = np.concatenate([self._app_code, app])
+            self._time_order = None
+        return read
+
+    def _upsert(self, rows: list[sqlite3.Row]) -> tuple[np.ndarray, ...] | None:
+        """Update the rows already held in place; returns the arrays of the
+        new ones (int8, scale, first, last, window, app), None when none."""
         new_vectors: list[np.ndarray] = []
         new_first: list[float] = []
         new_last: list[float] = []
@@ -953,7 +1067,7 @@ class MemoryIndex:
                 if at < self._first.size:
                     self._first[at], self._last[at] = first, last
                     # A settling frame replaced the row's vector.
-                    self._matrix[at] = vector
+                    self._q8[at:at + 1], self._scale[at:at + 1] = _quantize(vector[None, :])
                     self._time_order = None
                 continue
             self._pos[row["id"]] = len(self._ids)
@@ -964,13 +1078,130 @@ class MemoryIndex:
             new_window.append(code)
             new_app.append(self._app_codes.setdefault(row["app"].casefold(), len(self._app_codes)))
         if not new_vectors:
-            return
-        self._matrix = np.vstack([self._matrix, np.stack(new_vectors)])
-        self._first = np.concatenate([self._first, new_first])
-        self._last = np.concatenate([self._last, new_last])
-        self._window = np.concatenate([self._window, np.asarray(new_window, dtype=np.int64)])
-        self._app_code = np.concatenate([self._app_code, np.asarray(new_app, dtype=np.int64)])
-        self._time_order = None
+            return None
+        q8, scale = _quantize(np.stack(new_vectors))
+        return (
+            q8, scale, np.asarray(new_first), np.asarray(new_last),
+            np.asarray(new_window, dtype=np.int64), np.asarray(new_app, dtype=np.int64),
+        )
+
+    # -- search ---------------------------------------------------------
+
+    def _approx_scores(self, q: np.ndarray) -> np.ndarray:
+        """Every row's 8-bit dot product with *q*, a block at a time."""
+        scores = np.empty(len(self._ids), dtype=np.float32)
+        for start in range(0, scores.size, SCORE_BLOCK_ROWS):
+            block = self._q8[start:start + SCORE_BLOCK_ROWS].astype(np.float32)
+            scores[start:start + SCORE_BLOCK_ROWS] = block @ q
+        scores *= self._scale
+        return scores
+
+    def _vectors(self, ids: list[str]) -> dict[str, np.ndarray]:
+        """The stored float32 vectors of *ids* (rows gone since are left out)."""
+        vectors: dict[str, np.ndarray] = {}
+        for start in range(0, len(ids), 500):
+            chunk = ids[start:start + 500]
+            for row in self._conn.execute(
+                f"SELECT id, embedding FROM memory_frames WHERE id IN ({','.join('?' * len(chunk))})",
+                chunk,
+            ):
+                vector = np.frombuffer(row["embedding"], dtype="<f4")
+                if vector.size == self.dim:
+                    vectors[row["id"]] = vector
+        return vectors
+
+    def _rescore(self, positions: np.ndarray, q: np.ndarray, scores: np.ndarray) -> None:
+        """Replace the 8-bit scores at *positions* with float32 ones."""
+        vectors = self._vectors([self._ids[i] for i in positions])
+        found = [int(i) for i in positions if self._ids[i] in vectors]
+        if found:
+            scores[found] = np.stack([vectors[self._ids[i]] for i in found]) @ q
+
+    @staticmethod
+    def _best(positions: np.ndarray, scores: np.ndarray, k: int) -> np.ndarray:
+        """The (at most) *k* of *positions* with the highest *scores*, unordered."""
+        if positions.size <= k:
+            return positions
+        return positions[np.argpartition(-scores[positions], k - 1)[:k]]
+
+    def search(
+        self,
+        query: str,
+        *,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        app: str | None = None,
+        limit: int = 10,
+    ) -> list[dict]:
+        """The moments that best match *query*, best first.
+
+        *since*/*until* keep moments that overlap the range; *app* keeps
+        one app (case-insensitive).  Each moment is a run of rows of one
+        window less than :data:`MOMENT_GAP_SECONDS` apart: ``id`` (its
+        best row), ``first_ts``, ``last_ts``, ``frames``, ``app``,
+        ``window_title``, ``url_host``, ``description`` and ``thumb_id``
+        (of its best row; the first thumbnail kept when that row has
+        none), ``score`` (float32, keyword boost included) and ``rows``
+        (the row ids, in time order).
+        """
+        if not query.strip() or limit <= 0:
+            return []
+        with self._lock:
+            self._used = self._clock()
+            self.refresh()
+            if not self._ids:
+                return []
+            self._arm()
+            return self._search(query, since=since, until=until, app=app, limit=limit)
+
+    def _search(
+        self, query: str, *, since: datetime | None, until: datetime | None,
+        app: str | None, limit: int,
+    ) -> list[dict]:
+        q = _unit(self._embed_query(query))
+        if q is None or q.size != self.dim:
+            raise ValueError(f"query vector is not {self.dim} values")
+        mask = np.ones(len(self._ids), dtype=bool)
+        if since is not None:
+            mask &= self._last >= since.timestamp()
+        if until is not None:
+            mask &= self._first <= until.timestamp()
+        if app:
+            mask &= self._app_code == self._app_codes.get(app.casefold(), -1)
+        idx = np.nonzero(mask)[0]
+        if idx.size == 0:
+            return []
+        scores = self._approx_scores(q)
+        # The keyword boost re-ranks the vector shortlist.
+        shortlist = self._best(idx, scores, SHORTLIST)
+        boosted = np.asarray(sorted(
+            self._pos[row_id]
+            for row_id in self._keyword_rows(query, [self._ids[i] for i in shortlist])
+        ), dtype=np.int64)
+        if self._time_order is None:
+            self._time_order = np.argsort(self._first, kind="stable")
+        order = self._time_order[mask[self._time_order]]
+        same = (
+            (self._window[order][1:] == self._window[order][:-1])
+            & (self._first[order][1:] - self._last[order][:-1] < MOMENT_GAP_SECONDS)
+        )
+        starts = np.concatenate([[0], np.nonzero(~same)[0] + 1])
+        ends = np.concatenate([starts[1:], [order.size]])
+        # Scored again from float32: the best rows, the best row of each of
+        # the best moments, and the boosted rows.
+        keep = max(RESCORE_MIN, RESCORE_PER_RESULT * limit)
+        best_approx = np.maximum.reduceat(scores[order], starts)
+        group_best = [
+            order[starts[g] + int(np.argmax(scores[order[starts[g]:ends[g]]]))]
+            for g in self._best(np.arange(starts.size), best_approx, keep)
+        ]
+        self._rescore(np.unique(np.concatenate([
+            self._best(idx, scores, keep), np.asarray(group_best, dtype=np.int64), boosted,
+        ])), q, scores)
+        scores[boosted] += KEYWORD_BOOST
+        best = np.maximum.reduceat(scores[order], starts)
+        top = np.argsort(-best, kind="stable")[:limit]
+        return self._moments([order[starts[g]:ends[g]] for g in top], q, set(boosted.tolist()))
 
     def _keyword_rows(self, query: str, candidates: list[str]) -> set[str]:
         """Of *candidates*, the rows whose description holds every word
@@ -990,88 +1221,37 @@ class MemoryIndex:
             ))
         return found
 
-    def search(
-        self,
-        query: str,
-        *,
-        since: datetime | None = None,
-        until: datetime | None = None,
-        app: str | None = None,
-        limit: int = 10,
-    ) -> list[dict]:
-        """The moments that best match *query*, best first.
-
-        *since*/*until* keep moments that overlap the range; *app* keeps
-        one app (case-insensitive).  Each moment is a run of rows of one
-        window less than :data:`MOMENT_GAP_SECONDS` apart: ``id`` (its
-        best row), ``first_ts``, ``last_ts``, ``frames``, ``app``,
-        ``window_title``, ``url_host``, ``description`` and ``thumb_id``
-        (of its best row; the first thumbnail kept when that row has
-        none), ``score`` and ``rows`` (the row ids, in time order).
-        """
-        if not query.strip() or limit <= 0:
-            return []
-        self.refresh()
-        if not self._ids:
-            return []
-        q = _unit(self._embed_query(query))
-        if q is None or q.size != self.dim:
-            raise ValueError(f"query vector is not {self.dim} values")
-        mask = np.ones(len(self._ids), dtype=bool)
-        if since is not None:
-            mask &= self._last >= since.timestamp()
-        if until is not None:
-            mask &= self._first <= until.timestamp()
-        if app:
-            mask &= self._app_code == self._app_codes.get(app.casefold(), -1)
-        idx = np.nonzero(mask)[0]
-        if idx.size == 0:
-            return []
-        scores = self._matrix @ q
-        # The keyword boost re-ranks the vector shortlist.
-        shortlist = (
-            idx if idx.size <= SHORTLIST
-            else idx[np.argpartition(-scores[idx], SHORTLIST - 1)[:SHORTLIST]]
-        )
-        for row_id in self._keyword_rows(query, [self._ids[i] for i in shortlist]):
-            scores[self._pos[row_id]] += KEYWORD_BOOST
-        if self._time_order is None:
-            self._time_order = np.argsort(self._first, kind="stable")
-        order = self._time_order[mask[self._time_order]]
-        same = (
-            (self._window[order][1:] == self._window[order][:-1])
-            & (self._first[order][1:] - self._last[order][:-1] < MOMENT_GAP_SECONDS)
-        )
-        starts = np.concatenate([[0], np.nonzero(~same)[0] + 1])
-        ends = np.concatenate([starts[1:], [order.size]])
-        ordered_scores = scores[order]
-        best = np.maximum.reduceat(ordered_scores, starts)
-        top = np.argsort(-best, kind="stable")[:limit]
-        groups = [order[starts[g]:ends[g]] for g in top]
-        return self._moments(groups, scores)
-
-    def _moments(self, groups: list[np.ndarray], scores: np.ndarray) -> list[dict]:
+    def _moments(self, groups: list[np.ndarray], q: np.ndarray, boosted: set[int]) -> list[dict]:
+        """The moments of *groups*, every member scored from float32 (its
+        best row and score), best first."""
         ids = [self._ids[i] for group in groups for i in group]
         rows: dict[str, sqlite3.Row] = {}
         for start in range(0, len(ids), 500):
             chunk = ids[start:start + 500]
             for row in self._conn.execute(
                 "SELECT id, first_ts, last_ts, frames, app, window_title, url_host, "
-                f"description, thumb_id FROM memory_frames WHERE id IN ({','.join('?' * len(chunk))})",
+                "description, thumb_id, embedding FROM memory_frames "
+                f"WHERE id IN ({','.join('?' * len(chunk))})",
                 chunk,
             ):
-                rows[row["id"]] = row
-        moments: list[dict] = []
+                if len(row["embedding"]) == 4 * self.dim:
+                    rows[row["id"]] = row
+        scored: list[tuple[float, dict]] = []
         for group in groups:
             members = [self._ids[i] for i in group if self._ids[i] in rows]
             if not members:
                 continue
-            best_at = max(group, key=lambda i: scores[i])
-            best = rows.get(self._ids[best_at]) or rows[members[0]]
+            exact = np.stack([np.frombuffer(rows[m]["embedding"], dtype="<f4") for m in members]) @ q
+            exact += np.asarray(
+                [KEYWORD_BOOST if self._pos[m] in boosted else 0.0 for m in members],
+                dtype=np.float32,
+            )
+            best_at = int(np.argmax(exact))
+            best = rows[members[best_at]]
             thumb = best["thumb_id"] or next(
                 (rows[m]["thumb_id"] for m in members if rows[m]["thumb_id"]), None,
             )
-            moments.append({
+            scored.append((float(exact[best_at]), {
                 "id": best["id"],
                 "first_ts": min(rows[m]["first_ts"] for m in members),
                 "last_ts": max(rows[m]["last_ts"] for m in members),
@@ -1081,10 +1261,11 @@ class MemoryIndex:
                 "url_host": best["url_host"],
                 "description": best["description"],
                 "thumb_id": thumb,
-                "score": round(float(scores[best_at]), 4),
+                "score": round(float(exact[best_at]), 4),
                 "rows": members,
-            })
-        return moments
+            }))
+        scored.sort(key=lambda pair: -pair[0])
+        return [moment for _, moment in scored]
 
 
 def keyword_search(
