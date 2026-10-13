@@ -16,7 +16,10 @@ struct SOPEntry: Identifiable, Codable, Hashable {
     let reviewed_at: String?
     var lifecycleState: String    // "observed", "draft", "reviewed", "verified", "agent_ready", "stale", "archived"
 
-    var id: String { sop_id }
+    /// Unique per entry: Skills only in the knowledge base are listed with
+    /// an empty `sop_id` (the worker's index writer), so they are told apart
+    /// by their slug (unique after the index's slug dedup).
+    var id: String { sop_id.isEmpty ? "kb:\(slug)" : sop_id }
 
     enum CodingKeys: String, CodingKey {
         case sop_id, slug, title, short_title, tags, source, status

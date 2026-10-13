@@ -28,6 +28,23 @@ final class SOPEntryTests: XCTestCase {
         XCTAssertEqual(entry.lifecycleState, "observed")
     }
 
+    /// Skills only in the knowledge base come with an empty sop_id; each
+    /// needs its own identity, or selecting one shows another.
+    func testKnowledgeBaseOnlyEntriesHaveDistinctIds() throws {
+        func entry(_ sopID: String, _ slug: String) throws -> SOPEntry {
+            let json = """
+            {"sop_id": "\(sopID)", "slug": "\(slug)", "title": "T", "source": "kb",
+             "status": "draft", "confidence": 0.5, "created_at": "2026-10-13T10:00:00Z"}
+            """.data(using: .utf8)!
+            return try JSONDecoder().decode(SOPEntry.self, from: json)
+        }
+        let a = try entry("", "reconcile-payouts")
+        let b = try entry("", "post-standup")
+        XCTAssertNotEqual(a.id, b.id)
+        XCTAssertEqual(a.id, "kb:reconcile-payouts")
+        XCTAssertEqual(try entry("sop-7", "post-standup").id, "sop-7", "database Skills keep their id")
+    }
+
     func testDecodesWithLifecycleState() throws {
         let json = """
         {
