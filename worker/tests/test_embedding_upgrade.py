@@ -79,9 +79,11 @@ class FakeOllama:
         self.version_string = "0.40.3"
         self.models = {TARGET_MODEL, EMBEDDING_MODEL}
 
-    def embed(self, model, texts, *, prefix="", dimensions=None, batch_size=None, timeout=None):
+    def embed(self, model, texts, *, prefix="", dimensions=None, batch_size=None, timeout=None,
+              keep_alive=None):
         if self.fail is not None:
             raise self.fail
+        self.keep_alive = keep_alive
         self.requests.append((model, prefix, list(texts)))
         return [_vector(model + prefix + t) for t in texts]
 
@@ -607,3 +609,11 @@ def test_switch_embedding_file_writes_a_new_file_or_backs_up_the_old(tmp_path: P
     existing.write_text('embedding = { model = "x" }\n')
     with pytest.raises(ValueError):
         switch_embedding_file(existing, TARGET_MODEL)
+
+
+def test_the_re_embed_releases_the_model_soon(world) -> None:
+    """EmbeddingGemma sits next to the annotation model on a 16 GB Mac:
+    each job asks Ollama to unload it a minute after its last request."""
+    _choose(world)
+    _upgrade(world, rows_per_job=10).step()
+    assert world.fake.keep_alive == "1m"

@@ -101,6 +101,10 @@ HOLD_HOURS = 48.0
 # Frames embedded per job: one job stays a few seconds, so P0 work (a
 # stopped recording) never waits long behind it.
 FRAMES_PER_JOB = 8
+# Memory's model stays loaded this long after its last frame (Ollama's
+# default is 5 minutes): on a 16 GB Mac it sits next to the annotation
+# model, so it is released soon after a burst.
+EMBED_KEEP_ALIVE = "1m"
 # Events read per job (frames passed over count against this, not the above).
 EVENTS_PER_JOB = 1000
 # Per embedding request.
@@ -289,6 +293,7 @@ def ollama_embedder(
     def embed(items: list[str | dict]) -> list[list[float]]:
         return client.embed(
             model, items, prefix=prefix, dimensions=dimensions, timeout=timeout,
+            keep_alive=EMBED_KEEP_ALIVE,
         )
 
     return embed

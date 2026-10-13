@@ -89,6 +89,8 @@ ROWS_PER_JOB = 64
 # Texts per ``/api/embed`` request.
 BATCH_SIZE = 32
 EMBED_TIMEOUT_SECONDS = 120.0
+# EmbeddingGemma is released soon after each job (memory.EMBED_KEEP_ALIVE).
+EMBED_KEEP_ALIVE = "1m"
 # Ollama not answering: first wait, doubled per failure up to the maximum.
 BACKOFF_SECONDS = 60.0
 BACKOFF_MAX_SECONDS = 900.0
@@ -316,6 +318,7 @@ class EmbeddingUpgrade:
                 TARGET_MODEL, [text for _, text in items],
                 prefix=prefix, dimensions=profile.dimensions,
                 batch_size=self.batch_size, timeout=EMBED_TIMEOUT_SECONDS,
+                keep_alive=EMBED_KEEP_ALIVE,
             )
             for (row, text), emb in zip(items, embeddings):
                 if emb:

@@ -529,3 +529,14 @@ def test_compute_reaches_worker_status(tmp_path):
     assert compute["last_hour"]["model_seconds_by_call_type"] == {
         "annotation": 3.0, "sop": 3.0,
     }
+
+
+def test_embed_keep_alive_is_sent_only_when_asked():
+    """Memory releases its model a minute after a burst; other callers'
+    requests keep Ollama's default (no field, unchanged bytes)."""
+    opener = _Urlopen({"embeddings": [[1.0, 0.0]]})
+    with patch("urllib.request.urlopen", opener):
+        OllamaClient(HOST).embed("m", ["a"], keep_alive="1m")
+        OllamaClient(HOST).embed("m", ["a"])
+    assert json.loads(opener.sent[0][2]) == {"model": "m", "input": ["a"], "keep_alive": "1m"}
+    assert json.loads(opener.sent[1][2]) == {"model": "m", "input": ["a"]}

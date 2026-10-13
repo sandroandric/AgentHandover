@@ -222,6 +222,7 @@ class OllamaClient:
         dimensions: int | None = None,
         batch_size: int | None = None,
         timeout: float | None = None,
+        keep_alive: str | None = None,
     ) -> list[list[float]]:
         """POST ``/api/embed``: one vector per input, in order.
 
@@ -234,6 +235,8 @@ class OllamaClient:
         vectors are L2-normalised here, so their cosine is their dot
         product whether or not the server normalises them.  *batch_size*
         splits the inputs over several requests; None sends them in one.
+        *keep_alive* is how long Ollama keeps the model loaded afterwards
+        (its default, 5 minutes, when None).
         A reply with fewer vectors than inputs is padded with empty vectors.
 
         For text-only inputs without *dimensions* the request is exactly
@@ -249,6 +252,8 @@ class OllamaClient:
             payload: dict[str, Any] = {"model": model, "input": batch}
             if dimensions is not None:
                 payload["dimensions"] = dimensions
+            if keep_alive is not None:
+                payload["keep_alive"] = keep_alive
             began = time.monotonic()
             reply = self._request("POST", "/api/embed", payload, timeout)
             embeddings = list(reply.get("embeddings") or [])[: len(batch)]

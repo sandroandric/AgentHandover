@@ -106,16 +106,16 @@ FALLBACK_AFTER_SECONDS = 6 * 3600
 SWAP_LIMIT_BYTES = 8 * GB
 DISK_FLOOR_BYTES = 10 * GB
 
-# Memory's embedding model is small (~0.7 GB), and swap in use stays high
-# long after the pressure that caused it has passed (many 16 GB Macs sit
-# above SWAP_LIMIT_BYTES all day).  So background embedding waits on what
-# says the Mac is short of memory now: little free memory, or swap that
-# is growing; the disk floor applies as above.
+# Memory's embedding model is small (~0.6 GB resident), and swap in use
+# stays high long after the pressure that caused it has passed (many 16 GB
+# Macs sit above SWAP_LIMIT_BYTES all day; the test Mac did at 10.5 GB with
+# macOS reporting normal pressure and no pages swapped out).  So background
+# embedding waits on what says the Mac is short of memory now: macOS's own
+# memory-pressure level (warning or critical), or little free memory; the
+# disk floor applies as above.
 EMBED_FREE_FLOOR_BYTES = 2 * GB
-SWAP_GROWTH_WINDOW_SECONDS = 300.0
-SWAP_GROWTH_LIMIT_BYTES = 256_000_000
-# Embedding starts only once swap has been watched this long.
-SWAP_WATCH_MIN_SECONDS = 60.0
+# kern.memorystatus_vm_pressure_level: 1 normal, 2 warning, 4 critical.
+PRESSURE_WARNING = 2
 
 # A failed SOP-model load is retried after this, doubling up to the cap.
 LOAD_BACKOFF_SECONDS = 60.0
@@ -182,6 +182,20 @@ def swap_used_bytes() -> int | None:
     except (OSError, subprocess.SubprocessError):
         return None
     return parse_swapusage(out)
+
+
+def memory_pressure_level() -> int | None:
+    """macOS's memory-pressure level (``sysctl
+    kern.memorystatus_vm_pressure_level``: 1 normal, 2 warning, 4
+    critical), or None when it cannot be read."""
+    try:
+        out = subprocess.run(
+            ["sysctl", "-n", "kern.memorystatus_vm_pressure_level"],
+            capture_output=True, text=True, timeout=5, check=True,
+        ).stdout
+        return int(out.strip())
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
 
 
 def free_disk_bytes() -> int | None:
@@ -252,6 +266,7 @@ class ModelScheduler:
         free_memory: Callable[[], int | None] = free_memory_bytes,
         swap_used: Callable[[], int | None] = swap_used_bytes,
         free_disk: Callable[[], int | None] = free_disk_bytes,
+        pressure_level: Callable[[], int | None] = memory_pressure_level,
     ) -> None:
         self.client = client
         self.annotation_model = annotation_model
@@ -260,6 +275,7 @@ class ModelScheduler:
         self._free_memory = free_memory
         self._swap_used = swap_used
         self._free_disk = free_disk
+        self._pressure_level = pressure_level
         self._components: list[object] = []
         self._due_since: dict[str, float] = {}
         self._plan_model = sop_model
@@ -269,9 +285,7 @@ class ModelScheduler:
         self._load_failures = 0
         # The loaded size (bytes) Ollama reported for a model, from /api/ps.
         self._sizes: dict[str, int] = {}
-        # ``(time, swap in use)`` samples over the last
-        # SWAP_GROWTH_WINDOW_SECONDS, for :meth:`embedding_blocker`.
-        self._swap_samples: list[tuple[float, int]] = []
+
         # Why generation is not running (or runs on the fallback), for the
         # worker status; None while it runs normally.
         self.reason: str | None = None
@@ -484,12 +498,10 @@ class ModelScheduler:
         return None
 
     def _embedding_pressure(self) -> str | None:
-        """For the small embedding model: free memory under
-        :data:`EMBED_FREE_FLOOR_BYTES`, swap grown by more than
-        :data:`SWAP_GROWTH_LIMIT_BYTES` within
-        :data:`SWAP_GROWTH_WINDOW_SECONDS` (or not watched for
-        :data:`SWAP_WATCH_MIN_SECONDS` yet), or free disk under
-        :data:`DISK_FLOOR_BYTES`.  Swap merely in use is no reason: unlike
+        """For the small embedding model: macOS reports memory pressure
+        (:data:`PRESSURE_WARNING` or worse), free memory is under
+        :data:`EMBED_FREE_FLOOR_BYTES`, or free disk is under
+        :data:`DISK_FLOOR_BYTES`.  Swap merely in use is no reason, unlike
         the SOP model's :meth:`_pressure`.  An unknown value is no reason."""
         disk = self._free_disk()
         if disk is not None and disk < DISK_FLOOR_BYTES:
@@ -497,29 +509,16 @@ class ModelScheduler:
                 f"{_gb(disk)} of disk free (floor {_gb(DISK_FLOOR_BYTES)}): "
                 "swap cannot grow"
             )
+        level = self._pressure_level()
+        if level is not None and level >= PRESSURE_WARNING:
+            name = "critical" if level >= 4 else "warning"
+            return f"macOS reports memory pressure ({name})"
         free = self._free_memory()
         if free is not None and free < EMBED_FREE_FLOOR_BYTES:
             return (
                 f"{_gb(free)} of memory free (needs {_gb(EMBED_FREE_FLOOR_BYTES)}): "
                 "the Mac is short of memory"
             )
-        swap = self._swap_used()
-        if swap is None:
-            return None
-        now = self._clock()
-        self._swap_samples = [
-            (t, b) for t, b in self._swap_samples if now - t <= SWAP_GROWTH_WINDOW_SECONDS
-        ]
-        self._swap_samples.append((now, swap))
-        first = self._swap_samples[0][0]
-        growth = swap - min(b for _, b in self._swap_samples)
-        if growth > SWAP_GROWTH_LIMIT_BYTES:
-            return (
-                f"swap grew by {growth / 1_000_000:.0f} MB in the last "
-                f"{SWAP_GROWTH_WINDOW_SECONDS / 60:.0f} minutes: the Mac is short of memory"
-            )
-        if now - first < SWAP_WATCH_MIN_SECONDS:
-            return "checking that the Mac is not short of memory"
         return None
 
     # -- internals ------------------------------------------------------

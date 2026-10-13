@@ -57,10 +57,12 @@ the 16 GB test Mac with Ollama 0.40.3).
   `test_segmenter_threshold.py`, `test_linker_threshold.py`,
   `test_search_threshold.py`.
 - **Background embedding waits on current pressure.** Memory and the
-  re-index wait while less than 2 GB is free, swap grew more than 256 MB in
-  5 minutes, or the disk is under its floor; swap merely in use (often
-  above 8 GB all day on 16 GB Macs) no longer blocks them. The Skill models
-  keep the 8 GB swap limit. Proof: `test_memory.py`.
+  re-index wait while macOS reports memory pressure (warning or critical),
+  less than 2 GB is free, or the disk is under its floor; swap merely in
+  use no longer blocks them (the test Mac sat at 10.5 GB of swap with
+  normal pressure and nothing being swapped out). Their model is unloaded
+  a minute after its last request. The Skill models keep the 8 GB swap
+  limit. Proof: `test_memory.py`, `test_embedding_upgrade.py`.
 - **Ollama 0.40 or later** for Memory (`tiers.json`
   `minimum_ollama_version_for_memory`); doctor warns when Memory is on and
   Ollama is older.
