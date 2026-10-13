@@ -130,7 +130,6 @@ def trigger_handlers(ctx: Any) -> dict[str, Callable[[dict], None]]:
             t, db, vector_kb=ctx.vector_kb, **export_kwargs,
         ),
         "failed-query": lambda t: wm._process_failed_query_trigger(t, db),
-        "search-query": lambda t: wm._process_search_trigger(t, ctx.activity_searcher),
         "recall-query": lambda t: wm._process_recall_trigger(t, ctx.activity_searcher),
         "trust-accept": lambda t: wm._process_trust_accept_trigger(
             t, ctx.trust_advisor, ctx.constraint_manager,

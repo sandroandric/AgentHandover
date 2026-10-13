@@ -37,8 +37,12 @@ KINDS = ("skills", "memory", "days", "profile")
 DEFAULT_KINDS = ("skills", "memory", "days")
 DEFAULT_LIMIT = 5
 MAX_LIMIT = 50
-# After the embedding model failed, searches skip it for this long instead
-# of each waiting on it again (an agent is waiting).
+# Someone is waiting on a search, so the query embedding gets a short
+# timeout (a warm embed takes well under a second; a cold model load a few
+# seconds). Ollama serves one request at a time, so while the worker is
+# annotating an embed can queue far longer; after a failure, searches skip
+# the model for EMBED_RETRY_AFTER_S instead of each waiting on it again.
+QUERY_EMBED_TIMEOUT_S = 8.0
 EMBED_RETRY_AFTER_S = 60.0
 # Excerpt of a daily summary: its tasks' intents, this long at most.
 EXCERPT_CHARS = 400

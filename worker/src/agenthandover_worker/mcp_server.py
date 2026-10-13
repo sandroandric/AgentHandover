@@ -21,21 +21,14 @@ import logging
 from pathlib import Path
 
 from agenthandover_worker import paths
-from agenthandover_worker.commonplace import (  # noqa: F401  (EMBED_RETRY_AFTER_S: re-exported)
+from agenthandover_worker.commonplace import (  # noqa: F401  (the timeouts: re-exported)
     EMBED_RETRY_AFTER_S,
     MCP_INSTRUCTIONS,
+    QUERY_EMBED_TIMEOUT_S,
     Commonplace,
 )
 
 logger = logging.getLogger(__name__)
-
-# An agent is waiting on a search, so the query embedding gets a short
-# timeout (a warm embed takes well under a second; a cold model load a few
-# seconds). Ollama serves one request at a time, so while the worker is
-# annotating an embed can queue far longer; after a failure the search
-# skips the model for EMBED_RETRY_AFTER_S instead of making every search
-# wait again.
-QUERY_EMBED_TIMEOUT_S = 8.0
 
 
 def _get_kb_root() -> Path:

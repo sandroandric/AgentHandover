@@ -117,7 +117,7 @@ class TestMigrateLegacy:
         # main() asserts the handler table covers KINDS exactly; this pins
         # the names the app and the CLI write.
         assert set(trigger_spool.KINDS) == {
-            "retry", "approve", "failed-query", "search-query", "recall-query",
+            "retry", "approve", "failed-query", "recall-query",
             "trust-accept", "trust-dismiss", "staleness-reviewed",
             "lifecycle-promote", "merge", "drift-reviewed", "lifecycle-dismiss",
             "export", "micro-answer",

@@ -31,7 +31,6 @@ KINDS: tuple[str, ...] = (
     "retry",
     "approve",
     "failed-query",
-    "search-query",
     "recall-query",
     "trust-accept",
     "trust-dismiss",

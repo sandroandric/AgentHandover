@@ -274,6 +274,8 @@ class QueryAPIHandler(http.server.BaseHTTPRequestHandler):
                 self._handle_recall()
             elif path in ("/memory/search", "/memory/pause", "/memory/resume", "/memory/forget"):
                 self._handle_memory(path.rsplit("/", 1)[1])
+            elif path == "/commonplace/search":
+                self._handle_commonplace_search()
             elif _BUNDLE_SLUG_RE.match(path):
                 slug = _BUNDLE_SLUG_RE.match(path).group(1)  # type: ignore[union-attr]
                 self._handle_bundle_compile(slug)
@@ -508,6 +510,39 @@ class QueryAPIHandler(http.server.BaseHTTPRequestHandler):
         else:
             status, reply = getattr(service, action)(body)
         self._send_json(reply, status=status)
+
+    def _handle_commonplace_search(self) -> None:
+        """``POST /commonplace/search {"query", "kinds"?, "since"?,
+        "until"?, "limit"?}``: ``commonplace.Commonplace.search``'s answer,
+        one group per kind (Memory only while agents may search it);
+        400 with ``error`` for a bad request."""
+        commonplace = getattr(self.server, "commonplace", None)
+        if commonplace is None:
+            self._send_error(501, "Commonplace search is not available in this worker")
+            return
+        content_length = int(self.headers.get("Content-Length", 0) or 0)
+        raw = self.rfile.read(content_length) if content_length else b""
+        try:
+            body = json.loads(raw) if raw.strip() else None
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            self._send_error(400, f"Invalid JSON: {exc}")
+            return
+        if not isinstance(body, dict):
+            self._send_error(400, "Request body must be a JSON object")
+            return
+        unknown = set(body) - {"query", "kinds", "since", "until", "limit"}
+        if unknown:
+            self._send_error(400, f"unknown field(s): {', '.join(sorted(unknown))}")
+            return
+        try:
+            answer = commonplace.search(
+                body.get("query"), body.get("kinds"), body.get("since"),
+                body.get("until"), body.get("limit", 5),
+            )
+        except ValueError as exc:
+            self._send_error(400, str(exc))
+            return
+        self._send_json(answer)
 
     def _bundle_extras(self, slug: str) -> tuple[dict | None, dict | None]:
         """Preflight summary and execution stats for the bundle responses."""
@@ -1044,6 +1079,8 @@ class QueryAPIServer:
         Optional OpsTelemetry for ``/health/detailed`` and ``/telemetry/trend`` endpoints.
     memory:
         Optional ``memory_api.MemoryService`` for the ``/memory/*`` endpoints.
+    commonplace:
+        Optional ``commonplace.Commonplace`` for ``POST /commonplace/search``.
     token_path:
         File holding the POST token (created 0600 if absent).  ``None``
         keeps a random token in memory only (tests read ``token``).
@@ -1063,6 +1100,7 @@ class QueryAPIServer:
         vector_kb: Any = None,
         token_path: Path | None = None,
         memory: Any = None,
+        commonplace: Any = None,
     ) -> None:
         self._token_path = token_path
         self._token: str | None = None
@@ -1077,6 +1115,7 @@ class QueryAPIServer:
         self._ops_telemetry = ops_telemetry
         self._vector_kb = vector_kb
         self._memory = memory
+        self._commonplace = commonplace
         self._httpd: http.server.HTTPServer | None = None
         self._thread: threading.Thread | None = None
         self._running = False
@@ -1110,6 +1149,7 @@ class QueryAPIServer:
         self._httpd.ops_telemetry = self._ops_telemetry  # type: ignore[attr-defined]
         self._httpd.vector_kb = self._vector_kb  # type: ignore[attr-defined]
         self._httpd.memory = self._memory  # type: ignore[attr-defined]
+        self._httpd.commonplace = self._commonplace  # type: ignore[attr-defined]
 
         self._thread = threading.Thread(
             target=self._httpd.serve_forever,

@@ -54,7 +54,8 @@ from agenthandover_worker.thumbnails import delete_thumbnails, thumbs_dir
 
 logger = logging.getLogger(__name__)
 
-# The result files the CLI's search and recall fallbacks leave in the data dir.
+# The result files the CLI's recall fallback leaves in the data dir, and the
+# search fallback's before 0.6 (one may still hold activity a forget removes).
 RESULT_FILES = ("search-query-result.json", "recall-query-result.json")
 # preserved_text sources (``db.preserve_ocr_text``), for their vector ids.
 PRESERVED_SOURCES = ("ocr", "visual_proxy")
