@@ -4,6 +4,7 @@ import SwiftUI
 /// and actionable suggestions from the knowledge base.
 struct DailyDigestView: View {
     @StateObject private var viewModel = DigestViewModel()
+    @ObservedObject private var navigator = AppNavigator.shared
 
     // Contra design tokens (system-adaptive)
     private let darkNavy = Color.primary
@@ -36,7 +37,12 @@ struct DailyDigestView: View {
             .padding(24)
         }
         .frame(minWidth: 580, minHeight: 500)
-        .onAppear { viewModel.load() }
+        // The latest digest, or the day the Commonplace window opened.
+        .onAppear { viewModel.load(date: navigator.takeDigestDate()) }
+        .onChange(of: navigator.digestDate) { _, date in
+            guard date != nil else { return }
+            viewModel.load(date: navigator.takeDigestDate())
+        }
     }
 
     // MARK: - Header
@@ -280,7 +286,7 @@ struct DailyDigestView: View {
                     .font(.system(size: 28))
                     .foregroundColor(warmOrange)
             }
-            Text("No digest available")
+            Text(viewModel.emptyTitle)
                 .font(.system(size: 18, weight: .bold, design: .rounded))
                 .foregroundColor(darkNavy)
             Text("Digests are generated at the end of each day\nonce enough activity has been observed.")
@@ -351,6 +357,8 @@ struct DigestSectionData: Identifiable, Sendable {
 final class DigestViewModel: ObservableObject {
     @Published var digest: DigestData?
     @Published var isLoading = false
+    /// The day asked for ("2026-10-12"); nil for the latest.
+    @Published private(set) var requestedDate: String?
 
     var dateDisplay: String {
         // Use the loaded digest's date if available, fall back to today.
@@ -365,32 +373,51 @@ final class DigestViewModel: ObservableObject {
             // Date string present but unparseable - show it as-is.
             return dateStr
         }
+        if let requestedDate { return requestedDate }
         let formatter = DateFormatter()
         formatter.dateStyle = .medium
         return formatter.string(from: Date())
     }
 
-    func load() {
+    var emptyTitle: String {
+        requestedDate.map { "No digest for \($0)" } ?? "No digest available"
+    }
+
+    /// Load the digest of `date` ("2026-10-12"), or the latest when nil.
+    func load(date: String? = nil) {
         isLoading = true
+        requestedDate = date
+        digest = nil
+        let dates = Self.datesToTry(requested: date, now: Date())
         Task.detached(priority: .userInitiated) {
-            let data = Self.loadDigestFromDisk()
+            let data = Self.loadDigestFromDisk(dates: dates)
             await MainActor.run { [weak self] in
-                self?.digest = data
-                self?.isLoading = false
+                // A later load (another day) wins.
+                guard let self, self.requestedDate == date else { return }
+                self.digest = data
+                self.isLoading = false
             }
         }
     }
 
-    private nonisolated static func loadDigestFromDisk() -> DigestData? {
+    /// The days whose digest to show, in order: the one asked for, or
+    /// yesterday then today (the worker writes digests at the end of a
+    /// day, so the latest is usually yesterday's).
+    nonisolated static func datesToTry(
+        requested: String?, now: Date, calendar: Calendar = .current
+    ) -> [String] {
+        if let requested { return [requested] }
         let fmt = DateFormatter()
+        fmt.calendar = calendar
+        fmt.timeZone = calendar.timeZone
+        fmt.locale = Locale(identifier: "en_US_POSIX")
         fmt.dateFormat = "yyyy-MM-dd"
-        let today = fmt.string(from: Date())
-        let yesterday = fmt.string(from: Calendar.current.date(byAdding: .day, value: -1, to: Date()) ?? Date())
+        let today = fmt.string(from: now)
+        let yesterday = fmt.string(from: calendar.date(byAdding: .day, value: -1, to: now) ?? now)
+        return [yesterday, today]
+    }
 
-        // The worker generates digests at end-of-day, so the most recent
-        // digest is typically yesterday's. Try yesterday first, then today.
-        let datesToTry = [yesterday, today]
-
+    private nonisolated static func loadDigestFromDisk(dates datesToTry: [String]) -> DigestData? {
         let knowledgeDir = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".agenthandover/knowledge")
 

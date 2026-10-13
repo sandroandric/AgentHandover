@@ -1,7 +1,7 @@
 import AppKit
 import Foundation
 
-/// Memory's state for the menu, the Memory window and Memory Settings, and
+/// Memory's state for the menu, the Commonplace window and Memory Settings, and
 /// the actions they share: pause, resume, forget (after a confirmation),
 /// and turning Memory on or off.  Everything goes through the worker's
 /// query API (`MemoryAPI`); the switches live in config.toml.
@@ -97,6 +97,14 @@ final class MemoryCenter: ObservableObject {
         var settings = await Task.detached { MemorySettings.load() }.value
         settings.enabled = true
         await save(settings, keys: [.enabled])
+    }
+
+    /// Let agents search Memory, or stop them (`[memory] agents_access`):
+    /// read on every agent search, so nothing restarts.
+    func setAgentsAccess(_ on: Bool) async {
+        var settings = await Task.detached { MemorySettings.load() }.value
+        settings.agentsAccess = on
+        await save(settings, keys: [.agentsAccess])
     }
 
     nonisolated static func describe(_ error: Error) -> String {

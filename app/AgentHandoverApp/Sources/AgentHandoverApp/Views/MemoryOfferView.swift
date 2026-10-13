@@ -151,7 +151,7 @@ struct MemoryOfferView: View {
     static func doneMessage(_ choice: MemoryOfferState.Choice) -> String {
         choice == .everything
             ? "Memory is on. Your Skills are being re-indexed in the background."
-            : "Memory is on. Search it from the menu bar: Search Memory."
+            : "Memory is on. Search it from the menu bar: Commonplace."
     }
 
     /// Record the choice; for Memory, turn it on and pull its model when
