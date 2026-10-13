@@ -125,19 +125,28 @@ enum Commands {
         #[arg(long)]
         output: Option<String>,
     },
-    /// Search activity annotations (full-text search)
+    /// Search Commonplace: your Skills, Memory (when agents may search it), daily summaries and profile
     Search {
-        /// Search query (e.g. "domain research", "Stripe dashboard")
+        /// What you are looking for (e.g. "domain research", "the Stripe dashboard")
         query: String,
-        /// Filter by date (YYYY-MM-DD)
+        /// What to search, comma-separated: skills, memory, days, profile
+        /// (default: skills,memory,days)
+        #[arg(long, value_delimiter = ',',
+              value_parser = ["skills", "memory", "days", "profile"])]
+        kinds: Vec<String>,
+        /// Only Memory moments and days after this time (2026-10-12 14:30, 14:30, 2026-10-12)
         #[arg(long)]
-        date: Option<String>,
-        /// Filter by app name
+        since: Option<String>,
+        /// Only Memory moments and days before this time
         #[arg(long)]
-        app: Option<String>,
-        /// Maximum results to return
-        #[arg(short = 'n', long, default_value = "20")]
-        limit: usize,
+        until: Option<String>,
+        /// Maximum results per kind (1-50)
+        #[arg(short = 'n', long, default_value = "5",
+              value_parser = clap::value_parser!(u32).range(1..=50))]
+        limit: u32,
+        /// Print the API's JSON
+        #[arg(long)]
+        json: bool,
     },
     /// Connect an AI agent (claude-code, codex, openclaw, hermes, mcp)
     Connect {
@@ -244,7 +253,7 @@ enum MemoryAction {
         #[arg(long)]
         json: bool,
     },
-    /// Let agents search Memory over MCP (descriptions, never images), or stop them
+    /// Let agents search Memory (MCP and `agenthandover search`: descriptions, never images), or stop them
     Agents {
         /// on or off
         #[arg(value_parser = ["on", "off"])]
@@ -396,12 +405,18 @@ fn main() -> Result<()> {
         Commands::Export { format, sop, output } => {
             commands::export::run(&format, sop.as_deref(), output.as_deref())
         }
-        Commands::Search {
-            query,
-            date,
-            app,
-            limit,
-        } => commands::search::search(&query, date.as_deref(), app.as_deref(), limit),
+        Commands::Search { query, kinds, since, until, limit, json } => {
+            let args = commands::search::SearchArgs {
+                query: &query,
+                kinds: &kinds,
+                since: since.as_deref(),
+                until: until.as_deref(),
+                limit,
+                json,
+            };
+            let (now, tz) = commands::memory::now();
+            commands::search::search(&commands::memory::worker_api(), &mut std::io::stdout(), &args, now, &tz)
+        }
         Commands::Memory { action } => run_memory(action),
         Commands::Recall {
             date,

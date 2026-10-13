@@ -1,9 +1,13 @@
-//! CLI commands for searching activity and recalling sessions.
+//! `agenthandover search` (Commonplace) and `agenthandover recall`, and the
+//! client of the worker's local query API (127.0.0.1:9477) every command
+//! uses.
 //!
-//! Asks the worker's local query API first (`POST /search`, `POST /recall`
-//! on 127.0.0.1:9477), which answers immediately.  Only when nothing is
-//! listening there (the API is disabled in config.toml, or the worker is
-//! starting) does it fall back to the trigger spool and poll for the
+//! `search` asks `POST /commonplace/search`: Skills, Memory (only while
+//! agents may search it), daily summaries and, when asked for, the
+//! profile, one group per kind.  It needs the running worker (the query
+//! embeds with its models).  `recall` asks `POST /recall`, and only when
+//! nothing is listening there (the API is disabled in config.toml, or the
+//! worker is starting) falls back to the trigger spool and polls for the
 //! worker's result file, which waits for the worker's next tick.
 //!
 //! The API refuses a POST without the `X-AgentHandover-Token` header, whose
@@ -12,18 +16,22 @@
 use anyhow::{bail, Result};
 use colored::Colorize;
 use agenthandover_common::status::data_dir;
+use crate::commands::memory::{iso, parse_when, write_moment, Api, WORKER_DOWN};
 use crate::trigger::write_trigger;
+use chrono::{DateTime, NaiveDate, TimeZone, Utc};
+use serde_json::{json, Value};
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::Path;
 use std::time::Duration;
 
-const SEARCH_RESULT_FILE: &str = "search-query-result.json";
 const RECALL_RESULT_FILE: &str = "recall-query-result.json";
 
 /// The worker's query API (`knowledge.query_api_port`, default 9477).
 pub(crate) const QUERY_API_PORT: u16 = 9477;
-const QUERY_API_TIMEOUT: Duration = Duration::from_secs(15);
+/// A Commonplace search can wait on two embeddings (the text model's and
+/// Memory's, up to 8 s and 15 s while Ollama is busy) before it answers.
+const QUERY_API_TIMEOUT: Duration = Duration::from_secs(30);
 /// File in the data dir holding the token every POST must carry.
 const QUERY_API_TOKEN_FILE: &str = "query-api-token";
 const QUERY_API_TOKEN_HEADER: &str = "X-AgentHandover-Token";
@@ -149,90 +157,135 @@ fn poll_result(
     );
 }
 
-/// `agenthandover search "query"` — full-text search over activity annotations.
-pub fn search(
-    query: &str,
-    date: Option<&str>,
-    app: Option<&str>,
-    limit: usize,
-) -> Result<()> {
-    let mut trigger = serde_json::json!({
-        "query": query,
-        "limit": limit,
-        "requested_at": chrono::Utc::now().to_rfc3339(),
-    });
+pub struct SearchArgs<'a> {
+    pub query: &'a str,
+    /// Empty: the worker's default (skills, memory, days).
+    pub kinds: &'a [String],
+    pub since: Option<&'a str>,
+    pub until: Option<&'a str>,
+    pub limit: u32,
+    pub json: bool,
+}
 
-    if let Some(d) = date {
-        trigger["date"] = serde_json::json!(d);
+/// `agenthandover search "query"` — search Commonplace (`POST
+/// /commonplace/search`): one group per kind, each ranked on its own.
+pub fn search<Tz: TimeZone>(
+    api: &Api,
+    out: &mut dyn Write,
+    args: &SearchArgs,
+    now: DateTime<Utc>,
+    tz: &Tz,
+) -> Result<()>
+where
+    Tz::Offset: std::fmt::Display,
+{
+    let mut body = json!({"query": args.query, "limit": args.limit});
+    if !args.kinds.is_empty() {
+        body["kinds"] = json!(args.kinds);
     }
-    if let Some(a) = app {
-        trigger["app"] = serde_json::json!(a);
+    if let Some(since) = args.since {
+        body["since"] = json!(iso(parse_when(since, now, tz, false)?));
     }
-
-    println!("Searching for: {}", query.bold());
-
-    let parsed = query_worker("/search", "search-query", SEARCH_RESULT_FILE, &trigger)?;
-
-    if let Some(results) = parsed.get("results").and_then(|r| r.as_array()) {
+    if let Some(until) = args.until {
+        body["until"] = json!(iso(parse_when(until, now, tz, true)?));
+    }
+    let Some((status, reply)) = api("POST", "/commonplace/search", Some(&body))? else {
+        bail!(WORKER_DOWN);
+    };
+    if status != 200 {
+        bail!("{}", reply.get("error").and_then(Value::as_str).unwrap_or("unknown error"));
+    }
+    if args.json {
+        writeln!(out, "{}", serde_json::to_string_pretty(&reply)?)?;
+        return Ok(());
+    }
+    writeln!(out, "Commonplace for \"{}\":", args.query)?;
+    for (kind, heading) in [("skills", "Skills"), ("memory", "Memory"), ("days", "Days"), ("profile", "Profile")] {
+        let Some(group) = reply.get(kind) else { continue };
+        let mode = group["mode"].as_str().unwrap_or("");
+        let reason = group["reason"].as_str().unwrap_or("");
+        let results = group["results"].as_array().cloned().unwrap_or_default();
+        writeln!(out)?;
+        match mode {
+            "not_allowed" => {
+                writeln!(out, "{heading}: not searched. {reason}")?;
+                if kind == "memory" {
+                    writeln!(out, "  Search it yourself with: agenthandover memory search \"{}\"", args.query)?;
+                }
+                continue;
+            }
+            "keyword_fallback" if !reason.is_empty() => {
+                writeln!(out, "{heading} (by words; {reason}):")?
+            }
+            "keyword_fallback" => writeln!(out, "{heading} (by words):")?,
+            "semantic" => writeln!(out, "{heading} (by meaning):")?,
+            _ => writeln!(out, "{heading}:")?,
+        }
         if results.is_empty() {
-            println!("{} No results found.", "·".dimmed());
-            return Ok(());
+            writeln!(out, "  Nothing found.")?;
+            continue;
         }
-
-        println!(
-            "\n{:<20}  {:<15}  {}",
-            "Time".bold(),
-            "App".bold(),
-            "Activity".bold(),
-        );
-        println!("{}", "─".repeat(70));
-
-        for result in results {
-            let timestamp = result
-                .get("timestamp")
-                .and_then(|v| v.as_str())
-                .unwrap_or("?");
-            let app_name = result
-                .get("app")
-                .and_then(|v| v.as_str())
-                .unwrap_or("?");
-            let what_doing = result
-                .get("what_doing")
-                .and_then(|v| v.as_str())
-                .unwrap_or("?");
-            let score = result
-                .get("relevance_score")
-                .and_then(|v| v.as_f64())
-                .unwrap_or(0.0);
-
-            // Truncate timestamp to time only if it has a T
-            let time_part = if let Some(pos) = timestamp.find('T') {
-                &timestamp[pos + 1..std::cmp::min(pos + 9, timestamp.len())]
-            } else {
-                timestamp
-            };
-
-            let score_display = format!("{:.0}%", score * 100.0);
-            println!(
-                "  {:<20}  {:<15}  {} {}",
-                time_part,
-                app_name,
-                what_doing,
-                score_display.dimmed(),
-            );
+        for item in &results {
+            match kind {
+                "skills" => write_skill(out, item)?,
+                "memory" => write_moment(out, item, tz)?,
+                "days" => write_day(out, item)?,
+                _ => {
+                    for line in serde_json::to_string_pretty(item)?.lines() {
+                        writeln!(out, "  {line}")?;
+                    }
+                }
+            }
         }
-
-        println!(
-            "\n{} {} result(s)",
-            "✓".green(),
-            results.len()
-        );
-    } else if let Some(error) = parsed.get("error").and_then(|e| e.as_str()) {
-        println!("{} {}", "✗".red(), error);
-    } else {
-        println!("{}", serde_json::to_string_pretty(&parsed)?);
     }
+    Ok(())
+}
 
+fn write_skill(out: &mut dyn Write, item: &Value) -> Result<()> {
+    let text = |key: &str| item[key].as_str().unwrap_or("").to_string();
+    let handoff = match text("handoff").as_str() {
+        "ready" => "ready for agents".to_string(),
+        "held_back" => {
+            let reasons: Vec<&str> = item["reasons"]
+                .as_array()
+                .map(|r| r.iter().filter_map(Value::as_str).collect())
+                .unwrap_or_default();
+            format!("held back: {}", reasons.join("; "))
+        }
+        _ => "not approved".to_string(),
+    };
+    writeln!(out, "  {} ({}) — {handoff}", text("title"), text("slug"))?;
+    let description = text("description");
+    if !description.is_empty() {
+        writeln!(out, "      {description}")?;
+    }
+    Ok(())
+}
+
+fn write_day(out: &mut dyn Write, item: &Value) -> Result<()> {
+    let date = item["date"].as_str().unwrap_or("?");
+    let day = NaiveDate::parse_from_str(date, "%Y-%m-%d")
+        .map(|d| d.format("%a %-d %b %Y").to_string())
+        .unwrap_or_else(|_| date.to_string());
+    let mut line = format!("  {day}");
+    if let Some(tasks) = item["task_count"].as_u64() {
+        line += &format!("  {tasks} task{}", if tasks == 1 { "" } else { "s" });
+    }
+    if let Some(hours) = item["active_hours"].as_f64() {
+        line += &format!(", {hours:.1} active hours");
+    }
+    let apps: Vec<&str> = item["apps"]
+        .as_array()
+        .map(|a| a.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    if !apps.is_empty() {
+        line += &format!(" ({})", apps.join(", "));
+    }
+    writeln!(out, "{line}")?;
+    let excerpt = item["excerpt"].as_str().unwrap_or("");
+    if !excerpt.is_empty() {
+        writeln!(out, "      {excerpt}")?;
+    }
     Ok(())
 }
 
@@ -444,6 +497,117 @@ mod tests {
         assert!(request.starts_with("GET /memory/status HTTP/1.1\r\n"));
         assert!(request.contains("\r\nContent-Length: 0\r\n"));
         assert!(request.contains("\r\nX-AgentHandover-Token: t\r\n"));
+    }
+
+    use chrono::FixedOffset;
+    use std::cell::RefCell;
+
+    type Call = (String, String, Option<Value>);
+
+    /// `search` against a fake API answering `reply`; the calls and the output.
+    fn run_search(args: &SearchArgs, reply: Option<(u16, Value)>) -> (Result<()>, Vec<Call>, String) {
+        let calls: RefCell<Vec<Call>> = RefCell::new(Vec::new());
+        let api = |m: &str, p: &str, b: Option<&Value>| {
+            calls.borrow_mut().push((m.into(), p.into(), b.cloned()));
+            Ok(reply.clone())
+        };
+        let tz = FixedOffset::east_opt(2 * 3600).unwrap();
+        let now = Utc.with_ymd_and_hms(2026, 10, 12, 12, 0, 0).unwrap();
+        let mut out = Vec::new();
+        let result = search(&api, &mut out, args, now, &tz);
+        (result, calls.into_inner(), String::from_utf8(out).unwrap())
+    }
+
+    fn args<'a>(query: &'a str, kinds: &'a [String]) -> SearchArgs<'a> {
+        SearchArgs { query, kinds, since: None, until: None, limit: 5, json: false }
+    }
+
+    #[test]
+    fn search_sends_the_commonplace_contract() {
+        let kinds = vec!["memory".to_string(), "days".to_string()];
+        let mut a = args("acme invoice", &kinds);
+        a.since = Some("2026-10-12");
+        a.until = Some("13:00");
+        a.limit = 3;
+        let (result, calls, _) = run_search(&a, Some((200, json!({"query": "acme invoice"}))));
+        result.unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!((calls[0].0.as_str(), calls[0].1.as_str()), ("POST", "/commonplace/search"));
+        assert_eq!(calls[0].2, Some(json!({
+            "query": "acme invoice", "limit": 3, "kinds": ["memory", "days"],
+            "since": "2026-10-11T22:00:00Z", "until": "2026-10-12T11:00:00Z",
+        })));
+        // No kinds: the worker's default, so the body names none.
+        let (_, calls, _) = run_search(&args("x", &[]), Some((200, json!({}))));
+        assert_eq!(calls[0].2, Some(json!({"query": "x", "limit": 5})));
+    }
+
+    #[test]
+    fn search_prints_each_kind_in_its_own_group() {
+        let reply = json!({
+            "query": "domain",
+            "skills": {"mode": "semantic", "reason": "", "results": [
+                {"slug": "check-domain", "title": "Check Domain Availability",
+                 "description": "Is the domain free?", "score": 0.71, "handoff": "ready"},
+                {"slug": "old", "title": "Old Skill", "description": "", "score": 0.5,
+                 "handoff": "held_back", "reasons": ["stale", "trust is observe"]},
+            ]},
+            "memory": {"mode": "not_allowed", "reason": "The user has not let agents search their Memory.", "results": []},
+            "days": {"mode": "keyword_fallback", "reason": "embedding model unavailable: down", "results": [
+                {"date": "2026-10-12", "task_count": 3, "active_hours": 2.5,
+                 "apps": ["Google Chrome", "Slack"], "excerpt": "Checked domains", "score": 0.5},
+            ]},
+            "profile": {"mode": "whole", "reason": "", "results": [{"tools": {"editor": "Zed"}}]},
+        });
+        let (result, _, out) = run_search(&args("domain", &[]), Some((200, reply)));
+        result.unwrap();
+        assert_eq!(out, "Commonplace for \"domain\":\n\
+            \nSkills (by meaning):\n  \
+            Check Domain Availability (check-domain) — ready for agents\n      \
+            Is the domain free?\n  \
+            Old Skill (old) — held back: stale; trust is observe\n\
+            \nMemory: not searched. The user has not let agents search their Memory.\n  \
+            Search it yourself with: agenthandover memory search \"domain\"\n\
+            \nDays (by words; embedding model unavailable: down):\n  \
+            Mon 12 Oct 2026  3 tasks, 2.5 active hours (Google Chrome, Slack)\n      \
+            Checked domains\n\
+            \nProfile:\n  {\n    \"tools\": {\n      \"editor\": \"Zed\"\n    }\n  }\n");
+    }
+
+    #[test]
+    fn search_prints_memory_moments_in_local_time_and_says_when_nothing_matched() {
+        let reply = json!({"query": "q",
+            "memory": {"mode": "semantic", "reason": "", "results": [
+                {"app": "Google Chrome", "window_title": "Invoice INV-2041", "url_host": "billing.acme.com",
+                 "description": "Paying the Acme invoice", "first_ts": "2026-10-12T09:30:00.000Z",
+                 "last_ts": "2026-10-12T09:35:00.000Z", "score": 0.8}]},
+            "skills": {"mode": "keyword_fallback", "reason": "", "results": []}});
+        let (result, _, out) = run_search(&args("q", &[]), Some((200, reply)));
+        result.unwrap();
+        assert_eq!(out, "Commonplace for \"q\":\n\
+            \nSkills (by words):\n  Nothing found.\n\
+            \nMemory (by meaning):\n  \
+            Mon 12 Oct 11:30–11:35  Google Chrome — Invoice INV-2041 (billing.acme.com)\n      \
+            Paying the Acme invoice\n");
+    }
+
+    #[test]
+    fn search_json_errors_and_a_stopped_worker() {
+        let mut a = args("q", &[]);
+        a.json = true;
+        let reply = json!({"query": "q", "days": {"mode": "semantic", "reason": "", "results": []}});
+        let (result, _, out) = run_search(&a, Some((200, reply.clone())));
+        result.unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&out).unwrap(), reply);
+
+        let (result, _, _) = run_search(&a, Some((400, json!({"error": "unknown kind(s): x"}))));
+        assert_eq!(result.unwrap_err().to_string(), "unknown kind(s): x");
+        let (result, _, _) = run_search(&a, None);
+        assert_eq!(result.unwrap_err().to_string(), WORKER_DOWN);
+        let mut bad = args("q", &[]);
+        bad.since = Some("yesterday-ish");
+        let (result, calls, _) = run_search(&bad, Some((200, json!({}))));
+        assert!(result.is_err() && calls.is_empty());
     }
 
     #[test]

@@ -544,7 +544,7 @@ Generated from the CLI's own definition (`agenthandover <command> --help` has th
 | `agenthandover focus finalize` | Answer the focus recording's pending questions in the terminal |  |
 | `agenthandover focus skip-questions` | Skip the pending questions (the Skill keeps them as not yet known) |  |
 | `agenthandover export` | Export SOPs in a specific format | `--format` `--sop` `--output` |
-| `agenthandover search <QUERY>` | Search activity annotations (full-text search) | `--date` `--app` `--limit` |
+| `agenthandover search <QUERY>` | Search Commonplace: your Skills, Memory (when agents may search it), daily summaries and profile | `--kinds` `--since` `--until` `--limit` `--json` |
 | `agenthandover connect <AGENT> [OPTIONS]...` | Connect an AI agent (claude-code, codex, openclaw, hermes, mcp) |  |
 | `agenthandover bench [OPTIONS]...` | Model bake-off: replay a journey cassette's prompts against a tier's live models and report tok/s and a golden-diff score | `--tier` |
 | `agenthandover memory search <QUERY>` | Search Memory by meaning ("the Acme invoice", "the error in the terminal") | `--since` `--until` `--app` `--limit` `--json` |
@@ -552,7 +552,7 @@ Generated from the CLI's own definition (`agenthandover <command> --help` has th
 | `agenthandover memory pause` | Pause Memory (Skills still learn; pause observing in the app for that) | `--for` |
 | `agenthandover memory resume` | Resume Memory |  |
 | `agenthandover memory status` | What Memory holds, and whether it is on or paused | `--json` |
-| `agenthandover memory agents <STATE>` | Let agents search Memory over MCP (descriptions, never images), or stop them |  |
+| `agenthandover memory agents <STATE>` | Let agents search Memory (MCP and `agenthandover search`: descriptions, never images), or stop them |  |
 | `agenthandover recall` | Recall what you were doing at a given time | `--date` `--app` `--start` `--end` |
 <!-- cli-table:end -->
 
