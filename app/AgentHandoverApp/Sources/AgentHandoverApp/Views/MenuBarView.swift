@@ -51,7 +51,7 @@ struct MenuBarView: View {
                 }
 
                 // Primary action: Record (Memory only learns no Skills)
-                if appState.workerStatus?.memoryOnly == true {
+                if appState.memoryOnly {
                     memoryOnlyRow
                 } else {
                     recordSection
@@ -247,11 +247,13 @@ struct MenuBarView: View {
         if isRecording {
             return "\(recordingTitle) \u{00B7} \(formattedElapsed)"
         }
-        if appState.userStopped { return "Tap Start to resume learning" }
+        if appState.userStopped {
+            return appState.memoryOnly ? "Tap Observe Me to resume Memory" : "Tap Start to resume learning"
+        }
         if appState.health == .starting { return "Waiting for the daemon and worker to report" }
         if appState.daemonRunning && appState.workerRunning {
             if appState.eventsToday > 0 {
-                return appState.workerStatus?.memoryOnly == true
+                return appState.memoryOnly
                     ? "Remembering what you see" : "Learning from your work"
             }
             return "Waiting for activity"
@@ -329,7 +331,7 @@ struct MenuBarView: View {
     /// A recording's questions, except in Memory only: answering them would
     /// finish a Skill that nothing writes until Skills are on again.
     private var focusQuestionsShown: Bool {
-        questionsActuallyPending && appState.workerStatus?.memoryOnly != true
+        questionsActuallyPending && !appState.memoryOnly
     }
 
     /// Check if questions file actually exists with pending status,

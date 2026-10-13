@@ -4259,7 +4259,7 @@ def main(argv: list[str] | None = None) -> None:
     _write_worker_status(
         started_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         events_processed_today=0, sops_generated=0, last_pipeline_duration_ms=None,
-        consecutive_errors=0, vlm_available=False,
+        consecutive_errors=0, vlm_available=False, skills_enabled=load_config().skills.enabled,
     )
     if not _wait_for_db(args.db_path, shutdown_flag) or not _schema_ready(
         args.db_path, shutdown_flag,

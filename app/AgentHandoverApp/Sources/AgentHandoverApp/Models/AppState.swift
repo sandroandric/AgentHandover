@@ -205,6 +205,9 @@ final class AppState: ObservableObject {
 
     @Published var daemonStatus: DaemonStatusFile?
     @Published var workerStatus: WorkerStatusFile?
+    /// Memory only (`SkillsMode`), from config.toml, the source of truth:
+    /// known before the worker has started (and when it is stopped).
+    @Published var memoryOnly = false
     @Published var extensionHeartbeat: ExtensionHeartbeatFile?
     @Published var daemonRunning = false
     @Published var workerRunning = false
@@ -390,6 +393,8 @@ final class AppState: ObservableObject {
         readFocusSession()
         readFocusQuestions()
         readSOPIndex()
+        let mode = SkillsMode.load().isMemoryOnly
+        if memoryOnly != mode { memoryOnly = mode }
         updateHealth()
         checkPermissions()
         updateVLMStatus()
