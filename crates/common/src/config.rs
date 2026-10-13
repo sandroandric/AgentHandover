@@ -455,7 +455,7 @@ impl Default for ConstraintsConfig {
     }
 }
 
-/// `[memory]`: the private memory of kept frames (v0.6). The daemon reads
+/// `[memory]`: the private memory of kept frames (2.0). The daemon reads
 /// `enabled` and `thumbnail_days` (whether it writes encrypted thumbnails);
 /// the worker owns the rest. Same keys and defaults as the worker's
 /// `MemoryConfig`. Pausing is not config: see `status::memory_paused`.

@@ -30,7 +30,7 @@
   <a href="#how-it-works">How It Works</a> &middot;
   <a href="#memory">Memory</a> &middot;
   <a href="#commonplace">Commonplace</a> &middot;
-  <a href="#v060">What's New</a> &middot;
+  <a href="#v200">What's New</a> &middot;
   <a href="#connect-your-agent">Connect Your Agent</a> &middot;
   <a href="#install">Install</a> &middot;
   <a href="#privacy">Privacy</a> &middot;
@@ -61,7 +61,7 @@ Each Skill captures the *what*, the *why*, and the *how* — steps, strategy, de
 
 You already know how to do your work. Now your agents can too.
 
-**New in 0.6: [Memory](#memory).** Everything AgentHandover sees on your screen also goes into a private memory on your Mac that you can search by describing it: *"the invoice from Acme"*, *"that orange news site"*. If you allow it, your agents can search it too.
+**New in 2.0: [Memory](#memory) and [Commonplace](#commonplace).** Everything AgentHandover sees on your screen also goes into a private memory on your Mac that you can search by describing it: *"the invoice from Acme"*, *"that orange news site"*. If you allow it, your agents can search it too.
 
 ## Why this matters
 
@@ -156,7 +156,7 @@ An approved Skill that fails a check is listed by `list_ready_skills` as held ba
 
 ## Memory
 
-New in 0.6. Find anything you saw on your Mac by describing it. Each screen AgentHandover keeps is embedded, the screenshot together with its app and window title, by Google's [EmbeddingGemma 2](https://huggingface.co/google/embeddinggemma-2) running in Ollama on your Mac. Near-identical screens of the same window in a row become one moment, so a long day stays a short list.
+New in 2.0. Find anything you saw on your Mac by describing it. Each screen AgentHandover keeps is embedded, the screenshot together with its app and window title, by Google's [EmbeddingGemma 2](https://huggingface.co/google/embeddinggemma-2) running in Ollama on your Mac. Near-identical screens of the same window in a row become one moment, so a long day stays a short list.
 
 - **Search** from the menu bar (**Commonplace…**, the Memory scope), from the CLI (`agenthandover memory search "the Acme invoice"`), or let your agents search it (below).
 - **What is kept.** For each moment: a short redacted description (the screen's annotation, or its screen text until one exists), the app and window title, the time and a search vector. The screenshot is deleted once it is embedded. A small thumbnail (about 480 px) is kept for 7 days to show in results, encrypted with a key in your Keychain that only the app and the capture daemon use. After that the description and vector remain, for a year by default.
@@ -172,7 +172,7 @@ New in 0.6. Find anything you saw on your Mac by describing it. Each screen Agen
 
 ## Commonplace
 
-New in 0.6. Everything AgentHandover knows about your work, in one place your agents can search: **Skills** (the workflows it learned from you, and whether each may be handed off), **Memory** (what was on your screen, only when you let agents search it), **daily summaries** (what you worked on each day) and your **profile** (tools, working hours, writing style). All of it stays on your Mac.
+New in 2.0. Everything AgentHandover knows about your work, in one place your agents can search: **Skills** (the workflows it learned from you, and whether each may be handed off), **Memory** (what was on your screen, only when you let agents search it), **daily summaries** (what you worked on each day) and your **profile** (tools, working hours, writing style). All of it stays on your Mac.
 
 - **In the app.** **Commonplace…** in the menu bar opens one search over your Skills, Memory and days, grouped by kind, with scope chips (All, Skills, Memory, Days). Return opens a result: a moment in place, a Skill in Workflows, a day in the Daily Digest. Your own search always includes Memory; a line at the top says what agents can see and turns their Memory access on or off.
 - **Agents know it exists.** The MCP server's instructions describe Commonplace to every connected agent, and `agenthandover connect` adds a short Commonplace note where each agent reads its instructions (Claude Code's `/agenthandover-list`, Codex's `AGENTS.md` block, an `agenthandover-commonplace` Skill for Hermes, `memory/apprentice/commonplace.md` in the OpenClaw workspace; `connect mcp` prints it for any other agent).
@@ -625,7 +625,7 @@ GitHub [Discussions](https://github.com/sandroandric/AgentHandover/discussions) 
 
 ## Changelog
 
-### v0.6.0
+### v2.0.0
 
 AgentHandover grows from Skills into a private memory of your work, with Skills on top. Numbers are measurements on the 16 GB test Mac with Ollama 0.40.3 unless stated.
 

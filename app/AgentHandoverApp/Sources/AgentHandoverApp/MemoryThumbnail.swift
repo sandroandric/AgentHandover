@@ -3,7 +3,7 @@ import CryptoKit
 import Foundation
 import Security
 
-/// The key that seals Memory thumbnails (v0.6).
+/// The key that seals Memory thumbnails (2.0).
 ///
 /// Created once, on first use, as a 256-bit random key and kept as a
 /// Keychain generic password (service `com.agenthandover.app`, account

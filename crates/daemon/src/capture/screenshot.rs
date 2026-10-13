@@ -10,7 +10,7 @@
 //! - success: `AHJ1` + width u32 LE + height u32 LE + byte length u32 LE + JPEG bytes
 //! - error:   `{"error":"..."}\n`
 //!
-//! Memory thumbnail key (v0.6): request `{"command":"thumbnail_key"}\n`,
+//! Memory thumbnail key (2.0): request `{"command":"thumbnail_key"}\n`,
 //! reply `length u32 LE` (32) + the raw AES-256 key, or the error line.
 
 use std::io::{Read, Write};

@@ -50,7 +50,7 @@ struct MemoryOfferView: View {
                     .font(.system(size: 28, weight: .light))
                     .foregroundStyle(.secondary)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("New in AgentHandover 0.6")
+                    Text("New in AgentHandover 2.0")
                         .font(.system(size: 11, weight: .medium))
                         .foregroundStyle(.secondary)
                     Text("Memory")

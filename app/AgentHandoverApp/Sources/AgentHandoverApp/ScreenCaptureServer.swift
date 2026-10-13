@@ -10,7 +10,7 @@ import Foundation
 ///   byte length u32 LE + JPEG bytes (the frame after downscaling)
 /// - Or error: `{"error": "..."}\n`
 ///
-/// Memory thumbnail key (v0.6): `{"command":"thumbnail_key"}\n` is answered
+/// Memory thumbnail key (2.0): `{"command":"thumbnail_key"}\n` is answered
 /// with byte length u32 LE (32) + the raw key (`MemoryThumbnailKey`), or the
 /// error line. Like every request it reaches only peers `policy` accepts:
 /// the daemon at its installed path and, in a signed build, signed by this

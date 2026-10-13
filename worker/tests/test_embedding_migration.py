@@ -1,6 +1,6 @@
 """Removing ``[embedding] image_embeddings`` (WP-E1).
 
-The SigLIP "Visual search" option is gone in 0.6.0.  The worker's startup
+The SigLIP "Visual search" option is gone in 2.0.0.  The worker's startup
 migration (``model_profiles.migrate_embedding_file``) removes the key from
 config.toml after a timestamped backup, and when it was on, first records
 ``{"wanted_visual_search": true}`` in ``memory-offer.json`` beside the

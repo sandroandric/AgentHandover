@@ -3,14 +3,17 @@
 All notable changes to AgentHandover are documented here.
 
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/),
-and the project follows [Semantic Versioning](https://semver.org/) within the 0.x line
-(minor bumps may include breaking changes; the README's Changelog section has the
-prose version of every release).
+and the project follows [Semantic Versioning](https://semver.org/). Up to 0.5.0,
+minor bumps could include breaking changes; 2.0.0 follows 0.5.0 directly (there is
+no 0.6 or 1.x). The README's Changelog section has the prose version of every release.
 
-## [0.6.0] — unreleased
+## [2.0.0] — unreleased
 
-Memory: a private, searchable record of what was on screen, with Skills on
-top. Every claim names the test that proves it (`worker/tests/journeys/`
+AgentHandover becomes more than Skills: a private memory of your work and
+Commonplace, the one place your agents search for what you know. The version
+jumps from 0.5.0 to 2.0.0 to say so; upgrades from 0.5 are offered Memory once.
+
+Every claim names the test that proves it (`worker/tests/journeys/`
 replays recorded model output) or the measurement behind it (single runs on
 the 16 GB test Mac with Ollama 0.40.3).
 

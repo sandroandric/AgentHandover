@@ -508,7 +508,7 @@ async fn an_allowed_window_keeps_its_frame() {
     let events = run_loop(h.config, &h.root, Some(&served), Duration::from_millis(800)).await;
     assert_eq!(frames(&events), 1, "{events:?}");
     assert_eq!(jpegs_in(&shots), 1);
-    // v0.6 Memory: the kept frame has an encrypted thumbnail named by its
+    // 2.0 Memory: the kept frame has an encrypted thumbnail named by its
     // event id, sealed with the app's key.
     let frame = events.iter().find(|e| matches!(e.kind, EventKind::DwellSnapshot)).unwrap();
     assert_eq!(thumbnails_in(&thumbs), vec![format!("{}.ahthumb", frame.id)]);
@@ -652,7 +652,7 @@ fn secure_field_reply(app_id: &str, title: &str) -> String {
     reply.to_string()
 }
 
-/// v0.6 Memory, with frames on offer and Memory on: a blocked window, a
+/// 2.0 Memory, with frames on offer and Memory on: a blocked window, a
 /// metadata-only window and a focused password field never produce an
 /// encrypted thumbnail (nor a frame), while the same switch into an
 /// ordinary window does (the control in `an_allowed_window_keeps_its_frame`).

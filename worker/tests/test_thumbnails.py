@@ -1,4 +1,4 @@
-"""v0.6 Memory thumbnails: the worker deletes the daemon's encrypted
+"""2.0 Memory thumbnails: the worker deletes the daemon's encrypted
 thumbnails past ``[memory] thumbnail_days`` (by file age and by event age),
 those whose event is gone, and, for forget, those of given events."""
 

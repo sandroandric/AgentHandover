@@ -133,7 +133,7 @@ final class MemoryFormatTests: XCTestCase {
     }
 
     func testTheWorkerStatusCarriesTheUpgradeProgress() throws {
-        let json = #"{"pid": 1, "version": "0.6.0", "started_at": "", "heartbeat": "", "events_processed_today": 0, "sops_generated": 0, "consecutive_errors": 0, "vlm_available": true, "embedding_upgrade": {"state": "running", "done": 120, "total": 400, "dropped": 2, "error": null}}"#
+        let json = #"{"pid": 1, "version": "2.0.0", "started_at": "", "heartbeat": "", "events_processed_today": 0, "sops_generated": 0, "consecutive_errors": 0, "vlm_available": true, "embedding_upgrade": {"state": "running", "done": 120, "total": 400, "dropped": 2, "error": null}}"#
         let status = try JSONDecoder().decode(WorkerStatusFile.self, from: Data(json.utf8))
         XCTAssertEqual(status.embedding_upgrade, EmbeddingUpgradeStatus(state: "running", done: 120, total: 400, dropped: 2, error: nil))
         XCTAssertEqual(status.embedding_upgrade?.line,

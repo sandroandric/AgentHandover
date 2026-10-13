@@ -755,7 +755,7 @@ def _migrate_embedding_config(
     path: Path | None = None, state_dir: Path | None = None,
 ) -> bool:
     """Remove ``[embedding] image_embeddings`` (the "Visual search" option
-    removed in 0.6.0) from config.toml, recording in the status dir's
+    removed in 2.0.0) from config.toml, recording in the status dir's
     ``memory-offer.json`` that it was on
     (``model_profiles.migrate_embedding_file``: backup first, atomic
     write, only when the key is there).  One INFO line when it changes

@@ -1,6 +1,6 @@
 {
   "name": "agenthandover-extension",
-  "version": "0.6.0",
+  "version": "2.0.0",
   "description": "AgentHandover Observer - Chrome MV3 extension for silent workflow learning",
   "private": true,
   "scripts": {

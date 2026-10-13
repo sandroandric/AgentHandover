@@ -1274,7 +1274,7 @@ MEMORY_OFFER_FILE = "memory-offer.json"
 
 def drop_image_embeddings(config_text: str) -> tuple[str, bool | None]:
     """*config_text* without ``[embedding] image_embeddings`` (the SigLIP
-    "Visual search" option, removed in 0.6.0), and whether it was on;
+    "Visual search" option, removed in 2.0.0), and whether it was on;
     ``(config_text, None)`` when there is nothing to remove or the edit
     cannot be made safely.
 

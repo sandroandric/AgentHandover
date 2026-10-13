@@ -1,4 +1,4 @@
-"""Encrypted Memory thumbnails (v0.6): expiry and deletion.
+"""Encrypted Memory thumbnails (2.0): expiry and deletion.
 
 The daemon writes ``<data dir>/thumbs/<event_id>.ahthumb`` (AES-256-GCM
 under the app's Keychain key) for each kept frame while ``[memory]`` is on;

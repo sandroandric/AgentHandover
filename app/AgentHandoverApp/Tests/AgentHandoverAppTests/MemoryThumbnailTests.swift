@@ -2,7 +2,7 @@ import CryptoKit
 import XCTest
 @testable import AgentHandoverApp
 
-/// v0.6 Memory thumbnails: the app's key (created once, Keychain attributes),
+/// 2.0 Memory thumbnails: the app's key (created once, Keychain attributes),
 /// opening what the daemon sealed, and the capture-socket key handshake that
 /// only the allowed daemon passes. No test touches the real Keychain.
 final class MemoryThumbnailTests: XCTestCase {

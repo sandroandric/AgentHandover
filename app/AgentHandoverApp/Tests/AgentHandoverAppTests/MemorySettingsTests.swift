@@ -9,7 +9,7 @@ final class MemorySettingsTests: XCTestCase {
         .deletingLastPathComponent().deletingLastPathComponent()
         .deletingLastPathComponent()
 
-    /// The config a 0.6 install starts from.
+    /// The config a 2.0 install starts from.
     private func example() throws -> String {
         try String(contentsOf: Self.repoRoot.appendingPathComponent("config.example.toml"), encoding: .utf8)
     }

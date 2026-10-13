@@ -1,4 +1,4 @@
--- v009: "Upgrade everything" (v0.6), the switch of `[embedding] model` to
+-- v009: "Upgrade everything" (2.0), the switch of `[embedding] model` to
 -- EmbeddingGemma 2 with every stored vector re-embedded first.
 --
 -- `vector_store`'s key is the source (`id` = sha256 of

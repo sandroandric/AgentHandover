@@ -37,7 +37,7 @@ struct OnboardingView: View {
     @State private var vlmStatusMessage = ""
     @State private var hasSeededVLMFromConfig = false
 
-    // Memory (v0.6): on by default for a new install, agents off.
+    // Memory (2.0): on by default for a new install, agents off.
     @State private var setupMemoryOn = MemorySetupChoice.wantsMemory()
     @State private var setupAgentsAccess = MemorySetupChoice.agentsAccess()
     /// The version the local Ollama reports (nil until read, or when none

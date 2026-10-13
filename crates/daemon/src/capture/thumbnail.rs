@@ -1,4 +1,4 @@
-//! Encrypted thumbnails of kept frames (v0.6 Memory).
+//! Encrypted thumbnails of kept frames (2.0 Memory).
 //!
 //! For each kept frame, while `[memory]` is on and not paused, the daemon
 //! writes `<data dir>/thumbs/<event_id>.ahthumb`: a JPEG of the frame
