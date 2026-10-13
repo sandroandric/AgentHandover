@@ -4110,7 +4110,6 @@ def _commonplace(ctx, memory_service) -> "object":
     through *memory_service*'s index, and ``config.toml`` read on each
     search (the agents switch applies at once, as in the MCP server)."""
     from agenthandover_worker.commonplace import QUERY_EMBED_TIMEOUT_S, Commonplace
-    from agenthandover_worker.config import load_config
 
     vector_kb = ctx.vector_kb
     return Commonplace(
