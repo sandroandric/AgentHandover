@@ -24,7 +24,7 @@ at a time:
   ``frames``) instead of adding one: one row per moment;
 * the row's description is the annotation of one of its frames when one
   exists (:func:`annotation_description`, redacted), else the frame's
-  screen text (``SceneAnnotator._build_visual_text_proxy``, redacted);
+  screen text (:func:`proxy_description`, redacted);
   an annotation that lands later replaces the screen text
   (:meth:`MemoryWriter.annotated`).
 
@@ -83,7 +83,7 @@ from agenthandover_worker.model_profiles import EMBEDDING_PROFILES
 from agenthandover_worker.ollama import OllamaClient, OllamaError
 from agenthandover_worker.privacy_zones import ObservationTier, is_system_ui
 from agenthandover_worker.redaction import redact
-from agenthandover_worker.scene_annotator import SceneAnnotator, find_screenshot
+from agenthandover_worker.scene_annotator import find_screenshot
 from agenthandover_worker.thumbnails import EXTENSION as THUMB_EXTENSION
 from agenthandover_worker.thumbnails import delete_thumbnails, thumbs_dir
 
@@ -269,9 +269,14 @@ def annotation_description(annotation: dict | None) -> str:
 
 
 def proxy_description(event: dict) -> str:
-    """A frame's description from its screen text, redacted."""
-    proxy = SceneAnnotator._build_visual_text_proxy(event, None) or ""
-    return proxy[:DESCRIPTION_MAX_CHARS]
+    """A frame's description until its annotation lands: its screen text,
+    on one line, redacted ("On screen: ..."), or "" when it has none."""
+    ocr = parse_json_field(event, "metadata_json").get("ocr")
+    text = ocr.get("full_text", "") if isinstance(ocr, dict) else ""
+    text = " ".join(str(text or "").split())
+    if not text:
+        return ""
+    return redact(f"On screen: {text}")[:DESCRIPTION_MAX_CHARS]
 
 
 def _completed_annotation(event: dict) -> dict | None:

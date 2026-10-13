@@ -58,8 +58,23 @@ the 16 GB test Mac with Ollama 0.40.3).
   target writes a short Commonplace note where its agent reads
   instructions. Proof: `test_commonplace.py`, `test_mcp_server.py`,
   `test_agent_connect.py`, `search.rs` tests, J-commonplace.
+- **The Commonplace window** replaces the Memory window (menu
+  **Commonplace…**): one search, grouped Memory · Days · Skills with scope
+  chips, a moment opens in place, a Skill in Workflows, a day in the
+  Daily Digest, and a line saying what agents can see with their Memory
+  switch. Empty, it offers searches to try and requests to give an agent
+  (copied with one click). Proof: `CommonplaceTests` (Swift); checked on
+  the test Mac.
+- **A memory index that is light to keep.** Vectors are held as 8-bit
+  integers and the best candidates re-scored at full precision (rankings
+  identical to float32 in every test); the index loads on the first search
+  and is freed after 10 minutes without one. At 300,000 moments: 207 MB
+  instead of 666 MB while loaded. Proof: `test_memory_index.py`.
 
 ### Changed
+- **AgentHandover's own windows are never captured.** Commonplace shows
+  other moments' thumbnails and descriptions; capturing it would copy them
+  and fill Memory with your own searches. Proof: privacy zone tests.
 - **Embedding profiles.** Prefixes, sizes and thresholds per model. For
   EmbeddingGemma 2 (text paths at 768 dimensions, its document prefix for
   clustering: the model card's clustering prefix squeezed task texts into

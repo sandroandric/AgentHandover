@@ -174,7 +174,7 @@ struct CommonplaceView: View {
                     action: "Resume"
                 ) { Task { await center.resume() } }
             } else if case .problem(let problem) = model.waiting {
-                bannerRow(icon: "hourglass", text: problem.message + " New screens wait until then.",
+                bannerRow(icon: "hourglass", text: problem.message,
                           action: actionTitle(for: problem)) { perform(problem) }
             }
         }
@@ -209,7 +209,11 @@ struct CommonplaceView: View {
                       text: "AgentHandover's worker is not running, so Commonplace cannot be searched.",
                       action: "Start Worker") { perform(.workerNotRunning) }
         } else if model.query.trimmingCharacters(in: .whitespaces).isEmpty {
-            stateView(icon: "text.magnifyingglass", text: introText, action: nil, perform: {})
+            if model.scope == .all {
+                examples
+            } else {
+                stateView(icon: "text.magnifyingglass", text: introText, action: nil, perform: {})
+            }
         } else if let only = singleScopeFailure {
             failureState(only)
         } else if model.phase == .results && model.results.isEmpty(model.scope) {
@@ -237,7 +241,7 @@ struct CommonplaceView: View {
     private var introText: String {
         switch model.scope {
         case .all:
-            return "Search everything AgentHandover keeps on this Mac: your Skills, what you saw, and your days."
+            return "Search everything AgentHandover keeps on this Mac: what you saw, your days and your Skills."
         case .skills:
             return "Find a Skill by what it does: \u{201C}send the weekly report\u{201D}."
         case .memory:
@@ -245,6 +249,84 @@ struct CommonplaceView: View {
         case .days:
             return "Find a day by what you did: \u{201C}the day I fixed the banner\u{201D}."
         }
+    }
+
+    /// The empty All window: searches to try and requests for an agent.
+    private var examples: some View {
+        ScrollView {
+            VStack(spacing: 22) {
+                VStack(spacing: 10) {
+                    Image(systemName: "text.magnifyingglass")
+                        .font(.system(size: 30, weight: .light))
+                        .foregroundStyle(.tertiary)
+                    Text(introText)
+                        .font(.system(size: 13))
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                HStack(alignment: .top, spacing: 28) {
+                    exampleColumn("Try a search") {
+                        ForEach(CommonplaceExamples.searches, id: \.self) { query in
+                            exampleButton(query, icon: "magnifyingglass", help: "Search for this") {
+                                model.query = query
+                                searchFocused = true
+                            }
+                        }
+                    }
+                    exampleColumn("Ask your agent") {
+                        ForEach(CommonplaceExamples.agentRequests, id: \.self) { request in
+                            exampleButton(request, icon: "doc.on.doc", help: "Copy, then paste it to Claude Code, Codex or any connected agent") {
+                                NSPasteboard.general.clearContents()
+                                NSPasteboard.general.setString(request, forType: .string)
+                                center.notice = "Copied. Paste it to Claude Code, Codex or any agent connected to AgentHandover."
+                            }
+                        }
+                    }
+                }
+                Text("Agents search your Skills, days and profile. They see Memory only when you allow it above.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.tertiary)
+                    .multilineTextAlignment(.center)
+            }
+            .frame(maxWidth: 640)
+            .padding(.horizontal, 28)
+            .padding(.vertical, 32)
+            .frame(maxWidth: .infinity)
+        }
+    }
+
+    private func exampleColumn<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .padding(.bottom, 2)
+            content()
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func exampleButton(_ text: String, icon: String, help: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Image(systemName: icon)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.tertiary)
+                Text(text)
+                    .font(.system(size: 13))
+                    .foregroundStyle(.primary)
+                    .multilineTextAlignment(.leading)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .background(RoundedRectangle(cornerRadius: 7, style: .continuous).fill(Color.primary.opacity(0.05)))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(help)
     }
 
     /// A single-kind scope whose search failed: the whole window says why.
@@ -302,7 +384,8 @@ struct CommonplaceView: View {
         case .ollamaNotRunning: return "Open Ollama"
         case .ollamaTooOld: return "Download Ollama"
         case .modelMissing: return "Download\u{2026}"
-        case .waiting: return "Try Again"
+        // It clears by itself; the worker retries on its own.
+        case .waiting: return nil
         }
     }
 
@@ -366,7 +449,7 @@ struct CommonplaceView: View {
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(.secondary)
             if section.searched, section.error == nil {
-                Text("\(section.total)")
+                Text(section.countLabel)
                     .font(.system(size: 11))
                     .foregroundStyle(.tertiary)
                     .monospacedDigit()
@@ -402,7 +485,7 @@ struct CommonplaceView: View {
                     }
             }
             if section.hiddenCount > 0 {
-                Button("Show All \(section.total)") { model.scope = CommonplaceScope(section.kind) }
+                Button(section.showAllLabel) { model.scope = CommonplaceScope(section.kind) }
                     .buttonStyle(.link)
                     .font(.system(size: 12))
                     .selectionDisabled()
@@ -828,7 +911,7 @@ private struct MomentRow: View {
                         .font(.system(size: 13, weight: .semibold))
                         .lineLimit(1)
                 }
-                if let description = moment.description, !description.isEmpty {
+                if let description = moment.rowDescription {
                     Text(description)
                         .font(.system(size: 12))
                         .foregroundStyle(.secondary)

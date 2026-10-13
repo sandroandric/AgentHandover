@@ -16,6 +16,19 @@ struct MemoryMoment: Decodable, Equatable, Identifiable, Hashable {
     /// The event id the thumbnail is named by; nil when none was kept.
     let thumbID: String?
 
+    /// The description for a list row: the worker ends an annotation with
+    /// "(App, location)", which the row already shows as its title and
+    /// icon, so that tail is left out (the detail keeps the full text).
+    var rowDescription: String? {
+        guard var text = description?.trimmingCharacters(in: .whitespaces), !text.isEmpty else { return nil }
+        if text.hasSuffix(")"), let open = text.range(of: " (", options: .backwards),
+           let app, !app.isEmpty,
+           text[open.upperBound...].hasPrefix(app) {
+            text = String(text[..<open.lowerBound])
+        }
+        return text.isEmpty ? description : text
+    }
+
     enum CodingKeys: String, CodingKey {
         case id, frames, app, description, score
         case firstTS = "first_ts"

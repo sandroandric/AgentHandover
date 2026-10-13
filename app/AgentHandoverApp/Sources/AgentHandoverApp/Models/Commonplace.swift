@@ -162,7 +162,7 @@ enum CommonplaceScope: String, CaseIterable, Identifiable {
 
     var placeholder: String {
         switch self {
-        case .all: return "Search your Skills, Memory and days"
+        case .all: return "Search what you saw, your days and your Skills"
         case .skills: return "Find a Skill"
         case .memory: return "Describe what you saw"
         case .days: return "Find a day"
@@ -366,6 +366,13 @@ struct CommonplaceSection: Equatable, Identifiable {
     var id: CommonplaceKind { kind }
     /// "Show all 12" when All shows only some.
     var hiddenCount: Int { total - items.count }
+    /// The search asks for at most CommonplaceRequest.limit of a kind: a
+    /// group that reached it may have more.
+    var reachedLimit: Bool { total >= CommonplaceRequest.limit }
+    /// "12", or "50+" when the group reached the limit.
+    var countLabel: String { reachedLimit ? "\(total)+" : "\(total)" }
+    /// "Show All 12", or "Show More" when the group reached the limit.
+    var showAllLabel: String { reachedLimit ? "Show More" : "Show All \(total)" }
 
     /// Why the kind could not be searched, in one sentence.
     var errorMessage: String {
@@ -492,4 +499,32 @@ struct AgentsLine: Equatable {
         case nil: return nil
         }
     }
+}
+
+
+// MARK: - Examples
+
+/// What the empty window offers: searches to click (they run) and requests
+/// to give an agent (they are copied). The README and the website list the
+/// same ones.
+enum CommonplaceExamples {
+    /// Each finds something in a different way: by meaning, by look, in
+    /// your days, in your Skills.
+    static let searches = [
+        "the invoice from Acme",
+        "that page with the orange header",
+        "the error in the terminal",
+        "a slide with a chart about churn",
+        "how I deploy to staging",
+        "the day I spent in Figma",
+    ]
+
+    /// Requests a connected agent answers with search_commonplace.
+    static let agentRequests = [
+        "Write my weekly update from what I actually did this week.",
+        "Find the pricing article I read yesterday and summarise it.",
+        "Pick up where I left off on the onboarding doc.",
+        "Before you ask me how I release, check my Skills.",
+        "Roast my week: where did my hours really go?",
+    ]
 }

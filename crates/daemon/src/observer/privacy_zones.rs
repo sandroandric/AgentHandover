@@ -43,6 +43,10 @@ pub const DEFAULT_BLOCKED_APPS: &[&str] = &[
     "Passwords",
     "ScreenSaverEngine",
     "UserNotificationCenter",
+    // AgentHandover's own windows: Commonplace shows thumbnails and
+    // descriptions of other moments, so capturing it would copy them
+    // (past a forget, too) and fill Memory with your own searches.
+    "AgentHandover",
 ];
 
 /// URL patterns always blocked (the worker's `_DEFAULT_BLOCKED_URLS`).

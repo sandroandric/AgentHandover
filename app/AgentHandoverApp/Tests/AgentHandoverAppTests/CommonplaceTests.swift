@@ -561,4 +561,46 @@ final class CommonplaceTests: XCTestCase {
         XCTAssertEqual(model.lastQuery, "")
         XCTAssertFalse(model.isShowingResults(for: "domain"))
     }
+
+    // MARK: - Polish
+
+    func testARowLeavesOutTheAppAndPlaceItAlreadyShows() throws {
+        func moment(_ description: String?, app: String? = "Finder") throws -> MemoryMoment {
+            var object: [String: Any] = ["id": "e", "first_ts": "2026-10-13T10:00:00Z", "last_ts": "2026-10-13T10:00:00Z",
+                                         "frames": 1, "score": 0.5]
+            if let app { object["app"] = app }
+            if let description { object["description"] = description }
+            return try JSONDecoder().decode(MemoryMoment.self, from: JSONSerialization.data(withJSONObject: object))
+        }
+        XCTAssertEqual(try moment("viewing invoice files (Finder, Macintosh HD/Users/invoices-2026/)").rowDescription,
+                       "viewing invoice files")
+        // A parenthesis that is not the app's is kept.
+        XCTAssertEqual(try moment("reading about cats (and dogs)").rowDescription, "reading about cats (and dogs)")
+        XCTAssertEqual(try moment("reading (Finder notes)", app: nil).rowDescription, "reading (Finder notes)")
+        XCTAssertNil(try moment(nil).rowDescription)
+        XCTAssertNil(try moment("  ").rowDescription)
+    }
+
+    func testAGroupAtTheLimitSaysThereMayBeMore() {
+        func section(_ total: Int) -> CommonplaceSection {
+            CommonplaceSection(kind: .memory, items: [], total: total, searched: true, error: nil, byWordsReason: nil)
+        }
+        XCTAssertEqual(section(12).countLabel, "12")
+        XCTAssertEqual(section(12).showAllLabel, "Show All 12")
+        XCTAssertEqual(section(CommonplaceRequest.limit).countLabel, "\(CommonplaceRequest.limit)+")
+        XCTAssertEqual(section(CommonplaceRequest.limit).showAllLabel, "Show More")
+    }
+
+    func testTheExamplesCoverEveryKindAndAreDistinct() {
+        XCTAssertEqual(Set(CommonplaceExamples.searches).count, CommonplaceExamples.searches.count)
+        XCTAssertEqual(Set(CommonplaceExamples.agentRequests).count, CommonplaceExamples.agentRequests.count)
+        XCTAssertGreaterThanOrEqual(CommonplaceExamples.searches.count, 5)
+        XCTAssertGreaterThanOrEqual(CommonplaceExamples.agentRequests.count, 4)
+        XCTAssertEqual(CommonplaceScope.all.placeholder, "Search what you saw, your days and your Skills")
+    }
+
+    func testWaitingSaysItClearsByItself() {
+        XCTAssertEqual(MemoryProblem.waiting("macOS reports memory pressure (warning)").message,
+                       "Search still works. New screens are added once this clears: macOS reports memory pressure (warning).")
+    }
 }

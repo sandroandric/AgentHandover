@@ -992,3 +992,18 @@ def test_the_index_follows_a_replaced_vector(env):
     add_frame(env, at=NOW - timedelta(seconds=15), app="Safari", title="Fuji", image=b"loaded")
     writer.run()
     assert index.search("mountain", limit=1)[0]["score"] > 0.99
+
+
+def test_a_description_before_annotation_is_the_screen_text_on_one_line():
+    from agenthandover_worker.memory import proxy_description
+
+    event = {"metadata_json": json.dumps({"ocr": {"full_text": "Invoice  INV-2041\nAcme Studio\n\n1,240.00"}})}
+    assert proxy_description(event) == "On screen: Invoice INV-2041 Acme Studio 1,240.00"
+    assert proxy_description({"metadata_json": "{}"}) == ""
+
+
+def test_agenthandovers_own_windows_are_never_kept():
+    """Commonplace shows other moments' thumbnails and descriptions."""
+    from agenthandover_worker.privacy_zones import PrivacyZoneChecker
+
+    assert "AgentHandover" in PrivacyZoneChecker._DEFAULT_BLOCKED

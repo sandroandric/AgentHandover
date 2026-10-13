@@ -130,6 +130,10 @@ class PrivacyZoneChecker:
         "Passwords",
         "ScreenSaverEngine",
         "UserNotificationCenter",
+        # AgentHandover's own windows: Commonplace shows thumbnails and
+        # descriptions of other moments, so capturing it would copy them
+        # (past a forget, too) and fill Memory with your own searches.
+        "AgentHandover",
     }
 
     # Default blocked URL patterns — banking, gov, payroll, auth pages

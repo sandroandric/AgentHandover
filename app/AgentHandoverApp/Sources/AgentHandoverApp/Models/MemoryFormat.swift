@@ -240,7 +240,9 @@ enum MemoryProblem: Equatable {
         case .modelMissing(let model):
             return "Memory needs the \(model) model, which is not downloaded yet."
         case .waiting(let why):
-            return why.isEmpty ? "Memory is waiting for Ollama." : "Memory is waiting: \(why)"
+            return why.isEmpty
+                ? "Search still works. New screens are added once Ollama answers."
+                : "Search still works. New screens are added once this clears: \(why)."
         }
     }
 }
