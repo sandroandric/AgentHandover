@@ -556,6 +556,7 @@ Generated from the CLI's own definition (`agenthandover <command> --help` has th
 | `agenthandover skills promote <SLUG> <TO_STATE>` | Promote a procedure's lifecycle state (e.g., draft → reviewed → verified → agent_ready) |  |
 | `agenthandover skills failed` | List failed SOP generations |  |
 | `agenthandover skills retry <FAILURE_ID>` | Retry a failed SOP generation |  |
+| `agenthandover skills learn <STATE>` | Learn Skills from how you work (on), or Memory only (off: no model but Memory's) |  |
 | `agenthandover watch` | Live-updating status dashboard (refreshes every 2s) |  |
 | `agenthandover setup` | Interactive setup wizard | `--check` `--extension` `--vlm` `--tier` `--shell` `--shell-remove` |
 | `agenthandover doctor` | Run pre-flight checks | `--ollama-json` `--extension-json` |

@@ -329,7 +329,12 @@ fn print_service_status(name: &str, status_file: &str, pid_name: &str) {
             {
                 println!("    Pipeline:   last run {}ms", duration);
             }
-            if let Some(vlm) = value.get("vlm_available").and_then(|v| v.as_bool()) {
+            if value.get("skills_enabled").and_then(|v| v.as_bool()) == Some(false) {
+                println!(
+                    "    Mode:       {} (no model but Memory's; agenthandover skills learn on)",
+                    "Memory only".cyan()
+                );
+            } else if let Some(vlm) = value.get("vlm_available").and_then(|v| v.as_bool()) {
                 let vlm_str = if vlm {
                     "local".green()
                 } else {

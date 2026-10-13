@@ -31,6 +31,8 @@ pub struct AppConfig {
     pub constraints: ConstraintsConfig,
     #[serde(default)]
     pub memory: MemoryConfig,
+    #[serde(default)]
+    pub skills: SkillsConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -229,6 +231,7 @@ impl Default for AppConfig {
             trust: TrustConfig::default(),
             constraints: ConstraintsConfig::default(),
             memory: MemoryConfig::default(),
+            skills: SkillsConfig::default(),
         }
     }
 }
@@ -452,6 +455,21 @@ impl Default for ConstraintsConfig {
             require_confirmation_for: Vec::new(),
             max_autonomous_actions_per_hour: default_max_autonomous_actions(),
         }
+    }
+}
+
+/// `[skills]`: learning Skills from how the user works. Off is "Memory
+/// only": capture and Memory keep running and no generative model is ever
+/// loaded or called (the worker's `SkillsConfig`, same key and default).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SkillsConfig {
+    pub enabled: bool,
+}
+
+impl Default for SkillsConfig {
+    fn default() -> Self {
+        Self { enabled: true }
     }
 }
 

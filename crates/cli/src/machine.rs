@@ -803,6 +803,10 @@ pub struct ConfiguredModels {
     /// `[memory] enabled = true`: Memory's model needs the tier table's
     /// `minimum_ollama_version_for_memory`.
     pub memory_enabled: bool,
+    /// `[skills] enabled` (default true). False is "Memory only": no
+    /// annotation or Skill model runs (`annotation` and `sop` are empty), so
+    /// there is no tier to size memory headroom for.
+    pub skills: bool,
 }
 
 /// With Memory on, a service older than `minimum` (the tier table's
@@ -865,7 +869,7 @@ pub fn gather(host_url: &str, models: &ConfiguredModels) -> Report {
         models.memory_enabled,
     ));
     let mut headroom = None;
-    if host.local {
+    if host.local && models.skills {
         if let Some(free) = free_memory_now() {
             let loaded = ollama::loaded_models(&host.url).unwrap_or_default();
             let (h, f) = diagnose_headroom(

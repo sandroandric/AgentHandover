@@ -402,7 +402,63 @@ pub fn failed() -> Result<()> {
     );
 }
 
+/// `skills learn on|off` on the config text *current*: the new text and
+/// what to tell the person. Off is "Memory only", which needs Memory, so
+/// it turns `[memory] enabled` on as well; on leaves Memory as it is.
+pub fn learn_config(current: &str, on: bool) -> (String, &'static str) {
+    use crate::commands::memory::set_section_key;
+    if on {
+        (
+            set_section_key(current, "skills", "enabled", "true"),
+            "AgentHandover learns Skills again: screen descriptions, Skill drafts and their \
+             questions, daily summaries. It needs its Skill models: `agenthandover doctor` \
+             checks them and `agenthandover setup --vlm` downloads them.",
+        )
+    } else {
+        let text = set_section_key(current, "skills", "enabled", "false");
+        (
+            set_section_key(&text, "memory", "enabled", "true"),
+            "Memory only: AgentHandover keeps capturing and filling Memory, and runs no model \
+             but Memory's own. No new Skills, questions or daily summaries; your Skills stay \
+             available to your agents. Learn Skills again with: agenthandover skills learn on",
+        )
+    }
+}
+
+/// `skills learn on|off`: write the config, then restart the daemon and the
+/// worker, which read it at start.
+pub fn learn(on: bool) -> Result<()> {
+    let path = crate::commands::config::config_path();
+    let current = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e.into()),
+    };
+    let (updated, message) = learn_config(&current, on);
+    if updated != current {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let tmp = path.with_extension("toml.tmp");
+        std::fs::write(&tmp, &updated)?;
+        std::fs::rename(&tmp, &path)?;
+        crate::commands::service::restart("all")?;
+    }
+    println!("{message}");
+    Ok(())
+}
+
 pub fn retry(failure_id: &str) -> Result<()> {
+    // An unreadable config is Skills on, as the worker reads it.
+    let skills = agenthandover_common::config::AppConfig::from_file(&crate::commands::config::config_path())
+        .map(|c| c.skills.enabled)
+        .unwrap_or(true);
+    if !skills {
+        bail!(
+            "Memory only: Skills are off, so nothing can regenerate a Skill. \
+             Learn Skills again with: agenthandover skills learn on"
+        );
+    }
     let trigger = serde_json::json!({
         "failure_id": failure_id,
         "requested_at": chrono::Utc::now().to_rfc3339(),
@@ -418,4 +474,31 @@ pub fn retry(failure_id: &str) -> Result<()> {
     println!("The worker will re-attempt on its next cycle.");
 
     Ok(())
+}
+
+#[cfg(test)]
+mod learn_tests {
+    use super::learn_config;
+
+    #[test]
+    fn learning_off_is_memory_only_and_turns_memory_on() {
+        let (text, message) = learn_config("[memory]\nenabled = false\nagents_access = true\n", false);
+        assert!(text.contains("[skills]\nenabled = false"), "{text}");
+        assert!(text.contains("[memory]\nenabled = true\nagents_access = true"), "{text}");
+        assert!(message.starts_with("Memory only"));
+    }
+
+    #[test]
+    fn learning_on_leaves_memory_as_it_is() {
+        let (text, message) = learn_config("[memory]\nenabled = false\n\n[skills]\nenabled = false\n", true);
+        assert!(text.contains("[skills]\nenabled = true"), "{text}");
+        assert!(text.contains("[memory]\nenabled = false"), "{text}");
+        assert!(message.contains("setup --vlm"));
+    }
+
+    #[test]
+    fn an_empty_config_gets_both_sections() {
+        let (text, _) = learn_config("", false);
+        assert!(text.contains("[skills]") && text.contains("[memory]"), "{text}");
+    }
 }

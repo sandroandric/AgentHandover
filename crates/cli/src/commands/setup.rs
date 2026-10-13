@@ -583,14 +583,25 @@ fn step_vlm(check_only: bool, tier_arg: Option<&str>) -> Result<()> {
         })?,
         None => tiers::resolve_models(config.vlm.tier.as_deref(), None, None).0,
     };
-    let models = table.models(tier);
-    println!(
-        "  {} Tier: {} ({}; {} GB RAM detected)",
-        "•".cyan(),
-        tier.label.bold(),
-        tier.subtitle,
-        tiers::machine_ram_gb(),
-    );
+    // Memory only ([skills] enabled = false): Memory's model alone; no
+    // tier is chosen or written.
+    let skills = config.skills.enabled;
+    let models = if skills { table.models(tier) } else { vec![config.memory.model.as_str()] };
+    if skills {
+        println!(
+            "  {} Tier: {} ({}; {} GB RAM detected)",
+            "•".cyan(),
+            tier.label.bold(),
+            tier.subtitle,
+            tiers::machine_ram_gb(),
+        );
+    } else {
+        println!(
+            "  {} Memory only: Memory's model is the only one needed ({})",
+            "•".cyan(),
+            config.memory.model,
+        );
+    }
 
     // Ask the service over HTTP, as doctor does (see crate::ollama): the
     // `ollama` CLI need not be on the PATH for a running service to serve.
@@ -629,7 +640,7 @@ fn step_vlm(check_only: bool, tier_arg: Option<&str>) -> Result<()> {
 
     if missing.is_empty() {
         println!("  {} Models present: {}", "✓".green(), models.join(", "));
-        if !check_only {
+        if !check_only && skills {
             persist_tier(tier)?;
         }
         return Ok(());
@@ -645,14 +656,19 @@ fn step_vlm(check_only: bool, tier_arg: Option<&str>) -> Result<()> {
         return Ok(());
     }
 
-    let needs_new_ollama = missing.iter().any(|m| ollama::is_gemma4(m));
-    let minimum = &table.minimum_ollama_version_for_gemma4;
+    let needs_new_ollama = !skills || missing.iter().any(|m| ollama::is_gemma4(m));
+    let minimum = if skills {
+        &table.minimum_ollama_version_for_gemma4
+    } else {
+        &table.minimum_ollama_version_for_memory
+    };
     if needs_new_ollama {
         match &service_version {
             Some(v) if !ollama::version_at_least(v, minimum) => {
                 println!(
-                    "  {} Gemma 4 QAT models need Ollama {}+; you have {}. Update the app at {}.",
+                    "  {} {} needs Ollama {}+; you have {}. Update the app at {}.",
                     "✗".red(),
+                    if skills { "Gemma 4 QAT" } else { "Memory's model" },
                     minimum,
                     v,
                     "https://ollama.com/download".cyan()
@@ -665,7 +681,9 @@ fn step_vlm(check_only: bool, tier_arg: Option<&str>) -> Result<()> {
 
     // Persist the choice before pulling, as onboarding does, so an
     // interrupted pull leaves the config naming the models being pulled.
-    persist_tier(tier)?;
+    if skills {
+        persist_tier(tier)?;
+    }
     for model in &missing {
         println!("    Pulling {}...", model.bold());
         let mut last_status = String::new();

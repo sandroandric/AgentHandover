@@ -269,11 +269,16 @@ pub fn run() -> Result<()> {
 
     // Check 15c: a config still pinning its tier's earlier default models
     // (tiers.json `previous_defaults`): the tier migration the installer
-    // and the worker run at startup did not happen or failed.
-    print_findings(
-        &mut counts,
-        &tier_migration_findings(&config_str, tiers::machine_ram_gb()),
-    );
+    // and the worker run at startup did not happen or failed.  Memory only
+    // runs neither model.
+    if configured_models(&config_str).skills {
+        print_findings(
+            &mut counts,
+            &tier_migration_findings(&config_str, tiers::machine_ram_gb()),
+        );
+    } else {
+        check_pass(&mut counts, "Memory only: no Skill models needed ([skills] enabled = false)");
+    }
 
     // Check 15d: a config still selecting cloud mode, which 0.5.0 removed:
     // the upgrade's migration (the installer and the worker at startup)
@@ -292,32 +297,10 @@ pub fn run() -> Result<()> {
     if ollama_ok {
         // Missing model keys come from the config's tier, else the
         // RAM tier, exactly as the worker resolves them.
-        let machine::ConfiguredModels {
-            annotation: annotation_model,
-            sop: sop_model,
-            ..
-        } = configured_models(&config_str);
-        let embedding_model = read_config_string_field(&config_str, "embedding", "model")
-            .unwrap_or_else(|| tiers::table().embedding_model.clone());
-
         // Over HTTP, as `setup` asks (see crate::ollama for why).
         let installed = ollama::installed_models(&report.host.url).unwrap_or_default();
-
-        // The recommended tier runs one model for both jobs; deduplicate
-        // so we don't report the same model twice.
-        let mut models_to_check: Vec<(String, &str)> = Vec::new();
-        if !annotation_model.is_empty() {
-            models_to_check.push((annotation_model.clone(), "scene annotation"));
-        }
-        if !sop_model.is_empty() && sop_model != annotation_model {
-            models_to_check.push((sop_model.clone(), "SOP generation"));
-        }
-        if !embedding_model.is_empty() {
-            models_to_check.push((embedding_model, "semantic search"));
-        }
-
         let table = tiers::table();
-        for (model, purpose) in &models_to_check {
+        for (model, purpose) in &models_to_check(&config_str) {
             let cannot_run = machine::model_cannot_run(
                 model,
                 report.version.as_deref(),
@@ -406,13 +389,39 @@ fn configured_models(config_str: &str) -> machine::ConfiguredModels {
         read_config_string_field(config_str, "vlm", "annotation_model").as_deref(),
         read_config_string_field(config_str, "vlm", "sop_model").as_deref(),
     );
+    // Memory only: no annotation or Skill model is configured to run.
+    let skills = read_config_string_field(config_str, "skills", "enabled").is_none_or(|v| v != "false");
     machine::ConfiguredModels {
         tier_label: tier.label.clone(),
-        annotation,
-        sop,
+        annotation: if skills { annotation } else { String::new() },
+        sop: if skills { sop } else { String::new() },
         memory_enabled: read_config_string_field(config_str, "memory", "enabled")
             .is_some_and(|v| v == "true"),
+        skills,
     }
+}
+
+/// The models doctor checks are pulled, each with what it is for: the
+/// annotation and Skill models (not in Memory only), the search embedding
+/// model and, with Memory on, Memory's model; each name once.
+fn models_to_check(config_str: &str) -> Vec<(String, &'static str)> {
+    let configured = configured_models(config_str);
+    let embedding = read_config_string_field(config_str, "embedding", "model")
+        .unwrap_or_else(|| tiers::table().embedding_model.clone());
+    let memory = read_config_string_field(config_str, "memory", "model")
+        .unwrap_or_else(|| tiers::table().memory_model.clone());
+    let mut out: Vec<(String, &'static str)> = Vec::new();
+    for (model, purpose, wanted) in [
+        (configured.annotation, "scene annotation", true),
+        (configured.sop, "SOP generation", true),
+        (embedding, "semantic search", true),
+        (memory, "Memory", configured.memory_enabled),
+    ] {
+        if wanted && !model.is_empty() && !out.iter().any(|(m, _)| *m == model) {
+            out.push((model, purpose));
+        }
+    }
+    out
 }
 
 /// What doctor says about `[privacy] read_app_state`: nothing when it is
@@ -966,6 +975,33 @@ fn print_extension_path(extension: &browser_extension::Report) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn checked(config: &str) -> Vec<String> {
+        models_to_check(config).into_iter().map(|(m, _)| m).collect()
+    }
+
+    #[test]
+    fn memory_only_checks_no_skill_model_and_memorys_own() {
+        let config = "[vlm]\nannotation_model = \"qwen3.5:4b\"\nsop_model = \"gemma4:12b-it-qat\"\n\n\
+                      [embedding]\nmodel = \"embeddinggemma-2:440m\"\n\n\
+                      [memory]\nenabled = true\n\n[skills]\nenabled = false\n";
+        assert_eq!(checked(config), vec!["embeddinggemma-2:440m".to_string()]);
+        let m = configured_models(config);
+        assert!(!m.skills && m.annotation.is_empty() && m.sop.is_empty());
+    }
+
+    #[test]
+    fn with_skills_every_model_is_checked_once_and_memorys_when_it_is_on() {
+        let base = "[vlm]\nannotation_model = \"qwen3.5:4b\"\nsop_model = \"qwen3.5:4b\"\n\n\
+                    [embedding]\nmodel = \"nomic-embed-text\"\n";
+        assert_eq!(checked(base), vec!["qwen3.5:4b".to_string(), "nomic-embed-text".to_string()]);
+        let with_memory = format!("{base}\n[memory]\nenabled = true\n");
+        assert_eq!(
+            checked(&with_memory),
+            vec!["qwen3.5:4b".to_string(), "nomic-embed-text".to_string(), "embeddinggemma-2:440m".to_string()],
+        );
+        assert!(configured_models(base).skills);
+    }
 
     #[test]
     fn venv_version_matches_cli() {

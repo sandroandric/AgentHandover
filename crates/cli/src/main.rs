@@ -320,6 +320,12 @@ enum SopsAction {
         /// Failure ID to retry
         failure_id: String,
     },
+    /// Learn Skills from how you work (on), or Memory only (off: no model but Memory's)
+    Learn {
+        /// on or off
+        #[arg(value_parser = ["on", "off"])]
+        state: String,
+    },
 }
 
 fn main() -> Result<()> {
@@ -350,6 +356,7 @@ fn main() -> Result<()> {
             SopsAction::Promote { slug, to_state } => commands::sops::promote(&slug, &to_state),
             SopsAction::Failed => commands::sops::failed(),
             SopsAction::Retry { failure_id } => commands::sops::retry(&failure_id),
+            SopsAction::Learn { state } => commands::sops::learn(state == "on"),
         },
         Commands::Watch => commands::watch::run(),
         Commands::Setup { shell: true, .. } => commands::shell_hook::run(false),
