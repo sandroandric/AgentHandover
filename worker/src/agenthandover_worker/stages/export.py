@@ -78,6 +78,7 @@ def _write_heartbeat(ctx: Any) -> None:
         model_schedule=ctx.model_scheduler.status(),
         inference=inference,
         missing_models=ctx.missing_models,
+        skills_enabled=ctx.cfg.skills.enabled,
         embedding_upgrade=(
             ctx.embedding_upgrade.status() if ctx.embedding_upgrade is not None else None
         ),

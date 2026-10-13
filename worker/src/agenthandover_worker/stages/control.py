@@ -54,6 +54,20 @@ def submit_model_jobs(ctx: Any, tick: Any) -> list:
 
     ctx.control_idle = not tick.unprocessed
     jobs: list[tuple[str, int, Callable[[], None]]] = []
+    if not ctx.cfg.skills.enabled:
+        # Memory only: Memory, the re-embed and the daily upkeep; no
+        # annotation, Skill or daily-summary job (they need a generative
+        # model).
+        if ctx.memory_writer is not None and ctx.cfg.memory.enabled:
+            jobs.append(("memory", P2, lambda: memory.run(ctx, tick)))
+        if upgrade.due(ctx):
+            jobs.append(("embedding-upgrade", P2, lambda: upgrade.run(ctx, tick)))
+        jobs.append(("maintenance", P2, lambda: daily.run_maintenance(ctx, tick)))
+        tick.jobs = jobs
+        if ctx.runner is not None:
+            for key, priority, job in jobs:
+                ctx.runner.submit(key, priority, job)
+        return jobs
     if wm._focus_job_due(wm._status_dir()):
         jobs.append(("focus", P0, lambda: synthesize.run(ctx, tick)))
     if (
@@ -114,18 +128,27 @@ def trigger_handlers(ctx: Any) -> dict[str, Callable[[dict], None]]:
         # queue before the merge ran.
         wm._write_curation_queue(ctx.procedure_curator)
 
-    return {
-        "retry": lambda t: model_work(
+    def retry(trigger: dict) -> None:
+        # Memory only: regenerating a Skill needs the Skill model.  The
+        # other requests (approve, merge, answers, dismissals) are
+        # model-free without it and keep working on existing Skills.
+        if not ctx.cfg.skills.enabled:
+            logger.info("Memory only: retry request ignored (Skills are off)")
+            return
+        model_work(
             f"retry:{uuid.uuid4().hex}",
             lambda: wm._process_retry_triggers(
-                t, db,
+                trigger, db,
                 focus_processor=ctx.focus_processor,
                 sop_generator=ctx.sop_generator,
                 screenshots_dir=ctx.screenshots_dir,
                 sop_auto_approve=ctx.cfg.sop.auto_approve,
                 **export_kwargs,
             ),
-        ),
+        )
+
+    return {
+        "retry": retry,
         "approve": lambda t: wm._process_approval_triggers(
             t, db, vector_kb=ctx.vector_kb, **export_kwargs,
         ),

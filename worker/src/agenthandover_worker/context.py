@@ -42,7 +42,7 @@ from agenthandover_worker.frame_differ import DiffConfig, FrameDiffer
 from agenthandover_worker.loop_guard import EventRetryGuard
 from agenthandover_worker.model_scheduler import ModelScheduler
 from agenthandover_worker.negative_demo import NegativeDemoPruner
-from agenthandover_worker.ollama import OllamaClient, OllamaError
+from agenthandover_worker.ollama import OllamaClient, OllamaError, switch_off_generation
 from agenthandover_worker.openclaw_writer import OpenClawWriter
 from agenthandover_worker.scene_annotator import AnnotationConfig, SceneAnnotator
 from agenthandover_worker.scheduler import (
@@ -291,6 +291,14 @@ def build_context(
         [k for k, v in vars(features).items() if not v] or "all enabled",
     )
 
+    # "Memory only" ([skills] enabled = false): no component that calls a
+    # generative model is built, and the Ollama client refuses any call
+    # that would load one, as the last guard.
+    skills = cfg.skills.enabled
+    switch_off_generation(None if skills else "Skills are off (Memory only)")
+    if not skills:
+        logger.info("Memory only: Skills are off; no generative model is loaded or called")
+
     # The shared reasoner, before the modules that take it, and the daily
     # budget it shares with the behavioral synthesizer (on the local day).
     reasoning_budget = ReasoningBudget.from_config(
@@ -299,14 +307,14 @@ def build_context(
     llm_reasoner = LLMReasoner(
         config=ReasoningConfig(model=vlm_cfg.reasoner_model, ollama_host=host),
         budget=reasoning_budget,
-    )
+    ) if skills else None
     vector_kb = _vector_kb(cfg, db_path)
 
     evidence_tracker = EvidenceTracker(knowledge_base=knowledge_base)
     lifecycle_manager = LifecycleManager(knowledge_base)
     staleness_detector = StalenessDetector(knowledge_base)
     activity_classifier = None
-    if features.activity_classification:
+    if features.activity_classification and skills:
         activity_classifier = ActivityClassifier(
             profile=knowledge_base.get_profile(),
             policy=UserPolicy(knowledge_base),
@@ -322,7 +330,7 @@ def build_context(
         config=SynthesizerConfig(model=vlm_cfg.sop_model, ollama_host=host),
         budget=reasoning_budget,
         knowledge_base=knowledge_base,
-    )
+    ) if skills else None
     procedure_curator = None
     if features.curation:
         from agenthandover_worker.quality_judge import QualityJudge
@@ -333,7 +341,9 @@ def build_context(
             trust_advisor=trust_advisor,
             lifecycle_manager=lifecycle_manager,
             evidence_normalizer=evidence_normalizer,
-            quality_judge=QualityJudge(llm_reasoner),
+            # Memory only: the model-free review (curate) still runs; a
+            # promotion or merge that would ask the model is refused.
+            quality_judge=QualityJudge(llm_reasoner) if skills else None,
             llm_reasoner=llm_reasoner,
         )
     logger.info("Knowledge base initialized: %s", knowledge_dir)
@@ -370,8 +380,10 @@ def build_context(
 
     model_scheduler = ModelScheduler(
         OllamaClient(host),
-        annotation_model=vlm_cfg.annotation_model,
-        sop_model=vlm_cfg.sop_model,
+        # Memory only: no generation model, so no two-model schedule; the
+        # scheduler still holds Memory back under memory pressure.
+        annotation_model=vlm_cfg.annotation_model if skills else "",
+        sop_model=vlm_cfg.sop_model if skills else "",
         **(scheduler_probes or {}),
     )
     model_scheduler.register(v2["sop_generator"], behavioral_synthesizer, llm_reasoner)
@@ -674,6 +686,8 @@ def _writers(cfg: Any, adapter: str, sops_dir: Path, json_export: bool) -> tuple
 def _sop_enhancer(cfg: Any, overrides: dict) -> Any:
     """The LLM SOP enhancer (the v1 focus path's) when enabled: the local
     SOP model through Ollama."""
+    if not cfg.skills.enabled:
+        return None
     llm_config = dataclasses.asdict(cfg.llm)
     llm_config.update(overrides)
     if not llm_config.get("enhance_sops", True):
@@ -697,15 +711,18 @@ def _v2_pipeline(
     cfg: Any, db_path: Path, knowledge_base: Any, llm_reasoner: Any, vector_kb: Any,
 ) -> dict:
     """The v2 scene annotation pipeline's components (all None when
-    ``[vlm] annotation_enabled`` is off)."""
+    ``[vlm] annotation_enabled`` is off or Skills are off)."""
     vlm_cfg = cfg.vlm
     host = vlm_cfg.ollama_host
     parts: dict = dict.fromkeys((
         "annotation_cache", "scene_annotator", "frame_differ",
         "sop_generator", "focus_processor", "task_segmenter",
     ))
-    if not vlm_cfg.annotation_enabled:
-        logger.info("v2 scene annotation pipeline disabled by config")
+    if not vlm_cfg.annotation_enabled or not cfg.skills.enabled:
+        logger.info(
+            "v2 scene annotation pipeline disabled by config%s",
+            "" if cfg.skills.enabled else " (Memory only)",
+        )
         return parts
 
     parts["annotation_cache"] = AnnotationCache(db_path)

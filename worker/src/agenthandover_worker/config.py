@@ -221,6 +221,18 @@ class FocusConfig:
 
 
 @dataclass(frozen=True)
+class SkillsConfig:
+    """``[skills]``: learning Skills from how the user works.
+
+    Off is "Memory only": capture, Memory and Commonplace keep running and
+    no generative model (screen descriptions, Skill writing, reasoning) is
+    ever loaded or called; only Memory's embedding model runs.
+    ``crates/common/src/config.rs`` reads the same key."""
+
+    enabled: bool = True
+
+
+@dataclass(frozen=True)
 class OpenClawConfig:
     """``[openclaw]``."""
 
@@ -242,6 +254,7 @@ class Config:
     embedding: EmbeddingConfig = field(default_factory=EmbeddingConfig)
     memory: MemoryConfig = field(default_factory=MemoryConfig)
     focus: FocusConfig = field(default_factory=FocusConfig)
+    skills: SkillsConfig = field(default_factory=SkillsConfig)
     openclaw: OpenClawConfig = field(default_factory=OpenClawConfig)
     # ``[privacy.zones]`` as written; ``privacy_zones.PrivacyZoneConfig``
     # owns its defaults and validation.
@@ -288,6 +301,7 @@ def load_config(path: str | Path | None = None) -> Config:
         embedding=_embedding(section("embedding")),
         memory=_build(MemoryConfig, "memory", section("memory")),
         focus=_build(FocusConfig, "focus", section("focus")),
+        skills=_build(SkillsConfig, "skills", section("skills")),
         openclaw=_build(OpenClawConfig, "openclaw", section("openclaw")),
         privacy_zones=zones if isinstance(zones, dict) else {},
         raw=raw,

@@ -830,8 +830,12 @@ def _write_worker_status(
     inference: dict | None = None,
     missing_models: list[str] | None = None,
     embedding_upgrade: dict | None = None,
+    skills_enabled: bool = True,
 ) -> None:
     """Atomically write worker-status.json (tmp + fsync + rename).
+
+    ``skills_enabled`` is ``[skills] enabled``: false is "Memory only",
+    where no generative model is used and ``missing_models`` is empty.
 
     ``embedding_upgrade`` ("Upgrade everything"'s re-embed with
     EmbeddingGemma 2, ``EmbeddingUpgrade.status``) is ``{"state":
@@ -887,6 +891,7 @@ def _write_worker_status(
         status["inference"] = inference
     if embedding_upgrade is not None:
         status["embedding_upgrade"] = embedding_upgrade
+    status["skills_enabled"] = skills_enabled
     # Tokens and Ollama timings per model since the worker started, and
     # model seconds per call type (since start and in the last hour).
     status["model_calls"] = MODEL_USAGE.snapshot()
@@ -4090,6 +4095,14 @@ def _vlm_backend_available(vlm_cfg) -> bool:
     return available
 
 
+def _generative_models(cfg) -> tuple[bool, list[str] | None]:
+    """``(vlm_available, missing_models)`` for the worker status.  Memory
+    only uses no generative model, so none is available or missing."""
+    if not cfg.skills.enabled:
+        return False, []
+    return _vlm_backend_available(cfg.vlm), _missing_vlm_models(cfg.vlm)
+
+
 def _missing_vlm_models(vlm_cfg) -> list[str] | None:
     """``missing_models`` in ``worker-status.json``: the annotation and
     Skills models Ollama does not serve at ``[vlm] ollama_host``; None
@@ -4275,8 +4288,7 @@ def main(argv: list[str] | None = None) -> None:
     )
     try:
         _log_model_profiles(cfg.vlm)
-        ctx.vlm_available = _vlm_backend_available(cfg.vlm)
-        ctx.missing_models = _missing_vlm_models(cfg.vlm)
+        ctx.vlm_available, ctx.missing_models = _generative_models(cfg)
         ctx.query_api_server = _start_query_api(ctx)
         export.heartbeat(ctx)
         logger.info("Connected to database, entering main loop")

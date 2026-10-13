@@ -717,7 +717,7 @@ def test_the_memory_job_runs_before_passive_annotation_only_when_on(enabled):
     from agenthandover_worker.stages import Tick, control
 
     ctx = SimpleNamespace(
-        cfg=SimpleNamespace(memory=SimpleNamespace(enabled=enabled)),
+        cfg=SimpleNamespace(memory=SimpleNamespace(enabled=enabled), skills=SimpleNamespace(enabled=True)),
         memory_writer=object(), focus_processor=None, v2_schema_ok=True, runner=None,
         embedding_upgrade=None,
     )

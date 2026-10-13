@@ -1,5 +1,8 @@
 """Daily stage (inference thread, P2): the once-per-day pass.
 
+In Memory only (``[skills] enabled = false``) :func:`run_maintenance` runs
+its model-free part instead (``control.submit_model_jobs``).
+
 The second half of the passive generation job, on the first tick of each
 local day that the generation plan allows it (keyed on the date persisted
 when it last ran, so a restart does not rerun it): yesterday's daily batch
@@ -31,9 +34,6 @@ def run(ctx: Any, tick: Any) -> bool:
     plan = tick.generation_plan
     if plan is None or not plan.allows("daily"):
         return False
-    db = ctx.db
-    today_local = tick.local_day
-
     # Process *yesterday* (the local calendar day): today is still in
     # progress and would produce an incomplete summary.
     yesterday_str = (ctx.local_now() - timedelta(days=1)).strftime("%Y-%m-%d")
@@ -41,6 +41,30 @@ def run(ctx: Any, tick: Any) -> bool:
         _daily_batch(ctx, yesterday_str)
     except Exception:
         logger.warning("Daily batch failed", exc_info=True)
+    _upkeep(ctx, tick.local_day)
+    return True
+
+
+def run_maintenance(ctx: Any, tick: Any) -> bool:
+    """Memory only (``[skills] enabled = false``): the model-free part of the
+    once-per-day pass, without the daily batch (summaries, profile and the
+    rest need the generative model) and without a generation plan, so
+    Memory's purge and thumbnail expiry never wait on one.  True when it
+    ran."""
+    from agenthandover_worker.stages.segment import daily_due
+
+    today_local = ctx.local_now().date().isoformat()
+    if not daily_due(ctx, today_local):
+        return False
+    _upkeep(ctx, today_local)
+    return True
+
+
+def _upkeep(ctx: Any, today_local: str) -> None:
+    """The model-free daily work (workflow TTLs, OCR text, staleness,
+    lifecycle, the bundle, curation, the stores' maintenance), then the day
+    is recorded as done."""
+    db = ctx.db
 
     # Workflow observations: segment and observation TTLs, the promoted
     # workflows' recurrence and value.
@@ -89,7 +113,6 @@ def run(ctx: Any, tick: Any) -> bool:
     )
     db.set_state(wm.DAILY_JOBS_STATE_KEY, today_local)
     ctx.daily_jobs_date = today_local
-    return True
 
 
 def _daily_batch(ctx: Any, day: str) -> None:

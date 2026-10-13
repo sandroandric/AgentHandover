@@ -263,7 +263,7 @@ def test_the_job_is_submitted_at_p2_only_while_it_is_due(world) -> None:
 
     upgrade = _upgrade(world)
     ctx = SimpleNamespace(
-        cfg=SimpleNamespace(memory=SimpleNamespace(enabled=False)),
+        cfg=SimpleNamespace(memory=SimpleNamespace(enabled=False), skills=SimpleNamespace(enabled=True)),
         memory_writer=None, focus_processor=None, v2_schema_ok=True, runner=None,
         embedding_upgrade=upgrade,
     )

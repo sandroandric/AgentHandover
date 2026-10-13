@@ -86,6 +86,13 @@ thumbnail_days = 7                 # encrypted thumbnails older than this are de
 agents_access = false              # let agents search Memory (MCP search_memory); never images
 max_frames_per_hour = 600          # frames embedded per rolling hour; past it, frames wait
 
+[skills]
+# Learn Skills from how you work: screen descriptions, Skill drafts and their
+# questions, daily summaries.  false is "Memory only": capture and Memory keep
+# running with Memory's embedding model alone, and no other model is ever
+# loaded or called (no Skills, no Days).  Setup asks; Settings can switch.
+enabled = true
+
 [focus]
 max_session_hours = 4              # a recording never stopped is closed as stale after this long
 

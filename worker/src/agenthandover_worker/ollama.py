@@ -56,6 +56,25 @@ class OllamaUnavailable(OllamaError, ConnectionError):
     can succeed, so callers defer the work instead of discarding it."""
 
 
+class GenerationOff(OllamaUnavailable):
+    """Generation is switched off in this process (``[skills] enabled =
+    false``, "Memory only"): no generative model may be loaded or called.
+    A subclass of :class:`OllamaUnavailable`, so a caller that slipped past
+    the switch defers instead of failing."""
+
+
+# Why generation is off in this process, or None (``switch_off_generation``).
+_generation_off: str | None = None
+
+
+def switch_off_generation(reason: str | None) -> None:
+    """Refuse every ``generate`` (and so every ``preload``) from now on with
+    *reason*; None allows them again.  The worker sets it from ``[skills]``
+    at startup, as the last guard behind not building the components."""
+    global _generation_off
+    _generation_off = reason
+
+
 class OllamaTimeout(OllamaError, TimeoutError):
     """No reply within the timeout (often a cold model load)."""
 
@@ -145,6 +164,8 @@ class OllamaClient:
             timeout: seconds to wait for the reply; None waits forever.
             call_type: what the call is for, in the compute counters.
         """
+        if _generation_off is not None:
+            raise GenerationOff(_generation_off)
         payload: dict[str, Any] = {"model": model, "prompt": prompt, "stream": False}
         if think is not None:
             payload["think"] = think
