@@ -287,7 +287,7 @@ class TestSearchSkillsMode:
         prefixes: list[str] = []
         searches: list[dict] = []
 
-        def embed(self, texts, *, prefix=None):
+        def embed(self, texts, *, prefix=None, timeout=None):
             prefixes.append(prefix)
             return _fake_embed(self, texts, prefix=prefix)
 
@@ -326,7 +326,7 @@ class TestSearchSkillsMode:
     def test_embedding_timeout_is_short_and_not_retried_every_call(self, server):
         """Seen on a real Mac: Ollama was busy, and each of four searches in
         one Claude Code turn waited 60 s for /api/embed before falling back."""
-        from agenthandover_worker import mcp_server
+        from agenthandover_worker import commonplace, mcp_server
         from agenthandover_worker.ollama import OllamaTimeout
         from agenthandover_worker.vector_kb import VectorKB
 
@@ -334,8 +334,8 @@ class TestSearchSkillsMode:
         self._embed_skill(db)
         timeouts: list[float] = []
 
-        def busy(self, texts, **_):
-            timeouts.append(self.config.timeout_seconds)
+        def busy(self, texts, *, timeout=None, **_):
+            timeouts.append(timeout)
             raise OllamaTimeout("Ollama timed out after 8s (/api/embed)")
 
         with patch.object(VectorKB, "compute_embeddings", busy):
@@ -346,8 +346,8 @@ class TestSearchSkillsMode:
         assert "retrying after" in second["reason"]
 
         with patch.object(VectorKB, "compute_embeddings", _fake_embed), \
-             patch.object(mcp_server.time, "monotonic",
-                          return_value=mcp_server.time.monotonic() + mcp_server.EMBED_RETRY_AFTER_S + 1):
+             patch.object(commonplace.time, "monotonic",
+                          return_value=commonplace.time.monotonic() + mcp_server.EMBED_RETRY_AFTER_S + 1):
             assert search("reddit")["mode"] == "semantic"
 
 

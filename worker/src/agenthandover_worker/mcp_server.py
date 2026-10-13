@@ -18,26 +18,24 @@ from __future__ import annotations
 
 import json
 import logging
-import re
-import time
-from datetime import datetime, timezone
 from pathlib import Path
 
 from agenthandover_worker import paths
+from agenthandover_worker.commonplace import (  # noqa: F401  (EMBED_RETRY_AFTER_S: re-exported)
+    EMBED_RETRY_AFTER_S,
+    MCP_INSTRUCTIONS,
+    Commonplace,
+)
 
 logger = logging.getLogger(__name__)
 
-# An agent is waiting on search_skills, so the query embedding gets a short
+# An agent is waiting on a search, so the query embedding gets a short
 # timeout (a warm embed takes well under a second; a cold model load a few
 # seconds). Ollama serves one request at a time, so while the worker is
-# annotating an embed can queue far longer; after a failure, skip the
-# model for a while instead of making every search wait again.
+# annotating an embed can queue far longer; after a failure the search
+# skips the model for EMBED_RETRY_AFTER_S instead of making every search
+# wait again.
 QUERY_EMBED_TIMEOUT_S = 8.0
-EMBED_RETRY_AFTER_S = 60.0
-
-_STOPWORDS = frozenset(
-    "a an and at by for from how i in into is it my of on or the to with".split()
-)
 
 
 def _get_kb_root() -> Path:
@@ -62,12 +60,7 @@ def build_mcp_server():
             "MCP package not installed. Install with: pip install mcp"
         )
 
-    mcp = FastMCP(
-        "AgentHandover",
-        instructions="Access your learned workflows, procedures, and handoff bundles. "
-        "AgentHandover watches how you work and turns your workflows into "
-        "step-by-step procedures that AI agents can follow.",
-    )
+    mcp = FastMCP("AgentHandover", instructions=MCP_INSTRUCTIONS)
 
     # Lazy-loaded singletons
     _state: dict = {}
@@ -119,44 +112,88 @@ def build_mcp_server():
                     _state["vkb"] = (None, f"vector store failed to open: {exc}")
             if _state["vkb"][0] is None:
                 logger.warning(
-                    "Semantic search unavailable (%s); search_skills uses keyword matching",
+                    "Semantic search unavailable (%s); Skill and day search use keyword matching",
                     _state["vkb"][1],
                 )
         return _state["vkb"]
 
-    def _keyword_search(query: str, limit: int) -> list[dict]:
-        """Score each Skill by the share of query words it contains: a
-        word in the title counts 1, one only in the description, tags or
-        steps counts 0.5."""
-        from agenthandover_worker.procedure_schema import procedure_steps
+    def _memory_index(cfg):
+        """The Memory index for ``[memory]``'s model (one per model)."""
+        from agenthandover_worker.memory import MemoryIndex, query_embedder
 
-        words = [
-            w for w in re.findall(r"\w+", query.lower())
-            if w not in _STOPWORDS and len(w) > 1
-        ] or [query.lower().strip()]
-        matches = []
-        for proc in _kb().list_procedures():
-            title = f"{proc.get('title', '')} {proc.get('short_title', '')}".lower()
-            body = " ".join([
-                proc.get("description", ""),
-                " ".join(proc.get("tags", [])),
-                *(s.get("action") or s.get("description", "") for s in procedure_steps(proc)),
-            ]).lower()
-            score = sum(
-                1.0 if w in title else 0.5 if w in body else 0.0 for w in words
-            ) / len(words)
-            if score > 0:
-                matches.append({
-                    "slug": proc.get("id", ""),
-                    "title": proc.get("title", ""),
-                    "score": round(score, 2),
-                })
-        matches.sort(key=lambda m: m["score"], reverse=True)
-        return matches[:limit]
+        key = (cfg.memory.model, cfg.memory.dimensions, cfg.vlm.ollama_host)
+        if _state.get("memory_key") != key:
+            if "memory" in _state:
+                _state.pop("memory").close()
+            _state["memory"] = MemoryIndex(
+                _get_db_path(), model=cfg.memory.model, dim=cfg.memory.dimensions,
+                embed_query=query_embedder(
+                    cfg.vlm.ollama_host, cfg.memory.model, cfg.memory.dimensions,
+                    timeout=QUERY_EMBED_TIMEOUT_S,
+                ),
+            )
+            _state["memory_key"] = key
+        return _state["memory"]
+
+    def _memory_search(cfg, query: str, *, keyword: bool, **filters) -> list[dict]:
+        from agenthandover_worker.memory import keyword_search
+
+        index = _memory_index(cfg)
+        if keyword:
+            return keyword_search(index, query, **filters)
+        return index.search(query, **filters)
+
+    def _load_config():
+        from agenthandover_worker.config import load_config
+
+        return load_config()  # read on every call: the agents switch applies at once
+
+    commonplace = Commonplace(
+        knowledge_base=_kb,
+        vector_kb=_vector_kb,
+        load_config=_load_config,
+        memory=_memory_search,
+        db_path=lambda: _get_db_path(),
+        embed_timeout=QUERY_EMBED_TIMEOUT_S,
+    )
 
     # ------------------------------------------------------------------
     # Tools — agents call these to get data
     # ------------------------------------------------------------------
+
+    @mcp.tool()
+    def search_commonplace(
+        query: str,
+        kinds: list[str] | None = None,
+        since: str | None = None,
+        until: str | None = None,
+        limit: int = 5,
+    ) -> str:
+        """Search Commonplace: everything AgentHandover knows about the user's work.
+
+        Use this before asking the user about their own work, tools, habits
+        or something they saw.  *kinds* picks what to search, any of
+        ``skills`` (workflows learned from the user), ``memory`` (what was
+        on their screen; only when the user lets agents search Memory),
+        ``days`` (daily summaries) and ``profile`` (tools, working hours,
+        writing style; returned whole); default skills, memory and days.
+        *since* / *until* (ISO-8601) keep Memory moments and days in that
+        range; *limit* is per kind (1-50).
+
+        Returns ``{"query", <kind>: {"mode", "reason", "results"}}``, one
+        group per kind, each ranked by its own scorer (scores of different
+        kinds are not comparable).  ``mode`` is ``"semantic"``,
+        ``"keyword_fallback"`` (``reason`` says why), ``"not_allowed"``
+        (``reason`` says how the user can allow it) or ``"whole"`` (the
+        profile).  A Skill carries ``handoff``: ``ready`` (you may run
+        it), ``held_back`` (with ``reasons``) or ``not_approved``.  Text
+        only: never images, vectors or file paths.
+        """
+        try:
+            found = commonplace.search(query, kinds, since, until, limit)
+        except ValueError as exc:
+            return json.dumps({"error": str(exc)})
+        return json.dumps(found, indent=2, default=str)
 
     @mcp.tool()
     def list_ready_skills() -> str:
@@ -246,74 +283,15 @@ def build_mcp_server():
         titles, descriptions, tags and steps), and ``reason`` says why
         semantic search was not used.
         """
-        from agenthandover_worker.ollama import OllamaError
-
-        vkb, reason = _vector_kb()
-        if vkb is not None:
-            down_until, down_reason = _state.get("embed_down", (0.0, ""))
-            if vkb.count("procedure") == 0:
-                reason = "no Skill has been embedded yet"
-            elif time.monotonic() < down_until:
-                reason = down_reason
-            else:
-                try:
-                    vectors = vkb.compute_embeddings(
-                        [query], prefix=vkb.profile.query_prefix,
-                    )
-                except (ConnectionError, TimeoutError, OllamaError) as exc:
-                    reason = f"embedding model unavailable: {exc}"
-                    logger.warning("search_skills: %s", reason)
-                    _state["embed_down"] = (
-                        time.monotonic() + EMBED_RETRY_AFTER_S,
-                        f"{reason} (retrying after {EMBED_RETRY_AFTER_S:.0f}s)",
-                    )
-                else:
-                    if vectors and vectors[0]:
-                        hits = vkb.search_by_vector(
-                            vectors[0], top_k=limit,
-                            source_types=["procedure"],
-                            min_score=vkb.thresholds.min_score,
-                        )
-                        titles = {
-                            p.get("id", ""): p.get("title", "")
-                            for p in _kb().list_procedures()
-                        }
-                        return json.dumps({
-                            "mode": "semantic",
-                            "reason": "",
-                            "results": [
-                                {
-                                    "slug": r.source_id,
-                                    "title": titles.get(r.source_id, ""),
-                                    "score": round(r.score, 4),
-                                }
-                                for r in hits
-                            ],
-                        }, indent=2)
-                    reason = "embedding model returned no vector"
+        mode, reason, hits = commonplace.skills(query, limit)
         return json.dumps({
-            "mode": "keyword_fallback",
+            "mode": mode,
             "reason": reason,
-            "results": _keyword_search(query, limit),
+            "results": [
+                {"slug": proc.get("id", ""), "title": proc.get("title", ""), "score": score}
+                for proc, score in hits
+            ],
         }, indent=2)
-
-    def _memory_index(cfg):
-        """The Memory index for ``[memory]``'s model (one per model)."""
-        from agenthandover_worker.memory import MemoryIndex, query_embedder
-
-        key = (cfg.memory.model, cfg.memory.dimensions, cfg.vlm.ollama_host)
-        if _state.get("memory_key") != key:
-            if "memory" in _state:
-                _state.pop("memory").close()
-            _state["memory"] = MemoryIndex(
-                _get_db_path(), model=cfg.memory.model, dim=cfg.memory.dimensions,
-                embed_query=query_embedder(
-                    cfg.vlm.ollama_host, cfg.memory.model, cfg.memory.dimensions,
-                    timeout=QUERY_EMBED_TIMEOUT_S,
-                ),
-            )
-            _state["memory_key"] = key
-        return _state["memory"]
 
     @mcp.tool()
     def search_memory(
@@ -336,53 +314,18 @@ def build_mcp_server():
         descriptions; ``reason`` says why), or ``"not_allowed"`` when the
         user has not let agents search Memory.
         """
-        from agenthandover_worker.config import load_config
-        from agenthandover_worker.memory import keyword_search
         from agenthandover_worker.memory_forget import parse_time
-        from agenthandover_worker.ollama import OllamaError
 
-        cfg = load_config()  # read on every call: the switch applies at once
-
-        def answer(mode: str, reason: str, moments: list[dict]) -> str:
-            fields = ("app", "window_title", "url_host", "description", "first_ts", "last_ts", "score")
-            return json.dumps({
-                "mode": mode,
-                "reason": reason,
-                "results": [{k: m[k] for k in fields} for m in moments],
-            }, indent=2)
-
-        if not cfg.memory.agents_access:
-            return answer("not_allowed", (
-                "The user has not let agents search their Memory. They can turn it on "
-                "in AgentHandover's Memory Settings (\"Let agents search my Memory\") or "
-                "with `agenthandover memory agents on`."
-            ), [])
-        if not cfg.memory.enabled:
-            return answer("not_allowed", (
-                "Memory is off. The user can turn it on in AgentHandover's Settings."
-            ), [])
-        if not _get_db_path().exists():
-            return answer("not_allowed", f"no worker database at {_get_db_path()}", [])
         try:
             since_at = parse_time(since, "since") if since else None
             until_at = parse_time(until, "until") if until else None
         except ValueError as exc:
             return json.dumps({"error": str(exc)})
-        limit = max(1, min(int(limit), 50))
-        index = _memory_index(cfg)
-        filters = {"since": since_at, "until": until_at, "app": app or None, "limit": limit}
-        down_until, reason = _state.get("memory_embed_down", (0.0, ""))
-        if time.monotonic() >= down_until:
-            try:
-                return answer("semantic", "", index.search(query, **filters))
-            except (ConnectionError, TimeoutError, OllamaError, ValueError) as exc:
-                reason = f"the Memory model is unavailable: {exc}"
-                logger.warning("search_memory: %s", reason)
-                _state["memory_embed_down"] = (
-                    time.monotonic() + EMBED_RETRY_AFTER_S,
-                    f"{reason} (retrying after {EMBED_RETRY_AFTER_S:.0f}s)",
-                )
-        return answer("keyword_fallback", reason, keyword_search(index, query, **filters))
+        found = commonplace.memory(
+            query, since=since_at, until=until_at, app=app,
+            limit=max(1, min(int(limit), 50)),
+        )
+        return json.dumps(found, indent=2)
 
     @mcp.tool()
     def get_user_profile() -> str:
