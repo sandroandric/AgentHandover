@@ -365,7 +365,7 @@ struct CommonplaceView: View {
             Text(section.kind.title)
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(.secondary)
-            if section.error == nil {
+            if model.phase == .results, section.error == nil {
                 Text("\(section.total)")
                     .font(.system(size: 11))
                     .foregroundStyle(.tertiary)
@@ -586,7 +586,8 @@ final class CommonplaceWindowModel: ObservableObject {
 
     private let api: MemoryAPI
     private let diagnose: (String) async -> MemoryProblem
-    private var pending: Task<Void, Never>?
+    /// The search under way (debounced or not).
+    private(set) var pending: Task<Void, Never>?
     /// The request the shown results answer.
     private(set) var lastRequest: CommonplaceRequest?
 
