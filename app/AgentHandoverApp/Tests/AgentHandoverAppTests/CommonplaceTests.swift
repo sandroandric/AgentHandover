@@ -178,7 +178,7 @@ final class CommonplaceTests: XCTestCase {
         let results = await CommonplaceResults.search(request, api: api)
 
         let text = try XCTUnwrap(worker.requests(to: "/commonplace/search").first)
-        XCTAssertEqual(body(text), #"{"kinds":["skills","days"],"limit":50,"query":"domain"}"#)
+        XCTAssertEqual(body(text), #"{"kinds":["days","skills"],"limit":50,"query":"domain"}"#)
         let memory = try XCTUnwrap(worker.requests(to: "/memory/search").first)
         // The app filter is Memory's own: not applied in All.
         XCTAssertEqual(body(memory), #"{"limit":50,"query":"domain"}"#)
@@ -213,7 +213,7 @@ final class CommonplaceTests: XCTestCase {
         XCTAssertEqual(results.items(.days).count, 2)
         XCTAssertFalse(results.workerUnreachable)
         XCTAssertFalse(results.isEmpty(.all))
-        XCTAssertEqual(results.sections(.all).map(\.error), [nil, .memoryOff, nil])
+        XCTAssertEqual(results.sections(.all).map(\.error), [.memoryOff, nil, nil])
     }
 
     func testAFailedCommonplaceSearchFailsSkillsAndDays() async {
@@ -266,10 +266,10 @@ final class CommonplaceTests: XCTestCase {
     }
 
     func testScopeFilters() {
-        XCTAssertEqual(CommonplaceScope.allCases.map(\.rawValue), ["All", "Skills", "Memory", "Days"])
-        XCTAssertEqual(CommonplaceScope.allCases.map(\.showsTimeFilter), [true, false, true, true])
-        XCTAssertEqual(CommonplaceScope.allCases.map(\.showsAppFilter), [false, false, true, false])
-        XCTAssertEqual(CommonplaceKind.allCases.map(CommonplaceScope.init), [.skills, .memory, .days])
+        XCTAssertEqual(CommonplaceScope.allCases.map(\.rawValue), ["All", "Memory", "Days", "Skills"])
+        XCTAssertEqual(CommonplaceScope.allCases.map(\.showsTimeFilter), [true, true, true, false])
+        XCTAssertEqual(CommonplaceScope.allCases.map(\.showsAppFilter), [false, true, false, false])
+        XCTAssertEqual(CommonplaceKind.allCases.map(CommonplaceScope.init), [.memory, .days, .skills])
     }
 
     func testARequestCoversNarrowerScopesWithTheSameQueryAndFilters() {
@@ -306,14 +306,15 @@ final class CommonplaceTests: XCTestCase {
 
     func testAllShowsFiveOfEachKindWithShowAll() {
         let sections = manyResults().sections(.all)
-        XCTAssertEqual(sections.map(\.kind), [.skills, .memory, .days])
-        XCTAssertEqual(sections[0].items.map(\.id), ["skill:s1", "skill:s2", "skill:s3", "skill:s4", "skill:s5"])
-        XCTAssertEqual(sections[0].total, 7)
-        XCTAssertEqual(sections[0].hiddenCount, 2)
-        XCTAssertEqual(sections[1].items, [])
+        // What you saw first, then your days, then Skills.
+        XCTAssertEqual(sections.map(\.kind), [.memory, .days, .skills])
+        XCTAssertEqual(sections[2].items.map(\.id), ["skill:s1", "skill:s2", "skill:s3", "skill:s4", "skill:s5"])
+        XCTAssertEqual(sections[2].total, 7)
+        XCTAssertEqual(sections[2].hiddenCount, 2)
+        XCTAssertEqual(sections[0].items, [])
+        XCTAssertEqual(sections[0].hiddenCount, 0)
+        XCTAssertEqual(sections[1].byWordsReason, "no daily summary has been embedded yet")
         XCTAssertEqual(sections[1].hiddenCount, 0)
-        XCTAssertEqual(sections[2].byWordsReason, "no daily summary has been embedded yet")
-        XCTAssertEqual(sections[2].hiddenCount, 0)
     }
 
     func testASingleScopeShowsAllOfItsKindOnly() {
@@ -325,7 +326,7 @@ final class CommonplaceTests: XCTestCase {
 
     func testVisibleItemsRunAcrossGroupsInOrder() {
         XCTAssertEqual(manyResults().visibleItems(.all).map(\.id), [
-            "skill:s1", "skill:s2", "skill:s3", "skill:s4", "skill:s5", "day:2026-10-12", "day:2026-10-11",
+            "day:2026-10-12", "day:2026-10-11", "skill:s1", "skill:s2", "skill:s3", "skill:s4", "skill:s5",
         ])
         XCTAssertEqual(manyResults().visibleItems(.days).map(\.id), ["day:2026-10-12", "day:2026-10-11"])
     }
@@ -354,7 +355,7 @@ final class CommonplaceTests: XCTestCase {
         XCTAssertEqual(section(.unexpected(status: 501, body: "x")).errorMessage, "The worker answered 501. Try again.")
         XCTAssertEqual(section(.badRequest("'query' must be a non-empty string")).errorMessage, "'query' must be a non-empty string")
         XCTAssertEqual(section(.workerNotRunning).errorMessage, "The worker is not running.")
-        XCTAssertEqual(CommonplaceKind.allCases.map(\.noMatches), ["No Skills match.", "No moments match.", "No days match."])
+        XCTAssertEqual(CommonplaceKind.allCases.map(\.noMatches), ["No moments match.", "No days match.", "No Skills match."])
     }
 
     func testDayTitleReadsTheLocalDay() {
@@ -479,21 +480,19 @@ final class CommonplaceTests: XCTestCase {
         await model.run(force: true)
         XCTAssertEqual(model.phase, .results)
         XCTAssertEqual(model.lastQuery, "domain")
-        // The first result is selected.
-        XCTAssertEqual(model.selectedID, "skill:check-domain")
-        model.moveSelection(1)
-        model.moveSelection(1)
-        XCTAssertEqual(model.selectedID, "skill:deploy-staging")
-        model.moveSelection(1)  // into Memory
+        // The first result is selected: Memory comes first.
         XCTAssertEqual(model.selectedID, "moment:ev-1")
         XCTAssertEqual(model.selected?.moment?.id, "ev-1")
         model.moveSelection(1)
         model.moveSelection(1)  // into Days
         XCTAssertEqual(model.selectedID, "day:2026-10-12")
-        model.moveSelection(5)
-        XCTAssertEqual(model.selectedID, "day:2026-10-10")
-        model.moveSelection(-100)
+        model.moveSelection(1)
+        model.moveSelection(1)  // into Skills
         XCTAssertEqual(model.selectedID, "skill:check-domain")
+        model.moveSelection(5)
+        XCTAssertEqual(model.selectedID, "skill:deploy-staging")
+        model.moveSelection(-100)
+        XCTAssertEqual(model.selectedID, "moment:ev-1")
         XCTAssertEqual(model.knownApps, ["Mail", "Safari"])
     }
 

@@ -103,9 +103,11 @@ extension MemoryAPI {
 
 // MARK: - Scope and request
 
-/// The kinds the window searches, in the order it shows them.
+/// The kinds the window searches, in the order it shows them: what you
+/// saw first (this is where you look for it), then your days, then Skills.
+/// Scores of different kinds are not comparable, so the order is fixed.
 enum CommonplaceKind: String, CaseIterable, Identifiable {
-    case skills, memory, days
+    case memory, days, skills
 
     var id: Self { self }
 
@@ -130,9 +132,9 @@ enum CommonplaceKind: String, CaseIterable, Identifiable {
 /// The scope chips: everything, or one kind.
 enum CommonplaceScope: String, CaseIterable, Identifiable {
     case all = "All"
-    case skills = "Skills"
     case memory = "Memory"
     case days = "Days"
+    case skills = "Skills"
 
     var id: Self { self }
 
