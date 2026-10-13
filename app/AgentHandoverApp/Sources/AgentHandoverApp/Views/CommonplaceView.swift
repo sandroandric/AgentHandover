@@ -16,6 +16,8 @@ struct CommonplaceView: View {
     @StateObject private var thumbnails = MemoryThumbnailStore()
     @FocusState private var searchFocused: Bool
     @State private var openMoment: MemoryMoment?
+    /// `[skills] enabled = false`: no new Days or Skills are made.
+    @State private var memoryOnly = false
     @Environment(\.openWindow) private var openWindow
 
     private let format = MemoryFormat()
@@ -27,6 +29,9 @@ struct CommonplaceView: View {
             Divider()
             agentsLine
             banner
+            if memoryOnly, model.scope == .days || model.scope == .skills {
+                memoryOnlyLine
+            }
             content
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             Divider()
@@ -36,6 +41,7 @@ struct CommonplaceView: View {
         .background(Color(nsColor: .windowBackgroundColor))
         .task {
             searchFocused = true
+            memoryOnly = await Task.detached { SkillsMode.load().isMemoryOnly }.value
             await center.refresh()
             await model.checkWaiting(status: center.status)
         }
@@ -46,6 +52,20 @@ struct CommonplaceView: View {
     }
 
     // MARK: - Search
+
+    private var memoryOnlyLine: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "info.circle")
+            Text(SkillsMode.memoryOnlyNote)
+            Spacer()
+            Button("Learn Skills\u{2026}") { openWindow(id: "memory-settings") }
+                .buttonStyle(.link)
+        }
+        .font(.system(size: 11))
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 6)
+    }
 
     private var searchBar: some View {
         HStack(spacing: 10) {

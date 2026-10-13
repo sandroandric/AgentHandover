@@ -49,7 +49,11 @@ struct StatusDetailView: View {
                         }
 
                         HStack(spacing: 8) {
-                            FeatureBadge(name: "VLM", available: worker.vlm_available)
+                            if worker.memoryOnly {
+                                FeatureBadge(name: "Memory only", available: true)
+                            } else {
+                                FeatureBadge(name: "VLM", available: worker.vlm_available)
+                            }
                         }
                         .padding(.top, 4)
                     }

@@ -362,6 +362,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Obse
     /// download them unless the user said "Not now" for this version.
     private func checkModelUpgrade() {
         DispatchQueue.global(qos: .utility).async { [weak self] in
+            // Memory only runs no Skill model: nothing to upgrade or download.
+            if SkillsMode.load().isMemoryOnly {
+                self?.checkMemory()
+                return
+            }
             let plan = ModelUpgrade.loadPlan()
             let decision = ModelUpgrade.decide(
                 plan: plan,

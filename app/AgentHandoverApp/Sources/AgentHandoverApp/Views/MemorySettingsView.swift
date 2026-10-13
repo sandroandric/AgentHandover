@@ -1,7 +1,8 @@
 import AppKit
 import SwiftUI
 
-/// Memory Settings: on or off, how long thumbnails and moments are kept,
+/// Memory Settings: what AgentHandover does (Skills + Memory or Memory
+/// only, `SkillsMode`), Memory on or off, how long thumbnails and moments are kept,
 /// whether agents may search, and forgetting everything.  Each change is
 /// written to config.toml `[memory]` at once; the worker and the daemon
 /// restart (they read it at start) a moment after the last change, except
@@ -14,22 +15,43 @@ struct MemorySettingsView: View {
     @State private var loaded = false
     @State private var pendingSave: Task<Void, Never>?
     @State private var saving = false
+    @State private var mode = SkillsMode.skillsAndMemory
+    @State private var savedMode = SkillsMode.skillsAndMemory
 
     /// The retention choices; a value set by hand in config.toml is listed too.
     private static let retentionChoices = [30, 90, 180, 365, 730, 1825, 3650]
 
     var body: some View {
         Form {
+            Section("What AgentHandover does") {
+                Picker("Mode", selection: $mode) {
+                    Text(SkillsMode.skillsAndMemory.title).tag(SkillsMode.skillsAndMemory)
+                    Text(SkillsMode.memoryOnly.title).tag(SkillsMode.memoryOnly)
+                }
+                .pickerStyle(.radioGroup)
+                .labelsHidden()
+                .disabled(saving)
+                Text(mode.isMemoryOnly
+                     ? mode.summary + " Your Skills stay available to your agents."
+                     : mode.summary + " If its models are not on this Mac yet, the menu offers to download them.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
             Section {
                 Toggle(isOn: $settings.enabled) {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Memory")
-                        Text("A private, searchable record of what you see: a short description and a search vector of each screen, kept only on this Mac.")
+                        Text(mode.isMemoryOnly
+                             ? "Memory only is Memory: to turn Memory off, choose Skills + Memory first."
+                             : "A private, searchable record of what you see: a short description and a search vector of each screen, kept only on this Mac.")
                             .font(.system(size: 11))
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 }
+                .disabled(mode.isMemoryOnly)
             }
 
             Section("Keep") {
@@ -112,11 +134,17 @@ struct MemorySettingsView: View {
         .frame(width: 520)
         .frame(minHeight: 560)
         .task {
-            let current = await Task.detached { MemorySettings.load() }.value
+            let (current, currentMode) = await Task.detached { (MemorySettings.load(), SkillsMode.load()) }.value
             settings = current
             saved = current
+            mode = currentMode
+            savedMode = currentMode
             loaded = true
             await center.refresh()
+        }
+        .onChange(of: mode) { _, new in
+            guard loaded, new != savedMode else { return }
+            switchMode(to: new)
         }
         .onChange(of: settings) { _, new in
             guard loaded else { return }
@@ -141,6 +169,25 @@ struct MemorySettingsView: View {
 
     static func retentionLabel(_ days: Int) -> String {
         retentionNames[days] ?? "\(days) days"
+    }
+
+    /// Write the mode (Memory only also turns Memory on) and restart the
+    /// worker and the daemon, which read it at start; then show Memory's
+    /// settings as the file now has them.
+    private func switchMode(to new: SkillsMode) {
+        pendingSave?.cancel()
+        saving = true
+        savedMode = new
+        Task {
+            let current = await Task.detached { () -> MemorySettings in
+                if new.write() { MemorySettings.restartServices() }
+                return MemorySettings.load()
+            }.value
+            saved = current
+            settings = current
+            saving = false
+            await center.refresh()
+        }
     }
 
     /// Write at once when only the agents switch changed, else shortly

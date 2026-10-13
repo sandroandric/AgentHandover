@@ -140,7 +140,13 @@ final class MemoryOfferTests: XCTestCase {
         XCTAssertEqual(ConfigTOML.value(section: "memory", key: "enabled", in: updated), "true")
         XCTAssertEqual(ConfigTOML.value(section: "memory", key: "agents_access", in: updated), "false")
         XCTAssertEqual(ConfigTOML.value(section: "embedding", key: "model", in: updated), "embeddinggemma-2:440m")
-        let changed = updated.components(separatedBy: "\n").filter { !example.components(separatedBy: "\n").contains($0) }
+        // Lines added, counted (the example has other "enabled = true" lines).
+        var remaining = example.components(separatedBy: "\n")
+        let changed = updated.components(separatedBy: "\n").filter { line in
+            guard let i = remaining.firstIndex(of: line) else { return true }
+            remaining.remove(at: i)
+            return false
+        }
         XCTAssertEqual(Set(changed), ["enabled = true", "agents_access = false", "model = \"embeddinggemma-2:440m\""])
         // An old Ollama: Memory off, text model unchanged.
         let old = MemoryDecisions.setupPlan(wantsMemory: true, ollamaVersion: "0.34.2", table: table)

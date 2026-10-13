@@ -50,8 +50,12 @@ struct MenuBarView: View {
                     attentionSection
                 }
 
-                // Primary action: Record
-                recordSection
+                // Primary action: Record (Memory only learns no Skills)
+                if appState.workerStatus?.memoryOnly == true {
+                    memoryOnlyRow
+                } else {
+                    recordSection
+                }
 
                 // Quick links grid
                 quickLinksGrid
@@ -699,6 +703,30 @@ struct MenuBarView: View {
     }
 
     // MARK: - Memory
+
+    /// Memory only: what is not happening, and where to change it.
+    private var memoryOnlyRow: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "brain")
+                .font(.system(size: 12))
+                .foregroundColor(warmOrange)
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Memory only")
+                    .font(.system(size: 12, weight: .bold, design: .rounded))
+                    .foregroundColor(darkNavy)
+                Text("Remembering what you see; no Skills are learned.")
+                    .font(.system(size: 10))
+                    .foregroundColor(.secondary)
+            }
+            Spacer()
+            Button("Learn Skills\u{2026}") { openAndActivate("memory-settings") }
+                .buttonStyle(.plain)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundColor(.blue)
+        }
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 10).fill(warmOrange.opacity(0.06)))
+    }
 
     /// "Memory · Recording" with Commonplace…, Pause Memory (or Resume
     /// Memory), Forget and Settings.  The state comes from the worker's

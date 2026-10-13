@@ -168,6 +168,12 @@ struct WorkerStatusFile: Codable {
     /// "Upgrade everything": the background re-embed of the Skills index
     /// with EmbeddingGemma 2; absent unless the user chose it.
     let embedding_upgrade: EmbeddingUpgradeStatus?
+    /// `[skills] enabled` as the running worker read it: false is Memory
+    /// only (`SkillsMode`); absent from a worker before 2.0.
+    let skills_enabled: Bool?
+
+    /// The worker runs Memory only: no generative model, no Skills learned.
+    var memoryOnly: Bool { skills_enabled == false }
 }
 
 /// worker-status.json's `embedding_upgrade` (worker embedding_upgrade.py).

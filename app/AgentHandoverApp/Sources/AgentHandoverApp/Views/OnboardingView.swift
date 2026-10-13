@@ -40,6 +40,8 @@ struct OnboardingView: View {
     // Memory (2.0): on by default for a new install, agents off.
     @State private var setupMemoryOn = MemorySetupChoice.wantsMemory()
     @State private var setupAgentsAccess = MemorySetupChoice.agentsAccess()
+    /// The AI step's choice: Skills + Memory (preselected) or Memory only.
+    @State private var setupMode = SkillsMode.load()
     /// The version the local Ollama reports (nil until read, or when none
     /// answers); decides whether this Mac can run Memory's model.
     @State private var ollamaVersion: String? = nil
@@ -1011,6 +1013,65 @@ struct OnboardingView: View {
         }
     }
 
+    /// What this step downloads, for the line under the models.
+    private var downloadLabel: String {
+        guard let table = tierTable else { return "" }
+        if setupMode.isMemoryOnly {
+            return table.memoryModel.flatMap { table.sizeLabel($0) } ?? ""
+        }
+        return selectedTier.flatMap { table.downloadLabel(for: $0, embeddingModel: memoryPlan?.embeddingModel) } ?? ""
+    }
+
+    /// Skills + Memory or Memory only, each with what it downloads.
+    private var modeChooser: some View {
+        VStack(spacing: 8) {
+            ForEach([SkillsMode.skillsAndMemory, .memoryOnly], id: \.title) { mode in
+                Button {
+                    guard setupMode != mode else { return }
+                    setupMode = mode
+                    if mode.isMemoryOnly, !setupMemoryOn {
+                        // The mode is Memory: it turns Memory on.
+                        setupMemoryOn = true
+                        MemorySetupChoice.save(memoryOn: true, agentsAccess: setupAgentsAccess)
+                    }
+                    refreshVLMSetupState(force: true)
+                } label: {
+                    HStack(alignment: .top, spacing: 10) {
+                        Image(systemName: setupMode == mode ? "checkmark.circle.fill" : "circle")
+                            .foregroundColor(setupMode == mode ? warmOrange : darkNavy.opacity(0.2))
+                            .font(.system(size: 16))
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(mode.title)
+                                .font(.system(size: 13, weight: .bold, design: .rounded))
+                                .foregroundColor(darkNavy)
+                            Text(mode.summary)
+                                .font(.system(size: 11))
+                                .foregroundColor(darkNavy.opacity(0.55))
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        Spacer(minLength: 0)
+                    }
+                    .padding(10)
+                    .contentShape(Rectangle())
+                    .background(
+                        RoundedRectangle(cornerRadius: 10)
+                            .fill(setupMode == mode ? warmOrange.opacity(0.08) : Color.clear)
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 10)
+                            .stroke(setupMode == mode ? warmOrange.opacity(0.3) : darkNavy.opacity(0.08), lineWidth: 1)
+                    )
+                }
+                .buttonStyle(.plain)
+                .disabled(vlmPullInProgress)
+            }
+            Text("You can switch later in Memory Settings.")
+                .font(.system(size: 11))
+                .foregroundColor(darkNavy.opacity(0.4))
+        }
+        .frame(maxWidth: 440)
+    }
+
     private var localVLMReady: Bool {
         ollamaInstalled && ollamaRunning && ollamaHasRequiredModels
     }
@@ -1496,12 +1557,16 @@ struct OnboardingView: View {
                     .font(titleFont)
                     .foregroundColor(darkNavy)
 
-                Text("AgentHandover runs its AI models on your Mac through Ollama, to understand what\u{2019}s on your screen.")
+                Text(setupMode.isMemoryOnly
+                    ? "Memory only runs one small model on your Mac through Ollama, to make what you saw searchable."
+                    : "AgentHandover runs its AI models on your Mac through Ollama, to understand what\u{2019}s on your screen.")
                     .font(bodyFont)
                     .foregroundColor(darkNavy.opacity(0.5))
                     .multilineTextAlignment(.center)
                     .lineSpacing(5)
                     .frame(maxWidth: 440)
+
+                modeChooser
 
                 if localVLMReady {
                     PermissionStatusBadge(
@@ -1656,7 +1721,8 @@ struct OnboardingView: View {
                     }
                 } else {
                     VStack(alignment: .leading, spacing: 10) {
-                        // Model tier picker
+                        // Model tier picker (none in Memory only: one model)
+                    if !setupMode.isMemoryOnly {
                     VStack(alignment: .leading, spacing: 8) {
                         HStack(spacing: 6) {
                             Image(systemName: "cpu")
@@ -1720,12 +1786,13 @@ struct OnboardingView: View {
                             .buttonStyle(.plain)
                         }
                     }
+                    }
 
                     HStack(spacing: 8) {
                         Image(systemName: ollamaHasRequiredModels ? "checkmark.circle.fill" : "arrow.down.circle.fill")
                             .foregroundColor(ollamaHasRequiredModels ? brightGreen : warmOrange)
                             .font(.system(size: 16))
-                        Text(ollamaHasRequiredModels ? "Required models ready." : "\(selectedTier.flatMap { tierTable?.downloadLabel(for: $0, embeddingModel: memoryPlan?.embeddingModel) } ?? "") download \u{00B7} Runs on Apple Silicon")
+                        Text(ollamaHasRequiredModels ? "Required models ready." : "\(downloadLabel) download \u{00B7} Runs on Apple Silicon")
                             .font(.system(size: 13, weight: .medium))
                             .foregroundColor(darkNavy.opacity(0.5))
                     }
@@ -1740,7 +1807,16 @@ struct OnboardingView: View {
                     }
 
                     VStack(alignment: .leading, spacing: 6) {
-                        if let table = tierTable, let tier = selectedTier {
+                        if setupMode.isMemoryOnly, let table = tierTable, let model = table.memoryModel {
+                            modelRow(model, table.sizeLabel(model) ?? "", "Memory: what you saw, searchable by meaning and by look")
+                            if let version = ollamaVersion, let minimum = table.minimumOllamaVersionForMemory,
+                               !OllamaModels.isVersion(version, atLeast: minimum) {
+                                Text("Memory needs Ollama \(minimum) or later (this Mac has \(version)). Update Ollama from ollama.com/download, then Recheck, or choose Skills + Memory.")
+                                    .font(.system(size: 11))
+                                    .foregroundColor(warmOrange)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        } else if let table = tierTable, let tier = selectedTier {
                             if tier.annotationModel == tier.sopModel {
                                 modelRow(tier.annotationModel, table.sizeLabel(tier.annotationModel) ?? "", "Screen annotation + Skill generation (single model)")
                             } else {
@@ -1774,6 +1850,7 @@ struct OnboardingView: View {
                         )
                         .buttonStyle(.plain)
 
+                        if !setupMode.isMemoryOnly {
                         Button {
                             useCustomModels.toggle()
                         } label: {
@@ -1832,6 +1909,7 @@ struct OnboardingView: View {
                                     .foregroundColor(darkNavy.opacity(0.4))
                             }
                             .padding(.top, 6)
+                        }
                         }
 
                         if !vlmStatusMessage.isEmpty {
@@ -2276,23 +2354,43 @@ struct OnboardingView: View {
                     .foregroundColor(darkNavy)
 
                 VStack(alignment: .leading, spacing: 12) {
-                    instructionRow(
-                        icon: "record.circle",
-                        iconColor: .red,
-                        title: "Focus Session",
-                        description: "Record one specific task. Click Stop when done."
-                    )
-                    instructionRow(
-                        icon: "eye.fill",
-                        iconColor: warmOrange,
-                        title: "Observe Me",
-                        description: "Learns patterns silently in the background over time."
-                    )
+                    if setupMode.isMemoryOnly {
+                        instructionRow(
+                            icon: "magnifyingglass",
+                            iconColor: warmOrange,
+                            title: "Commonplace",
+                            description: "Search what you saw by describing it, from Commonplace\u{2026} in the menu bar."
+                        )
+                        instructionRow(
+                            icon: "pause.circle",
+                            iconColor: darkNavy,
+                            title: "Pause and forget",
+                            description: "Pause Memory or forget a moment, an hour or a day from the menu bar."
+                        )
+                        Text("Memory only: to have AgentHandover learn Skills too, choose Skills + Memory in Memory Settings.")
+                            .font(.system(size: 11))
+                            .foregroundColor(darkNavy.opacity(0.5))
+                            .fixedSize(horizontal: false, vertical: true)
+                            .padding(.top, 4)
+                    } else {
+                        instructionRow(
+                            icon: "record.circle",
+                            iconColor: .red,
+                            title: "Focus Session",
+                            description: "Record one specific task. Click Stop when done."
+                        )
+                        instructionRow(
+                            icon: "eye.fill",
+                            iconColor: warmOrange,
+                            title: "Observe Me",
+                            description: "Learns patterns silently in the background over time."
+                        )
 
-                    Text("Always click Stop when you finish a focus session -- otherwise it keeps recording.")
-                        .font(.system(size: 11))
-                        .foregroundColor(warmOrange.opacity(0.8))
-                        .padding(.top, 4)
+                        Text("Always click Stop when you finish a focus session -- otherwise it keeps recording.")
+                            .font(.system(size: 11))
+                            .foregroundColor(warmOrange.opacity(0.8))
+                            .padding(.top, 4)
+                    }
                 }
                 .frame(maxWidth: 400, alignment: .leading)
             }
@@ -2493,6 +2591,12 @@ struct OnboardingView: View {
         let plan = MemoryDecisions.setupPlan(wantsMemory: setupMemoryOn, ollamaVersion: version, table: table)
         let agentsAccess = setupAgentsAccess
 
+        let mode = setupMode
+        if mode.isMemoryOnly {
+            pullMemoryOnly(table: table, ollamaPath: ollamaPath, version: version)
+            return
+        }
+
         // The QAT Gemma 4 tags need a recent Ollama (older ones answer the
         // pull with HTTP 412, "requires a newer version of Ollama").
         let minimum = table.minimumOllamaVersionForGemma4
@@ -2552,10 +2656,50 @@ struct OnboardingView: View {
             }
 
             MemorySetupChoice.write(plan, agentsAccess: agentsAccess)
+            mode.write()
 
             DispatchQueue.main.async {
                 vlmPullInProgress = false
                 vlmPullOutput = "All models downloaded successfully!"
+                refreshVLMSetupState(force: true)
+            }
+        }
+    }
+
+    /// Memory only: pull Memory's model alone, then write the mode (and
+    /// Memory on). Memory's model needs its own minimum Ollama.
+    private func pullMemoryOnly(table: ModelTierTable, ollamaPath: String, version: String?) {
+        guard let model = table.memoryModel,
+              MemoryDecisions.ollamaRunsMemory(version, minimum: table.minimumOllamaVersionForMemory) else {
+            vlmPullInProgress = false
+            vlmPullOutput = "Memory needs Ollama \(table.minimumOllamaVersionForMemory ?? "") or later"
+                + (version.map { " (this Mac has \($0))" } ?? "")
+                + ". Update the Ollama app from ollama.com/download, then try again."
+            return
+        }
+        let plan = MemoryDecisions.setupPlan(wantsMemory: true, ollamaVersion: version, table: table)
+        let agentsAccess = setupAgentsAccess
+        // The tier stays written for a later switch to Skills + Memory.
+        persistModelChoice()
+        DispatchQueue.global(qos: .userInitiated).async {
+            let installed = (try? OllamaModels.installed(ollamaPath: ollamaPath).get()) ?? []
+            if !OllamaModels.missing([model], installed: installed).isEmpty {
+                DispatchQueue.main.async { vlmPullOutput = "Pulling \(model) (Memory)..." }
+                if let failure = OllamaModels.pull(model, ollamaPath: ollamaPath, progress: { line in
+                    DispatchQueue.main.async { vlmPullOutput = "\(model): \(String(line.prefix(60)))" }
+                }) {
+                    DispatchQueue.main.async {
+                        vlmPullInProgress = false
+                        vlmPullOutput = failure
+                    }
+                    return
+                }
+            }
+            MemorySetupChoice.write(plan, agentsAccess: agentsAccess)
+            SkillsMode.memoryOnly.write()
+            DispatchQueue.main.async {
+                vlmPullInProgress = false
+                vlmPullOutput = "Memory's model is ready."
                 refreshVLMSetupState(force: true)
             }
         }
@@ -2590,6 +2734,7 @@ struct OnboardingView: View {
         let wantsMemory = setupMemoryOn
         let agentsAccess = setupAgentsAccess
         let tierModels = resolvedAnnotationModel.isEmpty ? [] : [resolvedAnnotationModel, resolvedSOPModel]
+        let mode = setupMode
         vlmStateRefreshing = true
         appState.refreshStatus()
 
@@ -2602,11 +2747,19 @@ struct OnboardingView: View {
             // The Ollama that answers decides the embedding model setup pulls.
             let version = ollamaPath == nil ? nil : OllamaModels.serverVersion()
             let plan = table.map {
-                MemoryDecisions.setupPlan(wantsMemory: wantsMemory, ollamaVersion: version, table: $0)
+                MemoryDecisions.setupPlan(wantsMemory: wantsMemory || mode.isMemoryOnly, ollamaVersion: version, table: $0)
             }
-            let requiredModels = plan.map { plan in
-                tierModels.isEmpty ? [] : Array(Set(tierModels + [plan.embeddingModel])).sorted()
-            }.map { $0.map(OllamaModels.canonical) } ?? []
+            // Memory only needs Memory's model alone, on an Ollama that runs
+            // it (an older one leaves nothing to run: not ready).
+            let requiredModels: [String]
+            if mode.isMemoryOnly {
+                requiredModels = (plan?.memoryEnabled == true ? plan.map { [$0.embeddingModel] } : nil)?
+                    .map(OllamaModels.canonical) ?? []
+            } else {
+                requiredModels = plan.map { plan in
+                    tierModels.isEmpty ? [] : Array(Set(tierModels + [plan.embeddingModel])).sorted()
+                }.map { $0.map(OllamaModels.canonical) } ?? []
+            }
 
             if let ollamaPath {
                 switch OllamaModels.installed(ollamaPath: ollamaPath) {
@@ -2643,6 +2796,7 @@ struct OnboardingView: View {
                     if let plan {
                         MemorySetupChoice.write(plan, agentsAccess: agentsAccess)
                     }
+                    mode.write()
                 }
                 self.vlmStateRefreshing = false
                 self.appState.vlmAvailable = self.localVLMReady
