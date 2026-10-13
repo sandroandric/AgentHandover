@@ -9,7 +9,8 @@ build against).  Each method takes the request body and returns
   (20)}`` → ``{"moments": [...], "model"}``; 503 ``memory_off`` while
   ``[memory] enabled = false``; 503 ``model_unavailable`` (with ``detail``)
   when the query cannot be embedded.  One :class:`~memory.MemoryIndex`
-  serves every search (it refreshes itself from the table).
+  serves every search (it refreshes itself from the table, and releases
+  its vectors after ten minutes without a search).
 * ``status`` — what Memory holds and whether it runs.
 * ``pause`` — ``{"minutes"?: int > 0 | null}`` writes the pause file
   (null or absent: until resumed); ``resume`` deletes it; both answer the
