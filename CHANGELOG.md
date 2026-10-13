@@ -41,11 +41,23 @@ the 16 GB test Mac with Ollama 0.40.3).
   `search_memory` behind `[memory] agents_access` (off by default; text
   only). Proof: `test_memory_api.py`, `test_mcp_search_memory.py`, J-mcp.
 - **Setup and upgrade.** Setup has a Memory step (on by default). An
-  upgrade offers Memory only, Upgrade everything or Not now, once. Upgrade
+  upgrade offers Add Memory, Upgrade everything or Not now, once. Upgrade
   everything re-embeds every vector into a staging table (migration v009)
   and swaps it in one transaction; resumable, never mixing models in a
   search. Proof: J-upgrade-everything, `test_embedding_upgrade.py`, Swift
   `MemoryOfferTests`.
+- **Memory only.** `[skills] enabled = false` (setup's "Memory only",
+  Memory Settings, `agenthandover skills learn off`): capture and Memory
+  keep running with Memory's embedding model alone, and no other model is
+  built, preloaded or called (no annotations, Skill drafts, questions or
+  daily summaries); the model-free daily upkeep (Memory purge, thumbnail
+  expiry) runs without a generation plan; the Ollama client refuses any
+  generate call as the last guard. Setup downloads only Memory's model;
+  doctor, `setup --vlm`, `status`, the menu and Commonplace follow the
+  mode. Proof: J-memory-only (only `/api/embed` reaches Ollama over a
+  day; fails with `/api/generate` when the mode is broken),
+  `test_memory_only.py` (each guard mutation-checked), CLI `learn_tests`
+  and doctor tests, Swift `SkillsModeTests`.
 - **Commonplace.** Skills, Memory, daily summaries and the profile as one
   hub agents can search: MCP `search_commonplace(query, kinds?, since?,
   until?, limit?)`, query API `POST /commonplace/search`, and

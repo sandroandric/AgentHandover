@@ -2,7 +2,7 @@ import AppKit
 import SwiftUI
 
 /// The offer an updated install sees once (`MemoryDecisions.offer`):
-/// "Memory only", "Upgrade everything" or "Not now", recorded in
+/// "Add Memory", "Upgrade everything" or "Not now", recorded in
 /// memory-offer.json.  With an Ollama too old for Memory's model it
 /// explains the update and offers "Remind me later" instead.
 struct MemoryOfferView: View {
@@ -89,7 +89,7 @@ struct MemoryOfferView: View {
     private var choices: some View {
         VStack(alignment: .leading, spacing: 14) {
             VStack(alignment: .leading, spacing: 8) {
-                choiceLine("Memory only", "Turns on Memory. Skill search keeps the model it uses now.")
+                choiceLine("Add Memory", "Turns on Memory. Skill search keeps the model it uses now.")
                 choiceLine("Upgrade everything",
                            "Also moves Skill search and task grouping to EmbeddingGemma 2. AgentHandover will re-index your Skills in the background and switch when it is done.")
                 Text("Either one downloads \(memoryModel)\(memoryModelSize.map { " (\($0))" } ?? "") if it is not on this Mac yet.")
@@ -116,7 +116,7 @@ struct MemoryOfferView: View {
                     Button("Done") { close() }.keyboardShortcut(.defaultAction)
                 } else {
                     Button("Upgrade Everything") { choose(.everything) }
-                    Button("Memory Only") { choose(.memoryOnly) }
+                    Button("Add Memory") { choose(.memoryOnly) }
                         .keyboardShortcut(.defaultAction)
                 }
             }
