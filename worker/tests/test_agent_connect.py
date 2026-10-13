@@ -15,6 +15,7 @@ from agenthandover_worker import agent_connect
 from agenthandover_worker.agent_connect import (
     CODEX_BEGIN,
     CODEX_END,
+    HERMES_COMMONPLACE,
     HERMES_MANIFEST,
     _load_procedures,
     connect_claude_code,
@@ -25,6 +26,7 @@ from agenthandover_worker.agent_connect import (
     pair_claude_code,
     parse_claude_mcp_list,
 )
+from agenthandover_worker.commonplace import AGENT_NOTE
 from agenthandover_worker.procedure_schema import sop_to_procedure
 from fixtures.vlm_answers import generated_sop_template
 
@@ -431,7 +433,11 @@ class TestConnectHermes:
         assert namespace_dir.is_dir()
 
         # Only the agent_ready procedure should be written, as a subdirectory
-        slug_dirs = [d for d in namespace_dir.iterdir() if d.is_dir()]
+        # (beside the Commonplace note)
+        slug_dirs = [
+            d for d in namespace_dir.iterdir()
+            if d.is_dir() and d.name != "agenthandover-commonplace"
+        ]
         assert len(slug_dirs) == 1
         assert slug_dirs[0].name == "reddit-marketing"
 
@@ -463,7 +469,7 @@ class TestConnectHermes:
         self._connect(fake_kb, tmp_path)
         namespace_dir = tmp_path / ".hermes" / "skills" / "agenthandover"
         manifest = json.loads((namespace_dir / HERMES_MANIFEST).read_text())
-        assert manifest["files"] == ["reddit-marketing/SKILL.md"]
+        assert manifest["files"] == ["reddit-marketing/SKILL.md", HERMES_COMMONPLACE]
 
     def test_removes_only_what_its_manifest_lists(self, fake_kb: Path, tmp_path: Path):
         namespace_dir = tmp_path / ".hermes" / "skills" / "agenthandover"
@@ -479,7 +485,10 @@ class TestConnectHermes:
         assert not (namespace_dir / "reddit-marketing" / "SKILL.md").exists()
         assert (namespace_dir / "reddit-marketing" / "notes.txt").read_text() == "mine"
         assert (namespace_dir / "my-notes" / "SKILL.md").read_text() == "hand written"
-        assert json.loads((namespace_dir / HERMES_MANIFEST).read_text())["files"] == []
+        assert json.loads((namespace_dir / HERMES_MANIFEST).read_text())["files"] == [
+            HERMES_COMMONPLACE,
+        ]
+        assert (namespace_dir / HERMES_COMMONPLACE).is_file()
 
     def test_an_upgrade_without_a_manifest_removes_only_generated_files(
         self, fake_kb: Path, tmp_path: Path,
@@ -536,3 +545,85 @@ class TestConnectHermes:
         assert "servers:" in out
         # Ensure we didn't leave the old TOML hint in place
         assert "[mcp.servers.agenthandover]" not in out
+
+
+class TestCommonplaceNote:
+    """Every connector tells the agent that Commonplace exists and how to
+    search it, in the place that agent reads instructions from."""
+
+    def test_the_note_names_the_tool_the_cli_and_the_privacy_line(self):
+        assert AGENT_NOTE.startswith("## Commonplace\n")
+        assert "search_commonplace(query, kinds?, since?, until?, limit?)" in AGENT_NOTE
+        assert 'agenthandover search "<query>"' in AGENT_NOTE
+        assert "only if the user lets agents search it" in AGENT_NOTE
+        assert "text only" in AGENT_NOTE
+
+    def test_claude_code_index_carries_it(self, fake_kb: Path, tmp_path: Path):
+        with patch("agenthandover_worker.agent_connect._get_kb_root", return_value=fake_kb / "knowledge"):
+            connect_claude_code(commands_dir=tmp_path / "commands", skills_dir=tmp_path / "skills")
+        index = (tmp_path / "commands" / "agenthandover-list.md").read_text(encoding="utf-8")
+        assert AGENT_NOTE.rstrip("\n") in index
+        # Still one generated file, with the footer last.
+        assert index.rstrip().endswith("to refresh.*")
+
+    def test_codex_block_carries_it_once_across_reruns(self, fake_kb: Path, tmp_path: Path):
+        target = tmp_path / "AGENTS.md"
+        with patch("agenthandover_worker.agent_connect._get_kb_root", return_value=fake_kb / "knowledge"):
+            assert connect_codex(target) == 0
+            assert connect_codex(target) == 0
+        content = target.read_text(encoding="utf-8")
+        assert content.count("## Commonplace") == 1
+        begin, end = content.index(CODEX_BEGIN), content.index(CODEX_END)
+        assert begin < content.index("## Commonplace") < end
+
+    def test_mcp_prints_it(self, capsys):
+        assert connect_mcp() == 0
+        out = capsys.readouterr().out
+        assert "  ## Commonplace" in out
+        assert "search_commonplace(query, kinds, since, until, limit)" in out
+
+    def test_hermes_gets_a_commonplace_skill(self, fake_kb: Path, tmp_path: Path, capsys):
+        with patch("agenthandover_worker.agent_connect._get_kb_root", return_value=fake_kb / "knowledge"), \
+             patch("agenthandover_worker.agent_connect.Path.home", return_value=tmp_path):
+            connect_hermes()
+            connect_hermes()
+        skill = tmp_path / ".hermes" / "skills" / "agenthandover" / HERMES_COMMONPLACE
+        content = skill.read_text(encoding="utf-8")
+        assert content.startswith("---\nname: agenthandover-commonplace\ndescription: ")
+        assert AGENT_NOTE in content
+        assert "Generated by AgentHandover" in content
+        assert f"Commonplace note: {skill}" in capsys.readouterr().out
+
+    @staticmethod
+    def _openclaw(workspace: Path) -> Path:
+        from agenthandover_worker import config as config_mod
+        from agenthandover_worker.config import Config, OpenClawConfig
+
+        cfg = Config(openclaw=OpenClawConfig(workspace_path=str(workspace)))
+        with patch.object(config_mod, "load_config", return_value=cfg):
+            agent_connect.connect_openclaw()
+        return workspace / "memory" / "apprentice" / "commonplace.md"
+
+    def test_openclaw_workspace_gets_the_note(self, tmp_path: Path, capsys):
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        note = self._openclaw(workspace)
+        assert note.read_text(encoding="utf-8").startswith(AGENT_NOTE)
+        assert f"Commonplace note: {note}" in capsys.readouterr().out
+        self._openclaw(workspace)  # a rerun rewrites its own file
+        assert note.read_text(encoding="utf-8").count("## Commonplace") == 1
+
+    def test_openclaw_keeps_a_users_file_and_writes_nothing_without_a_workspace(
+        self, tmp_path: Path, capsys,
+    ):
+        workspace = tmp_path / "workspace"
+        (workspace / "memory" / "apprentice").mkdir(parents=True)
+        mine = workspace / "memory" / "apprentice" / "commonplace.md"
+        mine.write_text("my notes", encoding="utf-8")
+        self._openclaw(workspace)
+        assert mine.read_text(encoding="utf-8") == "my notes"
+        assert "left alone" in capsys.readouterr().out
+
+        missing = tmp_path / "no-workspace"
+        self._openclaw(missing)
+        assert not missing.exists()
