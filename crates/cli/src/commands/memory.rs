@@ -201,6 +201,12 @@ where
 
 /// A moment's time span (local), window and description, as `memory
 /// search` and `search` list it.
+/// "  · match 0.62" for a result that carries a score (how close it is to
+/// the query; results of different kinds are not comparable), else "".
+pub(crate) fn match_label(item: &Value) -> String {
+    item["score"].as_f64().map(|s| format!("  · match {s:.2}")).unwrap_or_default()
+}
+
 pub(crate) fn write_moment<Tz: TimeZone>(out: &mut dyn Write, m: &Value, tz: &Tz) -> Result<()>
 where
     Tz::Offset: std::fmt::Display,
@@ -221,7 +227,7 @@ where
     let host = if host.is_empty() { String::new() } else { format!(" ({host})") };
     let title = text("window_title");
     let window = if title.is_empty() { text("app") } else { format!("{} — {title}", text("app")) };
-    writeln!(out, "  {span}  {window}{host}")?;
+    writeln!(out, "  {span}  {window}{host}{}", match_label(m))?;
     let description = text("description");
     if !description.is_empty() {
         writeln!(out, "      {description}")?;
@@ -653,7 +659,7 @@ mod tests {
             "since": "2026-10-11T22:00:00Z", "until": "2026-10-12T11:00:00Z",
         })));
         assert_eq!(text(out), "1 moment for \"acme invoice\":\n\n  \
-            Mon 12 Oct 11:30–11:35  Google Chrome — Invoice INV-2041 (billing.acme.com)\n      \
+            Mon 12 Oct 11:30–11:35  Google Chrome — Invoice INV-2041 (billing.acme.com)  · match 0.81\n      \
             Paying the Acme invoice\n      id: ev-1\n\n\
             Forget one with: agenthandover memory forget --moment <id>\n");
     }

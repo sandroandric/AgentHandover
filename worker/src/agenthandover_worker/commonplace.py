@@ -141,10 +141,12 @@ def _summary_apps(summary: dict) -> list[str]:
 
 
 def _summary_intents(summary: dict) -> list[str]:
-    intents = []
+    intents: list[str] = []
     for task in summary.get("tasks") or []:
         intent = task.get("intent") if isinstance(task, dict) else task
-        if isinstance(intent, str) and intent.strip():
+        # A day often repeats one task ("editing a document in TextEdit"):
+        # the excerpt names it once.
+        if isinstance(intent, str) and intent.strip() and intent.strip() not in intents:
             intents.append(intent.strip())
     return intents
 

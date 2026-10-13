@@ -254,7 +254,7 @@ fn write_skill(out: &mut dyn Write, item: &Value) -> Result<()> {
         }
         _ => "not approved".to_string(),
     };
-    writeln!(out, "  {} ({}) — {handoff}", text("title"), text("slug"))?;
+    writeln!(out, "  {} ({}) — {handoff}{}", text("title"), text("slug"), super::memory::match_label(item))?;
     let description = text("description");
     if !description.is_empty() {
         writeln!(out, "      {description}")?;
@@ -281,7 +281,7 @@ fn write_day(out: &mut dyn Write, item: &Value) -> Result<()> {
     if !apps.is_empty() {
         line += &format!(" ({})", apps.join(", "));
     }
-    writeln!(out, "{line}")?;
+    writeln!(out, "{line}{}", super::memory::match_label(item))?;
     let excerpt = item["excerpt"].as_str().unwrap_or("");
     if !excerpt.is_empty() {
         writeln!(out, "      {excerpt}")?;
@@ -563,13 +563,13 @@ mod tests {
         result.unwrap();
         assert_eq!(out, "Commonplace for \"domain\":\n\
             \nSkills (by meaning):\n  \
-            Check Domain Availability (check-domain) — ready for agents\n      \
+            Check Domain Availability (check-domain) — ready for agents  · match 0.71\n      \
             Is the domain free?\n  \
-            Old Skill (old) — held back: stale; trust is observe\n\
+            Old Skill (old) — held back: stale; trust is observe  · match 0.50\n\
             \nMemory: not searched. The user has not let agents search their Memory.\n  \
             Search it yourself with: agenthandover memory search \"domain\"\n\
             \nDays (by words; embedding model unavailable: down):\n  \
-            Mon 12 Oct 2026  3 tasks, 2.5 active hours (Google Chrome, Slack)\n      \
+            Mon 12 Oct 2026  3 tasks, 2.5 active hours (Google Chrome, Slack)  · match 0.50\n      \
             Checked domains\n\
             \nProfile:\n  {\n    \"tools\": {\n      \"editor\": \"Zed\"\n    }\n  }\n");
     }
@@ -587,7 +587,7 @@ mod tests {
         assert_eq!(out, "Commonplace for \"q\":\n\
             \nSkills (by words):\n  Nothing found.\n\
             \nMemory (by meaning):\n  \
-            Mon 12 Oct 11:30–11:35  Google Chrome — Invoice INV-2041 (billing.acme.com)\n      \
+            Mon 12 Oct 11:30–11:35  Google Chrome — Invoice INV-2041 (billing.acme.com)  · match 0.80\n      \
             Paying the Acme invoice\n");
     }
 

@@ -395,3 +395,15 @@ def test_api_without_commonplace_is_501(hub):
         assert _post(srv, {"query": "x"})[0] == 501
     finally:
         srv.stop()
+
+
+def test_a_day_excerpt_names_each_task_once():
+    """A day often repeats one task; the excerpt says it once, in order."""
+    from agenthandover_worker.commonplace import day_item
+
+    item = day_item("2026-09-25", {"tasks": [
+        {"intent": "editing a document in TextEdit"},
+        {"intent": "reviewing the models"},
+        {"intent": "editing a document in TextEdit"},
+    ]}, 0.6)
+    assert item["excerpt"] == "editing a document in TextEdit; reviewing the models"
