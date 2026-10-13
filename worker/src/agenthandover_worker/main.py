@@ -3248,63 +3248,6 @@ def _process_failed_query_trigger(trigger: dict, db: "WorkerDB") -> None:
         logger.warning("Failed to process failed query trigger", exc_info=True)
 
 
-def _process_search_trigger(
-    trigger: dict,
-    activity_searcher: "ActivitySearcher | None",
-) -> None:
-    """Handle a ``search-query`` trigger (the CLI's fallback path).
-
-    Runs the query through the ActivitySearcher and writes results
-    to search-query-result.json for the CLI to pick up.
-    """
-    state_dir = _status_dir()
-    logger.info("Processing search query trigger")
-
-    # Remove any stale result file so the CLI cannot read old data
-    result_path = state_dir / "search-query-result.json"
-    result_path.unlink(missing_ok=True)
-
-    try:
-        query = trigger.get("query", "")
-        limit = trigger.get("limit", 20)
-        date = trigger.get("date")
-        app = trigger.get("app")
-
-        if activity_searcher is None:
-            result = {"error": "Activity search not available (v2 schema required)"}
-        elif not query:
-            result = {"error": "Empty search query", "results": []}
-        else:
-            hits = activity_searcher.search(
-                query, limit=limit, date=date, app=app,
-            )
-            result = {
-                "results": [
-                    {
-                        "timestamp": h.timestamp,
-                        "app": h.app,
-                        "location": h.location,
-                        "what_doing": h.what_doing,
-                        "relevance_score": h.relevance_score,
-                        "event_id": h.event_id,
-                    }
-                    for h in hits
-                ]
-            }
-
-        result_path = state_dir / "search-query-result.json"
-        _atomic_write_result(result_path, result)
-        logger.info("Search: %d results written", len(result.get("results", [])))
-    except Exception:
-        logger.warning("Failed to process search trigger", exc_info=True)
-        # Write error result so CLI doesn't hang
-        try:
-            result_path = state_dir / "search-query-result.json"
-            _atomic_write_result(result_path, {"error": "Internal search error"})
-        except Exception:
-            pass
-
-
 def _process_recall_trigger(
     trigger: dict,
     activity_searcher: "ActivitySearcher | None",
@@ -4161,6 +4104,28 @@ def _missing_vlm_models(vlm_cfg) -> list[str] | None:
     return missing_models(dict.fromkeys([vlm_cfg.annotation_model, vlm_cfg.sop_model]), served)
 
 
+def _commonplace(ctx, memory_service) -> "object":
+    """Commonplace over the worker's own stores, for ``POST
+    /commonplace/search``: its knowledge base and vector store, Memory
+    through *memory_service*'s index, and ``config.toml`` read on each
+    search (the agents switch applies at once, as in the MCP server)."""
+    from agenthandover_worker.commonplace import QUERY_EMBED_TIMEOUT_S, Commonplace
+
+    vector_kb = ctx.vector_kb
+    return Commonplace(
+        knowledge_base=ctx.knowledge_base,
+        vector_kb=lambda: (vector_kb, "") if vector_kb is not None
+        else (None, "the worker has no vector store"),
+        load_config=lambda: load_config(ctx.cfg.path),
+        memory=lambda _cfg, query, *, keyword, **filters: memory_service.moments(
+            query, keyword=keyword, **filters,
+        ),
+        db_path=lambda: Path(ctx.db_path),
+        embed_timeout=QUERY_EMBED_TIMEOUT_S,
+        local_tz=ctx.local_tz,
+    )
+
+
 def _start_query_api(ctx) -> "object | None":
     """The localhost query API server, when ``[knowledge]
     query_api_enabled``; None otherwise or when it could not start."""
@@ -4177,6 +4142,7 @@ def _start_query_api(ctx) -> "object | None":
             knowledge_dir=ctx.knowledge_dir, writer=ctx.memory_writer,
             vector_kb=ctx.vector_kb, local_tz=ctx.local_tz, now=ctx.now,
         )
+        commonplace = _commonplace(ctx, memory)
         server = QueryAPIServer(
             knowledge_base=ctx.knowledge_base,
             port=port,
@@ -4190,6 +4156,7 @@ def _start_query_api(ctx) -> "object | None":
             vector_kb=ctx.vector_kb,
             token_path=_status_dir() / TOKEN_FILE,
             memory=memory,
+            commonplace=commonplace,
         )
         server.start()
         logger.info(

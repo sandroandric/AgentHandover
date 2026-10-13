@@ -79,14 +79,14 @@ def test_tick_drains_the_trigger_spool_through_mains_handlers(
 ) -> None:
     fixture = events_db("focus_dailynews", rebase_to=clock.now())
     journey = worker(fixture)
-    trigger_spool.write_trigger(temp_home.data_dir, "search-query", {"query": ""})
+    trigger_spool.write_trigger(temp_home.data_dir, "recall-query", {"date": "2000-01-01"})
 
     assert journey.run_tick()["triggers_consumed"] == 1
     assert trigger_spool.pending(temp_home.data_dir) == []
     result = json.loads(
-        (temp_home.data_dir / "search-query-result.json").read_text(encoding="utf-8")
+        (temp_home.data_dir / "recall-query-result.json").read_text(encoding="utf-8")
     )
-    assert result == {"error": "Empty search query", "results": []}
+    assert result["entries"] == []
     assert journey.run_tick()["triggers_consumed"] == 0
 
 
@@ -195,7 +195,7 @@ def test_tick_skips_while_the_inference_thread_holds_the_state(
 
     fixture = events_db("focus_dailynews", rebase_to=clock.now())
     journey = worker(fixture)
-    trigger_spool.write_trigger(temp_home.data_dir, "search-query", {"query": ""})
+    trigger_spool.write_trigger(temp_home.data_dir, "recall-query", {"date": "2000-01-01"})
     status_file = temp_home.data_dir / "worker-status.json"
     status_file.unlink(missing_ok=True)
 

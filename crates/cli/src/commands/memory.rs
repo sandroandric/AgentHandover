@@ -4,7 +4,8 @@
 //! (`/memory/*` on 127.0.0.1:9477, the contract the app uses too); when
 //! nothing listens there the command says the worker isn't running and
 //! exits 1.  `agents on|off` writes `[memory] agents_access` in
-//! config.toml, which the MCP server reads on every `search_memory` call.
+//! config.toml, which the MCP server and Commonplace search read on every
+//! search.
 
 use crate::commands::config::config_path;
 use crate::commands::search::{call_query_api, read_query_api_token, QUERY_API_PORT};
@@ -14,7 +15,7 @@ use chrono::{DateTime, Duration, Local, NaiveDate, NaiveDateTime, NaiveTime, Tim
 use serde_json::{json, Value};
 use std::io::{BufRead, Write};
 
-const WORKER_DOWN: &str = "AgentHandover's worker isn't running; open the app.";
+pub(crate) const WORKER_DOWN: &str ="AgentHandover's worker isn't running; open the app.";
 
 /// `(method, path, body)` → `(HTTP status, JSON reply)`, or `None` when
 /// nothing listens.
@@ -117,7 +118,7 @@ pub fn parse_when<Tz: TimeZone>(
     bail!("'{text}' is not a time (like 2026-10-12 14:30, 14:30, or 2026-10-12)")
 }
 
-fn iso(t: DateTime<Utc>) -> String {
+pub(crate) fn iso(t: DateTime<Utc>) -> String {
     t.format("%Y-%m-%dT%H:%M:%SZ").to_string()
 }
 
@@ -191,30 +192,40 @@ where
     let noun = if moments.len() == 1 { "moment" } else { "moments" };
     writeln!(out, "{} {noun} for \"{}\":\n", moments.len(), args.query)?;
     for m in &moments {
-        let text = |key: &str| m[key].as_str().unwrap_or("").to_string();
-        let first = parse_iso(&text("first_ts"));
-        let last = parse_iso(&text("last_ts"));
-        let span = match (first, last) {
-            (Some(a), Some(b)) if b.with_timezone(tz).format("%H:%M").to_string()
-                != a.with_timezone(tz).format("%H:%M").to_string() =>
-            {
-                format!("{}–{}", when(tz, a), b.with_timezone(tz).format("%H:%M"))
-            }
-            (Some(a), _) => when(tz, a),
-            _ => "?".to_string(),
-        };
-        let host = text("url_host");
-        let host = if host.is_empty() { String::new() } else { format!(" ({host})") };
-        let title = text("window_title");
-        let window = if title.is_empty() { text("app") } else { format!("{} — {title}", text("app")) };
-        writeln!(out, "  {span}  {window}{host}")?;
-        let description = text("description");
-        if !description.is_empty() {
-            writeln!(out, "      {description}")?;
-        }
-        writeln!(out, "      id: {}", text("id"))?;
+        write_moment(out, m, tz)?;
+        writeln!(out, "      id: {}", m["id"].as_str().unwrap_or(""))?;
     }
     writeln!(out, "\nForget one with: agenthandover memory forget --moment <id>")?;
+    Ok(())
+}
+
+/// A moment's time span (local), window and description, as `memory
+/// search` and `search` list it.
+pub(crate) fn write_moment<Tz: TimeZone>(out: &mut dyn Write, m: &Value, tz: &Tz) -> Result<()>
+where
+    Tz::Offset: std::fmt::Display,
+{
+    let text = |key: &str| m[key].as_str().unwrap_or("").to_string();
+    let first = parse_iso(&text("first_ts"));
+    let last = parse_iso(&text("last_ts"));
+    let span = match (first, last) {
+        (Some(a), Some(b)) if b.with_timezone(tz).format("%H:%M").to_string()
+            != a.with_timezone(tz).format("%H:%M").to_string() =>
+        {
+            format!("{}–{}", when(tz, a), b.with_timezone(tz).format("%H:%M"))
+        }
+        (Some(a), _) => when(tz, a),
+        _ => "?".to_string(),
+    };
+    let host = text("url_host");
+    let host = if host.is_empty() { String::new() } else { format!(" ({host})") };
+    let title = text("window_title");
+    let window = if title.is_empty() { text("app") } else { format!("{} — {title}", text("app")) };
+    writeln!(out, "  {span}  {window}{host}")?;
+    let description = text("description");
+    if !description.is_empty() {
+        writeln!(out, "      {description}")?;
+    }
     Ok(())
 }
 

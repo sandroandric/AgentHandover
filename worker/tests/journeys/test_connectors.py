@@ -15,7 +15,12 @@ import subprocess
 import sys
 from pathlib import Path
 
-from agenthandover_worker.agent_connect import CODEX_BEGIN, CODEX_END, HERMES_MANIFEST
+from agenthandover_worker.agent_connect import (
+    CODEX_BEGIN,
+    CODEX_END,
+    HERMES_COMMONPLACE,
+    HERMES_MANIFEST,
+)
 from agenthandover_worker.knowledge_base import KnowledgeBase
 from agenthandover_worker.procedure_schema import sop_to_procedure
 from fixtures.vlm_answers import generated_sop_template
@@ -85,7 +90,7 @@ def test_codex_and_hermes_keep_the_users_files(temp_home, kb_root, tmp_path: Pat
     generated = namespace / SLUG / "SKILL.md"
     assert generated.read_text(encoding="utf-8").startswith(f"---\nname: {SLUG}\n")
     manifest = json.loads((namespace / HERMES_MANIFEST).read_text(encoding="utf-8"))
-    assert manifest["files"] == [f"{SLUG}/SKILL.md"]
+    assert manifest["files"] == [f"{SLUG}/SKILL.md", HERMES_COMMONPLACE]
     assert sorted(p.name for p in namespace.iterdir()) == sorted(
-        [HERMES_MANIFEST, SLUG, "my-own-skill"]
+        [HERMES_MANIFEST, SLUG, "my-own-skill", "agenthandover-commonplace"]
     )

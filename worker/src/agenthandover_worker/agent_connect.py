@@ -20,6 +20,7 @@ import sys
 from pathlib import Path
 
 from agenthandover_worker import paths
+from agenthandover_worker.commonplace import AGENT_NOTE
 from agenthandover_worker.skill_render import description as skill_description
 from agenthandover_worker.skill_render import render_packet, slugify, version_line
 
@@ -41,6 +42,10 @@ CODEX_BEGIN = "<!-- BEGIN agenthandover -->"
 CODEX_END = "<!-- END agenthandover -->"
 
 HERMES_MANIFEST = ".agenthandover-manifest.json"
+# The Hermes Skill that tells Hermes about Commonplace (in our namespace).
+HERMES_COMMONPLACE = "agenthandover-commonplace/SKILL.md"
+# The note OpenClaw reads from its workspace memory.
+OPENCLAW_COMMONPLACE = Path("memory") / "apprentice" / "commonplace.md"
 
 
 def _get_kb_root() -> Path:
@@ -311,6 +316,8 @@ def connect_claude_code(
         index_lines.append("Record a Focus Session to teach it a workflow, then approve the draft.")
     index_lines += [
         "",
+        AGENT_NOTE.rstrip("\n"),
+        "",
         "---",
         f"*{version_line()}. Run `agenthandover connect claude-code` to refresh.*",
     ]
@@ -348,6 +355,7 @@ def _codex_block(ready: list[dict]) -> str:
     if not ready:
         lines.append("No agent-ready procedures yet. AgentHandover is still learning.")
         lines.append("")
+    lines.append(AGENT_NOTE)
     lines.append("*For real-time access, use the AgentHandover REST API at localhost:9477*")
     lines.append("*or the MCP server: `agenthandover-mcp`*")
     lines.append(CODEX_END)
@@ -421,8 +429,23 @@ def connect_codex(target: Path | None = None, mode: str | None = None) -> int:
 # ---------------------------------------------------------------------------
 
 
+def _write_openclaw_note(workspace: Path) -> str:
+    """Write the Commonplace note to ``memory/apprentice/commonplace.md`` in
+    the OpenClaw *workspace* (OpenClaw reads its workspace memory).  A file
+    there that AgentHandover did not generate is left alone.  Returns what
+    happened, for the report."""
+    from agenthandover_worker.exporter import AtomicWriter
+
+    path = workspace / OPENCLAW_COMMONPLACE
+    if path.exists() and not _is_generated(path):
+        return f"{path} exists and was not written by AgentHandover; left alone."
+    AtomicWriter.write(path, f"{AGENT_NOTE}\n---\n*{version_line()}*\n")
+    return f"Commonplace note: {path}"
+
+
 def connect_openclaw() -> None:
-    """Verify and configure OpenClaw integration."""
+    """Verify and configure OpenClaw integration: report the Skills the
+    worker synced to the workspace, and write the Commonplace note there."""
     from agenthandover_worker.config import load_config
 
     workspace = load_config().openclaw.workspace_path
@@ -432,6 +455,8 @@ def connect_openclaw() -> None:
     )
 
     sops_dir = configured_path / "memory" / "apprentice" / "sops"
+    if configured_path.is_dir():
+        print(_write_openclaw_note(configured_path))
 
     if sops_dir.is_dir():
         sop_count = len(list(sops_dir.glob("sop.*.md")))
@@ -479,6 +504,18 @@ def _hermes_previous_exports(namespace_dir: Path) -> set[str]:
     }
 
 
+def _hermes_commonplace_skill() -> str:
+    """The Skill that tells Hermes about Commonplace and how to search it."""
+    return (
+        "---\n"
+        "name: agenthandover-commonplace\n"
+        "description: Search what AgentHandover knows about the user's work "
+        "(Skills, Memory, daily summaries, profile) before asking them.\n"
+        "---\n\n"
+        f"{AGENT_NOTE}\n---\n*{version_line()}*\n"
+    )
+
+
 def connect_hermes() -> None:
     """Install AgentHandover skills into the Hermes skill library.
 
@@ -512,9 +549,10 @@ def connect_hermes() -> None:
         rel = f"{slugify(proc.get('id') or proc.get('slug') or 'unknown')}/SKILL.md"
         AtomicWriter.write(namespace_dir / rel, render_packet(proc, target="hermes"))
         written.append(rel)
+    AtomicWriter.write(namespace_dir / HERMES_COMMONPLACE, _hermes_commonplace_skill())
 
     root = namespace_dir.resolve()
-    for rel in sorted(previous - set(written)):
+    for rel in sorted(previous - set(written) - {HERMES_COMMONPLACE}):
         stale = (namespace_dir / rel).resolve()
         if root not in stale.parents or not stale.is_file():
             continue
@@ -527,12 +565,15 @@ def connect_hermes() -> None:
 
     AtomicWriter.write(
         namespace_dir / HERMES_MANIFEST,
-        json.dumps({"generated_by": version_line(), "files": written}, indent=2) + "\n",
+        json.dumps(
+            {"generated_by": version_line(), "files": [*written, HERMES_COMMONPLACE]}, indent=2,
+        ) + "\n",
     )
 
     print("Hermes integration ready.")
     print(f"  Skills namespace: {namespace_dir}")
     print(f"  Procedures installed: {len(ready)}")
+    print(f"  Commonplace note: {namespace_dir / HERMES_COMMONPLACE}")
     print()
     if not hermes_exists:
         print("Note: ~/.hermes not found — Hermes may not be installed yet.")
@@ -609,6 +650,11 @@ def connect_mcp() -> int:
     for name, args, summary in tools:
         signature = f"{name}({', '.join(args)})"
         print(f"  - {signature.ljust(width)}  {summary}")
+    print()
+    print("Add this to the agent's instructions so it knows to search Commonplace:")
+    print()
+    for line in AGENT_NOTE.rstrip("\n").splitlines():
+        print(f"  {line}".rstrip())
     print()
     print("Start the server manually:")
     print(f"  {command}        # stdio transport (for agents)")

@@ -113,6 +113,16 @@ class MemoryService:
             )
         return self._index
 
+    def moments(self, query: str, *, keyword: bool = False, **filters: Any) -> list[dict]:
+        """The index's moments for *query* (``MemoryIndex.search``; with
+        *keyword*, ``memory.keyword_search``), under the index lock.
+        *filters*: ``since``, ``until``, ``app``, ``limit``."""
+        with self._index_lock:
+            index = self._memory_index()
+            if keyword:
+                return memory.keyword_search(index, query, **filters)
+            return index.search(query, **filters)
+
     def search(self, body: Any) -> Reply:
         if not isinstance(body, dict):
             return 400, {"error": "the body must be a JSON object"}
@@ -135,10 +145,7 @@ class MemoryService:
         if not self.memory.enabled:
             return 503, {"error": "memory_off"}
         try:
-            with self._index_lock:
-                moments = self._memory_index().search(
-                    query, since=since, until=until, app=app, limit=limit,
-                )
+            moments = self.moments(query, since=since, until=until, app=app, limit=limit)
         except (OllamaError, ConnectionError, TimeoutError, ValueError) as exc:
             logger.warning("Memory search: the query could not be embedded: %s", exc)
             return 503, {"error": "model_unavailable", "detail": str(exc)}

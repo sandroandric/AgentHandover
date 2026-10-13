@@ -197,7 +197,7 @@ enum FAQContent {
                     FAQItem(
                         id: "mcp-what",
                         question: "What is the MCP server?",
-                        answer: "MCP (Model Context Protocol) is a standard that lets AI agents use external tools. AgentHandover's MCP server gives agents:\n\n- list_ready_skills: the Skills an agent may run, and the approved ones held back and why\n- get_skill: the full Skill\n- search_skills: find Skills by meaning\n- list_all_skills: every Skill, drafts included\n- get_user_profile: your tools, working hours and writing style\n- report_execution_start, report_step_result, report_execution_complete: report progress while running a Skill\n\nWhen you click \"Connect\", this server is configured for the agent."
+                        answer: "MCP (Model Context Protocol) is a standard that lets AI agents use external tools. AgentHandover's MCP server gives agents:\n\n- search_commonplace: one search over Commonplace, everything AgentHandover knows about your work (Skills, daily summaries, your profile, and Memory if you let agents search it), grouped by kind, text only\n- list_ready_skills: the Skills an agent may run, and the approved ones held back and why\n- get_skill: the full Skill\n- search_skills: find Skills by meaning\n- search_memory: search Memory, only if you let agents search it\n- list_all_skills: every Skill, drafts included\n- get_user_profile: your tools, working hours and writing style\n- report_execution_start, report_step_result, report_execution_complete: report progress while running a Skill\n\nWhen you click \"Connect\", this server is configured for the agent."
                     ),
                 ]
             ),

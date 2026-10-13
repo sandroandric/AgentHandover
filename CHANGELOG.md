@@ -43,6 +43,18 @@ the 16 GB test Mac with Ollama 0.40.3).
   and swaps it in one transaction; resumable, never mixing models in a
   search. Proof: J-upgrade-everything, `test_embedding_upgrade.py`, Swift
   `MemoryOfferTests`.
+- **Commonplace.** Skills, Memory, daily summaries and the profile as one
+  hub agents can search: MCP `search_commonplace(query, kinds?, since?,
+  until?, limit?)`, query API `POST /commonplace/search`, and
+  `agenthandover search` (now Commonplace: `--kinds`, `--since`,
+  `--until`, `-n` per kind, `--json`; it replaces the full-text activity
+  search and its `--date`/`--app` flags, and the `search-query` spool
+  trigger is gone). Each kind is ranked by its own scorer and returned in
+  its own group; Memory only behind `[memory] agents_access`; text only.
+  The MCP server's instructions introduce Commonplace, and every `connect`
+  target writes a short Commonplace note where its agent reads
+  instructions. Proof: `test_commonplace.py`, `test_mcp_server.py`,
+  `test_agent_connect.py`, `search.rs` tests, J-commonplace.
 
 ### Changed
 - **Embedding profiles.** Prefixes, sizes and thresholds per model. For

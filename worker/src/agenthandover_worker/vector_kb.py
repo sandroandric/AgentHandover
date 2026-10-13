@@ -270,10 +270,12 @@ class VectorKB:
         texts: list[str],
         *,
         prefix: str | None = None,
+        timeout: float | None = None,
     ) -> list[list[float]]:
         """Embed *texts* with the task *prefix* (default: the profile's
         document prefix) at the profile's size, batched by
-        config.batch_size.
+        config.batch_size, each request waiting at most *timeout* seconds
+        (default: config.timeout_seconds).
 
         Raises ConnectionError if Ollama is unreachable.
         """
@@ -284,7 +286,7 @@ class VectorKB:
             prefix=self.profile.doc_prefix if prefix is None else prefix,
             dimensions=self.profile.dimensions,
             batch_size=self.config.batch_size,
-            timeout=self.config.timeout_seconds,
+            timeout=self.config.timeout_seconds if timeout is None else timeout,
         )
 
     # ------------------------------------------------------------------
