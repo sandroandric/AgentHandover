@@ -92,6 +92,11 @@ PAUSE_FILE = "memory-pause.json"
 # to it, at most this long after it.
 MERGE_COSINE = 0.97
 MERGE_GAP_SECONDS = 600.0
+# A frame of the same window this soon after the latest row is the same
+# moment settling (a page still loading when the window came to the
+# front, then loaded): it extends the row and replaces its vector,
+# thumbnail and screen-text description, whatever their cosine.
+SETTLE_SECONDS = 10.0
 # How long Memory waits for a frame (a focus recording's processing, the
 # model coming back, the hourly budget) before giving up on it.  Longer
 # than the annotation backlog's 24 hours, so a frame the backlog expiry
@@ -623,13 +628,15 @@ class MemoryWriter:
         latest = self._load_latest()
         event_id = str(event["id"])
         has_thumb = (thumbs_dir(self.data_dir) / f"{event_id}{THUMB_EXTENSION}").is_file()
-        merge = (
-            latest is not None
-            and latest.app == app
-            and latest.title == title
-            and 0.0 <= (when - latest.last_ts).total_seconds() < MERGE_GAP_SECONDS
+        same_window = latest is not None and latest.app == app and latest.title == title
+        gap = (when - latest.last_ts).total_seconds() if latest is not None else -1.0
+        settling = same_window and 0.0 <= gap < SETTLE_SECONDS
+        merge = settling or (
+            same_window
+            and 0.0 <= gap < MERGE_GAP_SECONDS
             and float(np.dot(latest.vector, vector)) >= MERGE_COSINE
         )
+        replaced_thumb: str | None = None
         self._conn.execute("BEGIN IMMEDIATE")
         try:
             gone = self._conn.execute(
@@ -644,10 +651,22 @@ class MemoryWriter:
                 assert latest is not None
                 sets = ["frames = frames + 1", "last_ts = MAX(last_ts, ?)"]
                 params: list[Any] = [utc_text(when)]
+                if settling:
+                    # The settled screen represents the moment.
+                    sets.append("embedding = ?")
+                    params.append(_pack(vector))
+                    if not described and not latest.described:
+                        sets.append("description = ?")
+                        params.append(proxy_description(event))
                 if described and not latest.described:
                     sets += ["description = ?", "described_by = ?"]
                     params += [described, event_id]
-                if has_thumb and not latest.has_thumb:
+                if has_thumb and (settling or not latest.has_thumb):
+                    if settling and latest.has_thumb:
+                        row = self._conn.execute(
+                            "SELECT thumb_id FROM memory_frames WHERE id = ?", (latest.id,),
+                        ).fetchone()
+                        replaced_thumb = row[0] if row else None
                     sets.append("thumb_id = ?")
                     params.append(event_id)
                 # The row is gone when it was forgotten meanwhile: the
@@ -679,7 +698,12 @@ class MemoryWriter:
             assert latest is not None
             latest.last_ts = max(latest.last_ts, when)
             latest.described = latest.described or bool(described)
-            if has_thumb and latest.has_thumb:
+            if settling:
+                latest.vector = vector
+                if has_thumb and replaced_thumb and replaced_thumb != event_id:
+                    # The settled frame's thumbnail replaced the earlier one.
+                    _unlink(thumbs_dir(self.data_dir) / f"{replaced_thumb}{THUMB_EXTENSION}")
+            elif has_thumb and latest.has_thumb:
                 # The moment shows its first thumbnail; this one is a copy.
                 _unlink(thumbs_dir(self.data_dir) / f"{event_id}{THUMB_EXTENSION}")
             latest.has_thumb = latest.has_thumb or has_thumb
@@ -928,6 +952,8 @@ class MemoryIndex:
             if at is not None:
                 if at < self._first.size:
                     self._first[at], self._last[at] = first, last
+                    # A settling frame replaced the row's vector.
+                    self._matrix[at] = vector
                     self._time_order = None
                 continue
             self._pos[row["id"]] = len(self._ids)

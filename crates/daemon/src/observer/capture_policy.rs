@@ -12,7 +12,12 @@
 //! title, while the previous page is still on screen), so a frame taken on
 //! the transition showed the page being left under the new page's title.
 //! One settled frame per burst is attributed to its most specific
-//! transition. Focus recordings keep firing on the transition.
+//! transition, and [`FOLLOW_UP`] later the window is looked at once more
+//! (a page can still be loading after a second of quiet: an app brought
+//! to the front shows its previous page until the new one paints). That
+//! frame goes through the same comparison with the last kept frame, so an
+//! unchanged screen is dropped. Focus recordings keep firing on the
+//! transition.
 //!
 //! Per tick the cheap checks run first and in this order:
 //! 1. [`CapturePolicy::shutter_trigger`]: did anything happen, and is there
@@ -47,6 +52,9 @@ pub const FOCUS_INTERVAL: Duration = Duration::from_secs(2);
 pub const SETTLE: Duration = Duration::from_millis(1000);
 /// ...or this long after the first transition of a burst, whichever is first.
 pub const SETTLE_MAX: Duration = Duration::from_millis(3000);
+/// After a settled transition frame, the window is looked at once more
+/// this long later.
+pub const FOLLOW_UP: Duration = Duration::from_millis(3000);
 /// A heartbeat frame whose OCR words overlap the last kept frame's by at
 /// least this Jaccard similarity shows the same text and is dropped.
 pub const SAME_TEXT_JACCARD: f64 = 0.9;
@@ -63,6 +71,8 @@ pub enum CaptureTrigger {
     FormSubmit,
     Click,
     Clipboard,
+    /// The second look [`FOLLOW_UP`] after a settled transition frame.
+    SettleCheck,
     FocusInterval,
     Heartbeat,
 }
@@ -76,6 +86,7 @@ impl CaptureTrigger {
             CaptureTrigger::FormSubmit => "form_submit",
             CaptureTrigger::Click => "click",
             CaptureTrigger::Clipboard => "clipboard",
+            CaptureTrigger::SettleCheck => "settle_check",
             CaptureTrigger::FocusInterval => "focus_interval",
             CaptureTrigger::Heartbeat => "heartbeat",
         }
@@ -91,8 +102,9 @@ impl CaptureTrigger {
             CaptureTrigger::TitleChange => 3,
             CaptureTrigger::Click => 4,
             CaptureTrigger::Clipboard => 5,
-            CaptureTrigger::FocusInterval => 6,
-            CaptureTrigger::Heartbeat => 7,
+            CaptureTrigger::SettleCheck => 6,
+            CaptureTrigger::FocusInterval => 7,
+            CaptureTrigger::Heartbeat => 8,
         }
     }
 }
@@ -127,6 +139,8 @@ pub struct CapturePolicy {
     pending: Option<(CaptureTrigger, Instant, Instant)>,
     settle: Duration,
     settle_max: Duration,
+    /// When the second look after a settled transition frame is due.
+    follow_up: Option<Instant>,
 }
 
 impl CapturePolicy {
@@ -149,6 +163,7 @@ impl CapturePolicy {
             pending: None,
             settle: SETTLE,
             settle_max: SETTLE_MAX,
+            follow_up: None,
         }
     }
 
@@ -168,6 +183,7 @@ impl CapturePolicy {
     /// the screen, e.g. for a privacy zone).
     pub fn cancel_pending(&mut self) {
         self.pending = None;
+        self.follow_up = None;
     }
 
     /// Throttle passive capture (the worker's annotation backlog is long)
@@ -222,6 +238,7 @@ impl CapturePolicy {
         let latest = transitions.iter().copied().min_by_key(|t| t.rank());
         let transition = if focus_recording {
             self.pending = None;
+            self.follow_up = None;
             latest
         } else {
             if let Some(t) = latest {
@@ -236,11 +253,18 @@ impl CapturePolicy {
                         || now.duration_since(first) >= self.settle_max =>
                 {
                     self.pending = None;
+                    self.follow_up = Some(now + self.settle * 3);
                     Some(t)
                 }
                 // Still changing: neither a transition nor a heartbeat now.
                 Some(_) => return None,
-                None => None,
+                None => match self.follow_up {
+                    Some(due) if now >= due => {
+                        self.follow_up = None;
+                        Some(CaptureTrigger::SettleCheck)
+                    }
+                    _ => None,
+                },
             }
         };
         let focus_due = focus_recording
@@ -367,6 +391,32 @@ mod tests {
     }
 
     #[test]
+    fn a_settled_frame_is_followed_by_one_more_look() {
+        let t0 = Instant::now();
+        let mut p = policy(t0);
+        assert_eq!(settled(&mut p, &[CaptureTrigger::AppSwitch], t0), Some(CaptureTrigger::AppSwitch));
+        let fired = t0 + SETTLE;
+        assert_eq!(p.shutter_trigger(&[], false, fired + FOLLOW_UP - Duration::from_millis(500)), None);
+        assert_eq!(p.shutter_trigger(&[], false, fired + FOLLOW_UP), Some(CaptureTrigger::SettleCheck));
+        // Once only.
+        assert_eq!(p.shutter_trigger(&[], false, fired + FOLLOW_UP + Duration::from_secs(5)), None);
+        // An unchanged screen is dropped like any other frame.
+        let sig = signature(9);
+        p.record_kept(sig.clone(), None, false);
+        assert_eq!(p.frame_decision(CaptureTrigger::SettleCheck, false, &sig), FrameDecision::Unchanged);
+    }
+
+    #[test]
+    fn a_new_transition_replaces_the_pending_follow_up() {
+        let t0 = Instant::now();
+        let mut p = policy(t0);
+        settled(&mut p, &[CaptureTrigger::TitleChange], t0);
+        let t1 = t0 + SETTLE + Duration::from_millis(500);
+        assert_eq!(settled(&mut p, &[CaptureTrigger::Click], t1), Some(CaptureTrigger::Click));
+        assert_eq!(p.shutter_trigger(&[], false, t1 + SETTLE + FOLLOW_UP), Some(CaptureTrigger::SettleCheck));
+    }
+
+    #[test]
     fn a_window_that_keeps_changing_is_captured_after_settle_max() {
         let t0 = Instant::now();
         let mut p = policy(t0);
@@ -403,9 +453,14 @@ mod tests {
             settled(&mut p, &[CaptureTrigger::Click], t0 + Duration::from_secs(90)),
             Some(CaptureTrigger::Click)
         );
-        assert_eq!(p.shutter_trigger(&[], false, t0 + Duration::from_secs(150)), None);
+        // The click's frame settled at 91 s; the second look follows at 94 s.
         assert_eq!(
-            p.shutter_trigger(&[], false, t0 + Duration::from_secs(151)),
+            p.shutter_trigger(&[], false, t0 + Duration::from_secs(94)),
+            Some(CaptureTrigger::SettleCheck)
+        );
+        assert_eq!(p.shutter_trigger(&[], false, t0 + Duration::from_secs(153)), None);
+        assert_eq!(
+            p.shutter_trigger(&[], false, t0 + Duration::from_secs(154)),
             Some(CaptureTrigger::Heartbeat)
         );
     }

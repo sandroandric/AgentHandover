@@ -75,8 +75,12 @@ the 16 GB test Mac with Ollama 0.40.3).
   page's title (seen live: Hacker News described as "threads related to
   Ollama", the previous page). Outside focus recordings a transition now
   fires once the window has been quiet for 1 s (at most 3 s after the
-  first), one frame per burst; a switch into a privacy zone before then
-  takes no frame. Proof: `capture_policy.rs` tests, `privacy_zones_test.rs`.
+  first), one frame per burst, and the window is looked at once more 3 s
+  later (an app brought to the front shows its previous page until the
+  new one paints; an unchanged screen is dropped); a switch into a privacy
+  zone before then takes no frame. In Memory, a frame of the same window
+  within 10 s replaces the moment's picture. Proof: `capture_policy.rs`
+  tests, `privacy_zones_test.rs`, `test_memory.py`.
 - Vector search compared rows of different models of the same size; it
   now filters by model and size. The daily purge would have deleted any
   model's vectors but the configured one's. `/search/semantic` crashed on

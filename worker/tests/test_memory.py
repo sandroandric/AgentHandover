@@ -938,3 +938,57 @@ def test_thumbnail_days_is_a_whole_number_of_days_at_least_zero(tmp_path, value,
     path = tmp_path / "config.toml"
     path.write_text(f"[memory]\nthumbnail_days = {value}\n")
     assert load_config(path).memory.thumbnail_days == days
+
+
+# ---------------------------------------------------------------------------
+# A moment settling: the page was still loading when the window came up
+# ---------------------------------------------------------------------------
+
+
+def test_a_frame_seconds_later_replaces_the_moments_picture(env):
+    """Safari comes to the front showing its previous page, then loads the
+    new one: the second frame (same window, 3 s later, a different
+    picture) is the moment's settled state."""
+    clock = Clock()
+    fake = FakeEmbedder({b"stale": _basis(0), b"loaded": _basis(7)})
+    writer = _writer(env, fake, clock)
+    clock.now = NOW
+    first = add_frame(env, at=NOW - timedelta(seconds=13), app="Safari", title="Sourdough",
+                      image=b"stale", thumb=True)
+    second = add_frame(env, at=NOW - timedelta(seconds=10), app="Safari", title="Sourdough",
+                       image=b"loaded", thumb=True)
+    index = _index(env, {"loaf": _basis(7)})
+    assert writer.run()["merged"] == 1
+    [row] = rows(env)
+    assert row["id"] == first["id"] and row["frames"] == 2
+    assert row["thumb_id"] == second["id"]
+    assert np.allclose(np.frombuffer(row["embedding"], dtype="<f4"), _basis(7))
+    thumbs = sorted(p.name for p in (env.data_dir / "thumbs").iterdir())
+    assert thumbs == [f"{second['id']}.ahthumb"], "the stale thumbnail is gone"
+    [moment] = index.search("loaf", limit=1)
+    assert moment["id"] == first["id"] and moment["score"] > 0.99
+
+
+def test_a_different_picture_after_the_settle_window_is_its_own_moment(env):
+    clock = Clock()
+    fake = FakeEmbedder({b"one": _basis(0), b"two": _basis(7)})
+    writer = _writer(env, fake, clock)
+    clock.now = NOW
+    add_frame(env, at=NOW - timedelta(seconds=40), app="Safari", title="Docs", image=b"one")
+    add_frame(env, at=NOW - timedelta(seconds=25), app="Safari", title="Docs", image=b"two")
+    writer.run()
+    assert len(rows(env)) == 2
+
+
+def test_the_index_follows_a_replaced_vector(env):
+    clock = Clock()
+    fake = FakeEmbedder({b"stale": _basis(0), b"loaded": _basis(7)})
+    writer = _writer(env, fake, clock)
+    clock.now = NOW
+    add_frame(env, at=NOW - timedelta(seconds=20), app="Safari", title="Fuji", image=b"stale")
+    index = _index(env, {"mountain": _basis(7), "old": _basis(0)})
+    writer.run()
+    assert index.search("old", limit=1)[0]["score"] > 0.99
+    add_frame(env, at=NOW - timedelta(seconds=15), app="Safari", title="Fuji", image=b"loaded")
+    writer.run()
+    assert index.search("mountain", limit=1)[0]["score"] > 0.99

@@ -86,6 +86,16 @@ def pytest_runtest_logreport(report: pytest.TestReport) -> None:
     log_test_report(report)
 
 
+@pytest.fixture(autouse=True)
+def _host_memory_pressure_ignored(monkeypatch):
+    """Memory's embedding waits on this Mac's memory pressure and free
+    memory (ModelScheduler._embedding_pressure, unit-tested in
+    test_memory.py); a journey must not depend on the machine it runs on."""
+    from agenthandover_worker.model_scheduler import ModelScheduler
+
+    monkeypatch.setattr(ModelScheduler, "_embedding_pressure", lambda self: None)
+
+
 @pytest.fixture()
 def temp_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TempHome:
     home = tmp_path / "home"

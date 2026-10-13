@@ -519,9 +519,13 @@ async fn an_allowed_window_keeps_its_frame() {
     assert!(thumbnail::open(&[0u8; 32], &sealed).is_err());
     // WP-C1: daemon-status.json's capture counters see the same frame.
     let compute = stats.lock().unwrap().snapshot(Instant::now());
-    assert_eq!(compute.since_start.frames_captured, 1);
+    // The switch's settled frame, then the second look a moment later,
+    // which shows the same screen (the fake serves one image) and is
+    // dropped as unchanged.
+    assert_eq!(compute.since_start.frames_captured, 2);
     assert_eq!(compute.since_start.frames_kept, 1);
-    assert!(compute.since_start.frames_gated_by_reason.is_empty());
+    assert_eq!(compute.since_start.frames_gated_by_reason.get("unchanged"), Some(&1));
+    assert_eq!(compute.since_start.frames_gated_by_reason.len(), 1);
 }
 
 /// Every kept frame records how many keys went down since the previous
