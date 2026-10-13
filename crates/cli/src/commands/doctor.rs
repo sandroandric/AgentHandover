@@ -316,8 +316,20 @@ pub fn run() -> Result<()> {
             models_to_check.push((embedding_model, "semantic search"));
         }
 
+        let table = tiers::table();
         for (model, purpose) in &models_to_check {
-            if ollama::model_installed(&installed, model) {
+            let cannot_run = machine::model_cannot_run(
+                model,
+                report.version.as_deref(),
+                &table.memory_model,
+                &table.minimum_ollama_version_for_memory,
+            );
+            if let Some(why) = cannot_run {
+                // Pulled (the models dir is shared) but this Ollama cannot
+                // load it: everything that embeds with it is down.
+                check_fail(&mut counts, &format!("Model {} ({}): {}", model, purpose, why));
+                eprintln!("  Fix: update Ollama (https://ollama.com/download).");
+            } else if ollama::model_installed(&installed, model) {
                 check_pass(&mut counts, &format!("Model {} ({})", model, purpose));
             } else {
                 check_fail(&mut counts, &format!("Model {} ({})", model, purpose));

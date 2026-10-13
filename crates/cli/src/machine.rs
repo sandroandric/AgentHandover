@@ -827,6 +827,18 @@ pub fn diagnose_memory(version: Option<&str>, minimum: &str, memory_enabled: boo
     ))
 }
 
+/// Why the service cannot run `model` although it may be pulled (the
+/// models dir is shared by every Ollama install), or None: EmbeddingGemma
+/// 2 (the table's `memory_model`) needs `minimum_ollama_version_for_memory`.
+/// An unknown version is no reason.
+pub fn model_cannot_run(model: &str, version: Option<&str>, memory_model: &str, minimum: &str) -> Option<String> {
+    let v = version?;
+    if model == memory_model && !ollama::version_at_least(v, minimum) {
+        return Some(format!("needs Ollama {minimum} or later; this Ollama is {v}"));
+    }
+    None
+}
+
 /// Probe this Mac and the service at `host_url`.
 pub fn gather(host_url: &str, models: &ConfiguredModels) -> Report {
     let table = agenthandover_common::tiers::table();
@@ -1490,5 +1502,17 @@ mod tests {
         assert_eq!(v["installs"][0]["kind"], "Ollama.app");
         assert_eq!(v["host"]["local"], true);
         assert!(v["headroom"].is_null());
+    }
+
+    #[test]
+    fn embeddinggemma_cannot_run_on_an_ollama_older_than_its_minimum() {
+        let m = "embeddinggemma-2:440m";
+        assert_eq!(
+            model_cannot_run(m, Some("0.34.2"), m, "0.40.0").as_deref(),
+            Some("needs Ollama 0.40.0 or later; this Ollama is 0.34.2")
+        );
+        assert_eq!(model_cannot_run(m, Some("0.40.3"), m, "0.40.0"), None);
+        assert_eq!(model_cannot_run("nomic-embed-text", Some("0.34.2"), m, "0.40.0"), None);
+        assert_eq!(model_cannot_run(m, None, m, "0.40.0"), None, "unknown is no reason");
     }
 }
