@@ -700,7 +700,7 @@ struct MenuBarView: View {
 
     // MARK: - Memory
 
-    /// "Memory · Recording" with Search Memory…, Pause Memory (or Resume
+    /// "Memory · Recording" with Commonplace…, Pause Memory (or Resume
     /// Memory), Forget and Settings.  The state comes from the worker's
     /// `/memory/status`, read each time the menu opens.
     private var memorySection: some View {
@@ -727,7 +727,7 @@ struct MenuBarView: View {
             .padding(.leading, 2)
 
             HStack(spacing: 6) {
-                compactLink("Search Memory\u{2026}") {
+                compactLink("Commonplace\u{2026}") {
                     openAndActivate("memory")
                 }
                 switch state {
@@ -1105,7 +1105,7 @@ struct MenuBarView: View {
         "daily-digest": "Daily Digest",
         "micro-review": "Review Queue",
         "faq": "FAQ",
-        "memory": "Memory",
+        "memory": "Commonplace",
         "memory-settings": "Memory Settings",
     ]
 

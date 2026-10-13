@@ -203,7 +203,7 @@ struct MemoryAPI {
         return request
     }
 
-    private func send<T: Decodable>(_ method: String, _ path: String, body: [String: Any]?) async throws -> T {
+    func send<T: Decodable>(_ method: String, _ path: String, body: [String: Any]?) async throws -> T {
         let request = try request(method, path, body: body)
         let data: Data
         let response: URLResponse

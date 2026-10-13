@@ -76,7 +76,7 @@ enum MemoryPauseOption: CaseIterable, Identifiable {
     }
 }
 
-/// The Memory window's time filter.
+/// The Commonplace window's time filter (Memory and days).
 enum MemoryRange: String, CaseIterable, Identifiable {
     case anyTime = "Any Time"
     case today = "Today"
@@ -187,6 +187,13 @@ struct MemoryFormat {
             parts.append("since " + formatter(sameYear ? "MMMd" : "yMMMd").string(from: oldest))
         }
         return parts.joined(separator: " \u{00B7} ")
+    }
+
+    /// A Commonplace day: "Monday, Oct 12, 2026"; its date as written when
+    /// it does not parse.
+    func dayTitle(_ day: CommonplaceDay) -> String {
+        guard let date = day.day(calendar: calendar) else { return day.date }
+        return formatter("EEEEyMMMd").string(from: date)
     }
 }
 

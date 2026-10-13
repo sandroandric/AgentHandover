@@ -58,8 +58,10 @@ struct AgentHandoverApp: App {
         .defaultSize(width: 560, height: 700)
         .windowResizability(.contentMinSize)
 
-        Window("Memory", id: "memory") {
-            MemoryView()
+        // The Commonplace window keeps the id of the Memory window it
+        // replaced, so its saved frame carries over.
+        Window("Commonplace", id: "memory") {
+            CommonplaceView()
                 .environmentObject(delegate)
         }
         .defaultSize(width: 960, height: 640)
@@ -453,7 +455,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Obse
         window.orderFrontRegardless()
     }
 
-    /// Download Memory's model (the Memory window's "Download…", or a
+    /// Download Memory's model (the Commonplace window's "Download…", or a
     /// Memory setup left off until Ollama was updated: then `turnOn`).
     @MainActor
     func showMemoryModelDownload(model: String, turnOn: Bool) {
