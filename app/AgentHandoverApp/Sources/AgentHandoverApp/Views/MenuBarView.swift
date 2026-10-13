@@ -251,7 +251,8 @@ struct MenuBarView: View {
         if appState.health == .starting { return "Waiting for the daemon and worker to report" }
         if appState.daemonRunning && appState.workerRunning {
             if appState.eventsToday > 0 {
-                return "Learning from your work"
+                return appState.workerStatus?.memoryOnly == true
+                    ? "Remembering what you see" : "Learning from your work"
             }
             return "Waiting for activity"
         }
@@ -322,7 +323,13 @@ struct MenuBarView: View {
     // MARK: - Attention Section
 
     private var hasAttentionItems: Bool {
-        questionsActuallyPending || appState.sopDraftCount > 0
+        focusQuestionsShown || appState.sopDraftCount > 0
+    }
+
+    /// A recording's questions, except in Memory only: answering them would
+    /// finish a Skill that nothing writes until Skills are on again.
+    private var focusQuestionsShown: Bool {
+        questionsActuallyPending && appState.workerStatus?.memoryOnly != true
     }
 
     /// Check if questions file actually exists with pending status,
@@ -343,7 +350,7 @@ struct MenuBarView: View {
     private var attentionSection: some View {
         VStack(spacing: 6) {
             // Focus Q&A pending
-            if questionsActuallyPending {
+            if focusQuestionsShown {
                 Button(action: { delegate.showFocusQA() }) {
                     HStack(spacing: 10) {
                         ZStack {
@@ -714,7 +721,7 @@ struct MenuBarView: View {
                 Text("Memory only")
                     .font(.system(size: 12, weight: .bold, design: .rounded))
                     .foregroundColor(darkNavy)
-                Text("Remembering what you see; no Skills are learned.")
+                Text("No Skills are learned.")
                     .font(.system(size: 10))
                     .foregroundColor(.secondary)
             }

@@ -411,10 +411,15 @@ fn models_to_check(config_str: &str) -> Vec<(String, &'static str)> {
     let memory = read_config_string_field(config_str, "memory", "model")
         .unwrap_or_else(|| tiers::table().memory_model.clone());
     let mut out: Vec<(String, &'static str)> = Vec::new();
+    let search = if configured.memory_enabled && embedding == memory {
+        "Memory and semantic search"
+    } else {
+        "semantic search"
+    };
     for (model, purpose, wanted) in [
         (configured.annotation, "scene annotation", true),
         (configured.sop, "SOP generation", true),
-        (embedding, "semantic search", true),
+        (embedding, search, true),
         (memory, "Memory", configured.memory_enabled),
     ] {
         if wanted && !model.is_empty() && !out.iter().any(|(m, _)| *m == model) {
