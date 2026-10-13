@@ -1,8 +1,10 @@
-"""MCP server — exposes AgentHandover procedures to any MCP-compatible agent.
+"""MCP server — exposes AgentHandover to any MCP-compatible agent.
 
-Wraps the knowledge base and vector KB as MCP tools + resources so agents
-like Claude Code, Cursor, Windsurf, or any MCP client can discover and
-consume procedures without custom integration.
+Serves Commonplace (``commonplace.Commonplace``: Skills, Memory behind the
+agents switch, daily summaries, the profile) through ``search_commonplace``
+and the server's instructions, and the Skills themselves as tools and
+resources, so agents like Claude Code, Cursor, Windsurf, or any MCP client
+can discover, run and report on them without custom integration.
 
 Usage::
 
