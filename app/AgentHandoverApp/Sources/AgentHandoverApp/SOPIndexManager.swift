@@ -228,6 +228,12 @@ final class SOPIndexManager: ObservableObject {
         (index?.sops ?? []).sorted { ($0.created_at) > ($1.created_at) }
     }
 
+    /// The entry of the Skill `slug` (a Commonplace result's slug is the
+    /// knowledge base's procedure id, which the index lists as `slug`).
+    static func entry(slug: String, in entries: [SOPEntry]) -> SOPEntry? {
+        entries.first { $0.slug == slug }
+    }
+
     var drafts: [SOPEntry] { allSorted.filter { $0.status == "draft" } }
     var approved: [SOPEntry] { allSorted.filter { $0.status == "approved" } }
 

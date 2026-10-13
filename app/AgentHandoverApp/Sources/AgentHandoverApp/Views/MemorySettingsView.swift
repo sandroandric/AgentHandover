@@ -122,6 +122,12 @@ struct MemorySettingsView: View {
             guard loaded else { return }
             scheduleSave(new)
         }
+        // The Commonplace window's agents line writes the same switch.
+        .onChange(of: center.status?.agentsAccess) { _, access in
+            guard loaded, let access, access != saved.agentsAccess else { return }
+            saved.agentsAccess = access
+            settings.agentsAccess = access
+        }
     }
 
     private var retentionChoices: [Int] {

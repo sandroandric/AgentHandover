@@ -5,6 +5,9 @@ struct WorkflowInboxView: View {
     @StateObject private var sopManager = SOPIndexManager()
     @State private var filter: SOPFilter = .all
     @State private var selectedSOPID: String?
+    /// Set when the Skill another window asked for is not listed here.
+    @State private var notice: String?
+    @ObservedObject private var navigator = AppNavigator.shared
 
     /// Live lookup: always reflects the latest data from the polling index.
     private var selectedSOP: SOPEntry? {
@@ -37,8 +40,27 @@ struct WorkflowInboxView: View {
             detailPane
         }
         .frame(minWidth: 750, minHeight: 500)
-        .onAppear { sopManager.startPolling() }
+        .onAppear {
+            sopManager.startPolling()
+            selectRequestedSkill()
+        }
         .onDisappear { sopManager.stopPolling() }
+        .onChange(of: navigator.skillSlug) { _, _ in selectRequestedSkill() }
+        .onReceive(sopManager.$index) { _ in selectRequestedSkill() }
+    }
+
+    /// Select the Skill the Commonplace window opened, once the index is
+    /// read; showing every Skill so the filter does not hide it.
+    private func selectRequestedSkill() {
+        guard let slug = navigator.skillSlug, sopManager.index != nil else { return }
+        navigator.skillSlug = nil
+        if let entry = SOPIndexManager.entry(slug: slug, in: sopManager.allSorted) {
+            filter = .all
+            selectedSOPID = entry.id
+            notice = nil
+        } else {
+            notice = "That Skill is not in this list."
+        }
     }
 
     // MARK: - Sidebar
@@ -49,6 +71,14 @@ struct WorkflowInboxView: View {
             Rectangle()
                 .fill(darkNavy.opacity(0.08))
                 .frame(height: 1)
+
+            if let notice {
+                Text(notice)
+                    .font(.system(size: 11))
+                    .foregroundColor(darkNavy.opacity(0.6))
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 6)
+            }
 
             if sopManager.index == nil {
                 emptyState
@@ -174,6 +204,7 @@ struct WorkflowInboxView: View {
                         .contentShape(Rectangle())
                         .onTapGesture {
                             selectedSOPID = sop.id
+                            notice = nil
                         }
                 }
             }
