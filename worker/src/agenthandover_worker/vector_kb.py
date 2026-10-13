@@ -635,16 +635,20 @@ class VectorKB:
         reads the index again."""
         self._index = None
 
-    def count(self, source_type: str | None = None) -> int:
-        """Count vectors in the store, optionally filtered by source_type."""
+    def count(self, source_type: str | None = None, *, model: str | None = None) -> int:
+        """Count vectors in the store, optionally of one source_type and of
+        one model (a search finds only the rows of its own model)."""
+        where, params = [], []
         if source_type:
-            cur = self._conn.execute(
-                "SELECT COUNT(*) FROM vector_store WHERE source_type = ?",
-                (source_type,),
-            )
-        else:
-            cur = self._conn.execute("SELECT COUNT(*) FROM vector_store")
-        return cur.fetchone()[0]
+            where.append("source_type = ?")
+            params.append(source_type)
+        if model:
+            where.append("model = ?")
+            params.append(model)
+        sql = "SELECT COUNT(*) FROM vector_store"
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        return self._conn.execute(sql, params).fetchone()[0]
 
     def purge_stale(self, max_age_days: int | None = None) -> int:
         """Remove entries not updated for *max_age_days* (default

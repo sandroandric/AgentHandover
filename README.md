@@ -184,7 +184,7 @@ New in 2.0. Everything AgentHandover knows about your work, in one place your ag
   - *"Pick up where I left off on the onboarding doc."* (needs Memory access)
   - *"Before you ask me how I release, check my Skills."*
   - *"Roast my week: where did my hours really go?"*
-- **What it is not.** A permission boundary against software that already runs as you: the data lives in files under your home folder, so any process with your user's file access can read the local database, as with any app's data.
+- **What it is not.** A permission boundary against software that already runs as you. The switch governs what AgentHandover hands to agents (MCP, `agenthandover search`, the REST search); an agent that can run any command as you (Claude Code with shell access, for example) can do what you can, including `agenthandover memory search`, and the data lives in files under your home folder that any process with your file access can read, as with any app's data. AgentHandover tells connected agents never to change its settings or read its files; it cannot enforce that against a process running as you.
 
 ## The Knowledge Base
 

@@ -44,6 +44,12 @@ struct MemoryOfferState: Equatable {
         return data + Data("\n".utf8)
     }
 
+    /// The offer window closed: a close without a choice is "Not now" (the
+    /// offer is shown once), except "Remind Me Later", which asks again.
+    static func choiceOnClose(remindLater: Bool, recorded: String?) -> Choice? {
+        remindLater || recorded != nil ? nil : .declined
+    }
+
     /// Record `choice` in the file (atomic write, owner-only).
     static func record(_ choice: Choice, at date: Date = Date(), url: URL = fileURL) {
         let data = recording(choice, at: date, in: try? Data(contentsOf: url))

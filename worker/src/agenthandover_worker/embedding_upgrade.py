@@ -170,8 +170,12 @@ class EmbeddingUpgrade:
     # -- the trigger and the state ------------------------------------
 
     def wanted(self) -> bool:
-        """The user asked for the upgrade and it has not happened yet."""
-        return self.model != TARGET_MODEL and offer_choice(self.data_dir) == CHOICE
+        """The user asked for the upgrade and it has not happened yet.  Once
+        done it is never wanted again: a user who sets ``[embedding] model``
+        back by hand keeps their choice."""
+        if self.model == TARGET_MODEL or offer_choice(self.data_dir) != CHOICE:
+            return False
+        return (self.saved_state() or {}).get("state") != "done"
 
     def saved_state(self) -> dict | None:
         row = self._conn.execute(

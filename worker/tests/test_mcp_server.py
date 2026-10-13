@@ -270,6 +270,10 @@ class TestSearchSkillsMode:
 
         with patch.object(VectorKB, "compute_embeddings", embed):
             search("reddit")
+            # The re-index stored the Skill with the new model too.
+            with VectorKB(db) as vkb:
+                vkb.upsert("procedure", "reddit-marketing", "Reddit Community Marketing",
+                           embedding=[1.0, 0.0], model="embeddinggemma-2:440m")
             switched = dataclasses.replace(
                 real, embedding=dataclasses.replace(real.embedding, model="embeddinggemma-2:440m"),
             )
@@ -439,7 +443,10 @@ class TestCommonplaceTool:
             ("expense-report", "not_approved"),
         ]
         assert result["memory"]["mode"] == "not_allowed"
-        assert "agenthandover memory agents on" in result["memory"]["reason"]
+        reason = result["memory"]["reason"]
+        assert "Memory Settings" in reason
+        # Agents are never handed the command that would turn it on.
+        assert "agenthandover memory agents on" not in reason
         assert result["profile"]["results"][0]["tools"] == {"expenses": "Expensify"}
 
     def test_a_bad_request_is_an_error_object(self, server):

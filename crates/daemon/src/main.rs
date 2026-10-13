@@ -188,6 +188,7 @@ async fn main() -> Result<()> {
         read_app_state: app_config.privacy.read_app_state,
         // `[memory]`: encrypted thumbnails of kept frames in `<data dir>/thumbs`.
         memory_thumbnails: app_config.memory.writes_thumbnails(),
+        memory_enabled: app_config.memory.enabled,
         // Sockets and the state dir: the standard locations.
         ..ObserverConfig::default()
     };

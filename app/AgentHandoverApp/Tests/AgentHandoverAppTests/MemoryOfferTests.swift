@@ -196,6 +196,12 @@ final class MemoryOfferTests: XCTestCase {
         XCTAssertFalse(OllamaModels.isVersion("0.4.0", atLeast: "0.40.0"))
         XCTAssertFalse(OllamaModels.isVersion("unknown", atLeast: "0.40.0"))
     }
+
+    func testClosingTheOfferWithoutAChoiceIsNotNowButRemindLaterAsksAgain() {
+        XCTAssertEqual(MemoryOfferState.choiceOnClose(remindLater: false, recorded: nil), .declined)
+        XCTAssertNil(MemoryOfferState.choiceOnClose(remindLater: true, recorded: nil))
+        XCTAssertNil(MemoryOfferState.choiceOnClose(remindLater: false, recorded: "memory_only"), "a choice is kept")
+    }
 }
 
 private extension Array where Element: Hashable {

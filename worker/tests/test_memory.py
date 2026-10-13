@@ -39,7 +39,7 @@ from agenthandover_worker.memory import (
     utc_text,
 )
 from agenthandover_worker.model_scheduler import GB, ModelScheduler
-from agenthandover_worker.ollama import OllamaUnavailable
+from agenthandover_worker.ollama import OllamaError, OllamaUnavailable
 from agenthandover_worker.privacy_zones import PrivacyZoneChecker
 from agenthandover_worker.scene_annotator import AnnotationConfig, SceneAnnotator
 from daemon_db import create_daemon_db
@@ -71,7 +71,8 @@ class FakeEmbedder:
         if self.fail:
             self.fail -= 1
             raise OllamaUnavailable("Ollama not reachable (fake)")
-        return [self.vectors[item["image"]] for item in items]
+        # A text-only item is the writer checking that the model answers.
+        return [self.vectors[item["image"]] if "image" in item else _basis(1) for item in items]
 
 
 class Clock:
@@ -513,7 +514,9 @@ def test_repeated_failures_stop_the_hold_so_annotation_deletes_as_before(env):
     keep every screenshot on disk for two days."""
     clock = Clock()
     fake = FakeEmbedder({b"red": _basis(0)})
-    fake.fail = 3
+    # Three attempts at the frame; from the second, the writer also checks
+    # whether the model embeds text at all (it does not: Ollama is down).
+    fake.fail = 5
     writer = _writer(env, fake, clock)
     frame = add_frame(env, at=NOW - timedelta(minutes=1))
     for attempt in range(3):
@@ -1007,3 +1010,72 @@ def test_agenthandovers_own_windows_are_never_kept():
     from agenthandover_worker.privacy_zones import PrivacyZoneChecker
 
     assert "AgentHandover" in PrivacyZoneChecker._DEFAULT_BLOCKED
+
+
+def test_a_frame_captured_while_paused_is_never_embedded_even_after_resume(env):
+    """The daemon tags frames kept during a pause; the memory job may run
+    only after the pause ended (busy inference thread, worker down)."""
+    clock = Clock()
+    fake = FakeEmbedder({b"secret": _basis(0), b"later": _basis(3)})
+    writer = _writer(env, fake, clock)
+    clock.now = NOW
+    paused = add_frame(env, at=NOW - timedelta(minutes=10), image=b"secret", thumb=True)
+    conn = sqlite3.connect(env.db_path)
+    conn.execute(
+        "UPDATE events SET metadata_json = json_set(metadata_json, '$.memory_paused', json('true')) "
+        "WHERE id = ?", (paused["id"],),
+    )
+    conn.commit()
+    conn.close()
+    resumed = add_frame(env, at=NOW - timedelta(minutes=1), image=b"later", title="After")
+
+    stats = writer.run()
+
+    assert stats["embedded"] == 1 and stats["passed"] == 1
+    assert [r["id"] for r in rows(env)] == [resumed["id"]]
+    assert fake.calls and all(item["image"] != b"secret" for call in fake.calls for item in call)
+    assert not (env.data_dir / "thumbs" / f"{paused['id']}.ahthumb").exists()
+
+
+
+def test_a_frame_the_model_rejects_is_passed_over_not_retried_for_48_hours(env):
+    """Ollama answers text but fails on one frame's image: after two tries
+    the writer passes over it, and the frame behind it is embedded."""
+    clock = Clock()
+
+    class RejectsOneImage(FakeEmbedder):
+        def __call__(self, items):
+            if any(item.get("image") == b"broken" for item in items):
+                self.calls.append(items)
+                raise OllamaError("Ollama HTTP 500: invalid image")
+            return super().__call__(items)
+
+    fake = RejectsOneImage({b"good": _basis(4)})
+    writer = _writer(env, fake, clock)
+    clock.now = NOW
+    bad = add_frame(env, at=NOW - timedelta(minutes=5), image=b"broken", thumb=True)
+    good = add_frame(env, at=NOW - timedelta(minutes=4), image=b"good", title="Next")
+
+    first = writer.run()
+    assert first["embedded"] == 0 and first["waiting"], "first failure: back off and retry"
+    clock.mono += 3600
+    second = writer.run()
+    assert second["passed"] == 1 and second["embedded"] == 1
+    assert [r["id"] for r in rows(env)] == [good["id"]]
+    assert not (env.data_dir / "thumbs" / f"{bad['id']}.ahthumb").exists()
+
+
+def test_an_ollama_outage_is_not_mistaken_for_a_bad_frame(env):
+    """When text does not embed either, the frame is kept and retried."""
+    clock = Clock()
+    fake = FakeEmbedder({b"a": _basis(0)})
+    writer = _writer(env, fake, clock)
+    clock.now = NOW
+    add_frame(env, at=NOW - timedelta(minutes=5), image=b"a")
+    fake.fail = 10
+    for _ in range(3):
+        stats = writer.run()
+        clock.mono += 3600
+        assert stats["passed"] == 0
+    fake.fail = 0
+    assert writer.run()["embedded"] == 1

@@ -50,9 +50,9 @@ EXCERPT_CHARS = 400
 MEMORY_FIELDS = ("app", "window_title", "url_host", "description", "first_ts", "last_ts", "score")
 
 MEMORY_NOT_ALLOWED = (
-    "The user has not let agents search their Memory. They can turn it on "
-    "in AgentHandover's Memory Settings (\"Let agents search my Memory\") or "
-    "with `agenthandover memory agents on`."
+    "The user has not let agents search their Memory. Do not change this "
+    "yourself: if Memory would help, tell the user they can allow it in "
+    "AgentHandover's Memory Settings (\"Let agents search my Memory\")."
 )
 MEMORY_OFF = "Memory is off. The user can turn it on in AgentHandover's Settings."
 
@@ -70,7 +70,9 @@ MCP_INSTRUCTIONS = (
     "Before asking the user about their own work, tools, habits or something "
     "they saw, call search_commonplace: results come grouped by kind, as text "
     "(never images). To run a Skill, use list_ready_skills and get_skill and "
-    "report progress with the report_execution_* tools."
+    "report progress with the report_execution_* tools. Never change "
+    "AgentHandover's settings (such as whether agents may search Memory) or "
+    "read its files or database directly; the user decides those."
 )
 
 # What `agenthandover connect` writes into the agent's own instructions.
@@ -85,7 +87,9 @@ AGENT_NOTE = (
     "`search_commonplace(query, kinds?, since?, until?, limit?)` of the "
     "`agenthandover` server, or `agenthandover search \"<query>\"` in a terminal "
     "(`--json` for machine-readable output). Results are grouped by kind "
-    "(skills, memory, days; ask for `profile` by kind) and are text only.\n"
+    "(skills, memory, days; ask for `profile` by kind) and are text only. "
+    "Never change AgentHandover's settings (such as whether agents may search "
+    "Memory) or read its files or database directly; the user decides those.\n"
 )
 
 
@@ -326,7 +330,10 @@ class Commonplace:
         vkb, reason = self._vector_kb()
         procedures = {p.get("id", ""): p for p in self._kb().list_procedures()}
         if vkb is not None:
-            if vkb.count("procedure") == 0:
+            # Rows of another model (the moment "Upgrade everything" swaps
+            # the store, before this process follows the config) are not
+            # found by this model's search: fall back to words, not nothing.
+            if vkb.count("procedure", model=vkb.config.embedding_model) == 0:
                 reason = "no Skill has been embedded yet"
             else:
                 vector, reason = self._query_vector(vkb, query, cache)

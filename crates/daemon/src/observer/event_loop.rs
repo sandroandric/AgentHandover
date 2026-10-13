@@ -96,6 +96,10 @@ pub struct ObserverConfig {
     /// encrypted thumbnail, unless memory is paused
     /// (`<state_dir>/status/memory-pause.json`).
     pub memory_thumbnails: bool,
+    /// `[memory] enabled`: a frame kept while Memory is paused
+    /// (`status/memory-pause.json`) is tagged `metadata.memory_paused`, so
+    /// the worker never embeds it, whenever its memory job runs.
+    pub memory_enabled: bool,
     /// Where the encrypted thumbnails go (`<data dir>/thumbs`).
     pub thumbs_dir: PathBuf,
 }
@@ -152,6 +156,7 @@ impl Default for ObserverConfig {
             seconds_since_last_click: system_seconds_since_last_click,
             key_down_count: system_key_down_count,
             memory_thumbnails: false,
+            memory_enabled: false,
             thumbs_dir: agenthandover_common::status::data_dir().join("thumbs"),
         }
     }
@@ -502,9 +507,9 @@ pub async fn run_observer_loop(
                     browser_url: browser_url.as_deref(),
                 };
                 // Memory on and not paused, and the app gave us its key.
-                let thumbnail_key = if config.memory_thumbnails
-                    && !agenthandover_common::status::memory_paused(&state_dir, Utc::now())
-                {
+                let memory_paused = config.memory_enabled
+                    && agenthandover_common::status::memory_paused(&state_dir, Utc::now());
+                let thumbnail_key = if config.memory_thumbnails && !memory_paused {
                     thumbnail_keys.get(&config.capture_socket).await
                 } else {
                     None
@@ -554,6 +559,10 @@ pub async fn run_observer_loop(
                     }
                 }
                 event.metadata["capture_trigger"] = serde_json::Value::String(trigger.as_str().to_string());
+                if memory_paused {
+                    // Skills still learn from it; Memory never keeps it.
+                    event.metadata["memory_paused"] = serde_json::Value::Bool(true);
+                }
                 event.metadata["keys_since_prev_frame"] = serde_json::Value::from(keys_since_prev_frame);
                 if focus_recording {
                     event.metadata["focus_capture"] = serde_json::Value::Bool(true);

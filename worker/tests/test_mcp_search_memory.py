@@ -70,7 +70,9 @@ def test_switched_off_it_explains_how_to_turn_it_on_and_searches_nothing(mcp):
     result = search("acme invoice")  # no config.toml: the default is off
     assert result["mode"] == "not_allowed"
     assert result["results"] == []
-    assert "agenthandover memory agents on" in result["reason"]
+    assert "Memory Settings" in result["reason"]
+    # Agents are never handed the command that would turn it on.
+    assert "agenthandover memory agents on" not in result["reason"]
     assert "Settings" in result["reason"]
     switch(agents=False)
     assert search("acme invoice")["mode"] == "not_allowed"

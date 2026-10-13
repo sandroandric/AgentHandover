@@ -200,7 +200,8 @@ where
         return Ok(());
     }
     writeln!(out, "Commonplace for \"{}\":", args.query)?;
-    for (kind, heading) in [("skills", "Skills"), ("memory", "Memory"), ("days", "Days"), ("profile", "Profile")] {
+    // The app's order: what you saw first, then your days, then Skills.
+    for (kind, heading) in [("memory", "Memory"), ("days", "Days"), ("skills", "Skills"), ("profile", "Profile")] {
         let Some(group) = reply.get(kind) else { continue };
         let mode = group["mode"].as_str().unwrap_or("");
         let reason = group["reason"].as_str().unwrap_or("");
@@ -210,7 +211,9 @@ where
             "not_allowed" => {
                 writeln!(out, "{heading}: not searched. {reason}")?;
                 if kind == "memory" {
-                    writeln!(out, "  Search it yourself with: agenthandover memory search \"{}\"", args.query)?;
+                    // Agents run this command too: point the person to the
+                    // app, not to a command that searches Memory anyway.
+                    writeln!(out, "  You can search your own Memory in the app: Commonplace\u{2026} in the menu bar.")?;
                 }
                 continue;
             }
@@ -562,15 +565,15 @@ mod tests {
         let (result, _, out) = run_search(&args("domain", &[]), Some((200, reply)));
         result.unwrap();
         assert_eq!(out, "Commonplace for \"domain\":\n\
+            \nMemory: not searched. The user has not let agents search their Memory.\n  \
+            You can search your own Memory in the app: Commonplace\u{2026} in the menu bar.\n\
+            \nDays (by words; embedding model unavailable: down):\n  \
+            Mon 12 Oct 2026  3 tasks, 2.5 active hours (Google Chrome, Slack)  · match 0.50\n      \
+            Checked domains\n\
             \nSkills (by meaning):\n  \
             Check Domain Availability (check-domain) — ready for agents  · match 0.71\n      \
             Is the domain free?\n  \
             Old Skill (old) — held back: stale; trust is observe  · match 0.50\n\
-            \nMemory: not searched. The user has not let agents search their Memory.\n  \
-            Search it yourself with: agenthandover memory search \"domain\"\n\
-            \nDays (by words; embedding model unavailable: down):\n  \
-            Mon 12 Oct 2026  3 tasks, 2.5 active hours (Google Chrome, Slack)  · match 0.50\n      \
-            Checked domains\n\
             \nProfile:\n  {\n    \"tools\": {\n      \"editor\": \"Zed\"\n    }\n  }\n");
     }
 
@@ -585,10 +588,10 @@ mod tests {
         let (result, _, out) = run_search(&args("q", &[]), Some((200, reply)));
         result.unwrap();
         assert_eq!(out, "Commonplace for \"q\":\n\
-            \nSkills (by words):\n  Nothing found.\n\
             \nMemory (by meaning):\n  \
             Mon 12 Oct 11:30–11:35  Google Chrome — Invoice INV-2041 (billing.acme.com)  · match 0.80\n      \
-            Paying the Acme invoice\n");
+            Paying the Acme invoice\n\
+            \nSkills (by words):\n  Nothing found.\n");
     }
 
     #[test]

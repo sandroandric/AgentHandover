@@ -176,7 +176,9 @@ def test_j_commonplace(temp_home, kb_root, worker, ollama) -> None:
     off = answer["off"]
     assert set(off) == {"query", "skills", "memory", "days"}
     assert off["memory"]["mode"] == "not_allowed"
-    assert "agenthandover memory agents on" in off["memory"]["reason"]
+    assert "Memory Settings" in off["memory"]["reason"]
+    # Agents are never handed the command that would turn it on.
+    assert "agenthandover memory agents on" not in off["memory"]["reason"]
     assert off["days"]["mode"] == "semantic"
     assert [d["date"] for d in off["days"]["results"]] == [today]
     assert off["days"]["results"][0]["excerpt"].startswith("Paid the Acme invoice")

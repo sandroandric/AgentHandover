@@ -90,6 +90,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Obse
     private var focusQAWindow: NSWindow?
     private var modelDownloadWindow: NSWindow?
     private var memoryOfferWindow: NSWindow?
+    /// Set by the offer's "Remind Me Later": that close records no choice.
+    private var memoryOfferRemindLater = false
 
     /// Single shared AppState used by onboarding, menu bar, and all windows.
     @MainActor let sharedAppState = AppState()
@@ -425,7 +427,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Obse
                 self.showMemoryOffer(MemoryOfferView(
                     visualSearch: visualSearch, ollamaTooOld: tooOld, minimumOllama: minimum,
                     memoryModel: model, memoryModelSize: table.sizeLabel(model),
-                    close: { [weak self] in self?.memoryOfferWindow?.close() }
+                    close: { [weak self] in self?.memoryOfferWindow?.close() },
+                    remindLater: { [weak self] in
+                        self?.memoryOfferRemindLater = true
+                        self?.memoryOfferWindow?.close()
+                    }
                 ))
             }
         }
@@ -546,6 +552,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Obse
             modelDownloadWindow = nil
         } else {
             memoryOfferWindow = nil
+            // Closed with the title bar's button: the offer is shown once,
+            // so that is "Not now" (not for "Remind Me Later").
+            if let choice = MemoryOfferState.choiceOnClose(
+                remindLater: memoryOfferRemindLater, recorded: MemoryOfferState.load().choice
+            ) {
+                MemoryOfferState.record(choice)
+            }
+            memoryOfferRemindLater = false
         }
         let others = NSApp.windows.contains {
             $0 !== window && $0.isVisible && $0.styleMask.contains(.titled)

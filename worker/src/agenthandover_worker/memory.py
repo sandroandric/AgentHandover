@@ -112,6 +112,9 @@ HOLD_HOURS = 48.0
 # Frames embedded per job: one job stays a few seconds, so P0 work (a
 # stopped recording) never waits long behind it.
 FRAMES_PER_JOB = 8
+# A frame that fails this many times while the model still embeds text is
+# passed over (an image the model rejects must not hold the frames behind it).
+FRAME_ATTEMPTS = 2
 # Memory's model stays loaded this long after its last frame (Ollama's
 # default is 5 minutes): on a 16 GB Mac it sits next to the annotation
 # model, so it is released soon after a burst.
@@ -393,6 +396,9 @@ class MemoryWriter:
         self._latest_loaded = False
         self._embedded_at: deque[float] = deque()
         self._failures = 0
+        # Failed embeds per frame id (a frame the model rejects is passed
+        # over after FRAME_ATTEMPTS while text still embeds).
+        self._frame_failures: dict[str, int] = {}
         self._retry_at = 0.0
         # Why the last run stopped short of the newest frame (None: it did not).
         self.waiting: str | None = None
@@ -473,6 +479,10 @@ class MemoryWriter:
         a focus recording's dropped (non-key) frames."""
         status = event.get("annotation_status")
         if status in ("privacy_blocked", "metadata_only"):
+            return True
+        # Captured while Memory was paused (the daemon tags it): never kept,
+        # however late the memory job runs.
+        if parse_json_field(event, "metadata_json").get("memory_paused"):
             return True
         if is_system_ui(event):
             return True
@@ -603,6 +613,20 @@ class MemoryWriter:
             try:
                 merged = self._embed_frame(rowid, event, when, path)
             except OllamaError as exc:
+                frame_id = str(event.get("id"))
+                self._frame_failures[frame_id] = self._frame_failures.get(frame_id, 0) + 1
+                if self._frame_failures[frame_id] >= FRAME_ATTEMPTS and self._model_answers():
+                    # The model works, so this frame is the problem (an
+                    # image it rejects, a bad vector): pass over it instead
+                    # of retrying it until it is 48 hours old while the
+                    # frames behind it wait.
+                    logger.warning("Memory passed over frame %s after %d attempts: %s",
+                                   frame_id, self._frame_failures.pop(frame_id), exc)
+                    self._release(event, path)
+                    delete_thumbnails([event.get("id")], thumbs_dir(self.data_dir))
+                    passed = (rowid, event)
+                    stats["passed"] += 1
+                    continue
                 self._failures += 1
                 delay = min(BACKOFF_SECONDS * 2 ** (self._failures - 1), BACKOFF_MAX_SECONDS)
                 self._retry_at = self._monotonic() + delay
@@ -611,6 +635,7 @@ class MemoryWriter:
                 break
             passed = None
             self._failures = 0
+            self._frame_failures.pop(str(event.get("id")), None)
             self._embedded_at.append(self._monotonic())
             stats["embedded"] += 1
             stats["merged"] += int(merged)
@@ -626,6 +651,15 @@ class MemoryWriter:
                 stats["embedded"], stats["merged"], stats["passed"],
             )
         return stats
+
+    def _model_answers(self) -> bool:
+        """True when the model embeds a short text: a frame that failed is
+        then the frame's fault, not Ollama's."""
+        try:
+            vectors = self._embed([{"text": embed_text("", "")}])
+        except OllamaError:
+            return False
+        return bool(vectors) and bool(vectors[0])
 
     def _annotation_needs(self, event: dict) -> bool:
         """True while annotation (or the focus processor) will still read

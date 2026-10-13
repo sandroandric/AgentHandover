@@ -212,7 +212,9 @@ def test_the_text_query_is_embedded_once_for_skills_and_days(hub):
 def test_memory_waits_for_the_users_switch_and_follows_it_at_once(hub):
     off = hub.search("acme invoice")["memory"]
     assert off["mode"] == "not_allowed" and off["results"] == []
-    assert "agenthandover memory agents on" in off["reason"]
+    assert "Memory Settings" in off["reason"]
+    # Agents are never handed the command that would turn it on.
+    assert "agenthandover memory agents on" not in off["reason"]
     assert hub.memory_calls == []
 
     hub.agents(True)
@@ -407,3 +409,18 @@ def test_a_day_excerpt_names_each_task_once():
         {"intent": "editing a document in TextEdit"},
     ]}, 0.6)
     assert item["excerpt"] == "editing a document in TextEdit; reviewing the models"
+
+
+
+def test_skills_fall_back_to_words_when_only_another_models_vectors_exist(tmp_path, monkeypatch):
+    """During the "Upgrade everything" switch the store holds EmbeddingGemma
+    rows while this process still searches with nomic: words, not nothing."""
+    from agenthandover_worker.vector_kb import VectorKB, VectorKBConfig
+    from daemon_db import create_daemon_db
+
+    db = create_daemon_db(tmp_path / "events.db")
+    vkb = VectorKB(db, VectorKBConfig(embedding_model="nomic-embed-text"))
+    vkb.upsert("procedure", "pay-invoice", "Pay an invoice", embedding=[1.0, 0.0], model="embeddinggemma-2:440m")
+    assert vkb.count("procedure") == 1
+    assert vkb.count("procedure", model="nomic-embed-text") == 0
+    assert vkb.count("procedure", model="embeddinggemma-2:440m") == 1

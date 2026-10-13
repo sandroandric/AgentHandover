@@ -14,6 +14,9 @@ struct MemoryOfferView: View {
     /// "710 MB", when the table knows the model's size.
     let memoryModelSize: String?
     let close: () -> Void
+    /// "Remind Me Later" (Ollama too old): close without a choice, so the
+    /// offer comes back; any other close without one is "Not now".
+    var remindLater: (() -> Void)? = nil
 
     private enum Phase: Equatable {
         case choosing
@@ -142,7 +145,7 @@ struct MemoryOfferView: View {
                 Button("Get Ollama") {
                     if let url = URL(string: "https://ollama.com/download/mac") { NSWorkspace.shared.open(url) }
                 }
-                Button("Remind Me Later") { close() }
+                Button("Remind Me Later") { (remindLater ?? close)() }
                     .keyboardShortcut(.defaultAction)
             }
         }

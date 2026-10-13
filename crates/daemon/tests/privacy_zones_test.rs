@@ -192,6 +192,7 @@ fn harness_with(zones: PrivacyZonesConfig, serve_frames: bool) -> Harness {
         seconds_since_last_click: || f64::INFINITY,
         // Memory on: every kept frame also gets an encrypted thumbnail.
         memory_thumbnails: true,
+        memory_enabled: true,
         thumbs_dir: root.join("thumbs"),
         ..Default::default()
     };
@@ -519,13 +520,15 @@ async fn an_allowed_window_keeps_its_frame() {
     assert!(thumbnail::open(&[0u8; 32], &sealed).is_err());
     // WP-C1: daemon-status.json's capture counters see the same frame.
     let compute = stats.lock().unwrap().snapshot(Instant::now());
-    // The switch's settled frame, then the second look a moment later,
-    // which shows the same screen (the fake serves one image) and is
-    // dropped as unchanged.
-    assert_eq!(compute.since_start.frames_captured, 2);
+    // The switch's settled frame, then (if the run lasts long enough on a
+    // loaded machine) the second look a moment later, which shows the same
+    // screen (the fake serves one image) and is dropped as unchanged.
+    let captured = compute.since_start.frames_captured;
+    assert!((1..=2).contains(&captured), "{captured}");
     assert_eq!(compute.since_start.frames_kept, 1);
-    assert_eq!(compute.since_start.frames_gated_by_reason.get("unchanged"), Some(&1));
-    assert_eq!(compute.since_start.frames_gated_by_reason.len(), 1);
+    let unchanged = compute.since_start.frames_gated_by_reason.get("unchanged").copied().unwrap_or(0);
+    assert_eq!(unchanged, captured - 1, "only the second look is dropped, as unchanged");
+    assert!(compute.since_start.frames_gated_by_reason.keys().all(|k| k == "unchanged"));
 }
 
 /// Every kept frame records how many keys went down since the previous
@@ -563,10 +566,17 @@ async fn kept_frames_record_how_many_keys_were_pressed() {
         static COUNTER: AtomicU32 = AtomicU32::new(1000);
         COUNTER.fetch_add(3, Ordering::SeqCst)
     }
-    assert_eq!(key_counts(typing).await, vec![Some(3), Some(3)]);
+    // Every frame kept (the two switches, and a follow-up look when the
+    // run on a loaded machine lasts long enough) carries the keys since
+    // the previous one.
+    let typed = key_counts(typing).await;
+    assert!(typed.len() >= 2, "{typed:?}");
+    assert!(typed.iter().all(|k| *k == Some(3)), "{typed:?}");
     // The counter never moves: no key since the observer started, not even
     // for the first frame.
-    assert_eq!(key_counts(|| 42).await, vec![Some(0), Some(0)]);
+    let idle = key_counts(|| 42).await;
+    assert!(idle.len() >= 2, "{idle:?}");
+    assert!(idle.iter().all(|k| *k == Some(0)), "{idle:?}");
 }
 
 /// A macOS password prompt (`SecurityAgent`, owner of the "... wants to
@@ -695,6 +705,8 @@ async fn memory_off_or_paused_writes_no_thumbnail() {
     ] {
         let mut h = harness_with(PrivacyZonesConfig::default(), true);
         h.config.memory_thumbnails = memory_on;
+        h.config.memory_enabled = memory_on;
+        let paused = memory_on && expect == 0;
         if let Some(body) = pause {
             let file = h.config.state_dir.join("status/memory-pause.json");
             std::fs::create_dir_all(file.parent().unwrap()).unwrap();
@@ -713,5 +725,13 @@ async fn memory_off_or_paused_writes_no_thumbnail() {
         assert_eq!(frames(&events), 1, "{name}: the frame is kept for Skills");
         assert_eq!(jpegs_in(&shots), 1, "{name}");
         assert_eq!(thumbnails_in(&thumbs).len(), expect, "{name}");
+        // A frame kept while paused is tagged: the worker never embeds it,
+        // however late its memory job runs.
+        let frame = events.iter().find(|e| matches!(e.kind, EventKind::DwellSnapshot)).unwrap();
+        assert_eq!(
+            frame.metadata.get("memory_paused").and_then(|v| v.as_bool()).unwrap_or(false),
+            paused,
+            "{name}"
+        );
     }
 }

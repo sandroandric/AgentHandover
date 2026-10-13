@@ -617,3 +617,20 @@ def test_the_re_embed_releases_the_model_soon(world) -> None:
     _choose(world)
     _upgrade(world, rows_per_job=10).step()
     assert world.fake.keep_alive == "1m"
+
+
+def test_a_model_set_back_by_hand_after_the_upgrade_is_left_alone(world) -> None:
+    """The upgrade happened once; the user then chose nomic again in
+    config.toml: the worker does not re-embed or rewrite the config."""
+    _choose(world)
+    upgrade = _upgrade(world, rows_per_job=10)
+    upgrade._conn.execute(
+        "INSERT OR REPLACE INTO worker_state (key, value) VALUES (?, ?)",
+        ("embedding_upgrade", json.dumps({"state": "done"})),
+    )
+    assert upgrade.wanted() is False
+    assert upgrade.step() is False
+    assert world.fake.texts() == []
+    # And it stays done on the next runs.
+    assert upgrade.saved_state() == {"state": "done"}
+    assert upgrade.step() is False and upgrade.wanted() is False
