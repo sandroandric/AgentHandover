@@ -339,11 +339,16 @@ final class CommonplaceTests: XCTestCase {
         results.memory = .failed(.memoryOff)
         XCTAssertFalse(results.isEmpty(.all))
         XCTAssertTrue(results.isEmpty(.skills))
+        // A kind not searched yet (a new scope, its search under way) is
+        // not "nothing found".
+        results.skills = nil
+        XCTAssertFalse(results.isEmpty(.skills))
+        XCTAssertEqual(results.sections(.skills).map(\.searched), [false])
     }
 
     func testGroupMessages() {
         func section(_ error: MemoryAPIError?) -> CommonplaceSection {
-            CommonplaceSection(kind: .skills, items: [], total: 0, error: error, byWordsReason: nil)
+            CommonplaceSection(kind: .skills, items: [], total: 0, searched: true, error: error, byWordsReason: nil)
         }
         XCTAssertEqual(section(.unexpected(status: 0, body: "The request timed out.")).errorMessage, "The request timed out.")
         XCTAssertEqual(section(.unexpected(status: 501, body: "x")).errorMessage, "The worker answered 501. Try again.")

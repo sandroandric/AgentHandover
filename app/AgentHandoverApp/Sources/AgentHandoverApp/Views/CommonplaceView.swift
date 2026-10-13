@@ -365,7 +365,7 @@ struct CommonplaceView: View {
             Text(section.kind.title)
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(.secondary)
-            if model.phase == .results, section.error == nil {
+            if section.searched, section.error == nil {
                 Text("\(section.total)")
                     .font(.system(size: 11))
                     .foregroundStyle(.tertiary)
@@ -386,7 +386,7 @@ struct CommonplaceView: View {
         if section.error != nil {
             sectionFailure(section)
         } else if section.items.isEmpty {
-            Text(model.phase == .results ? section.kind.noMatches : " ")
+            Text(section.searched ? section.kind.noMatches : " ")
                 .font(.system(size: 12))
                 .foregroundStyle(.tertiary)
                 .selectionDisabled()

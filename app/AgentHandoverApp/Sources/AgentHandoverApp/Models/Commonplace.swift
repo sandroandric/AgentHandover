@@ -236,6 +236,15 @@ struct CommonplaceResults: Equatable {
         }
     }
 
+    /// Whether `kind` was searched (found something, nothing, or failed).
+    func searched(_ kind: CommonplaceKind) -> Bool {
+        switch kind {
+        case .skills: return skills != nil
+        case .memory: return memory != nil
+        case .days: return days != nil
+        }
+    }
+
     func error(_ kind: CommonplaceKind) -> MemoryAPIError? {
         switch kind {
         case .skills: return skills?.error
@@ -264,7 +273,7 @@ struct CommonplaceResults: Equatable {
             let all = items(kind)
             let shown = scope == .all ? Array(all.prefix(Self.previewCount)) : all
             return CommonplaceSection(
-                kind: kind, items: shown, total: all.count,
+                kind: kind, items: shown, total: all.count, searched: searched(kind),
                 error: error(kind), byWordsReason: byWordsReason(kind)
             )
         }
@@ -276,9 +285,10 @@ struct CommonplaceResults: Equatable {
         sections(scope).flatMap(\.items)
     }
 
-    /// Whether nothing at all was found (and nothing failed).
+    /// Whether every kind of `scope` was searched and found nothing (and
+    /// nothing failed).
     func isEmpty(_ scope: CommonplaceScope) -> Bool {
-        sections(scope).allSatisfy { $0.items.isEmpty && $0.error == nil }
+        sections(scope).allSatisfy { $0.searched && $0.items.isEmpty && $0.error == nil }
     }
 
     /// Whether every searched kind failed because the worker is not there.
@@ -345,6 +355,8 @@ struct CommonplaceSection: Equatable, Identifiable {
     let items: [CommonplaceItem]
     /// How many the search found (All shows fewer).
     let total: Int
+    /// False while the kind has not been searched for the shown query.
+    let searched: Bool
     let error: MemoryAPIError?
     /// Set when the kind was searched by words, with the worker's reason.
     let byWordsReason: String?

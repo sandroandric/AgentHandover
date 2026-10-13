@@ -392,8 +392,10 @@ final class DigestViewModel: ObservableObject {
         Task.detached(priority: .userInitiated) {
             let data = Self.loadDigestFromDisk(dates: dates)
             await MainActor.run { [weak self] in
-                self?.digest = data
-                self?.isLoading = false
+                // A later load (another day) wins.
+                guard let self, self.requestedDate == date else { return }
+                self.digest = data
+                self.isLoading = false
             }
         }
     }
