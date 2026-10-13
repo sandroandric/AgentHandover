@@ -48,6 +48,10 @@ pub struct ObserverConfig {
     /// counter, so passive capture never leaves a recording blind).
     pub focus_screenshot_max_per_minute: u32,
     pub poll_interval: Duration,
+    /// Outside a focus recording, how long the window must be quiet after
+    /// a transition before the shutter fires (`capture_policy::SETTLE`;
+    /// at most three times this after the first transition).
+    pub capture_settle: Duration,
     pub db_path: PathBuf,
     /// Changed blocks (of the frame's block-mean signature) needed to keep
     /// a frame; see `capture::dhash`. Higher = fewer frames kept.
@@ -131,6 +135,7 @@ impl Default for ObserverConfig {
             screenshot_max_per_minute: 20,
             focus_screenshot_max_per_minute: 40,
             poll_interval: Duration::from_millis(500),
+            capture_settle: crate::observer::capture_policy::SETTLE,
             db_path: PathBuf::from("agenthandover.db"),
             dhash_threshold: 1,
             screenshot_format: "jpeg".to_string(),
@@ -192,6 +197,7 @@ pub async fn run_observer_loop(
         config.dhash_threshold,
         Instant::now(),
     );
+    policy.set_settle(config.capture_settle);
     let mut last_tick = Instant::now();
     let mut worker_status_checked: Option<Instant> = None;
     let zones = PrivacyZones::new(&config.zones);
@@ -467,6 +473,9 @@ pub async fn run_observer_loop(
                 // (or the heartbeat / focus interval is due) and budget remains.
                 // A blocked or metadata-only window never reaches the shutter.
                 if zone != Zone::Full {
+                    // A frame settling for the window before this one is
+                    // never taken of this one.
+                    policy.cancel_pending();
                     debug!(zone = zone.as_str(), "Privacy zone: no frame");
                     if !transitions.is_empty() {
                         with_stats(&config.capture_stats, |s| s.gated(Instant::now(), "privacy_zone"));
@@ -481,8 +490,8 @@ pub async fn run_observer_loop(
                     policy.shutter_trigger(&transitions, focus_recording, Instant::now())
                 else {
                     // With a transition in hand, only the minute's frame
-                    // budget stops the shutter.
-                    if !transitions.is_empty() {
+                    // budget stops the shutter (or the window settling).
+                    if !transitions.is_empty() && !policy.settling() {
                         with_stats(&config.capture_stats, |s| s.gated(Instant::now(), "rate_limited"));
                     }
                     continue;

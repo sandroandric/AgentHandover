@@ -5,6 +5,15 @@
 //! a heartbeat when nothing has fired for [`HEARTBEAT`]. During a focus
 //! recording the shutter also fires every [`FOCUS_INTERVAL`].
 //!
+//! Outside a focus recording a transition does not fire at once: the
+//! shutter waits until the window has been quiet for [`SETTLE`] (at most
+//! [`SETTLE_MAX`] after the first transition). Apps change a window's
+//! title before they repaint it (Safari: "Untitled", then the page's
+//! title, while the previous page is still on screen), so a frame taken on
+//! the transition showed the page being left under the new page's title.
+//! One settled frame per burst is attributed to its most specific
+//! transition. Focus recordings keep firing on the transition.
+//!
 //! Per tick the cheap checks run first and in this order:
 //! 1. [`CapturePolicy::shutter_trigger`]: did anything happen, and is there
 //!    budget left this minute? No trigger, no capture.
@@ -33,6 +42,11 @@ use crate::capture::dhash::{self, FrameSignature};
 pub const HEARTBEAT: Duration = Duration::from_secs(60);
 /// Shutter interval during a focus recording.
 pub const FOCUS_INTERVAL: Duration = Duration::from_secs(2);
+/// Outside a focus recording, a transition fires the shutter once nothing
+/// else has happened for this long...
+pub const SETTLE: Duration = Duration::from_millis(1000);
+/// ...or this long after the first transition of a burst, whichever is first.
+pub const SETTLE_MAX: Duration = Duration::from_millis(3000);
 /// A heartbeat frame whose OCR words overlap the last kept frame's by at
 /// least this Jaccard similarity shows the same text and is dropped.
 pub const SAME_TEXT_JACCARD: f64 = 0.9;
@@ -108,6 +122,11 @@ pub struct CapturePolicy {
     last_kept: Option<FrameSignature>,
     last_kept_words: Option<HashSet<String>>,
     passive_throttled: bool,
+    /// Outside a focus recording: the burst of transitions waiting to
+    /// settle (its most specific trigger, first and latest arrival).
+    pending: Option<(CaptureTrigger, Instant, Instant)>,
+    settle: Duration,
+    settle_max: Duration,
 }
 
 impl CapturePolicy {
@@ -127,7 +146,28 @@ impl CapturePolicy {
             last_kept: None,
             last_kept_words: None,
             passive_throttled: false,
+            pending: None,
+            settle: SETTLE,
+            settle_max: SETTLE_MAX,
         }
+    }
+
+    /// Wait `settle` of quiet after a passive transition (at most three
+    /// times that after the first one) instead of [`SETTLE`] / [`SETTLE_MAX`].
+    pub fn set_settle(&mut self, settle: Duration) {
+        self.settle = settle;
+        self.settle_max = settle * 3;
+    }
+
+    /// A transition is waiting for the window to settle.
+    pub fn settling(&self) -> bool {
+        self.pending.is_some()
+    }
+
+    /// Drop the transition waiting to settle (the window it was for left
+    /// the screen, e.g. for a privacy zone).
+    pub fn cancel_pending(&mut self) {
+        self.pending = None;
     }
 
     /// Throttle passive capture (the worker's annotation backlog is long)
@@ -179,14 +219,35 @@ impl CapturePolicy {
             return None;
         }
 
+        let latest = transitions.iter().copied().min_by_key(|t| t.rank());
+        let transition = if focus_recording {
+            self.pending = None;
+            latest
+        } else {
+            if let Some(t) = latest {
+                self.pending = Some(match self.pending {
+                    Some((p, first, _)) => (if t.rank() < p.rank() { t } else { p }, first, now),
+                    None => (t, now, now),
+                });
+            }
+            match self.pending {
+                Some((t, first, last))
+                    if now.duration_since(last) >= self.settle
+                        || now.duration_since(first) >= self.settle_max =>
+                {
+                    self.pending = None;
+                    Some(t)
+                }
+                // Still changing: neither a transition nor a heartbeat now.
+                Some(_) => return None,
+                None => None,
+            }
+        };
         let focus_due = focus_recording
             && self
                 .last_focus_shutter
                 .is_none_or(|t| now.duration_since(t) >= FOCUS_INTERVAL);
-        let trigger = transitions
-            .iter()
-            .copied()
-            .min_by_key(|t| t.rank())
+        let trigger = transition
             .or(focus_due.then_some(CaptureTrigger::FocusInterval))
             .or((now.duration_since(self.last_shutter) >= HEARTBEAT)
                 .then_some(CaptureTrigger::Heartbeat))?;
@@ -284,6 +345,49 @@ mod tests {
         CapturePolicy::new(20, 40, 1, now)
     }
 
+    /// A passive transition at `at`, then the quiet tick one [`SETTLE`]
+    /// later: what fires.
+    fn settled(p: &mut CapturePolicy, transitions: &[CaptureTrigger], at: Instant) -> Option<CaptureTrigger> {
+        assert_eq!(p.shutter_trigger(transitions, false, at), None, "a passive transition waits to settle");
+        p.shutter_trigger(&[], false, at + SETTLE)
+    }
+
+    #[test]
+    fn a_passive_transition_fires_once_the_window_is_quiet() {
+        let t0 = Instant::now();
+        let mut p = policy(t0);
+        // Safari loading a page: "Untitled", then the page's title.
+        assert_eq!(p.shutter_trigger(&[CaptureTrigger::TitleChange], false, t0), None);
+        let t1 = t0 + Duration::from_millis(500);
+        assert_eq!(p.shutter_trigger(&[CaptureTrigger::Navigation], false, t1), None);
+        assert_eq!(p.shutter_trigger(&[], false, t1 + Duration::from_millis(500)), None);
+        // One frame for the burst, attributed to its most specific transition.
+        assert_eq!(p.shutter_trigger(&[], false, t1 + SETTLE), Some(CaptureTrigger::Navigation));
+        assert_eq!(p.shutter_trigger(&[], false, t1 + SETTLE + Duration::from_millis(500)), None);
+    }
+
+    #[test]
+    fn a_window_that_keeps_changing_is_captured_after_settle_max() {
+        let t0 = Instant::now();
+        let mut p = policy(t0);
+        let mut fired = None;
+        for tick in 0..10u64 {
+            let now = t0 + Duration::from_millis(500 * tick);
+            if let Some(t) = p.shutter_trigger(&[CaptureTrigger::TitleChange], false, now) {
+                fired = Some((t, now.duration_since(t0)));
+                break;
+            }
+        }
+        assert_eq!(fired, Some((CaptureTrigger::TitleChange, SETTLE_MAX)));
+    }
+
+    #[test]
+    fn a_focus_recording_fires_on_the_transition() {
+        let t0 = Instant::now();
+        let mut p = policy(t0);
+        assert_eq!(p.shutter_trigger(&[CaptureTrigger::Click], true, t0), Some(CaptureTrigger::Click));
+    }
+
     #[test]
     fn nothing_happened_means_no_shutter_until_the_heartbeat() {
         let t0 = Instant::now();
@@ -296,12 +400,12 @@ mod tests {
         );
         // The heartbeat counts from the last shutter, whatever fired it.
         assert_eq!(
-            p.shutter_trigger(&[CaptureTrigger::Click], false, t0 + Duration::from_secs(90)),
+            settled(&mut p, &[CaptureTrigger::Click], t0 + Duration::from_secs(90)),
             Some(CaptureTrigger::Click)
         );
-        assert_eq!(p.shutter_trigger(&[], false, t0 + Duration::from_secs(149)), None);
+        assert_eq!(p.shutter_trigger(&[], false, t0 + Duration::from_secs(150)), None);
         assert_eq!(
-            p.shutter_trigger(&[], false, t0 + Duration::from_secs(150)),
+            p.shutter_trigger(&[], false, t0 + Duration::from_secs(151)),
             Some(CaptureTrigger::Heartbeat)
         );
     }
@@ -310,16 +414,16 @@ mod tests {
     fn one_frame_per_tick_attributed_to_the_most_specific_transition() {
         let t0 = Instant::now();
         let mut p = policy(t0);
-        let fired = p.shutter_trigger(
+        let fired = settled(
+            &mut p,
             &[CaptureTrigger::Click, CaptureTrigger::TitleChange, CaptureTrigger::Navigation],
-            false,
             t0,
         );
         assert_eq!(fired, Some(CaptureTrigger::Navigation));
-        let fired = p.shutter_trigger(
+        let fired = settled(
+            &mut p,
             &[CaptureTrigger::Clipboard, CaptureTrigger::AppSwitch],
-            false,
-            t0 + Duration::from_millis(500),
+            t0 + Duration::from_secs(5),
         );
         assert_eq!(fired, Some(CaptureTrigger::AppSwitch));
     }
@@ -329,15 +433,16 @@ mod tests {
         let t0 = Instant::now();
         let mut p = CapturePolicy::new(3, 40, 1, t0);
         for i in 0..3u8 {
-            let now = t0 + Duration::from_millis(500 * i as u64);
-            assert!(p.shutter_trigger(&[CaptureTrigger::Click], false, now).is_some());
+            let now = t0 + Duration::from_secs(2 * i as u64);
+            assert!(settled(&mut p, &[CaptureTrigger::Click], now).is_some());
             p.record_kept(signature(i * 50), None, false);
         }
         let now = t0 + Duration::from_secs(10);
         assert_eq!(p.shutter_trigger(&[CaptureTrigger::Click], false, now), None);
+        assert_eq!(p.shutter_trigger(&[], false, now + SETTLE), None, "over budget");
         // A new minute resets the budget.
         let now = t0 + Duration::from_secs(61);
-        assert!(p.shutter_trigger(&[CaptureTrigger::Click], false, now).is_some());
+        assert!(settled(&mut p, &[CaptureTrigger::Click], now).is_some());
     }
 
     #[test]
@@ -346,25 +451,28 @@ mod tests {
         let mut p = CapturePolicy::new(20, 40, 1, t0);
         p.set_passive_throttled(true);
         for i in 0..5u8 {
-            assert!(p.shutter_trigger(&[CaptureTrigger::Click], false, t0).is_some());
+            assert!(settled(&mut p, &[CaptureTrigger::Click], t0 + Duration::from_secs(2 * i as u64)).is_some());
             p.record_kept(signature(i * 50), None, false);
         }
-        assert_eq!(p.shutter_trigger(&[CaptureTrigger::Click], false, t0), None);
+        let t1 = t0 + Duration::from_secs(20);
+        assert_eq!(p.shutter_trigger(&[CaptureTrigger::Click], false, t1), None);
+        assert_eq!(p.shutter_trigger(&[], false, t1 + SETTLE), None, "over the throttled budget");
         // A recording keeps its own, unthrottled budget.
         assert_eq!(
-            p.shutter_trigger(&[], true, t0),
+            p.shutter_trigger(&[], true, t1 + SETTLE),
             Some(CaptureTrigger::FocusInterval)
         );
         // Lifted: the full budget again.
         p.set_passive_throttled(false);
-        assert!(p.shutter_trigger(&[CaptureTrigger::Click], false, t0).is_some());
+        assert!(settled(&mut p, &[CaptureTrigger::Click], t1 + Duration::from_secs(5)).is_some());
 
         // A tiny budget still keeps one frame a minute.
         let mut tiny = CapturePolicy::new(2, 40, 1, t0);
         tiny.set_passive_throttled(true);
-        assert!(tiny.shutter_trigger(&[CaptureTrigger::Click], false, t0).is_some());
+        assert!(settled(&mut tiny, &[CaptureTrigger::Click], t0).is_some());
         tiny.record_kept(signature(1), None, false);
-        assert_eq!(tiny.shutter_trigger(&[CaptureTrigger::Click], false, t0), None);
+        assert_eq!(tiny.shutter_trigger(&[CaptureTrigger::Click], false, t0 + Duration::from_secs(5)), None);
+        assert_eq!(tiny.shutter_trigger(&[], false, t0 + Duration::from_secs(6)), None);
     }
 
     #[test]
@@ -407,9 +515,7 @@ mod tests {
         }
         assert_eq!(kept, 3);
         // Passive capture has its own budget once the recording stops.
-        assert!(p
-            .shutter_trigger(&[CaptureTrigger::Click], false, t0 + Duration::from_secs(11))
-            .is_some());
+        assert!(settled(&mut p, &[CaptureTrigger::Click], t0 + Duration::from_secs(11)).is_some());
     }
 
     #[test]

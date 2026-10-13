@@ -12,6 +12,8 @@ async fn test_observer_loop_starts_and_stops() {
 
     let config = ObserverConfig {
         poll_interval: Duration::from_millis(50),
+        // Settle after two quiet ticks instead of the product's second.
+        capture_settle: Duration::from_millis(100),
         ..Default::default()
     };
 

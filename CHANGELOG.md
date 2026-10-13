@@ -68,6 +68,15 @@ the 16 GB test Mac with Ollama 0.40.3).
   Ollama is older.
 
 ### Fixed
+- **Frames show the page they are labelled with.** Apps change a window's
+  title before they repaint it (Safari: "Untitled", then the page's title,
+  with the previous page still on screen), and the shutter fired on the
+  title change, so a frame showed the page being left under the new
+  page's title (seen live: Hacker News described as "threads related to
+  Ollama", the previous page). Outside focus recordings a transition now
+  fires once the window has been quiet for 1 s (at most 3 s after the
+  first), one frame per burst; a switch into a privacy zone before then
+  takes no frame. Proof: `capture_policy.rs` tests, `privacy_zones_test.rs`.
 - Vector search compared rows of different models of the same size; it
   now filters by model and size. The daily purge would have deleted any
   model's vectors but the configured one's. `/search/semantic` crashed on

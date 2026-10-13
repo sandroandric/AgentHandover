@@ -74,6 +74,40 @@ fn fake_observation_server(path: &Path, replies: Vec<String>) -> Served {
     served
 }
 
+/// Like [`fake_observation_server`], but the window on screen is `before`
+/// until a capture has been requested (`captures` > 0), then `after`: a
+/// switch that lands while the frame is being taken, whatever the tick
+/// timing.
+fn observation_server_switching_on_capture(
+    path: &Path,
+    before: Vec<String>,
+    after: String,
+    captures: Arc<AtomicUsize>,
+) -> Served {
+    let listener = UnixListener::bind(path).unwrap();
+    let count = Arc::new(AtomicUsize::new(0));
+    let served = Served { count: Arc::clone(&count), scripted: before.len() };
+    tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else { return };
+            let i = count.load(Ordering::SeqCst);
+            let reply = if captures.load(Ordering::SeqCst) > 0 {
+                after.clone()
+            } else {
+                before[i.min(before.len() - 1)].clone()
+            };
+            let mut reader = BufReader::new(stream);
+            let mut line = String::new();
+            let _ = reader.read_line(&mut line).await;
+            let stream = reader.get_mut();
+            let _ = stream.write_all(reply.as_bytes()).await;
+            let _ = stream.write_all(b"\n").await;
+            count.fetch_add(1, Ordering::SeqCst);
+        }
+    });
+    served
+}
+
 /// A real frame as the app sends it: magic, width, height, length, JPEG.
 fn frame_response() -> Vec<u8> {
     let (width, height) = (64u32, 40u32);
@@ -146,6 +180,8 @@ fn harness_with(zones: PrivacyZonesConfig, serve_frames: bool) -> Harness {
     let captures = fake_capture_server(&root.join("capture.sock"), serve_frames);
     let config = ObserverConfig {
         poll_interval: Duration::from_millis(40),
+        // Settle after two quiet ticks instead of the product's second.
+        capture_settle: Duration::from_millis(80),
         screenshots_dir: root.join("screenshots"),
         db_path: root.join("events.db"),
         zones,
@@ -497,13 +533,17 @@ async fn key_counts(key_down_count: fn() -> u32) -> Vec<Option<u64>> {
     h.config.key_down_count = key_down_count;
     let served = fake_observation_server(
         &h.config.observation_socket,
-        vec![
-            window_reply("pid:10:TextEdit", "notes.txt"),
-            window_reply("pid:12:Preview", "invoice.pdf"),
-            window_reply("pid:10:TextEdit", "notes.txt"),
-        ],
+        // Each window stays long enough for its frame to settle.
+        [
+            vec![window_reply("pid:10:TextEdit", "notes.txt")],
+            vec![window_reply("pid:12:Preview", "invoice.pdf"); 6],
+            vec![window_reply("pid:10:TextEdit", "notes.txt")],
+        ]
+        .concat(),
     );
-    let events = run_loop(h.config, &h.root, Some(&served), Duration::from_millis(800)).await;
+    // Two settled frames need more ticks than one; the last window repeats
+    // after the script, so a longer run adds no frame.
+    let events = run_loop(h.config, &h.root, Some(&served), Duration::from_millis(1500)).await;
     events
         .iter()
         .filter(|e| matches!(e.kind, EventKind::DwellSnapshot))
@@ -553,21 +593,40 @@ async fn system_password_prompt_never_reaches_the_shutter() {
     );
 }
 
+/// The user switches to 1Password before the frame for Preview settled:
+/// no frame is taken at all, of Preview or of 1Password.
+#[tokio::test(flavor = "current_thread")]
+async fn a_switch_to_a_blocked_window_before_the_frame_settles_takes_none() {
+    let h = harness_with(PrivacyZonesConfig::default(), true);
+    let served = fake_observation_server(
+        &h.config.observation_socket,
+        vec![
+            window_reply("pid:10:TextEdit", "notes.txt"),
+            window_reply("pid:12:Preview", "invoice.pdf"),
+            window_reply("pid:11:1Password", "Vault"),
+        ],
+    );
+    let events = run_loop(h.config, &h.root, Some(&served), Duration::from_millis(800)).await;
+    assert_eq!(h.captures.load(Ordering::SeqCst), 0, "no capture request");
+    assert_eq!(frames(&events), 0, "no frame row: {events:?}");
+}
+
 /// The user switches to 1Password while the frame is being taken: the
 /// frame in hand is checked against the window on screen now, and dropped.
 #[tokio::test(flavor = "current_thread")]
 async fn a_switch_to_a_blocked_window_during_the_capture_drops_the_frame() {
     let h = harness_with(PrivacyZonesConfig::default(), true);
     let shots = h.config.screenshots_dir.clone();
-    let served = fake_observation_server(
+    let served = observation_server_switching_on_capture(
         &h.config.observation_socket,
+        // The switch to Preview, quiet until the shutter fires ...
         vec![
             window_reply("pid:10:TextEdit", "notes.txt"),
-            // Tick 2: the switch to Preview fires the shutter ...
             window_reply("pid:12:Preview", "invoice.pdf"),
-            // ... and by the time the frame is in hand 1Password is on screen.
-            window_reply("pid:11:1Password", "Vault"),
         ],
+        // ... and by the time the frame is in hand 1Password is on screen.
+        window_reply("pid:11:1Password", "Vault"),
+        Arc::clone(&h.captures),
     );
     let stats = Arc::clone(&h.config.capture_stats);
     let thumbs = h.config.thumbs_dir.clone();
