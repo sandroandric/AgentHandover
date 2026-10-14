@@ -215,6 +215,14 @@ class KnowledgeBase:
         )
         return _parse_procedure(slug, rows[0][0]) if rows else None
 
+    def recent_procedure_slugs(self, limit: int) -> list[str]:
+        """The slugs of the *limit* procedures changed last, newest first."""
+        return [
+            slug for (slug,) in self._read(
+                "SELECT slug FROM procedures ORDER BY updated_at DESC, slug LIMIT ?", (limit,),
+            )
+        ]
+
     def list_procedures(self) -> list[dict]:
         """Every procedure, in the order of their export file names.
 

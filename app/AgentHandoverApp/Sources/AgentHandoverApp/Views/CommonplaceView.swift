@@ -44,6 +44,8 @@ struct CommonplaceView: View {
             memoryOnly = await Task.detached { SkillsMode.load().isMemoryOnly }.value
             await center.refresh()
             await model.checkWaiting(status: center.status)
+            // Nothing typed yet: the newest of each kind.
+            model.search(force: true)
         }
         .onChange(of: center.forgetCount) { _, _ in model.search(force: true) }
         .sheet(item: $openMoment) { moment in
@@ -228,7 +230,8 @@ struct CommonplaceView: View {
             stateView(icon: "bolt.horizontal.circle",
                       text: "AgentHandover's worker is not running, so Commonplace cannot be searched.",
                       action: "Start Worker") { perform(.workerNotRunning) }
-        } else if model.query.trimmingCharacters(in: .whitespaces).isEmpty {
+        } else if model.isBrowsing, !model.hasSomethingToBrowse, singleScopeFailure == nil {
+            // Nothing typed and nothing kept yet (or still loading): what to try.
             if model.scope == .all {
                 examples
             } else {
@@ -236,7 +239,7 @@ struct CommonplaceView: View {
             }
         } else if let only = singleScopeFailure {
             failureState(only)
-        } else if model.phase == .results && model.results.isEmpty(model.scope) {
+        } else if model.phase == .results && !model.isBrowsing && model.results.isEmpty(model.scope) {
             stateView(
                 icon: "magnifyingglass",
                 text: "Nothing in \(model.scope == .all ? "Commonplace" : model.scope.rawValue) matches \u{201C}\(model.lastQuery)\u{201D}"
@@ -474,6 +477,11 @@ struct CommonplaceView: View {
                     .foregroundStyle(.tertiary)
                     .monospacedDigit()
             }
+            if model.isBrowsing, section.searched, !section.items.isEmpty {
+                Text("\u{00B7} newest first")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.tertiary)
+            }
             if let reason = section.byWordsReason {
                 Text("\u{00B7} searched by words")
                     .font(.system(size: 11))
@@ -489,7 +497,7 @@ struct CommonplaceView: View {
         if section.error != nil {
             sectionFailure(section)
         } else if section.items.isEmpty {
-            Text(section.searched ? section.kind.noMatches : " ")
+            Text(section.searched ? (model.isBrowsing ? section.kind.noneYet : section.kind.noMatches) : " ")
                 .font(.system(size: 12))
                 .foregroundStyle(.tertiary)
                 .selectionDisabled()
@@ -709,6 +717,15 @@ final class CommonplaceWindowModel: ObservableObject {
     var selected: CommonplaceItem? { visibleItems.first { $0.id == selectedID } }
     var hasFilters: Bool { request.range != .anyTime || request.app != nil }
 
+    /// Nothing typed: the window lists the newest of each kind (the
+    /// worker's answer to an empty query) instead of search results.
+    var isBrowsing: Bool { request.query.isEmpty }
+
+    /// Browsing, and the newest-first answer holds something to show.
+    var hasSomethingToBrowse: Bool {
+        isBrowsing && phase == .results && lastQuery.isEmpty && !results.isEmpty(scope)
+    }
+
     func isShowingResults(for query: String) -> Bool {
         phase == .results && lastQuery == query.trimmingCharacters(in: .whitespacesAndNewlines)
     }
@@ -750,17 +767,9 @@ final class CommonplaceWindowModel: ObservableObject {
     }
 
     /// Search now (unless the shown answer already covers the request and
-    /// `force` is false).
+    /// `force` is false).  An empty query asks for the newest of each kind.
     func run(force: Bool) async {
         let request = self.request
-        guard !request.query.isEmpty else {
-            results = .empty
-            phase = .idle
-            lastQuery = ""
-            lastRequest = nil
-            memoryProblem = nil
-            return
-        }
         if !force, phase == .results, let last = lastRequest, last.covers(request) {
             keepSelectionVisible()
             return

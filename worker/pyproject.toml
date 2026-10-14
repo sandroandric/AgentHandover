@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agenthandover-worker"
-version = "2.0.2"
+version = "2.0.3"
 description = "AgentHandover worker — episode building, semantic translation, SOP induction"
 requires-python = ">=3.11"
 dependencies = ["pyyaml>=6.0", "numpy>=2,<3"]

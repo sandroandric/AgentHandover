@@ -176,11 +176,11 @@ New in 2.0. Find anything you saw on your Mac by describing it. Each screen Agen
 
 New in 2.0. Everything AgentHandover knows about your work, in one place your agents can search: **Skills** (the workflows it learned from you, and whether each may be handed off), **Memory** (what was on your screen, only when you let agents search it), **daily summaries** (what you worked on each day) and your **profile** (tools, working hours, writing style). All of it stays on your Mac.
 
-- **In the app.** **Commonplace…** in the menu bar opens one search over your Memory, days and Skills, grouped by kind (what you saw first), with scope chips (All, Memory, Days, Skills). Return opens a result: a moment in place, a Skill in Workflows, a day in the Daily Digest. Your own search always includes Memory; a line at the top says what agents can see and turns their Memory access on or off.
+- **In the app.** **Commonplace…** in the menu bar opens one search over your Memory, days and Skills, grouped by kind (what you saw first), with scope chips (All, Memory, Days, Skills). Before you type it lists the newest of each, newest first. Return opens a result: a moment in place, a Skill in Workflows, a day in the Daily Digest. Your own search always includes Memory; a line at the top says what agents can see and turns their Memory access on or off.
 - **Agents know it exists.** The MCP server's instructions describe Commonplace to every connected agent, and `agenthandover connect` adds a short Commonplace note where each agent reads its instructions (Claude Code's `/agenthandover-list`, Codex's `AGENTS.md` block, an `agenthandover-commonplace` Skill for Hermes, `memory/apprentice/commonplace.md` in the OpenClaw workspace; `connect mcp` prints it for any other agent).
-- **One search, grouped by kind.** `search_commonplace(query, kinds?, since?, until?, limit?)` over MCP, `agenthandover search "…"` in a terminal (`--kinds skills,memory,days,profile`, `--since`, `--until`, `-n`, `--json`), or `POST /commonplace/search` on the REST API. Each kind is ranked by its own scorer and returned in its own group, so a Skill's score is never weighed against a Memory moment's. When an embedding model is busy or down, that kind falls back to matching the query's words and says so.
+- **One search, grouped by kind.** `search_commonplace(query, kinds?, since?, until?, limit?)` over MCP (an empty query lists the newest of each kind), `agenthandover search "…"` in a terminal (`--kinds skills,memory,days,profile`, `--since`, `--until`, `-n`, `--json`), or `POST /commonplace/search` on the REST API. Each kind is ranked by its own scorer and returned in its own group, so a Skill's score is never weighed against a Memory moment's. When an embedding model is busy or down, that kind falls back to matching the query's words and says so.
 - **What agents get.** Text: Skill titles, descriptions and hand-off status; Memory descriptions, apps, window titles and times; a day's date, apps and an excerpt of its tasks; the profile. Never vectors, images, thumbnails or file paths. Memory answers only while **Let agents search my Memory** is on; otherwise its group says how you can turn it on. The switch applies to the next search, no restart.
-- **Things to try.** In the app (the empty Commonplace window offers these too): *"the invoice from Acme"*, *"that page with the orange header"* (by how it looked), *"the error in the terminal"*, *"how I deploy to staging"* (a Skill), *"the day I spent in Figma"* (a day). Ask your agent:
+- **Things to try.** In the app (Commonplace offers these too while nothing is kept yet): *"the invoice from Acme"*, *"that page with the orange header"* (by how it looked), *"the error in the terminal"*, *"how I deploy to staging"* (a Skill), *"the day I spent in Figma"* (a day). Ask your agent:
   - *"Write my weekly update from what I actually did this week."*
   - *"Find the pricing article I read yesterday and summarise it."* (needs Memory access)
   - *"Pick up where I left off on the onboarding doc."* (needs Memory access)
@@ -634,6 +634,11 @@ GitHub [Discussions](https://github.com/sandroandric/AgentHandover/discussions) 
 [sandro@sandric.co](mailto:sandro@sandric.co)
 
 ## Changelog
+
+### v2.0.3
+
+- **Commonplace shows what it keeps before you type.** Open it and the newest moments, days and Skills are there, newest first; type to search. Agents can ask for the newest too (`search_commonplace` with an empty query).
+- **Frames are of the window you work in.** A toolbar on top could be captured instead of your window: every Comet frame was one of its toolbar strips, a black band. Frames now come from the app you are using, from its titled window (the page, the document), never a bar.
 
 ### v2.0.2
 

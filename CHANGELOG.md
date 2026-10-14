@@ -7,6 +7,30 @@ and the project follows [Semantic Versioning](https://semver.org/). Up to 0.5.0,
 minor bumps could include breaking changes; 2.0.0 follows 0.5.0 directly (there is
 no 0.6 or 1.x). The README's Changelog section has the prose version of every release.
 
+## [2.0.3] — unreleased
+
+### Fixed
+- **Frames are of the window you work in** (WP-E17). The app took the
+  topmost ordinary window of any app as the focused one, so toolbars on top
+  were captured instead: Comet draws its tab strip and toolbar as untitled
+  windows (1512 x 43, x 42 and x 121 on a MacBook Pro) above its page
+  window, and every Comet frame (and its Memory moment) was a black band
+  with nothing to read. It now takes, of the frontmost app, the frontmost
+  window with a title, else its largest, skipping bars under 100 points
+  either way (`ObservationService.focusedWindow(in:frontmostPID:)`).
+  Checked against the MacBook Pro's live window list. Proof:
+  `FocusedWindowTests`.
+
+### Added
+- **Commonplace shows what it keeps before you type.** Opened (or cleared),
+  it lists the newest moments, days and Skills, newest first, instead of
+  only examples; the examples show while nothing is kept yet. An empty
+  query to `/memory/search`, `/commonplace/search` or the agents'
+  `search_commonplace` lists the newest of each kind (mode `recent`), read
+  from the tables without a model call (`MemoryIndex.recent`,
+  `KnowledgeBase.recent_procedure_slugs`). Proof: `test_memory_index.py`,
+  `test_memory_api.py`, `test_commonplace.py`, `CommonplaceTests`.
+
 ## [2.0.2] — 2026-10-14
 
 ### Fixed

@@ -167,7 +167,8 @@ def build_mcp_server():
         """Search Commonplace: everything AgentHandover knows about the user's work.
 
         Use this before asking the user about their own work, tools, habits
-        or something they saw.  *kinds* picks what to search, any of
+        or something they saw.  An empty *query* lists the newest of each
+        kind (what they saw last, their latest days, the Skills changed last).  *kinds* picks what to search, any of
         ``skills`` (workflows learned from the user), ``memory`` (what was
         on their screen; only when the user lets agents search Memory),
         ``days`` (daily summaries) and ``profile`` (tools, working hours,

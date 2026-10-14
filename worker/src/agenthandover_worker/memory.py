@@ -1172,7 +1172,8 @@ class MemoryIndex:
         app: str | None = None,
         limit: int = 10,
     ) -> list[dict]:
-        """The moments that best match *query*, best first.
+        """The moments that best match *query*, best first; an empty
+        *query* lists the newest moments, newest first (:meth:`recent`).
 
         *since*/*until* keep moments that overlap the range; *app* keeps
         one app (case-insensitive).  Each moment is a run of rows of one
@@ -1183,8 +1184,10 @@ class MemoryIndex:
         none), ``score`` (float32, keyword boost included) and ``rows``
         (the row ids, in time order).
         """
-        if not query.strip() or limit <= 0:
+        if limit <= 0:
             return []
+        if not query.strip():
+            return self.recent(since=since, until=until, app=app, limit=limit)
         with self._lock:
             self._used = self._clock()
             self.refresh()
@@ -1192,6 +1195,66 @@ class MemoryIndex:
                 return []
             self._arm()
             return self._search(query, since=since, until=until, app=app, limit=limit)
+
+    def recent(
+        self,
+        *,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        app: str | None = None,
+        limit: int = 10,
+    ) -> list[dict]:
+        """The newest moments of this index's model, newest first: what
+        Commonplace shows before anything is typed.  Read from the table
+        (no vectors, no model call).  Rows of one window (app and title)
+        less than :data:`MOMENT_GAP_SECONDS` apart are one moment, as in
+        :meth:`search`; its ``id``, description and thumbnail are its newest
+        row's (the newest kept description and thumbnail when that row has
+        none); ``score`` is 0.0 (nothing was matched).  Same filters and
+        fields as :meth:`search`."""
+        if limit <= 0:
+            return []
+        where = ["model = ?", "dim = ?"]
+        params: list[Any] = [self.model, self.dim]
+        if since is not None:
+            where.append("julianday(last_ts) >= julianday(?)")
+            params.append(utc_text(since))
+        if until is not None:
+            where.append("julianday(first_ts) <= julianday(?)")
+            params.append(utc_text(until))
+        if app:
+            where.append("app = ? COLLATE NOCASE")
+            params.append(app)
+        moments: list[dict] = []
+        with self._lock:
+            for row in self._conn.execute(
+                "SELECT id, first_ts, last_ts, frames, app, window_title, url_host, "
+                f"description, thumb_id FROM memory_frames WHERE {' AND '.join(where)} "
+                "ORDER BY julianday(last_ts) DESC, id",
+                params,
+            ):
+                current = moments[-1] if moments else None
+                if (
+                    current is not None
+                    and (current["app"], current["window_title"]) == (row["app"], row["window_title"])
+                    and _epoch(current["first_ts"]) - _epoch(row["last_ts"]) < MOMENT_GAP_SECONDS
+                ):
+                    current["first_ts"] = row["first_ts"]
+                    current["frames"] += int(row["frames"])
+                    current["description"] = current["description"] or row["description"]
+                    current["thumb_id"] = current["thumb_id"] or row["thumb_id"]
+                    current["rows"].insert(0, row["id"])
+                    continue
+                if len(moments) == limit:
+                    break
+                moments.append({
+                    "id": row["id"], "first_ts": row["first_ts"], "last_ts": row["last_ts"],
+                    "frames": int(row["frames"]), "app": row["app"],
+                    "window_title": row["window_title"], "url_host": row["url_host"],
+                    "description": row["description"], "thumb_id": row["thumb_id"],
+                    "score": 0.0, "rows": [row["id"]],
+                })
+        return moments
 
     def _search(
         self, query: str, *, since: datetime | None, until: datetime | None,

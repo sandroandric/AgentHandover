@@ -128,6 +128,20 @@ def test_search_returns_moments_with_the_contracts_fields(api):
     assert {m["id"] for m in body["moments"][1:]} == {"chat", "standup"}  # score 0, a tie
 
 
+def test_no_query_lists_the_newest_moments_without_the_model(api):
+    """What Commonplace shows before anything is typed (2.0.3): absent or
+    blank, the newest moments first, with the same fields and filters."""
+    api.embedder.down = True  # browsing needs no model
+    for body in ({}, {"query": ""}, {"query": "  "}):
+        status, reply = call(api.srv, "POST", "/memory/search", body)
+        assert status == 200, reply
+        assert [m["id"] for m in reply["moments"]] == ["chat", "inv", "standup"]
+        assert all(m["score"] == 0.0 for m in reply["moments"])
+    status, reply = call(api.srv, "POST", "/memory/search", {"limit": 1, "app": "zoom.us"})
+    assert [m["id"] for m in reply["moments"]] == ["standup"]
+    assert api.embedder.queries == [], "browsing embeds nothing"
+
+
 def test_search_filters_and_limit(api):
     def ids(body):
         status, reply = call(api.srv, "POST", "/memory/search", body)
@@ -141,9 +155,8 @@ def test_search_filters_and_limit(api):
 
 
 @pytest.mark.parametrize("body, error", [
-    ({}, "'query'"),
-    ({"query": "  "}, "'query'"),
     ({"query": 3}, "'query'"),
+    ({"query": ["x"]}, "'query'"),
     ({"query": "x", "limit": 0}, "'limit'"),
     ({"query": "x", "limit": 101}, "'limit'"),
     ({"query": "x", "limit": True}, "'limit'"),

@@ -126,9 +126,11 @@ class MemoryService:
     def search(self, body: Any) -> Reply:
         if not isinstance(body, dict):
             return 400, {"error": "the body must be a JSON object"}
-        query = body.get("query")
-        if not isinstance(query, str) or not query.strip():
-            return 400, {"error": "'query' must be a non-empty string"}
+        # No query (absent or blank) lists the newest moments: what
+        # Commonplace shows before anything is typed.
+        query = body.get("query", "")
+        if not isinstance(query, str):
+            return 400, {"error": "'query' must be a string"}
         limit = body.get("limit", DEFAULT_LIMIT)
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= MAX_LIMIT:
             return 400, {"error": f"'limit' must be an integer from 1 to {MAX_LIMIT}"}

@@ -324,7 +324,7 @@ def test_results_are_text_never_vectors_images_ids_or_paths(hub):
 
 
 @pytest.mark.parametrize(("kwargs", "error"), [
-    ({"query": ""}, "'query' must be a non-empty string"),
+    ({"query": 3}, "'query' must be a string"),
     ({"query": "x", "kinds": []}, "'kinds' must be a non-empty list"),
     ({"query": "x", "kinds": "skills"}, "'kinds' must be a non-empty list"),
     ({"query": "x", "kinds": ["skills", "files"]}, "unknown kind(s): files"),
@@ -338,6 +338,47 @@ def test_bad_requests_say_what_is_wrong(hub, kwargs, error):
     with pytest.raises(ValueError) as exc:
         hub.hub.search(**kwargs)
     assert error in str(exc.value)
+
+
+# -- browsing: nothing typed (2.0.3) --------------------------------------
+
+
+def test_nothing_typed_lists_the_newest_of_each_kind_without_a_model(hub):
+    """Commonplace opened with an empty box: the newest moments, days and
+    Skills, mode ``recent``, and no query embedded by either model."""
+    hub.config = dataclasses.replace(
+        hub.config, memory=MemoryConfig(enabled=True, agents_access=True),
+    )
+    _set_updated(hub)
+    answer = hub.hub.search("", limit=5)
+    assert answer["query"] == ""
+    assert [m["description"] for m in answer["memory"]["results"]] == [
+        "Paying the Acme invoice", "Checking whether example.com the domain is free",
+    ]
+    assert [d["date"] for d in answer["days"]["results"]] == ["2026-10-12", "2026-10-10"]
+    assert [s["slug"] for s in answer["skills"]["results"]] == [
+        "deploy-staging", "check-domain", "old-domain-report",
+    ]
+    assert {answer[k]["mode"] for k in ("memory", "days", "skills")} == {"recent"}
+    assert hub.text_calls == [] and hub.memory_calls == []
+    # None means the same; the range and the limit apply.
+    assert hub.hub.search(None, kinds=["days"], since="2026-10-11T00:00:00Z")["days"]["results"][0]["date"] == "2026-10-12"
+    assert len(hub.hub.search("", kinds=["skills"], limit=1)["skills"]["results"]) == 1
+    # Memory stays behind the agents switch when nothing is typed too.
+    hub.config = dataclasses.replace(hub.config, memory=MemoryConfig(enabled=True, agents_access=False))
+    assert hub.hub.search("")["memory"]["mode"] == "not_allowed"
+
+
+def _set_updated(hub) -> None:
+    import sqlite3
+
+    conn = sqlite3.connect(hub.world.db)
+    for slug, at in (("deploy-staging", "2026-10-12T10:00:00Z"),
+                     ("check-domain", "2026-10-11T10:00:00Z"),
+                     ("old-domain-report", "2026-10-01T10:00:00Z")):
+        conn.execute("UPDATE procedures SET updated_at = ? WHERE slug = ?", (at, slug))
+    conn.commit()
+    conn.close()
 
 
 # -- POST /commonplace/search --------------------------------------------
@@ -384,7 +425,7 @@ def test_api_bad_requests_are_400(api):
         400, {"error": "unknown kind(s): nope (known: skills, memory, days, profile)"},
     )
     assert _post(api, {"query": "x", "app": "Slack"}) == (400, {"error": "unknown field(s): app"})
-    assert _post(api, {"limit": 3})[0] == 400
+    assert _post(api, {"query": ["x"]})[0] == 400
     assert _post(api, None, raw=b"[1]") == (400, {"error": "Request body must be a JSON object"})
     assert _post(api, None, raw=b"{")[0] == 400
     assert _post(api, None, raw=b"")[0] == 400

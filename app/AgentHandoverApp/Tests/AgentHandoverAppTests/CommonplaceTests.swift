@@ -549,17 +549,43 @@ final class CommonplaceTests: XCTestCase {
         XCTAssertEqual(model.memoryProblem, .off)
     }
 
-    func testAnEmptyQueryClearsTheResults() async {
+    /// Nothing typed (on opening, or after clearing a search): the window
+    /// asks the worker for the newest of each kind and lists them (2.0.3;
+    /// it used to show only examples until something was searched).
+    func testNothingTypedListsTheNewestOfEachKind() async throws {
         answerEverything()
         let model = model()
+        XCTAssertTrue(model.isBrowsing)
+        XCTAssertFalse(model.hasSomethingToBrowse)
+        await model.run(force: true)
+        XCTAssertEqual(model.phase, .results)
+        XCTAssertTrue(model.hasSomethingToBrowse)
+        XCTAssertEqual(model.selectedID, "moment:ev-1")
+        // Both endpoints were asked with an empty query.
+        let memoryBody = try XCTUnwrap(body(worker.requests(to: "/memory/search").last))
+        XCTAssertTrue(memoryBody.contains(#""query":"""#), memoryBody)
+        let textBody = try XCTUnwrap(body(worker.requests(to: "/commonplace/search").last))
+        XCTAssertTrue(textBody.contains(#""query":"""#), textBody)
+
+        // A search, then clearing it, goes back to the newest.
         model.query = "domain"
         await model.run(force: true)
+        XCTAssertFalse(model.isBrowsing)
         model.query = "   "
         await model.run(force: false)
-        XCTAssertEqual(model.phase, .idle)
-        XCTAssertEqual(model.results, .empty)
-        XCTAssertEqual(model.lastQuery, "")
+        XCTAssertTrue(model.hasSomethingToBrowse)
         XCTAssertFalse(model.isShowingResults(for: "domain"))
+    }
+
+    func testBrowsingWithNothingKeptHasNothingToBrowse() async {
+        worker.answers["/commonplace/search"] = (200, #"{"query": "", "skills": {"mode": "recent", "reason": "", "results": []}, "days": {"mode": "recent", "reason": "", "results": []}}"#)
+        worker.answers["/memory/search"] = (200, #"{"moments": [], "model": "embeddinggemma-2:440m"}"#)
+        let model = model()
+        await model.run(force: true)
+        XCTAssertEqual(model.phase, .results)
+        XCTAssertFalse(model.hasSomethingToBrowse, "the examples show instead")
+        XCTAssertEqual(CommonplaceKind.memory.noneYet, "No moments yet.")
+        XCTAssertEqual(CommonplaceKind.days.noneYet, "No daily summaries yet.")
     }
 
     // MARK: - Polish

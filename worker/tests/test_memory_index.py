@@ -427,3 +427,44 @@ def test_concurrent_searches_and_releases_agree(tmp_path):
         thread.join()
         index.close()
     assert not errors
+
+
+# -- browsing: an empty query lists the newest moments (2.0.3) -------------
+
+
+def test_an_empty_query_lists_the_newest_moments_without_the_model(tmp_path):
+    """Commonplace opened with nothing typed: the newest moments first,
+    rows of one window less than MOMENT_GAP_SECONDS apart as one moment,
+    no query embedded."""
+    db_path = _db(tmp_path)
+    v = [1.0, 0.0, 0.0, 0.0]
+    gap = timedelta(seconds=MOMENT_GAP_SECONDS + 5)
+    t = START
+    _insert(db_path, [
+        ("a1", t, t + timedelta(seconds=10), "Mail", "Inbox", "inbox with the invoice", v),
+        ("a2", t + timedelta(seconds=20), t + timedelta(seconds=30), "Mail", "Inbox", "", v),
+        ("b1", t + timedelta(seconds=40), t + timedelta(seconds=50), "Xcode", "App.swift", "code", v),
+        ("c1", t + timedelta(seconds=50) + gap, t + timedelta(seconds=60) + gap, "Xcode", "App.swift", "later", v),
+        ("other", t + timedelta(hours=1), t + timedelta(hours=1), "Mail", "Inbox", "another model", v),
+    ])
+    sqlite3.connect(db_path).execute("UPDATE memory_frames SET model = 'x' WHERE id = 'other'").connection.commit()
+
+    def no_model(text):
+        raise AssertionError("browsing embeds nothing")
+
+    index = MemoryIndex(db_path, model=MODEL, dim=4, embed_query=no_model)
+    try:
+        found = index.search("  ", limit=10)
+        assert [m["id"] for m in found] == ["c1", "b1", "a2"]
+        # The two Mail rows are one moment: its newest row, the kept description.
+        mail = found[2]
+        assert mail["rows"] == ["a1", "a2"] and mail["frames"] == 2
+        assert mail["first_ts"] == utc_text(t) and mail["description"] == "inbox with the invoice"
+        assert all(m["score"] == 0.0 for m in found)
+        # Filters and the limit, as for a search.
+        assert [m["id"] for m in index.search("", limit=1)] == ["c1"]
+        assert [m["id"] for m in index.search("", app="mail")] == ["a2"]
+        assert [m["id"] for m in index.search("", until=t + timedelta(seconds=45))] == ["b1", "a2"]
+        assert index.search("", since=t + timedelta(hours=2)) == []
+    finally:
+        index.close()

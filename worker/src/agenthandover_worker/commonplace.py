@@ -248,12 +248,16 @@ class Commonplace:
         of *kinds* (default ``skills``, ``memory``, ``days``), each kind's
         results ranked by its own scorer, at most *limit* each.  *since* /
         *until* (ISO-8601) keep Memory moments and days that overlap the
-        range; Skills and the profile are not tied to a time.
+        range; Skills and the profile are not tied to a time.  An empty
+        *query* lists the newest of each kind (mode ``recent``): the
+        moments, days and Skills Commonplace shows before anything is typed.
 
         Raises ValueError (saying what is wrong) for a bad request.
         """
-        if not isinstance(query, str) or not query.strip():
-            raise ValueError("'query' must be a non-empty string")
+        if query is None:
+            query = ""
+        if not isinstance(query, str):
+            raise ValueError("'query' must be a string")
         if kinds is None:
             kinds = DEFAULT_KINDS
         if (
@@ -277,8 +281,13 @@ class Commonplace:
 
         vector: dict[str, Any] = {}  # the text query's vector, embedded once
         answer: dict[str, Any] = {"query": query}
+        browse = not query.strip()
         for kind in dict.fromkeys(kinds):
-            if kind == "skills":
+            if browse and kind == "skills":
+                answer[kind] = self._recent_skills(limit)
+            elif browse and kind == "days":
+                answer[kind] = self._recent_days(since_at, until_at, limit)
+            elif kind == "skills":
                 answer[kind] = self._skills_group(query, limit, vector)
             elif kind == "memory":
                 answer[kind] = self.memory(query, since=since_at, until=until_at, limit=limit)
@@ -348,6 +357,15 @@ class Commonplace:
                     ]
         return "keyword_fallback", reason, keyword_skills(list(procedures.values()), query, limit)
 
+    def _recent_skills(self, limit: int) -> dict:
+        """The Skills changed last, newest first."""
+        kb = self._kb()
+        return group("recent", "", [
+            skill_item(proc, 0.0)
+            for proc in (kb.get_procedure(slug) for slug in kb.recent_procedure_slugs(limit))
+            if proc is not None
+        ])
+
     def _skills_group(self, query: str, limit: int, cache: dict) -> dict:
         mode, reason, hits = self.skills(query, limit, cache)
         return group(mode, reason, [skill_item(proc, score) for proc, score in hits])
@@ -380,6 +398,10 @@ class Commonplace:
         def moments(found: list[dict]) -> list[dict]:
             return [{k: m[k] for k in MEMORY_FIELDS} for m in found]
 
+        if not query.strip():
+            # The newest moments: read from the table, no model needed.
+            return group("recent", "", moments(self._memory(cfg, "", keyword=False, **filters)))
+
         down_until, reason = self._memory_down
         if time.monotonic() >= down_until:
             try:
@@ -402,6 +424,22 @@ class Commonplace:
     def _local_day(self, moment: datetime) -> str:
         local = moment.astimezone(self.local_tz) if self.local_tz else moment.astimezone()
         return local.date().isoformat()
+
+    def _recent_days(self, since: datetime | None, until: datetime | None, limit: int) -> dict:
+        """The newest daily summaries in the range, newest first."""
+        first = self._local_day(since) if since is not None else None
+        last = self._local_day(until) if until is not None else None
+        kb = self._kb()
+        found = []
+        for day in kb.list_daily_summaries(limit=100_000):
+            if (first is not None and day < first) or (last is not None and day > last):
+                continue
+            summary = kb.get_daily_summary(day)
+            if summary is not None:
+                found.append(day_item(day, summary, 0.0))
+            if len(found) == limit:
+                break
+        return group("recent", "", found)
 
     def _days_group(
         self,

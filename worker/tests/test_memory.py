@@ -809,7 +809,8 @@ def test_search_ranks_by_vector_and_filters_by_time_and_app(env):
     until = NOW - timedelta(minutes=250)
     assert [h["id"] for h in index.search("invoice", until=until, limit=5)] == ["r1"]
     assert index.search("lunch", limit=1)[0]["id"] == "r2"
-    assert index.search("   ") == []
+    # Nothing typed lists the newest moments (2.0.3): r3 is the latest.
+    assert [h["id"] for h in index.search("   ")] == ["r3", "r2", "r1"]
 
 
 def test_search_boosts_rows_whose_description_holds_every_word(env):

@@ -127,6 +127,15 @@ enum CommonplaceKind: String, CaseIterable, Identifiable {
         case .days: return "No days match."
         }
     }
+
+    /// The group's line when nothing was typed and it has nothing yet.
+    var noneYet: String {
+        switch self {
+        case .skills: return "No Skills yet."
+        case .memory: return "No moments yet."
+        case .days: return "No daily summaries yet."
+        }
+    }
 }
 
 /// The scope chips: everything, or one kind.

@@ -196,41 +196,74 @@ final class ObservationService {
 
     func getFocusedWindow(displays: [ObservationDisplayInfo]) -> ObservationWindowInfo? {
         let options: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
-        guard let windowList = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else {
+        guard let windowList = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]],
+              let dict = Self.focusedWindow(
+                  in: windowList,
+                  frontmostPID: NSWorkspace.shared.frontmostApplication.map { Int($0.processIdentifier) }
+              ) else {
             return nil
         }
 
-        for dict in windowList {
-            guard let layer = dict[kCGWindowLayer as String] as? Int, layer == 0 else {
-                continue
+        let ownerName = dict[kCGWindowOwnerName as String] as? String ?? ""
+        let windowNumber = dict[kCGWindowNumber as String] as? Int ?? 0
+        let title = dict[kCGWindowName as String] as? String ?? ""
+        let ownerPID = dict[kCGWindowOwnerPID as String] as? Int ?? 0
+        let bounds = Self.bounds(of: dict)
+
+        return ObservationWindowInfo(
+            windowId: String(windowNumber),
+            appId: "pid:\(ownerPID):\(ownerName)",
+            title: title,
+            boundsGlobalPx: bounds,
+            zOrder: 0,
+            isFullscreen: isWindowFullscreen(bounds: bounds, displays: displays)
+        )
+    }
+
+    /// Narrower or shorter than this (points), a window is a bar or a strip,
+    /// not one you work in.
+    static let minimumWindowSide = 100
+
+    /// The window you are working in, from `windowList` (front to back, as
+    /// `CGWindowListCopyWindowInfo` returns it), among ordinary windows
+    /// (layer 0, an owner, at least `minimumWindowSide` each way): of the
+    /// frontmost app (else of every app), the frontmost one with a title,
+    /// else the largest.  Taking simply the topmost layer-0 window caught
+    /// toolbars: Comet draws its tab strip and toolbar as untitled windows
+    /// (1512 x 43, x 42 and x 121 on a MacBook Pro) above the titled page
+    /// window, and every Comet frame was a black band.
+    static func focusedWindow(in windowList: [[String: Any]], frontmostPID: Int?) -> [String: Any]? {
+        let ordinary = windowList.filter { dict in
+            guard let layer = dict[kCGWindowLayer as String] as? Int, layer == 0,
+                  let owner = dict[kCGWindowOwnerName as String] as? String, !owner.isEmpty else {
+                return false
             }
-
-            let ownerName = dict[kCGWindowOwnerName as String] as? String ?? ""
-            guard !ownerName.isEmpty else { continue }
-
-            let windowNumber = dict[kCGWindowNumber as String] as? Int ?? 0
-            let title = dict[kCGWindowName as String] as? String ?? ""
-            let ownerPID = dict[kCGWindowOwnerPID as String] as? Int ?? 0
-
-            let boundsDict = dict[kCGWindowBounds as String] as? [String: Any] ?? [:]
-            let bounds = [
-                Int((boundsDict["X"] as? Double) ?? 0),
-                Int((boundsDict["Y"] as? Double) ?? 0),
-                Int((boundsDict["Width"] as? Double) ?? 0),
-                Int((boundsDict["Height"] as? Double) ?? 0)
-            ]
-
-            return ObservationWindowInfo(
-                windowId: String(windowNumber),
-                appId: "pid:\(ownerPID):\(ownerName)",
-                title: title,
-                boundsGlobalPx: bounds,
-                zOrder: 0,
-                isFullscreen: isWindowFullscreen(bounds: bounds, displays: displays)
-            )
+            let b = bounds(of: dict)
+            return b[2] >= minimumWindowSide && b[3] >= minimumWindowSide
         }
+        let own = frontmostPID.map { pid in
+            ordinary.filter { ($0[kCGWindowOwnerPID as String] as? Int) == pid }
+        } ?? []
+        let candidates = own.isEmpty ? ordinary : own
+        if let titled = candidates.first(where: { !(($0[kCGWindowName as String] as? String) ?? "").isEmpty }) {
+            return titled
+        }
+        return candidates.max { area($0) < area($1) }
+    }
 
-        return nil
+    private static func area(_ dict: [String: Any]) -> Int {
+        let b = bounds(of: dict)
+        return b[2] * b[3]
+    }
+
+    static func bounds(of dict: [String: Any]) -> [Int] {
+        let boundsDict = dict[kCGWindowBounds as String] as? [String: Any] ?? [:]
+        return [
+            Int((boundsDict["X"] as? Double) ?? 0),
+            Int((boundsDict["Y"] as? Double) ?? 0),
+            Int((boundsDict["Width"] as? Double) ?? 0),
+            Int((boundsDict["Height"] as? Double) ?? 0)
+        ]
     }
 
     private func getCursorPosition() -> ObservationCursorPosition? {
