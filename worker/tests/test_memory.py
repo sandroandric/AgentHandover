@@ -551,11 +551,11 @@ def test_the_model_schedulers_guard_makes_frames_wait(env):
     assert rows(env) == []
 
 
-def _embedding_scheduler(*, free=8 * GB, swap=lambda: 0, disk=100 * GB, level=1):
+def _embedding_scheduler(*, free=8 * GB, swap=lambda: 0, disk=100 * GB, level=1, ram=16 * GB):
     return ModelScheduler(
         SimpleNamespace(), annotation_model="a", sop_model="b",
         free_memory=lambda: free, swap_used=swap, free_disk=lambda: disk,
-        pressure_level=lambda: level,
+        pressure_level=lambda: level, ram=lambda: ram,
     )
 
 
@@ -590,9 +590,10 @@ def test_the_pressure_level_reader_parses_sysctl(monkeypatch):
     assert ms.memory_pressure_level() is None
 
 
-def test_the_sop_model_keeps_the_swap_limit():
-    sched = _embedding_scheduler(swap=lambda: 20 * GB)
+def test_the_sop_model_keeps_a_swap_cap_the_embedding_model_does_not():
+    sched = _embedding_scheduler(swap=lambda: 40 * GB)
     assert "swap in use" in sched._pressure()
+    assert sched.embedding_blocker() is None
 
 
 def test_held_paths_keep_the_orphan_sweep_off_memorys_frames(env):

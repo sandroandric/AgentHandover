@@ -97,6 +97,10 @@ enum Commands {
         /// app's onboarding shows)
         #[arg(long, conflicts_with = "extension_json")]
         ollama_json: bool,
+        /// With --ollama-json: report for this mode instead of the one
+        /// config.toml names (setup, before the choice is written)
+        #[arg(long, requires = "ollama_json", value_parser = ["skills", "memory-only"])]
+        mode: Option<String>,
         /// Print only whether the browser extension is built and loaded in
         /// a browser, as JSON (what the app's setup shows)
         #[arg(long)]
@@ -364,7 +368,9 @@ fn main() -> Result<()> {
         Commands::Setup { check, extension, vlm, tier, .. } => {
             commands::setup::run(check, extension, vlm, tier.as_deref())
         }
-        Commands::Doctor { ollama_json: true, .. } => commands::doctor::print_ollama_json(),
+        Commands::Doctor { ollama_json: true, mode, .. } => {
+            commands::doctor::print_ollama_json(mode.map(|m| m == "memory-only"))
+        }
         Commands::Doctor { extension_json: true, .. } => commands::doctor::print_extension_json(),
         Commands::Doctor { .. } => commands::doctor::run(),
         Commands::Uninstall { purge_data } => commands::uninstall::run(purge_data),

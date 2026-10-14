@@ -24,7 +24,6 @@ from agenthandover_worker.model_scheduler import (
     LOAD_START_SECONDS,
     LOAD_TIMEOUT_SECONDS,
     DISK_FLOOR_BYTES,
-    SWAP_LIMIT_BYTES,
     ModelScheduler,
     before_generation_call,
     parse_swapusage,
@@ -114,14 +113,16 @@ class Clock:
         return self.now
 
 
-def _scheduler(fake, *, free=16 * GB, clock=None, annotation=QWEN, sop=GEMMA):
-    """*memory* holds ``free``, ``swap`` (bytes in use) and ``disk`` (bytes
-    free); the tests change them between ticks."""
-    memory = {"free": free, "swap": 0, "disk": 100 * GB}
+def _scheduler(fake, *, free=16 * GB, clock=None, annotation=QWEN, sop=GEMMA, ram=16 * GB):
+    """*memory* holds ``free``, ``swap`` (bytes in use), ``disk`` (bytes
+    free), ``level`` (macOS's pressure level) and ``ram``; the tests change
+    them between ticks."""
+    memory = {"free": free, "swap": 0, "disk": 100 * GB, "level": 1, "ram": ram}
     scheduler = ModelScheduler(
         fake, annotation_model=annotation, sop_model=sop,
         clock=clock or Clock(), free_memory=lambda: memory["free"],
         swap_used=lambda: memory["swap"], free_disk=lambda: memory["disk"],
+        pressure_level=lambda: memory["level"], ram=lambda: memory["ram"],
     )
     return scheduler, memory
 
@@ -503,8 +504,9 @@ def test_swap_usage_is_read_from_sysctl():
 
 
 def test_heavy_swap_refuses_the_load_then_it_runs_when_swap_drops():
-    """The test Mac panicked loading a 7 GB model with ~44 GB swapped out:
-    enough free pages is not enough when the Mac is already swapping."""
+    """The 16 GB test Mac panicked loading a 7 GB model with ~44 GB swapped
+    out: enough free pages is not enough when the Mac is already swapping.
+    The cap is twice the Mac's memory."""
     fake = FakeOllama({QWEN: QWEN_SIZE})
     scheduler, memory = _scheduler(fake, free=16 * GB)
     component = FakeGenerator(fake)
@@ -513,17 +515,53 @@ def test_heavy_swap_refuses_the_load_then_it_runs_when_swap_drops():
 
     assert scheduler.plan_generation(urgent=False, due={"daily": True}).run is False
     assert scheduler.reason == (
-        "waiting: 44.0 GB of swap in use (limit 8.0 GB): the Mac is short of memory"
+        "waiting: 44.0 GB of swap in use (limit 32.0 GB, twice this Mac's memory): "
+        "the Mac is short of memory"
     )
     assert scheduler.status()["generation_waiting"] == scheduler.reason
     assert ("unload", QWEN) not in fake.log
     assert GEMMA not in _generations(fake.log)
 
-    memory["swap"] = SWAP_LIMIT_BYTES  # at the limit is not over it
+    memory["swap"] = 32 * GB  # at the limit is not over it
     assert scheduler.plan_generation(urgent=False, due={"daily": True}).allows("daily")
     assert scheduler.reason is None
     component.call()
     assert ("load", GEMMA, GEMMA_CTX) in fake.log
+
+
+def test_swap_left_in_use_on_a_larger_mac_does_not_hold_back_the_skills_model():
+    """A 24 GB MacBook Pro at 8.5 GB of swap with normal pressure (2.0.0's
+    fixed 8 GB limit refused it): the swap is left over, the Mac is fine."""
+    fake = FakeOllama({QWEN: QWEN_SIZE})
+    scheduler, memory = _scheduler(fake, ram=24 * GB)
+    memory["swap"] = 8_500_000_000
+    assert scheduler.plan_generation(urgent=False, due={"daily": True}).allows("daily")
+    assert scheduler.reason is None
+
+
+def test_macos_memory_pressure_refuses_the_load_at_any_swap():
+    fake = FakeOllama({QWEN: QWEN_SIZE})
+    scheduler, memory = _scheduler(fake)
+    memory["level"] = 2
+    assert scheduler.plan_generation(urgent=False, due={"daily": True}).run is False
+    assert scheduler.reason == "waiting: macOS reports memory pressure (warning)"
+    memory["level"] = 4
+    assert scheduler.plan_generation(urgent=False, due={"daily": True}).run is False
+    assert scheduler.reason == "waiting: macOS reports memory pressure (critical)"
+    memory["level"] = 1
+    assert scheduler.plan_generation(urgent=False, due={"daily": True}).allows("daily")
+
+
+def test_the_swap_cap_is_twice_the_macs_memory_and_none_when_unknown():
+    from agenthandover_worker.model_scheduler import swap_cap_bytes
+
+    assert swap_cap_bytes(16 * GB) == 32 * GB
+    assert swap_cap_bytes(24 * GB) == 48 * GB
+    assert swap_cap_bytes(None) is None and swap_cap_bytes(0) is None
+    fake = FakeOllama({QWEN: QWEN_SIZE})
+    scheduler, memory = _scheduler(fake, ram=None)
+    memory["swap"] = 100 * GB
+    assert scheduler.plan_generation(urgent=False, due={"daily": True}).run is True
 
 
 def test_a_nearly_full_disk_refuses_the_load():
@@ -543,13 +581,13 @@ def test_a_focus_recording_under_swap_pressure_runs_on_the_resident_model():
     scheduler, memory = _scheduler(fake)
     component = FakeGenerator(fake)
     scheduler.register(component)
-    memory["swap"] = 20 * GB
+    memory["swap"] = 40 * GB
 
     plan = scheduler.plan_generation(urgent=True, due={})
     assert plan.run and plan.fallback and plan.model == QWEN
     assert scheduler.status()["generation_waiting"] == (
-        f"generating on {QWEN}: not loading {GEMMA}, 20.0 GB of swap in use "
-        "(limit 8.0 GB): the Mac is short of memory"
+        f"generating on {QWEN}: not loading {GEMMA}, 40.0 GB of swap in use "
+        "(limit 32.0 GB, twice this Mac's memory): the Mac is short of memory"
     )
     component.call()
     assert ("unload", QWEN) not in fake.log
@@ -561,7 +599,7 @@ def test_batched_work_under_swap_pressure_falls_back_after_the_wait():
     clock = Clock()
     fake = FakeOllama({QWEN: QWEN_SIZE})
     scheduler, memory = _scheduler(fake, clock=clock)
-    memory["swap"] = 20 * GB
+    memory["swap"] = 40 * GB
     assert scheduler.plan_generation(urgent=False, due={"daily": True}).run is False
     clock.now += FALLBACK_AFTER_SECONDS
     plan = scheduler.plan_generation(urgent=False, due={"daily": True})
@@ -573,6 +611,7 @@ def test_pressure_does_not_matter_once_the_sop_model_is_loaded_or_when_unknown()
     scheduler, memory = _scheduler(fake)
     memory["swap"] = 40 * GB
     memory["disk"] = 0
+    memory["level"] = 4
     plan = scheduler.plan_generation(urgent=False, due={"daily": True})
     assert plan.run and not plan.fallback
 
@@ -580,6 +619,7 @@ def test_pressure_does_not_matter_once_the_sop_model_is_loaded_or_when_unknown()
     scheduler, memory = _scheduler(fake)
     memory["swap"] = None
     memory["disk"] = None
+    memory["level"] = None
     assert scheduler.plan_generation(urgent=False, due={"daily": True}).run is True
 
 

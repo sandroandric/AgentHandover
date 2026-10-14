@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "AgentHandover Observer",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "Silent observer for workflow learning - captures DOM snapshots, click intent, and accessibility metadata",
   "permissions": ["nativeMessaging", "activeTab", "alarms"],
   "host_permissions": ["<all_urls>"],

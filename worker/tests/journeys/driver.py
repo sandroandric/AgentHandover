@@ -139,6 +139,9 @@ class JourneyWorker:
                 "free_memory": free_memory,
                 "swap_used": lambda: 0,
                 "free_disk": lambda: 100 * GB,
+                # This Mac's own pressure level must not decide a journey.
+                "pressure_level": lambda: 1,
+                "ram": lambda: 16 * GB,
             },
         )
         self.ctx.run_daily_jobs = run_daily_jobs

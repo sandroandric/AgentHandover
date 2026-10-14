@@ -1837,7 +1837,9 @@ struct OnboardingView: View {
                         }
                     }
 
-                        Button(ollamaHasRequiredModels ? "Refresh Models" : "Pull All Models") {
+                        Button(ollamaHasRequiredModels
+                               ? (setupMode.isMemoryOnly ? "Refresh Model" : "Refresh Models")
+                               : (setupMode.isMemoryOnly ? "Pull Model" : "Pull All Models")) {
                             pullOllamaModel()
                         }
                         .font(.system(size: 14, weight: .bold, design: .rounded))
@@ -2767,7 +2769,13 @@ struct OnboardingView: View {
                     running = true
                     let missingModels = requiredModels.filter { !installedModels.contains($0) }
                     hasRequiredModels = !requiredModels.isEmpty && missingModels.isEmpty
-                    if missingModels.isEmpty {
+                    if requiredModels.isEmpty {
+                        // Nothing this Ollama can run (Memory only on an
+                        // Ollama older than Memory's minimum): not ready.
+                        statusMessage = mode.isMemoryOnly
+                            ? "Memory needs Ollama \(table?.minimumOllamaVersionForMemory ?? "") or later: update Ollama, then Recheck."
+                            : "No models to download yet."
+                    } else if missingModels.isEmpty {
                         statusMessage = "Local setup looks good."
                     } else if installedModels.isEmpty {
                         statusMessage = "Ollama is running, but no models are downloaded yet."
@@ -2782,7 +2790,7 @@ struct OnboardingView: View {
             } else {
                 statusMessage = "Download and install Ollama to run models locally."
             }
-            let report = findCLIBinary().flatMap { OllamaReport.load(cliPath: $0) }
+            let report = findCLIBinary().flatMap { OllamaReport.load(cliPath: $0, mode: mode) }
 
             Task { @MainActor in
                 self.ollamaReport = report

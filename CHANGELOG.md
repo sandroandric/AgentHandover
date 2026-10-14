@@ -7,6 +7,28 @@ and the project follows [Semantic Versioning](https://semver.org/). Up to 0.5.0,
 minor bumps could include breaking changes; 2.0.0 follows 0.5.0 directly (there is
 no 0.6 or 1.x). The README's Changelog section has the prose version of every release.
 
+## [2.0.1] — unreleased
+
+### Fixed
+- **The Skills model's swap guard follows the Mac** (WP-E15). 2.0.0 refused
+  to load the Skill model while more than 8 GB of swap was in use, on any
+  Mac; swap stays in use long after the pressure that caused it, so a 24 GB
+  MacBook Pro at 8.5 GB of swap would not write Skills. The worker now
+  waits while macOS reports memory pressure (warning or critical), and
+  keeps swap only as an emergency stop at twice the Mac's memory
+  (`model_scheduler.SWAP_CAP_RAM_MULTIPLE`, `swap_cap_bytes`); the disk
+  floor is unchanged. `agenthandover doctor` warns at the same points
+  (`machine.rs` pins them to the worker's). Proof: `test_model_scheduler.py`
+  (the 24 GB case, pressure, the cap, unknown RAM), `machine.rs` tests.
+- **Setup's Ollama panel follows the picked mode.** It read config.toml,
+  which names the mode only once the models are pulled, so with Memory only
+  picked it warned about the Skill models' Ollama minimum and the swap
+  limit. `agenthandover doctor --ollama-json --mode skills|memory-only`
+  reports for the mode setup shows; in Memory only the Gemma 4 minimum does
+  not apply, and an Ollama older than Memory's minimum is a failure that
+  says nothing else runs. Setup no longer says "Local setup looks good."
+  when nothing can be pulled, and says "Pull Model" for Memory's one model.
+
 ## [2.0.0] — 2026-10-14
 
 AgentHandover becomes more than Skills: a private memory of your work and
@@ -103,8 +125,8 @@ the 16 GB test Mac with Ollama 0.40.3).
   less than 2 GB is free, or the disk is under its floor; swap merely in
   use no longer blocks them (the test Mac sat at 10.5 GB of swap with
   normal pressure and nothing being swapped out). Their model is unloaded
-  a minute after its last request. The Skill models keep the 8 GB swap
-  limit. Proof: `test_memory.py`, `test_embedding_upgrade.py`.
+  a minute after its last request. The Skill models keep a swap limit
+  (8 GB; 2.0.1 makes it twice the Mac's memory). Proof: `test_memory.py`, `test_embedding_upgrade.py`.
 - **Ollama 0.40 or later** for Memory (`tiers.json`
   `minimum_ollama_version_for_memory`); doctor warns when Memory is on and
   Ollama is older.

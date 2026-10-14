@@ -25,9 +25,16 @@ pub const GB: u64 = 1_000_000_000;
 /// Over the largest model's size: its context (the tier table lists
 /// download sizes).  The worker's `model_scheduler.MEMORY_MARGIN_BYTES`.
 pub const MEMORY_MARGIN_BYTES: u64 = GB;
-/// Swap in use above this: the Mac is short of memory, and the worker does
-/// not load the Skills model (`model_scheduler.SWAP_LIMIT_BYTES`).
-pub const SWAP_LIMIT_BYTES: u64 = 8 * GB;
+/// Swap in use above this many times the Mac's memory: the Mac is short of
+/// memory, and the worker does not load the Skills model
+/// (`model_scheduler.SWAP_CAP_RAM_MULTIPLE`). Swap left over from earlier
+/// pressure is common, so it is only the emergency stop; macOS's pressure
+/// level is the everyday signal (`PRESSURE_WARNING`).
+pub const SWAP_CAP_RAM_MULTIPLE: u64 = 2;
+/// `kern.memorystatus_vm_pressure_level` at or above this (1 normal, 2
+/// warning, 4 critical): the worker does not load the Skills model
+/// (`model_scheduler.PRESSURE_WARNING`).
+pub const PRESSURE_WARNING: u32 = 2;
 /// Free disk below this: swap cannot grow (`model_scheduler.DISK_FLOOR_BYTES`).
 pub const DISK_FLOOR_BYTES: u64 = 10 * GB;
 
@@ -423,7 +430,9 @@ fn keep_only(keep: &Install, facts: &ServiceFacts) -> String {
 /// tag, which that version cannot pull or run.  Otherwise it is a warning
 /// with the same explanation and fix: people keep the Ollama they have, and
 /// the other models run on older versions (qwen3.5:4b on 0.30.6, on the
-/// test Mac), but a Gemma 4 tier needs the update.
+/// test Mac), but a Gemma 4 tier needs the update.  With no annotation or
+/// Skill model (Memory only) that minimum does not apply: `diagnose_memory`
+/// checks Memory's own.
 pub fn diagnose_service(facts: &ServiceFacts) -> Vec<Finding> {
     let mut out = Vec::new();
     let host = facts.host;
@@ -453,7 +462,10 @@ pub fn diagnose_service(facts: &ServiceFacts) -> Vec<Finding> {
             }
             out.push(finding(Level::Fail, "Ollama service", lines));
         }
-        Some(v) if ollama::version_at_least(v, facts.minimum) => {
+        Some(v)
+            if facts.models.iter().all(|m| m.is_empty())
+                || ollama::version_at_least(v, facts.minimum) =>
+        {
             let title = if host.local && (facts.serving.is_some() || !facts.installs.is_empty()) {
                 format!("Ollama service {v} at {} ({})", host.url, facts.serving_description())
             } else {
@@ -609,6 +621,11 @@ pub fn swap_used_now() -> Option<u64> {
     parse_swapusage(&command_stdout("sysctl", &["-n", "vm.swapusage"])?)
 }
 
+/// macOS's memory-pressure level now (`kern.memorystatus_vm_pressure_level`).
+pub fn pressure_level_now() -> Option<u32> {
+    command_stdout("sysctl", &["-n", "kern.memorystatus_vm_pressure_level"])?.trim().parse().ok()
+}
+
 /// Free space on the startup disk (where macOS keeps swap).
 pub fn free_disk_now() -> Option<u64> {
     let path = std::ffi::CString::new("/").ok()?;
@@ -652,6 +669,13 @@ pub struct MemoryFacts<'a> {
     pub swap_used: Option<u64>,
     pub free_disk: Option<u64>,
     pub ram_gb: u64,
+    /// macOS's memory-pressure level (1 normal, 2 warning, 4 critical).
+    pub pressure_level: Option<u32>,
+}
+
+/// The swap cap for a Mac with `ram_gb` GiB of memory; None when unknown.
+pub fn swap_cap_bytes(ram_gb: u64) -> Option<u64> {
+    (ram_gb > 0).then(|| SWAP_CAP_RAM_MULTIPLE * (ram_gb << 30))
 }
 
 fn model_bytes(table: &TierTable, loaded: &[(String, u64)], model: &str) -> u64 {
@@ -726,27 +750,37 @@ pub fn diagnose_headroom(
         out.push(finding(Level::Warn, title, lines));
     }
 
+    let short_of_memory = || -> Vec<String> {
+        vec![
+            if ollama::model_installed(&[annotation.to_string()], sop) {
+                // One model for both roles: nothing extra is loaded.
+                "The Mac is short of memory; any app that loads more now pushes it \
+                 further into swap. AgentHandover keeps using its one loaded model."
+                    .into()
+            } else {
+                "The Mac is short of memory; the worker does not load the Skills model \
+                 while this lasts."
+                    .into()
+            },
+            "Fix: close memory-heavy apps, or restart the Mac.".into(),
+        ]
+    };
+    if let Some(level) = mem.pressure_level.filter(|l| *l >= PRESSURE_WARNING) {
+        let name = if level >= 4 { "critical" } else { "warning" };
+        out.push(finding(
+            Level::Warn,
+            format!("macOS reports memory pressure ({name})"),
+            short_of_memory(),
+        ));
+    }
     if let Some(swap) = mem.swap_used {
-        if swap > SWAP_LIMIT_BYTES {
-            out.push(finding(
+        match swap_cap_bytes(mem.ram_gb).filter(|cap| swap > *cap) {
+            Some(cap) => out.push(finding(
                 Level::Warn,
-                format!("Swap in use: {} (more than {})", gb(swap), gb(SWAP_LIMIT_BYTES)),
-                vec![
-                    if ollama::model_installed(&[annotation.to_string()], sop) {
-                        // One model for both roles: nothing extra is loaded.
-                        "The Mac is short of memory; any app that loads more now pushes it \
-                         further into swap. AgentHandover keeps using its one loaded model."
-                            .into()
-                    } else {
-                        "The Mac is short of memory; the worker does not load the Skills model \
-                         while this lasts."
-                            .into()
-                    },
-                    "Fix: close memory-heavy apps, or restart the Mac.".into(),
-                ],
-            ));
-        } else {
-            out.push(finding(Level::Pass, format!("Swap in use: {}", gb(swap)), vec![]));
+                format!("Swap in use: {} (more than {}, twice this Mac's memory)", gb(swap), gb(cap)),
+                short_of_memory(),
+            )),
+            None => out.push(finding(Level::Pass, format!("Swap in use: {}", gb(swap)), vec![])),
         }
     }
     if let Some(disk) = mem.free_disk {
@@ -810,22 +844,34 @@ pub struct ConfiguredModels {
 }
 
 /// With Memory on, a service older than `minimum` (the tier table's
-/// `minimum_ollama_version_for_memory`) is a warning: EmbeddingGemma 2
-/// does not run there, so Memory is unavailable while Skills keep working.
+/// `minimum_ollama_version_for_memory`): EmbeddingGemma 2 does not run
+/// there, so Memory is unavailable. A warning while Skills keep working; a
+/// failure in Memory only (`skills` false), where nothing else runs.
 /// Nothing when Memory is off or the service does not answer (the service
 /// finding reports that).
-pub fn diagnose_memory(version: Option<&str>, minimum: &str, memory_enabled: bool) -> Option<Finding> {
+pub fn diagnose_memory(
+    version: Option<&str>,
+    minimum: &str,
+    memory_enabled: bool,
+    skills: bool,
+) -> Option<Finding> {
     let v = version.filter(|_| memory_enabled)?;
     if ollama::version_at_least(v, minimum) {
         return None;
     }
+    let what_runs = if skills {
+        "Skills keep working."
+    } else {
+        "In Memory only nothing else runs, so AgentHandover waits for the update."
+    };
     Some(finding(
-        Level::Warn,
+        if skills { Level::Warn } else { Level::Fail },
         format!("Memory needs Ollama {minimum} or later (you have {v})"),
         vec![
-            "Memory embeds what you see with EmbeddingGemma 2, which this Ollama cannot run, \
-             so Memory cannot work until Ollama is updated. Skills keep working."
-                .into(),
+            format!(
+                "Memory embeds what you see with EmbeddingGemma 2, which this Ollama cannot run, \
+                 so Memory cannot work until Ollama is updated. {what_runs}"
+            ),
             format!("Fix: update Ollama to {minimum} or later (https://ollama.com/download)."),
         ],
     ))
@@ -867,6 +913,7 @@ pub fn gather(host_url: &str, models: &ConfiguredModels) -> Report {
         version.as_deref(),
         &table.minimum_ollama_version_for_memory,
         models.memory_enabled,
+        models.skills,
     ));
     let mut headroom = None;
     if host.local && models.skills {
@@ -880,6 +927,7 @@ pub fn gather(host_url: &str, models: &ConfiguredModels) -> Report {
                     swap_used: swap_used_now(),
                     free_disk: free_disk_now(),
                     ram_gb: agenthandover_common::tiers::machine_ram_gb(),
+                    pressure_level: pressure_level_now(),
                 },
                 &models.tier_label,
                 &models.annotation,
@@ -1145,7 +1193,7 @@ mod tests {
     fn memory_warns_on_an_ollama_older_than_its_minimum() {
         let min = &tiers().minimum_ollama_version_for_memory;
         assert_eq!(min, "0.40.0");
-        let f = diagnose_memory(Some("0.34.2"), min, true).unwrap();
+        let f = diagnose_memory(Some("0.34.2"), min, true, true).unwrap();
         assert_eq!(f.level, Level::Warn);
         assert_eq!(f.title, "Memory needs Ollama 0.40.0 or later (you have 0.34.2)");
         assert_eq!(
@@ -1156,10 +1204,29 @@ mod tests {
                 "Fix: update Ollama to 0.40.0 or later (https://ollama.com/download).",
             ]
         );
-        assert_eq!(diagnose_memory(Some("0.34.2"), min, false), None);
-        assert_eq!(diagnose_memory(Some("0.40.0"), min, true), None);
-        assert_eq!(diagnose_memory(Some("0.40.3-rc1"), min, true), None);
-        assert_eq!(diagnose_memory(None, min, true), None);
+        assert_eq!(diagnose_memory(Some("0.34.2"), min, false, true), None);
+        assert_eq!(diagnose_memory(Some("0.40.0"), min, true, true), None);
+        assert_eq!(diagnose_memory(Some("0.40.3-rc1"), min, true, true), None);
+        assert_eq!(diagnose_memory(None, min, true, true), None);
+    }
+
+    /// Memory only: an Ollama too old for Memory is a failure that says
+    /// nothing else runs, and the Gemma 4 minimum does not apply (no
+    /// annotation or Skill model is configured).
+    #[test]
+    fn memory_only_fails_on_an_ollama_too_old_for_memory_and_skips_the_gemma_minimum() {
+        let min = &tiers().minimum_ollama_version_for_memory;
+        let f = diagnose_memory(Some("0.30.9"), min, true, false).unwrap();
+        assert_eq!(f.level, Level::Fail);
+        assert_eq!(f.title, "Memory needs Ollama 0.40.0 or later (you have 0.30.9)");
+        assert!(text(&f).contains("In Memory only nothing else runs"), "{}", text(&f));
+        assert!(!text(&f).contains("Skills keep working"), "{}", text(&f));
+
+        let host = local();
+        let installs = [Install { kind: APP, path: "/Applications/Ollama.app".into(), version: Some("0.30.9".into()) }];
+        let f = diagnose_service(&ServiceFacts { models: &["", ""], ..facts(&host, Some("0.30.9"), &installs, &[], None) });
+        assert_eq!(f[0].level, Level::Pass);
+        assert!(f[0].title.starts_with("Ollama service 0.30.9 at http://localhost:11434"), "{}", f[0].title);
     }
 
     /// Below the minimum only warns when no configured model is Gemma 4
@@ -1315,11 +1382,16 @@ mod tests {
     fn limits_match_the_worker() {
         let py = include_str!("../../../worker/src/agenthandover_worker/model_scheduler.py");
         for (name, value) in [
-            ("SWAP_LIMIT_BYTES", SWAP_LIMIT_BYTES),
             ("DISK_FLOOR_BYTES", DISK_FLOOR_BYTES),
             ("MEMORY_MARGIN_BYTES", MEMORY_MARGIN_BYTES),
         ] {
             let line = format!("{name} = {} * GB\n", value / GB);
+            assert!(py.contains(&line), "model_scheduler.py lacks `{}`", line.trim());
+        }
+        for line in [
+            format!("SWAP_CAP_RAM_MULTIPLE = {SWAP_CAP_RAM_MULTIPLE}\n"),
+            format!("PRESSURE_WARNING = {PRESSURE_WARNING}\n"),
+        ] {
             assert!(py.contains(&line), "model_scheduler.py lacks `{}`", line.trim());
         }
     }
@@ -1337,7 +1409,7 @@ mod tests {
     }
 
     fn mem(free: u64, loaded: &[(String, u64)], swap: Option<u64>, disk: Option<u64>) -> MemoryFacts<'_> {
-        MemoryFacts { free, loaded, swap_used: swap, free_disk: disk, ram_gb: 16 }
+        MemoryFacts { free, loaded, swap_used: swap, free_disk: disk, ram_gb: 16, pressure_level: Some(1) }
     }
 
     #[test]
@@ -1397,11 +1469,37 @@ mod tests {
         let t = &tiers();
         let (_, f) = diagnose_headroom(t, &mem(12 * GB, &[], Some(44 * GB), Some(4 * GB)), "Standard", "qwen3.5:4b", "qwen3.5:4b");
         assert_eq!(f[1].level, Level::Warn);
-        assert_eq!(f[1].title, "Swap in use: 44.0 GB (more than 8.0 GB)");
+        assert_eq!(f[1].title, "Swap in use: 44.0 GB (more than 34.4 GB, twice this Mac's memory)");
         // One model for both roles: the worker loads nothing extra.
         assert!(text(&f[1]).contains("keeps using its one loaded model"), "{}", text(&f[1]));
         assert_eq!(f[2].level, Level::Warn);
         assert_eq!(f[2].title, "Free disk: 4.0 GB (less than 10.0 GB)");
+    }
+
+    /// A 24 GB MacBook Pro at 8.5 GB of swap with normal pressure: 2.0.0's
+    /// fixed 8 GB limit warned and held the Skills model back; now it passes.
+    #[test]
+    fn swap_left_over_on_a_larger_mac_passes() {
+        let t = &tiers();
+        let facts = MemoryFacts { ram_gb: 24, ..mem(12 * GB, &[], Some(8_500_000_000), Some(100 * GB)) };
+        let (_, f) = diagnose_headroom(t, &facts, "Performance", "qwen3.5:4b", "gemma4:12b-it-qat");
+        assert_eq!(f[1].level, Level::Pass);
+        assert_eq!(f[1].title, "Swap in use: 8.5 GB");
+        assert_eq!(swap_cap_bytes(24), Some(48 << 30));
+        assert_eq!(swap_cap_bytes(0), None);
+    }
+
+    #[test]
+    fn macos_memory_pressure_holds_back_the_skills_model() {
+        let t = &tiers();
+        for (level, name) in [(2, "warning"), (4, "critical")] {
+            let facts = MemoryFacts { pressure_level: Some(level), ..mem(12 * GB, &[], Some(GB), None) };
+            let (_, f) = diagnose_headroom(t, &facts, "Performance", "qwen3.5:4b", "gemma4:12b-it-qat");
+            assert_eq!(f[1].level, Level::Warn);
+            assert_eq!(f[1].title, format!("macOS reports memory pressure ({name})"));
+            assert!(text(&f[1]).contains("does not load the Skills model"), "{}", text(&f[1]));
+            assert_eq!(f[2].title, "Swap in use: 1.0 GB");
+        }
     }
 
     /// The app's onboarding decodes this exact JSON

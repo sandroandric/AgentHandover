@@ -374,7 +374,7 @@ Why these models (measured on a 16 GB test Mac with Ollama 0.34.2, replaying a r
 
 The Gemma 4 tiers (24 GB and up) need **Ollama 0.34.0+**; the Qwen tiers work on older Ollama. `agenthandover doctor` fails an older Ollama only when a configured model is Gemma 4, and warns otherwise. All models run fully local.
 
-Where a tier's two models differ, the worker runs one at a time: annotation first, then Skills. Before loading the Skills model it checks free memory, swap and disk; when the model won't fit it defers the work instead of pushing the Mac into swap, and stops waiting on a model that doesn't load within a minute.
+Where a tier's two models differ, the worker runs one at a time: annotation first, then Skills. Before loading the Skills model it checks free memory, macOS's memory pressure, swap (an emergency stop at twice the Mac's memory) and disk; when the model won't fit it defers the work instead of pushing the Mac into swap, and stops waiting on a model that doesn't load within a minute.
 
 ```bash
 # Or pull manually (Recommended tier):
@@ -561,7 +561,7 @@ Generated from the CLI's own definition (`agenthandover <command> --help` has th
 | `agenthandover skills learn <STATE>` | Learn Skills from how you work (on), or Memory only (off: no model but Memory's) |  |
 | `agenthandover watch` | Live-updating status dashboard (refreshes every 2s) |  |
 | `agenthandover setup` | Interactive setup wizard | `--check` `--extension` `--vlm` `--tier` `--shell` `--shell-remove` |
-| `agenthandover doctor` | Run pre-flight checks | `--ollama-json` `--extension-json` |
+| `agenthandover doctor` | Run pre-flight checks | `--ollama-json` `--mode` `--extension-json` |
 | `agenthandover uninstall` | Uninstall AgentHandover | `--purge-data` |
 | `agenthandover focus start <TITLE>` | Start recording a workflow demonstration |  |
 | `agenthandover focus stop` | Stop the active focus recording session |  |
@@ -633,6 +633,13 @@ GitHub [Discussions](https://github.com/sandroandric/AgentHandover/discussions) 
 [sandro@sandric.co](mailto:sandro@sandric.co)
 
 ## Changelog
+
+### v2.0.1
+
+Fixes found on the first upgrade of a 24 GB MacBook Pro.
+
+- **The Skills model's swap limit follows the Mac.** 2.0.0 held back the model that writes Skills whenever more than 8 GB of swap was in use, on every Mac; swap stays in use long after the pressure that caused it, so a 24 GB Mac at 8.5 GB of swap would not write Skills. The worker now waits while macOS reports memory pressure (warning or critical), as Memory already did, and keeps swap only as an emergency stop at twice the Mac's memory (32 GB on a 16 GB Mac, which still catches the ~44 GB that once crashed our test Mac). `agenthandover doctor` warns at the same points.
+- **Setup speaks of the mode you picked.** With Memory only selected, setup's Ollama panel still warned about the Skill models (their Ollama minimum and the swap limit), because it read the settings file, which names the mode only after the download. It now reports for the mode on screen: in Memory only, an Ollama older than 0.40 is the one problem, said plainly. Setup no longer says "Local setup looks good." when there is nothing it can download, and the button says "Pull Model" for Memory's one model.
 
 ### v2.0.0
 

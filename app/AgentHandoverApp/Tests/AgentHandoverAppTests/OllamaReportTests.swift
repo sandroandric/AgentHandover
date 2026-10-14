@@ -86,8 +86,15 @@ final class OllamaReportTests: XCTestCase {
     }
 
     func testAMissingCLIIsNoReport() {
-        XCTAssertNil(OllamaReport.load(cliPath: "/nonexistent/agenthandover"))
+        XCTAssertNil(OllamaReport.load(cliPath: "/nonexistent/agenthandover", mode: .skillsAndMemory))
         // A program that prints something else is no report either.
-        XCTAssertNil(OllamaReport.load(cliPath: "/bin/echo"))
+        XCTAssertNil(OllamaReport.load(cliPath: "/bin/echo", mode: .memoryOnly))
+    }
+
+    /// Setup asks for the report of the mode the person picked (config.toml
+    /// names it only after the pull): `doctor --ollama-json --mode ...`.
+    func testTheReportIsAskedForThePickedMode() {
+        XCTAssertEqual(OllamaReport.arguments(for: .memoryOnly), ["--mode", "memory-only"])
+        XCTAssertEqual(OllamaReport.arguments(for: .skillsAndMemory), ["--mode", "skills"])
     }
 }

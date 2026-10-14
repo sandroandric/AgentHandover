@@ -371,32 +371,45 @@ pub fn print_extension_json() -> Result<()> {
     Ok(())
 }
 
-/// `agenthandover doctor --ollama-json`: the Ollama and memory report the
-/// app's onboarding shows (the same findings `doctor` prints).
-pub fn print_ollama_json() -> Result<()> {
+/// `agenthandover doctor --ollama-json [--mode skills|memory-only]`: the
+/// Ollama and memory report the app's onboarding shows (the same findings
+/// `doctor` prints). Setup writes `[skills] enabled` only once its models
+/// are pulled, so it passes the mode the person picked: the report then
+/// speaks of that mode, not the one config.toml still names.
+pub fn print_ollama_json(memory_only: Option<bool>) -> Result<()> {
     let config_path = agenthandover_common::status::status_dir().join("config.toml");
     let config_str = std::fs::read_to_string(config_path).unwrap_or_default();
     let host_url = read_config_string_field(&config_str, "vlm", "ollama_host").unwrap_or_default();
-    let report = machine::gather(&host_url, &configured_models(&config_str));
+    let report = machine::gather(&host_url, &configured_models_as(&config_str, memory_only));
     println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())
 }
 
 /// The config's tier and models, as the worker resolves them.
 fn configured_models(config_str: &str) -> machine::ConfiguredModels {
+    configured_models_as(config_str, None)
+}
+
+/// As `configured_models`, in the mode `memory_only` names when given
+/// (else config.toml's `[skills] enabled`). Memory only is Memory: it
+/// counts as on whatever `[memory] enabled` says.
+fn configured_models_as(config_str: &str, memory_only: Option<bool>) -> machine::ConfiguredModels {
     let (tier, annotation, sop) = tiers::resolve_models(
         read_config_string_field(config_str, "vlm", "tier").as_deref(),
         read_config_string_field(config_str, "vlm", "annotation_model").as_deref(),
         read_config_string_field(config_str, "vlm", "sop_model").as_deref(),
     );
     // Memory only: no annotation or Skill model is configured to run.
-    let skills = read_config_string_field(config_str, "skills", "enabled").is_none_or(|v| v != "false");
+    let skills = match memory_only {
+        Some(memory_only) => !memory_only,
+        None => read_config_string_field(config_str, "skills", "enabled").is_none_or(|v| v != "false"),
+    };
     machine::ConfiguredModels {
         tier_label: tier.label.clone(),
         annotation: if skills { annotation } else { String::new() },
         sop: if skills { sop } else { String::new() },
-        memory_enabled: read_config_string_field(config_str, "memory", "enabled")
-            .is_some_and(|v| v == "true"),
+        memory_enabled: !skills
+            || read_config_string_field(config_str, "memory", "enabled").is_some_and(|v| v == "true"),
         skills,
     }
 }
@@ -995,6 +1008,21 @@ mod tests {
         assert!(!m.skills && m.annotation.is_empty() && m.sop.is_empty());
     }
 
+    /// Setup's report follows the mode the person picked, before
+    /// config.toml names it (the 24 GB MacBook Pro upgrade: Memory only
+    /// picked, the config still on Skills + Memory with Memory off).
+    #[test]
+    fn setups_report_follows_the_picked_mode() {
+        let skills_config = "[vlm]\ntier = \"standard\"\n\n[memory]\nenabled = false\n";
+        let m = configured_models_as(skills_config, Some(true));
+        assert!(!m.skills && m.annotation.is_empty() && m.sop.is_empty() && m.memory_enabled);
+        let memory_only_config = "[vlm]\ntier = \"standard\"\n\n[memory]\nenabled = true\n\n[skills]\nenabled = false\n";
+        let m = configured_models_as(memory_only_config, Some(false));
+        assert!(m.skills && !m.annotation.is_empty() && !m.sop.is_empty());
+        assert_eq!(configured_models_as(memory_only_config, None).skills, false);
+        assert_eq!(configured_models_as(skills_config, None).skills, true);
+    }
+
     #[test]
     fn with_skills_every_model_is_checked_once_and_memorys_when_it_is_on() {
         let base = "[vlm]\nannotation_model = \"qwen3.5:4b\"\nsop_model = \"qwen3.5:4b\"\n\n\
@@ -1090,10 +1118,12 @@ mod tests {
     #[test]
     fn memory_on_warns_about_an_ollama_too_old_for_it() {
         let warning = |config: &str, version: &str| {
+            let m = configured_models(config);
             machine::diagnose_memory(
                 Some(version),
                 &tiers::table().minimum_ollama_version_for_memory,
-                configured_models(config).memory_enabled,
+                m.memory_enabled,
+                m.skills,
             )
         };
         let on = "[vlm]\ntier = \"recommended\"\n\n[memory]\nenabled = true  # setup\n";

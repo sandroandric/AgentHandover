@@ -60,10 +60,10 @@ struct ExtensionReport: Decodable, Equatable {
 
 /// Runs `<cli> doctor <flag>` and returns what it printed.
 enum DoctorJSON {
-    static func run(cliPath: String, flag: String) -> Data? {
+    static func run(cliPath: String, flag: String, extra: [String] = []) -> Data? {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: cliPath)
-        process.arguments = ["doctor", flag]
+        process.arguments = ["doctor", flag] + extra
         let out = Pipe()
         process.standardOutput = out
         process.standardError = FileHandle.nullDevice

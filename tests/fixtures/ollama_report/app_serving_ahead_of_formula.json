@@ -62,7 +62,7 @@
     },
     {
       "level": "warn",
-      "title": "Swap in use: 44.0 GB (more than 8.0 GB)",
+      "title": "Swap in use: 44.0 GB (more than 34.4 GB, twice this Mac's memory)",
       "lines": [
         "The Mac is short of memory; the worker does not load the Skills model while this lasts.",
         "Fix: close memory-heavy apps, or restart the Mac."

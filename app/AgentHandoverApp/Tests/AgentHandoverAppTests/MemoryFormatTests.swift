@@ -43,7 +43,7 @@ final class MemoryFormatTests: XCTestCase {
         XCTAssertTrue(MemoryMenuState.paused(until: nil).isPaused)
         XCTAssertFalse(MemoryMenuState.recording.isPaused)
         // On, but the worker cannot index yet: say so instead of "Recording".
-        let waiting = status(waiting: "11.4 GB of swap in use (limit 8.0 GB)")
+        let waiting = status(waiting: "macOS reports memory pressure (warning)")
         XCTAssertEqual(MemoryMenuState(status: waiting), .waiting)
         XCTAssertEqual(MemoryMenuState.waiting.label(now: now, format: format), "Recording; indexing waits")
         XCTAssertTrue(MemoryMenuState.waiting.isOn)

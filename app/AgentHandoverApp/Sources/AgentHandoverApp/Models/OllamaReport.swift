@@ -98,9 +98,16 @@ struct OllamaReport: Decodable, Equatable {
         String(format: "%.1f GB", Double(bytes) / 1_000_000_000)
     }
 
-    /// Run `<cli> doctor --ollama-json`.  Blocking; nil when the CLI is
-    /// missing, fails, or prints something else.
-    static func load(cliPath: String) -> OllamaReport? {
-        DoctorJSON.run(cliPath: cliPath, flag: "--ollama-json").flatMap { try? decode($0) }
+    /// Run `<cli> doctor --ollama-json --mode <mode>`: the report for the
+    /// mode setup shows, which config.toml names only once its models are
+    /// pulled.  Blocking; nil when the CLI is missing, fails, or prints
+    /// something else.
+    static func load(cliPath: String, mode: SkillsMode) -> OllamaReport? {
+        DoctorJSON.run(cliPath: cliPath, flag: "--ollama-json", extra: arguments(for: mode))
+            .flatMap { try? decode($0) }
+    }
+
+    static func arguments(for mode: SkillsMode) -> [String] {
+        ["--mode", mode.isMemoryOnly ? "memory-only" : "skills"]
     }
 }

@@ -42,12 +42,13 @@ runs empty.
   after :data:`FALLBACK_AFTER_SECONDS` they run on the annotation model
   instead, which is already resident, and the worker status says so.  A
   focus recording is always processed, on the SOP model, unless the Mac
-  is already swapping hard or its disk is nearly full (below).
-* before loading the SOP model it also checks the swap in use
-  (``sysctl vm.swapusage``) against :data:`SWAP_LIMIT_BYTES` and the free
-  disk against :data:`DISK_FLOOR_BYTES` (swap files live on the startup
-  disk, so a full disk means swap cannot grow).  Either one refuses the
-  load: batched jobs wait with the reason in the status, as for memory,
+  is short of memory or its disk is nearly full (below).
+* before loading the SOP model it also checks macOS's memory-pressure
+  level (``sysctl kern.memorystatus_vm_pressure_level``: warning or
+  critical), the swap in use (``sysctl vm.swapusage``) against twice the
+  Mac's memory (:func:`swap_cap_bytes`) and the free disk against
+  :data:`DISK_FLOOR_BYTES` (swap files live on the startup disk, so a
+  full disk means swap cannot grow).  Any one refuses the load: batched jobs wait with the reason in the status, as for memory,
   and a focus recording is processed on the resident annotation model
   instead, which loads nothing.  A Mac that loaded a 7 GB model with tens
   of GB already swapped out has run out of memory altogether (seen on the
@@ -69,6 +70,7 @@ before.
 from __future__ import annotations
 
 import logging
+import os
 import re
 import shutil
 import subprocess
@@ -100,18 +102,22 @@ MEMORY_MARGIN_BYTES = 1 * GB
 # model instead.
 FALLBACK_AFTER_SECONDS = 6 * 3600
 
-# The SOP model is not loaded while more swap than this is in use or less
-# disk than this is free (swap cannot grow).  ``agenthandover doctor`` warns
-# at the same values (crates/cli/src/machine.rs pins them to these).
-SWAP_LIMIT_BYTES = 8 * GB
+# The SOP model is not loaded while macOS reports memory pressure (warning
+# or critical), while more swap than SWAP_CAP_RAM_MULTIPLE times the Mac's
+# memory is in use, or while less disk than DISK_FLOOR_BYTES is free (swap
+# cannot grow).  Swap in use stays high long after the pressure that caused
+# it has passed (the test Mac sat at 10.5 GB with normal pressure and no
+# pages swapped out; a 24 GB MacBook Pro at 8.5 GB), so it is only the
+# emergency stop, sized to the Mac: a fixed 8 GB (2.0.0) held back every
+# larger Mac's Skills model all day.  The panic it guards against: the 16 GB
+# test Mac loading a 7 GB model with ~44 GB swapped out, over 2x its 16 GB.
+# ``agenthandover doctor`` warns at the same values (crates/cli/src/machine.rs
+# pins them to these).
+SWAP_CAP_RAM_MULTIPLE = 2
 DISK_FLOOR_BYTES = 10 * GB
 
-# Memory's embedding model is small (~0.6 GB resident), and swap in use
-# stays high long after the pressure that caused it has passed (many 16 GB
-# Macs sit above SWAP_LIMIT_BYTES all day; the test Mac did at 10.5 GB with
-# macOS reporting normal pressure and no pages swapped out).  So background
-# embedding waits on what says the Mac is short of memory now: macOS's own
-# memory-pressure level (warning or critical), or little free memory; the
+# Memory's embedding model is small (~0.6 GB resident): it waits on the
+# pressure level too, and on little free memory, but never on swap; the
 # disk floor applies as above.
 EMBED_FREE_FLOOR_BYTES = 2 * GB
 # kern.memorystatus_vm_pressure_level: 1 normal, 2 warning, 4 critical.
@@ -198,6 +204,21 @@ def memory_pressure_level() -> int | None:
         return None
 
 
+def physical_memory_bytes() -> int | None:
+    """The Mac's memory (RAM), or None when it cannot be read."""
+    try:
+        return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+    except (ValueError, OSError, AttributeError):
+        return None
+
+
+def swap_cap_bytes(ram: int | None) -> int | None:
+    """Swap in use above this refuses the SOP model's load: twice the Mac's
+    memory (:data:`SWAP_CAP_RAM_MULTIPLE`); None (no cap) when the memory
+    is unknown."""
+    return SWAP_CAP_RAM_MULTIPLE * ram if ram else None
+
+
 def free_disk_bytes() -> int | None:
     """Free space on the startup disk, where macOS keeps its swap files."""
     try:
@@ -249,8 +270,9 @@ class GenerationPlan:
 class ModelScheduler:
     """The switch between the annotation and the generation phase.
 
-    *clock* returns seconds (wall clock); *free_memory*, *swap_used* and
-    *free_disk* return bytes or None (unknown).  Components registered with :meth:`register` (anything with a
+    *clock* returns seconds (wall clock); *free_memory*, *swap_used*,
+    *free_disk* and *ram* return bytes or None (unknown), *pressure_level*
+    macOS's level (1 normal, 2 warning, 4 critical) or None.  Components registered with :meth:`register` (anything with a
     ``config.model``, such as the SOP generator, the synthesizer and the
     generation reasoner) are pointed at the annotation model while a
     fallback phase runs, and back afterwards.
@@ -267,6 +289,7 @@ class ModelScheduler:
         swap_used: Callable[[], int | None] = swap_used_bytes,
         free_disk: Callable[[], int | None] = free_disk_bytes,
         pressure_level: Callable[[], int | None] = memory_pressure_level,
+        ram: Callable[[], int | None] = physical_memory_bytes,
     ) -> None:
         self.client = client
         self.annotation_model = annotation_model
@@ -276,6 +299,7 @@ class ModelScheduler:
         self._swap_used = swap_used
         self._free_disk = free_disk
         self._pressure_level = pressure_level
+        self._ram = ram
         self._components: list[object] = []
         self._due_since: dict[str, float] = {}
         self._plan_model = sop_model
@@ -501,8 +525,8 @@ class ModelScheduler:
         """For the small embedding model: macOS reports memory pressure
         (:data:`PRESSURE_WARNING` or worse), free memory is under
         :data:`EMBED_FREE_FLOOR_BYTES`, or free disk is under
-        :data:`DISK_FLOOR_BYTES`.  Swap merely in use is no reason, unlike
-        the SOP model's :meth:`_pressure`.  An unknown value is no reason."""
+        :data:`DISK_FLOOR_BYTES`.  Swap in use is no reason, unlike for the
+        SOP model's :meth:`_pressure`.  An unknown value is no reason."""
         disk = self._free_disk()
         if disk is not None and disk < DISK_FLOOR_BYTES:
             return (
@@ -580,14 +604,19 @@ class ModelScheduler:
         return int(gb * GB) if gb else None
 
     def _pressure(self) -> str | None:
-        """Why no model may be loaded now (swap in use over
-        :data:`SWAP_LIMIT_BYTES`, free disk under :data:`DISK_FLOOR_BYTES`),
-        or None.  An unknown value is no reason to refuse."""
-        swap = self._swap_used()
-        if swap is not None and swap > SWAP_LIMIT_BYTES:
+        """Why the SOP model may not be loaded now (macOS reports memory
+        pressure, swap in use over :func:`swap_cap_bytes`, free disk under
+        :data:`DISK_FLOOR_BYTES`), or None.  An unknown value is no reason
+        to refuse."""
+        level = self._pressure_level()
+        if level is not None and level >= PRESSURE_WARNING:
+            name = "critical" if level >= 4 else "warning"
+            return f"macOS reports memory pressure ({name})"
+        swap, cap = self._swap_used(), swap_cap_bytes(self._ram())
+        if swap is not None and cap is not None and swap > cap:
             return (
-                f"{_gb(swap)} of swap in use (limit {_gb(SWAP_LIMIT_BYTES)}): "
-                "the Mac is short of memory"
+                f"{_gb(swap)} of swap in use (limit {_gb(cap)}, twice this Mac's "
+                "memory): the Mac is short of memory"
             )
         disk = self._free_disk()
         if disk is not None and disk < DISK_FLOOR_BYTES:
