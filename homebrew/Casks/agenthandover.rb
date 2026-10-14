@@ -1,6 +1,6 @@
 cask "agenthandover" do
-  version "2.0.2"
-  sha256 "c53274133ad0630a8e52ff689d31ead9652d6dc0fb9db7b16a074f6c59c302a2"
+  version "2.0.3"
+  sha256 "62e3662a3abe7279663224ec8b79a96bb7fe55c41ef47b7508282168141aaead"
 
   url "https://github.com/sandroandric/AgentHandover/releases/download/v#{version}/AgentHandover-#{version}.pkg",
       verified: "github.com/sandroandric/AgentHandover/"
