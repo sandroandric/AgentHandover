@@ -7,7 +7,7 @@ and the project follows [Semantic Versioning](https://semver.org/). Up to 0.5.0,
 minor bumps could include breaking changes; 2.0.0 follows 0.5.0 directly (there is
 no 0.6 or 1.x). The README's Changelog section has the prose version of every release.
 
-## [2.0.0] — unreleased
+## [2.0.0] — 2026-10-14
 
 AgentHandover becomes more than Skills: a private memory of your work and
 Commonplace, the one place your agents search for what you know. The version

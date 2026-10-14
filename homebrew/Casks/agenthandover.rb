@@ -1,11 +1,11 @@
 cask "agenthandover" do
-  version "0.5.0"
-  sha256 "0bf106a7c62b1b06836419743d958ce3a79d6e985b206f5428f40830f8c7e70e"
+  version "2.0.0"
+  sha256 "4b4cd31792a18c2c6d6ed8237968dd35f7d105a61c04d0e5b91256a3b64286f2"
 
   url "https://github.com/sandroandric/AgentHandover/releases/download/v#{version}/AgentHandover-#{version}.pkg",
       verified: "github.com/sandroandric/AgentHandover/"
   name "AgentHandover"
-  desc "Local, privacy-first app that turns your Mac workflows into Skills for AI agents"
+  desc "Local, private memory of your Mac work that also turns your workflows into Skills for AI agents"
   homepage "https://github.com/sandroandric/AgentHandover"
 
   # AgentHandover uses the signed + notarized .pkg we ship on GitHub releases.
