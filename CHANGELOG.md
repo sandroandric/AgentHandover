@@ -7,6 +7,23 @@ and the project follows [Semantic Versioning](https://semver.org/). Up to 0.5.0,
 minor bumps could include breaking changes; 2.0.0 follows 0.5.0 directly (there is
 no 0.6 or 1.x). The README's Changelog section has the prose version of every release.
 
+## [2.0.2] — unreleased
+
+### Fixed
+- **An upgrade while capture is paused no longer leaves AgentHandover
+  stuck.** Only the daemon migrated the database, and the app starts the
+  daemon only while capture runs. A Mac upgraded from 0.4.0 to 2.0 with
+  capture paused kept its version 3 database, and the worker waited for a
+  migration that never came, retrying every two minutes: no Memory, no
+  search, and Commonplace said the worker was not running. The worker now
+  runs the daemon's own migrations itself when it finds an older database
+  (`agenthandover db migrate --path`, new: a backup first, then every
+  pending migration in one transaction, as the daemon does), so it starts
+  at once whether or not capture runs. Proof: `test_schema_ownership.py`
+  (migrated once, before any wait; a failure is not retried and says what
+  to run), `test_main_once.py`, `commands/db.rs` tests; the migrations
+  themselves from 0.4.0's version 3 in `migration_test.rs`.
+
 ## [2.0.1] — 2026-10-14
 
 ### Fixed

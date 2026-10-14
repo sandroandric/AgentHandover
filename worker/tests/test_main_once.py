@@ -256,12 +256,17 @@ def test_a_database_at_another_schema_version_stops_the_worker_loudly(
     from agenthandover_worker.db import SCHEMA_VERSION
 
     monkeypatch.setattr(worker_main, "_DB_RETRY_MAX_SECONDS", 0)
+    # The migration the worker asks the CLI for, here one that fails.
+    migrations: list[Path] = []
+    monkeypatch.setattr(worker_main, "_migrate_with_cli", migrations.append)
     conn = sqlite3.connect(tmp_db_path)
     conn.execute(f"PRAGMA user_version = {found}")
     conn.close()
 
     with pytest.raises(SystemExit) as exit_info:
         _run_once(tmp_db_path, tmp_path)
+    # An older database is migrated first; a newer one is never touched.
+    assert migrations == ([Path(tmp_db_path)] if found < SCHEMA_VERSION else [])
 
     assert exit_info.value.code == 1
     err = capsys.readouterr().err

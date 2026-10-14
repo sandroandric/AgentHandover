@@ -3981,6 +3981,36 @@ def _wait_for_db(db_path: Path, shutdown_flag: list[bool]) -> bool:
     return False
 
 
+# The CLI the pkg installs; a source checkout's on PATH otherwise.
+_INSTALLED_CLI = "/usr/local/bin/agenthandover"
+
+
+def _migrate_with_cli(db_path: Path, cli: str | None = None) -> None:
+    """Bring *db_path* to the daemon's current schema with the daemon's own
+    migrations: ``agenthandover db migrate --path`` (the worker never
+    changes the schema itself).  Logs the outcome; never raises, as the
+    schema check that follows says what is still wrong."""
+    import shutil
+    import subprocess
+
+    cli = cli or (_INSTALLED_CLI if os.access(_INSTALLED_CLI, os.X_OK) else shutil.which("agenthandover"))
+    if cli is None:
+        logger.warning("The database is older than this worker and no agenthandover CLI was found to migrate it")
+        return
+    try:
+        done = subprocess.run(
+            [cli, "db", "migrate", "--path", str(db_path)],
+            capture_output=True, text=True, timeout=300,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        logger.warning("agenthandover db migrate could not run: %s", exc)
+        return
+    if done.returncode == 0:
+        logger.info("%s", done.stdout.strip())
+    else:
+        logger.warning("agenthandover db migrate failed (%d): %s", done.returncode, done.stderr.strip())
+
+
 def _schema_ready(db_path: Path, shutdown_flag: list[bool]) -> bool:
     """The daemon owns the schema: run only against the version this
     worker is written for.  Right after an upgrade, wait (as long as for
@@ -3995,6 +4025,7 @@ def _schema_ready(db_path: Path, shutdown_flag: list[bool]) -> bool:
             timeout_s=_DB_RETRY_MAX_SECONDS,
             poll_s=_DB_RETRY_POLL_SECONDS,
             stop=lambda: shutdown_flag[0],
+            migrate=lambda: _migrate_with_cli(db_path),
         )
     except SchemaVersionError as exc:
         logger.error("%s", exc)

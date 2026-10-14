@@ -171,6 +171,12 @@ enum Commands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         options: Vec<String>,
     },
+    /// The database: `migrate` brings it to this release's schema (the
+    /// daemon does it at start; the worker runs this while capture is paused)
+    Db {
+        #[command(subcommand)]
+        action: DbAction,
+    },
     /// Memory: search, forget or pause what was on your screen
     Memory {
         #[command(subcommand)]
@@ -190,6 +196,16 @@ enum Commands {
         /// End time filter (HH:MM)
         #[arg(long)]
         end: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum DbAction {
+    /// Bring the database to this release's schema (backed up first)
+    Migrate {
+        /// The database (default: the data directory's events.db)
+        #[arg(long)]
+        path: Option<std::path::PathBuf>,
     },
 }
 
@@ -430,6 +446,7 @@ fn main() -> Result<()> {
             let (now, tz) = commands::memory::now();
             commands::search::search(&commands::memory::worker_api(), &mut std::io::stdout(), &args, now, &tz)
         }
+        Commands::Db { action: DbAction::Migrate { path } } => commands::db::migrate(path),
         Commands::Memory { action } => run_memory(action),
         Commands::Recall {
             date,

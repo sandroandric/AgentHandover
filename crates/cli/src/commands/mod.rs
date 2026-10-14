@@ -1,4 +1,5 @@
 pub mod config;
+pub mod db;
 pub mod doctor;
 pub mod export;
 pub mod focus;

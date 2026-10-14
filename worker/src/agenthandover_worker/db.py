@@ -54,7 +54,9 @@ def check_schema_version(db_path: str | Path) -> None:
         raise SchemaVersionError(
             f"The database {db_path} is at schema version {found}; this worker "
             f"needs version {SCHEMA_VERSION}, which the daemon creates when it "
-            "starts.  Either the daemon has not started since the upgrade "
+            "starts and `agenthandover db migrate` creates while capture is "
+            "paused (the worker runs it; run it in Terminal to see why it "
+            "failed).  Either the daemon has not started since the upgrade "
             "(AgentHandover.app starts it once it has Accessibility and "
             "Screen Recording: open the app and grant them; `agenthandover "
             "doctor` shows which is missing), or the daemon running is older "
@@ -77,21 +79,32 @@ def wait_for_schema_version(
     timeout_s: float,
     poll_s: float,
     stop: Callable[[], bool] = lambda: False,
+    migrate: Callable[[], None] | None = None,
 ) -> None:
     """Return once *db_path* is at :data:`SCHEMA_VERSION`.
 
-    Right after an upgrade the worker can start before the daemon has
-    migrated the database, so an older version is polled for up to
+    Right after an upgrade the database can be older: *migrate* (the
+    daemon's migrations, run by ``agenthandover db migrate``) is called
+    once, since the daemon migrates only when it starts and it starts only
+    while capture runs (a paused Mac kept a 0.4.0 database, and the worker
+    waiting, for good).  Then an older version is polled for up to
     *timeout_s* (or until *stop* returns True, which returns early); a
     newer one fails at once.  Raises :class:`SchemaVersionError`.
     """
     waited = 0.0
+    migrated = migrate is None
     while True:
         try:
             check_schema_version(db_path)
             return
         except SchemaVersionError:
-            if database_schema_version(db_path) > SCHEMA_VERSION or waited >= timeout_s:
+            if database_schema_version(db_path) > SCHEMA_VERSION:
+                raise
+            if not migrated:
+                migrated = True
+                migrate()
+                continue
+            if waited >= timeout_s:
                 raise
         if stop():
             return

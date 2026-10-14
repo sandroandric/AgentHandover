@@ -571,6 +571,7 @@ Generated from the CLI's own definition (`agenthandover <command> --help` has th
 | `agenthandover search <QUERY>` | Search Commonplace: your Skills, Memory (when agents may search it), daily summaries and profile | `--kinds` `--since` `--until` `--limit` `--json` |
 | `agenthandover connect <AGENT> [OPTIONS]...` | Connect an AI agent (claude-code, codex, openclaw, hermes, mcp) |  |
 | `agenthandover bench [OPTIONS]...` | Model bake-off: replay a journey cassette's prompts against a tier's live models and report tok/s and a golden-diff score | `--tier` |
+| `agenthandover db migrate` | Bring the database to this release's schema (backed up first) | `--path` |
 | `agenthandover memory search <QUERY>` | Search Memory by meaning ("the Acme invoice", "the error in the terminal") | `--since` `--until` `--app` `--limit` `--json` |
 | `agenthandover memory forget` | Forget a stretch of time, an app, a moment or everything (asks first) | `--last` `--today` `--since` `--until` `--app` `--moment` `--all` `--yes` |
 | `agenthandover memory pause` | Pause Memory (Skills still learn; pause observing in the app for that) | `--for` |
@@ -633,6 +634,10 @@ GitHub [Discussions](https://github.com/sandroandric/AgentHandover/discussions) 
 [sandro@sandric.co](mailto:sandro@sandric.co)
 
 ## Changelog
+
+### v2.0.2
+
+- **Upgrading while capture is paused works.** The database upgrade ran only when capture started, so a Mac upgraded with capture paused stayed on the old database and AgentHandover waited for it: no Memory, no search, and Commonplace said the worker was not running. The worker now runs the same upgrade itself (`agenthandover db migrate`), so everything works right after an update, paused or not.
 
 ### v2.0.1
 
