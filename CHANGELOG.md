@@ -7,7 +7,7 @@ and the project follows [Semantic Versioning](https://semver.org/). Up to 0.5.0,
 minor bumps could include breaking changes; 2.0.0 follows 0.5.0 directly (there is
 no 0.6 or 1.x). The README's Changelog section has the prose version of every release.
 
-## [2.0.2] — unreleased
+## [2.0.2] — 2026-10-14
 
 ### Fixed
 - **An upgrade while capture is paused no longer leaves AgentHandover
